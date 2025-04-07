@@ -1,6 +1,7 @@
 # app/core/config.py
 import os
-from pydantic import BaseSettings, AnyHttpUrl
+from pydantic_settings import BaseSettings
+from pydantic import AnyHttpUrl # AnyHttpUrl stays in pydantic core
 from functools import lru_cache
 from dotenv import load_dotenv
 
