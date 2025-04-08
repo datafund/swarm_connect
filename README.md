@@ -35,3 +35,22 @@ swarm_api_aggregator/
 ├── README.md               # Project description, setup, and usage instructions
 └── run.py                  # Script to easily run the development server
 ``` 
+
+## Running
+
+
+
+```
+python3 -m venv /path/to/pythonvenv
+# use the binaries in that folder from now on
+
+pip install -r requirements.txt
+
+# Copy .env.example to .env.
+
+# Edit .env and ensure SWARM_BEE_API_URL points to your Bee node's API endpoint (e.g., http://localhost:1633 or the public gateway https://api.gateway.ethswarm.org).
+
+# if port 8000 is taken, use a different one, e.g.:
+export PORT=8001
+
+```
