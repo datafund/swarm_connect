@@ -19,10 +19,9 @@ router = APIRouter()
 logger = logging.getLogger(__name__)
 
 @router.get(
-    "/stamps",
+    "/",
     response_model=StampListResponse,
-    summary="List All Swarm Stamp Batches",
-    tags=["stamps"]
+    summary="List All Swarm Stamp Batches"
 )
 async def list_stamps() -> Any:
     """
@@ -70,10 +69,9 @@ async def list_stamps() -> Any:
 
 
 @router.get(
-    "/stamps/{stamp_id}",
+    "/{stamp_id}",
     response_model=StampDetails,
-    summary="Get Specific Swarm Stamp Batch Details",
-    tags=["stamps"]
+    summary="Get Specific Swarm Stamp Batch Details"
 )
 async def get_stamp_details(
     stamp_id: str = Path(..., description="The Batch ID of the Swarm stamp to retrieve.", example="a1b2c3d4e5f6...")
@@ -167,11 +165,10 @@ async def get_stamp_details(
 
 
 @router.post(
-    "/stamps",
+    "/",
     response_model=StampPurchaseResponse,
     status_code=status.HTTP_201_CREATED,
-    summary="Purchase a New Swarm Postage Stamp",
-    tags=["stamps"]
+    summary="Purchase a New Swarm Postage Stamp"
 )
 async def purchase_stamp(
     stamp_request: StampPurchaseRequest
@@ -224,10 +221,9 @@ async def purchase_stamp(
 
 
 @router.patch(
-    "/stamps/{stamp_id}/extend",
+    "/{stamp_id}/extend",
     response_model=StampExtensionResponse,
-    summary="Extend an Existing Swarm Postage Stamp",
-    tags=["stamps"]
+    summary="Extend an Existing Swarm Postage Stamp"
 )
 async def extend_stamp(
     stamp_id: str = Path(..., description="The Batch ID of the stamp to extend.", example="a1b2c3d4e5f6..."),

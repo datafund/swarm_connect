@@ -191,3 +191,77 @@ def get_all_stamps_processed() -> List[Dict[str, Any]]:
             continue
 
     return processed_stamps
+
+
+def upload_data_to_swarm(data: bytes, stamp_id: str, content_type: str = "application/json") -> str:
+    """
+    Uploads data to the Swarm network using the configured Bee node.
+
+    Args:
+        data: The data to upload as bytes
+        stamp_id: The postage stamp batch ID to use for the upload
+        content_type: MIME type of the content
+
+    Returns:
+        The Swarm reference hash of the uploaded data
+
+    Raises:
+        RequestException: If the HTTP request to the Swarm API fails
+        ValueError: If the response is malformed or missing expected fields
+    """
+    api_url = urljoin(str(settings.SWARM_BEE_API_URL), "bzz")
+    headers = {
+        "Swarm-Postage-Batch-Id": stamp_id.lower(),
+        "Content-Type": content_type
+    }
+
+    try:
+        response = requests.post(api_url, data=data, headers=headers, timeout=60)
+        response.raise_for_status()
+
+        response_json = response.json()
+        reference = response_json.get("reference")
+        if not reference:
+            raise ValueError("API Response missing 'reference' from upload")
+
+        logger.info(f"Successfully uploaded data to Swarm with reference: {reference}")
+        return reference
+
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Error uploading data to Swarm API ({api_url}): {e}")
+        raise
+    except (ValueError, KeyError) as e:
+        logger.error(f"Error parsing data upload response: {e}")
+        raise ValueError(f"Could not parse data upload response: {e}") from e
+
+
+def download_data_from_swarm(reference: str) -> bytes:
+    """
+    Downloads data from the Swarm network using a reference hash.
+
+    Args:
+        reference: The Swarm reference hash of the data to download
+
+    Returns:
+        The downloaded data as bytes
+
+    Raises:
+        RequestException: If the HTTP request to the Swarm API fails
+        FileNotFoundError: If the data is not found (404)
+    """
+    api_url = urljoin(str(settings.SWARM_BEE_API_URL), f"bzz/{reference.lower()}")
+
+    try:
+        response = requests.get(api_url, timeout=60)
+
+        if response.status_code == 404:
+            raise FileNotFoundError(f"Data not found on Swarm at reference {reference}")
+
+        response.raise_for_status()
+
+        logger.info(f"Successfully downloaded {len(response.content)} bytes from Swarm reference: {reference}")
+        return response.content
+
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Error downloading data from Swarm API ({api_url}): {e}")
+        raise

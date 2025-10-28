@@ -20,6 +20,7 @@ class Settings(BaseSettings):
     class Config:
         env_file = ".env"
         case_sensitive = True
+        extra = "ignore"  # Ignore extra fields from .env
 
 @lru_cache() # Cache the settings object for performance
 def get_settings() -> Settings:
