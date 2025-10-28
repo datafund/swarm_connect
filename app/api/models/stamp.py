@@ -9,7 +9,7 @@ class StampDetails(BaseModel):
     missing fields from the upstream API.
     """
     batchID: str = Field(..., description="The unique identifier of the batch.")
-    amount: str = Field(..., alias='value', description="The value of the batch (as string).")
+    amount: str = Field(..., description="The amount of the batch (as string).")
 
     # --- Make these fields Optional ---
     blockNumber: Optional[int] = Field(None, alias='start', description="The block number when the batch was created (if available).")
@@ -21,13 +21,14 @@ class StampDetails(BaseModel):
     bucketDepth: int = Field(..., description="The bucket depth of the batch.") # Assuming these are always present
     batchTTL: int = Field(..., description="Original Time-To-Live in seconds (from API).") # Assuming always present
 
-    # --- Fields NOT typically available from /batches endpoint ---
-    utilization: Optional[int] = Field(None, description="Stamp utilization (likely unavailable from /batches endpoint).")
-    usable: Optional[bool] = Field(None, description="Stamp usability (likely unavailable from /batches endpoint).")
-    label: Optional[str] = Field(None, description="User-defined label (likely unavailable from /batches endpoint).")
+    # --- Fields enhanced with local stamp data ---
+    utilization: Optional[int] = Field(None, description="Stamp utilization (from local /stamps endpoint when available).")
+    usable: Optional[bool] = Field(None, description="Stamp usability status (from local /stamps endpoint or calculated).")
+    label: Optional[str] = Field(None, description="User-defined label (from local /stamps endpoint when available).")
 
-    # --- Calculated Field ---
+    # --- Calculated Fields ---
     expectedExpiration: str = Field(..., description="Calculated expiration timestamp (YYYY-MM-DD-HH-MM UTC).")
+    local: bool = Field(..., description="Indicates if this stamp is owned/managed by the local node.")
 
     class Config:
         populate_by_name = True
@@ -45,7 +46,8 @@ class StampDetails(BaseModel):
                 "utilization": None,
                 "usable": None,
                 "label": None,
-                "expectedExpiration": "2024-08-15-10-30"
+                "expectedExpiration": "2024-08-15-10-30",
+                "local": False
             }
         }
 
@@ -111,7 +113,8 @@ class StampListResponse(BaseModel):
                         "utilization": None,
                         "usable": None,
                         "label": None,
-                        "expectedExpiration": "2024-08-15-10-30"
+                        "expectedExpiration": "2024-08-15-10-30",
+                        "local": False
                     }
                 ],
                 "total_count": 1

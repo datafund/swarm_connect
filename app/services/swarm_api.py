@@ -54,6 +54,48 @@ def get_all_stamps() -> List[Dict[str, Any]]:
         raise # Propagate unexpected errors
 
 
+def get_local_stamps() -> List[Dict[str, Any]]:
+    """
+    Fetches local postage stamp data from the configured Swarm Bee node.
+    This endpoint provides richer information including utilization, usable status,
+    owner information, and actual amounts.
+
+    Returns:
+        A list of dictionaries representing local stamp data with detailed information.
+        Returns an empty list if the request fails or no stamps are found.
+
+    Raises:
+        RequestException: If the HTTP request to the Swarm API fails.
+    """
+    api_url = urljoin(str(settings.SWARM_BEE_API_URL), "stamps")
+    try:
+        response = requests.get(api_url, timeout=10)
+        response.raise_for_status()
+
+        data = response.json()
+        if isinstance(data, dict) and "stamps" in data:
+            stamps = data.get("stamps")
+            if isinstance(stamps, list):
+                return stamps
+            else:
+                logger.warning(f"Local stamps API response 'stamps' field is not a list: {type(stamps)}")
+                return []
+        elif isinstance(data, list):
+            # Handle case where API directly returns a list
+            return data
+        else:
+            logger.warning(f"Unexpected data structure from local stamps API: {type(data)}")
+            return []
+
+    except RequestException as e:
+        logger.warning(f"Error fetching local stamps from Swarm API ({api_url}): {e}")
+        # Don't re-raise here - we want to continue even if local stamps fail
+        return []
+    except Exception as e:
+        logger.warning(f"An unexpected error occurred while processing local stamps response: {e}")
+        return []
+
+
 def purchase_postage_stamp(amount: int, depth: int, label: Optional[str] = None) -> str:
     """
     Purchases a new postage stamp from the configured Swarm Bee node.
@@ -187,32 +229,82 @@ def calculate_usable_status(stamp: Dict[str, Any]) -> bool:
         return False
 
 
+def merge_stamp_data(global_stamp: Dict[str, Any], local_stamp: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """
+    Merges global stamp data with local stamp data, preferring local data when available.
+
+    Args:
+        global_stamp: Stamp data from /batches endpoint (global view)
+        local_stamp: Stamp data from /stamps endpoint (local node view) or None
+
+    Returns:
+        Merged stamp data with priority given to local information
+    """
+    merged = global_stamp.copy()
+
+    if local_stamp:
+        # Prefer local data for these fields as they're more accurate
+        if local_stamp.get("utilization") is not None:
+            merged["utilization"] = local_stamp["utilization"]
+        if local_stamp.get("usable") is not None:
+            merged["usable"] = local_stamp["usable"]
+        if local_stamp.get("label") is not None:
+            merged["label"] = local_stamp["label"]
+        if local_stamp.get("amount"):
+            merged["amount"] = str(local_stamp["amount"])
+        if local_stamp.get("owner"):
+            merged["owner"] = local_stamp["owner"]
+        # Local stamps might have more current blockNumber, exists, etc.
+        if local_stamp.get("blockNumber") is not None:
+            merged["blockNumber"] = local_stamp["blockNumber"]
+        if local_stamp.get("exists") is not None:
+            merged["exists"] = local_stamp["exists"]
+        if local_stamp.get("immutableFlag") is not None:
+            merged["immutableFlag"] = local_stamp["immutableFlag"]
+        if local_stamp.get("batchTTL") is not None:
+            merged["batchTTL"] = local_stamp["batchTTL"]
+
+    return merged
+
+
 def get_all_stamps_processed() -> List[Dict[str, Any]]:
     """
     Fetches all postage stamp batches and processes them with expiration calculations.
-    Calculates the usable field based on stamp properties like TTL, depth, and immutability.
+    Merges global batch data with local stamp information for comprehensive results.
 
     Returns:
-        A list of processed stamp dictionaries with calculated expiration times and usable status.
+        A list of processed stamp dictionaries with merged global/local data,
+        calculated expiration times, and accurate usable status.
 
     Raises:
         RequestException: If the HTTP request to the Swarm API fails.
     """
     import datetime
 
-    # Get raw stamps data from /batches endpoint
-    all_stamps = get_all_stamps()
+    # Get stamps data from both endpoints
+    global_stamps = get_all_stamps()  # /batches endpoint
+    local_stamps = get_local_stamps()  # /stamps endpoint
+
+    # Create a lookup dictionary for local stamps by batchID
+    local_stamps_dict = {stamp.get("batchID"): stamp for stamp in local_stamps if stamp.get("batchID")}
+
     processed_stamps = []
 
-    for stamp in all_stamps:
+    for global_stamp in global_stamps:
         try:
-            batch_id = stamp.get("batchID")
+            batch_id = global_stamp.get("batchID")
             if not batch_id:
                 logger.warning("Skipping stamp with missing batchID")
                 continue
 
-            # Calculate expiration time for each stamp
-            batch_ttl = int(stamp.get("batchTTL", 0))
+            # Find corresponding local stamp data
+            local_stamp = local_stamps_dict.get(batch_id)
+
+            # Merge global and local data
+            merged_stamp = merge_stamp_data(global_stamp, local_stamp)
+
+            # Calculate expiration time
+            batch_ttl = int(merged_stamp.get("batchTTL", 0))
             if batch_ttl < 0:
                 logger.warning(f"Stamp {batch_id} has negative TTL: {batch_ttl}. Treating as 0.")
                 batch_ttl = 0
@@ -222,23 +314,27 @@ def get_all_stamps_processed() -> List[Dict[str, Any]]:
             expiration_time_utc = now_utc + datetime.timedelta(seconds=batch_ttl)
             expiration_str = expiration_time_utc.strftime('%Y-%m-%d-%H-%M')
 
-            # Calculate usable status based on available stamp data
-            usable = calculate_usable_status(stamp)
+            # Use local usable status if available, otherwise calculate
+            usable = merged_stamp.get("usable")
+            if usable is None:
+                usable = calculate_usable_status(merged_stamp)
 
             # Create processed stamp data
             processed_stamp = {
                 "batchID": batch_id,
-                "utilization": stamp.get("utilization"),
+                "utilization": merged_stamp.get("utilization"),
                 "usable": usable,
-                "label": stamp.get("label"),
-                "depth": stamp.get("depth"),
-                "amount": str(stamp.get("amount", "")),  # Ensure amount is string
-                "bucketDepth": stamp.get("bucketDepth"),
-                "blockNumber": stamp.get("blockNumber"),
-                "immutableFlag": stamp.get("immutableFlag"),
+                "label": merged_stamp.get("label"),
+                "depth": merged_stamp.get("depth"),
+                "amount": str(merged_stamp.get("amount", "")),  # Ensure amount is string
+                "bucketDepth": merged_stamp.get("bucketDepth"),
+                "blockNumber": merged_stamp.get("blockNumber"),
+                "immutableFlag": merged_stamp.get("immutableFlag"),
                 "batchTTL": batch_ttl,
-                "exists": stamp.get("exists", True),
-                "expectedExpiration": expiration_str
+                "exists": merged_stamp.get("exists", True),
+                "owner": merged_stamp.get("owner"),  # New field from local data
+                "expectedExpiration": expiration_str,
+                "local": local_stamp is not None  # True if stamp found in local data
             }
             processed_stamps.append(processed_stamp)
 
