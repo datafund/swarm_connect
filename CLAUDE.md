@@ -82,8 +82,19 @@ Optional environment variables:
 
 ### API Endpoints
 
+#### Core Endpoints
 - `GET /`: Health check endpoint
-- `GET /api/v1/stamps/{stamp_id}`: Retrieve specific Swarm stamp batch details
+
+#### Stamp Management
+- `POST /api/v1/stamps/`: Purchase new postage stamps
+- `GET /api/v1/stamps/`: List all available stamps with expiration calculations
+- `GET /api/v1/stamps/{stamp_id}`: Retrieve specific stamp batch details
+- `PATCH /api/v1/stamps/{stamp_id}/extend`: Extend existing stamps with additional funds
+
+#### Data Operations (NEW)
+- `POST /api/v1/data/?stamp_id={id}&content_type={type}`: Upload raw data to Swarm
+- `GET /api/v1/data/{reference}`: Download raw data from Swarm (returns bytes directly)
+- `GET /api/v1/data/{reference}/json`: Download data with JSON metadata (base64-encoded)
 
 ### Dependencies and Tech Stack
 
