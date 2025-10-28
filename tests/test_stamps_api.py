@@ -146,7 +146,7 @@ class TestStampsAPI:
         response = client.get("/api/v1/stamps/")
 
         assert response.status_code == 502
-        assert "swarm api" in response.json()["detail"].lower()
+        assert "swarm bee node" in response.json()["detail"].lower()
 
     @patch('app.services.swarm_api.purchase_postage_stamp')
     def test_purchase_stamp_success(self, mock_purchase):
@@ -167,7 +167,7 @@ class TestStampsAPI:
         assert "successfully" in data["message"].lower()
 
         # Verify the service was called with correct parameters
-        mock_purchase.assert_called_once_with(2000000000, 17, "test-purchase")
+        mock_purchase.assert_called_once_with(amount=2000000000, depth=17, label="test-purchase")
 
     @patch('app.services.swarm_api.purchase_postage_stamp')
     def test_purchase_stamp_without_label(self, mock_purchase):
@@ -186,7 +186,7 @@ class TestStampsAPI:
         assert data["batchID"] == "new_batch_id_456"
 
         # Verify the service was called with None for label
-        mock_purchase.assert_called_once_with(1000000000, 18, None)
+        mock_purchase.assert_called_once_with(amount=1000000000, depth=18, label=None)
 
     @patch('app.services.swarm_api.purchase_postage_stamp')
     def test_purchase_stamp_api_error(self, mock_purchase):
@@ -202,7 +202,7 @@ class TestStampsAPI:
         response = client.post("/api/v1/stamps/", json=purchase_data)
 
         assert response.status_code == 502
-        assert "failed to purchase" in response.json()["detail"].lower()
+        assert "could not purchase" in response.json()["detail"].lower()
 
     def test_purchase_stamp_invalid_data(self):
         """Test stamp purchase with invalid request data."""
@@ -232,7 +232,7 @@ class TestStampsAPI:
         assert "successfully" in data["message"].lower()
 
         # Verify the service was called with correct parameters
-        mock_extend.assert_called_once_with("existing_batch_id", 500000000)
+        mock_extend.assert_called_once_with(stamp_id="existing_batch_id", amount=500000000)
 
     @patch('app.services.swarm_api.extend_postage_stamp')
     def test_extend_stamp_api_error(self, mock_extend):
@@ -247,7 +247,7 @@ class TestStampsAPI:
         response = client.patch("/api/v1/stamps/batch123/extend", json=extension_data)
 
         assert response.status_code == 502
-        assert "failed to extend" in response.json()["detail"].lower()
+        assert "could not extend" in response.json()["detail"].lower()
 
     def test_extend_stamp_invalid_data(self):
         """Test stamp extension with invalid request data."""
@@ -271,7 +271,7 @@ class TestStampsDataIntegrity:
             {
                 "batchID": "test123",
                 "amount": "1000000000",
-                "blockNumber": 12345,
+                "blockNumber": 12345,  # This will be mapped to 'start' in the response
                 "owner": "0x1234567890abcdef",
                 "immutableFlag": True,
                 "depth": 18,
@@ -299,7 +299,7 @@ class TestStampsDataIntegrity:
             assert field in stamp, f"Required field '{field}' missing from response"
 
         # Verify optional fields are handled properly (can be null)
-        optional_fields = ["blockNumber", "owner", "utilization", "usable", "label"]
+        optional_fields = ["start", "owner", "utilization", "usable", "label"]
         for field in optional_fields:
             assert field in stamp, f"Optional field '{field}' missing from response"
 
