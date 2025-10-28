@@ -3,6 +3,7 @@ import requests
 from requests.exceptions import RequestException
 import logging
 from typing import List, Dict, Any, Optional
+from urllib.parse import urljoin
 
 from app.core.config import settings
 
@@ -19,7 +20,7 @@ def get_all_stamps() -> List[Dict[str, Any]]:
     Raises:
         RequestException: If the HTTP request to the Swarm API fails.
     """
-    api_url = f"{settings.SWARM_BEE_API_URL}/batches"
+    api_url = urljoin(str(settings.SWARM_BEE_API_URL), "batches")
     try:
         response = requests.get(api_url, timeout=10) # Add a timeout
         response.raise_for_status() # Raise HTTPError for bad responses (4xx or 5xx)
@@ -69,7 +70,7 @@ def purchase_postage_stamp(amount: int, depth: int, label: Optional[str] = None)
         RequestException: If the HTTP request to the Swarm API fails
         ValueError: If the response is malformed or missing expected fields
     """
-    api_url = f"{settings.SWARM_BEE_API_URL}/stamps/{amount}/{depth}"
+    api_url = urljoin(str(settings.SWARM_BEE_API_URL), f"stamps/{amount}/{depth}")
     headers = {"Content-Type": "application/json"}
 
     # Prepare request body if label is provided
@@ -116,7 +117,7 @@ def extend_postage_stamp(stamp_id: str, amount: int) -> str:
         RequestException: If the HTTP request to the Swarm API fails
         ValueError: If the response is malformed or missing expected fields
     """
-    api_url = f"{settings.SWARM_BEE_API_URL}/stamps/topup/{stamp_id}/{amount}"
+    api_url = urljoin(str(settings.SWARM_BEE_API_URL), f"stamps/topup/{stamp_id}/{amount}")
     headers = {"Content-Type": "application/json"}
 
     try:
