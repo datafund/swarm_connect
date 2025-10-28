@@ -209,7 +209,7 @@ Swarm Connect is a FastAPI-based API gateway that provides comprehensive access 
 
 #### `POST /api/v1/stamps/`
 Purchase a new postage stamp.
-- **Request Body**: `{"amount": 1000000000, "depth": 17, "label": "my-stamp"}`
+- **Request Body**: `{"amount": 2000000000, "depth": 17, "label": "my-stamp"}`
 - **Response**: `{"batchID": "...", "message": "Postage stamp purchased successfully"}`
 
 #### `GET /api/v1/stamps/`
