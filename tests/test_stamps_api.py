@@ -221,7 +221,7 @@ class TestStampsAPI:
         mock_extend.return_value = "existing_batch_id"
 
         extension_data = {
-            "amount": 500000000
+            "amount": 2000000000
         }
 
         response = client.patch("/api/v1/stamps/existing_batch_id/extend", json=extension_data)
@@ -232,7 +232,7 @@ class TestStampsAPI:
         assert "successfully" in data["message"].lower()
 
         # Verify the service was called with correct parameters
-        mock_extend.assert_called_once_with(stamp_id="existing_batch_id", amount=500000000)
+        mock_extend.assert_called_once_with(stamp_id="existing_batch_id", amount=2000000000)
 
     @patch('app.services.swarm_api.extend_postage_stamp')
     def test_extend_stamp_api_error(self, mock_extend):
@@ -241,7 +241,7 @@ class TestStampsAPI:
         mock_extend.side_effect = RequestException("Extension failed")
 
         extension_data = {
-            "amount": 500000000
+            "amount": 2000000000
         }
 
         response = client.patch("/api/v1/stamps/batch123/extend", json=extension_data)

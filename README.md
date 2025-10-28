@@ -231,7 +231,7 @@ Get detailed information about a specific stamp.
 
 #### `PATCH /api/v1/stamps/{stamp_id}/extend`
 Extend an existing stamp by adding more funds.
-- **Request Body**: `{"amount": 500000000}`
+- **Request Body**: `{"amount": 2000000000}`
 - **Response**: `{"batchID": "...", "message": "Postage stamp extended successfully"}`
 
 ### Data Operation Endpoints

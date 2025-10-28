@@ -75,7 +75,7 @@ class StampPurchaseResponse(BaseModel):
 
 class StampExtensionRequest(BaseModel):
     """Request model for extending a postage stamp."""
-    amount: int = Field(..., description="Additional amount to add to the stamp in wei.", example=500000000)
+    amount: int = Field(..., description="Additional amount to add to the stamp in wei.", example=2000000000)
 
 
 class StampExtensionResponse(BaseModel):
