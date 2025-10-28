@@ -84,7 +84,7 @@ async def get_stamp_details(
     and returns the relevant information.
     """
     try:
-        all_stamps = swarm_api.get_all_stamps()
+        all_stamps = swarm_api.get_all_stamps_processed()
     except RequestException as e:
         logger.error(f"Failed to retrieve data from upstream Swarm API: {e}")
         raise HTTPException(
@@ -112,35 +112,22 @@ async def get_stamp_details(
         )
 
     try:
-        batch_ttl = int(found_stamp.get("batchTTL", 0)) # Ensure TTL is an int, default to 0 if missing/invalid
-        if batch_ttl < 0:
-             logger.warning(f"Stamp {stamp_id} has negative TTL: {batch_ttl}. Treating as 0.")
-             batch_ttl = 0
-
-        # Calculate expiration based on current time + TTL
-        # IMPORTANT: Swarm's batchTTL is typically relative to the block it was created in.
-        # This calculation is based on the user request (current time + TTL).
-        # Consider if you need creation time + TTL instead.
-        now_utc = datetime.datetime.now(datetime.timezone.utc)
-        expiration_time_utc = now_utc + datetime.timedelta(seconds=batch_ttl)
-        # Format: YYYY-MM-DD-HH-MM (UTC)
-        expiration_str = expiration_time_utc.strftime('%Y-%m-%d-%H-%M')
-
-        # Prepare the response using the Pydantic model for validation and structure
-        # Ensure all required fields for StampDetails are present in found_stamp or handled
+        # Use the enhanced data directly from get_all_stamps_processed()
+        # which already includes calculated expiration, local data merging, etc.
         response_data = StampDetails(
             batchID=found_stamp.get("batchID"),
+            amount=str(found_stamp.get("amount", "")),
+            blockNumber=found_stamp.get("blockNumber"),
+            owner=found_stamp.get("owner"),
+            immutableFlag=found_stamp.get("immutableFlag"),
+            depth=found_stamp.get("depth"),
+            bucketDepth=found_stamp.get("bucketDepth"),
+            batchTTL=found_stamp.get("batchTTL"),
             utilization=found_stamp.get("utilization"),
             usable=found_stamp.get("usable"),
-            label=found_stamp.get("label"), # Handles None if missing
-            depth=found_stamp.get("depth"),
-            amount=str(found_stamp.get("amount")), # Ensure amount is string
-            bucketDepth=found_stamp.get("bucketDepth"),
-            blockNumber=found_stamp.get("blockNumber"),
-            immutableFlag=found_stamp.get("immutableFlag"),
-            batchTTL=batch_ttl, # Use the processed TTL
-            exists=found_stamp.get("exists", True), # Default to True if field is missing, adjust as needed
-            expectedExpiration=expiration_str
+            label=found_stamp.get("label"),
+            expectedExpiration=found_stamp.get("expectedExpiration"),
+            local=found_stamp.get("local")
         )
         return response_data
 

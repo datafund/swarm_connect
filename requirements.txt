@@ -6,3 +6,8 @@ pydantic[email]>=1.10.0   # Used by FastAPI, explicitly listed
 pydantic-settings>=2.0.0  # Separate settings for pydantic
 # For timezone handling if needed beyond basic UTC
 # pytz
+
+# Testing dependencies
+pytest>=7.0.0
+pytest-asyncio>=0.21.0
+httpx>=0.24.0  # For testing FastAPI endpoints
