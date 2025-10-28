@@ -14,7 +14,7 @@ class StampDetails(BaseModel):
     # --- Make these fields Optional ---
     blockNumber: Optional[int] = Field(None, alias='start', description="The block number when the batch was created (if available).")
     owner: Optional[str] = Field(None, description="The Ethereum address of the batch owner (if available).")
-    immutableFlag: Optional[bool] = Field(None, alias='immutable', description="Indicates if the batch is immutable (if available).")
+    immutableFlag: Optional[bool] = Field(None, description="Indicates if the batch is immutable (if available).")
     # --- End Optional fields ---
 
     depth: int = Field(..., description="The depth of the batch.") # Assuming these are always present based on example

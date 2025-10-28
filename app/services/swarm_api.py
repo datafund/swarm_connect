@@ -264,6 +264,10 @@ def merge_stamp_data(global_stamp: Dict[str, Any], local_stamp: Optional[Dict[st
         if local_stamp.get("batchTTL") is not None:
             merged["batchTTL"] = local_stamp["batchTTL"]
 
+    # Handle global API's "immutable" field if local doesn't have "immutableFlag"
+    if merged.get("immutableFlag") is None and global_stamp.get("immutable") is not None:
+        merged["immutableFlag"] = global_stamp["immutable"]
+
     return merged
 
 
