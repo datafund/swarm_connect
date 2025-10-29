@@ -68,11 +68,26 @@ async def upload_data(
     """
     Upload data to the Swarm network via the configured Bee node.
 
-    Upload a file containing JSON data (default) or raw binary data.
-    For JSON files: use Content-Type: application/json
-    For binary files: use appropriate Content-Type (e.g., application/octet-stream)
+    **Requirements**:
+    - Upload as **multipart/form-data** with a `file` field
+    - Valid `stamp_id` query parameter required
+    - Optional `content_type` parameter (defaults to application/json)
 
-    Example JSON structure (SWIP-compliant):
+    **Usage Examples**:
+    ```bash
+    # Upload JSON file
+    curl -X POST "http://localhost:8000/api/v1/data/?stamp_id=ABC123&content_type=application/json" \\
+         -F "file=@data.json"
+
+    # Upload binary file
+    curl -X POST "http://localhost:8000/api/v1/data/?stamp_id=ABC123&content_type=image/png" \\
+         -F "file=@image.png"
+    ```
+
+    **Supported Content Types**: JSON, text, images, PDFs, or any binary data.
+
+    **SWIP-Compliant JSON Example**:
+    ```json
     {
         "content_hash": "sha256:9f86d...",
         "provenance_standard": "DaTA v1.0.0",
@@ -80,6 +95,7 @@ async def upload_data(
         "data": { ... provenance data ... },
         "stamp_id": "0xfe2f..."
     }
+    ```
     """
     try:
         # Read file content as bytes
