@@ -17,6 +17,48 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
+def _detect_content_type_and_filename(data_bytes: bytes, reference: str) -> tuple[str, str]:
+    """
+    Detect content type and generate user-friendly filename for downloads.
+
+    Args:
+        data_bytes: The downloaded data
+        reference: Swarm reference hash
+
+    Returns:
+        Tuple of (content_type, filename)
+    """
+    # Try to detect if it's JSON
+    try:
+        json.loads(data_bytes.decode('utf-8'))
+        # It's valid JSON - use JSON content type and provenance filename
+        short_ref = reference[:8]  # First 8 chars of reference for filename
+        return "application/json", f"provenance-{short_ref}.json"
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        pass
+
+    # Check for common binary file signatures
+    if data_bytes.startswith(b'\x89PNG'):
+        return "image/png", f"image-{reference[:8]}.png"
+    elif data_bytes.startswith(b'\xFF\xD8\xFF'):
+        return "image/jpeg", f"image-{reference[:8]}.jpg"
+    elif data_bytes.startswith(b'%PDF'):
+        return "application/pdf", f"document-{reference[:8]}.pdf"
+    elif data_bytes.startswith(b'GIF8'):
+        return "image/gif", f"image-{reference[:8]}.gif"
+
+    # Check if it's likely text
+    try:
+        data_bytes.decode('utf-8')
+        # It's valid UTF-8 text
+        return "text/plain", f"text-{reference[:8]}.txt"
+    except UnicodeDecodeError:
+        pass
+
+    # Default to binary with .bin extension
+    return "application/octet-stream", f"data-{reference[:8]}.bin"
+
+
 @router.post("/", response_model=DataUploadResponse)
 async def upload_data(
     stamp_id: str,
@@ -79,12 +121,16 @@ async def download_data(
         # Download from Swarm
         data_bytes = download_data_from_swarm(reference)
 
-        # Return raw data
+        # Detect content type and generate user-friendly filename
+        content_type, filename = _detect_content_type_and_filename(data_bytes, reference)
+
+        # Return raw data with user-friendly filename
         return Response(
             content=data_bytes,
-            media_type="application/octet-stream",
+            media_type=content_type,
             headers={
                 "Content-Length": str(len(data_bytes)),
+                "Content-Disposition": f'attachment; filename="{filename}"',
                 "X-Swarm-Reference": reference
             }
         )
@@ -114,11 +160,15 @@ async def download_data_json(
         # Download from Swarm
         data_bytes = download_data_from_swarm(reference)
 
+        # Detect content type and generate filename for metadata
+        content_type, filename = _detect_content_type_and_filename(data_bytes, reference)
+
         # Encode as base64
         data_b64 = base64.b64encode(data_bytes).decode('utf-8')
 
         return DataDownloadResponse(
             data=data_b64,
+            content_type=content_type,
             size=len(data_bytes),
             reference=reference
         )
