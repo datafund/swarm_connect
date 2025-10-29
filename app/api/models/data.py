@@ -1,13 +1,22 @@
 # app/api/models/data.py
 from pydantic import BaseModel, Field
-from typing import Optional
+from typing import Optional, Dict, Any
+
+
 
 
 class DataUploadRequest(BaseModel):
-    """Request model for uploading data to Swarm."""
-    data: str = Field(..., description="Base64-encoded data to upload")
-    stamp_id: str = Field(..., description="Postage stamp batch ID to use for upload")
-    content_type: Optional[str] = Field(default="application/json", description="MIME type of the content")
+    """Request model for uploading base64-encoded binary data to Swarm."""
+    data: str = Field(
+        ...,
+        description="Base64-encoded binary data to upload",
+        example="SGVsbG8sIFN3YXJtISBUaGlzIGlzIGEgdGVzdCBmaWxlIGNvbnRlbnQu"
+    )
+    content_type: Optional[str] = Field(
+        default="application/octet-stream",
+        description="MIME type of the content",
+        example="text/plain"
+    )
 
 
 class DataUploadResponse(BaseModel):

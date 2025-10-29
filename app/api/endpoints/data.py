@@ -1,11 +1,16 @@
 # app/api/endpoints/data.py
 import base64
+import json
 import logging
-from fastapi import APIRouter, HTTPException, Path, Request
+from fastapi import APIRouter, HTTPException, Path, Request, Body, File, UploadFile
 from fastapi.responses import Response
 from requests.exceptions import RequestException
 
-from app.api.models.data import DataUploadRequest, DataUploadResponse, DataDownloadResponse
+from app.api.models.data import (
+    DataUploadRequest,
+    DataUploadResponse,
+    DataDownloadResponse
+)
 from app.services.swarm_api import upload_data_to_swarm, download_data_from_swarm
 
 logger = logging.getLogger(__name__)
@@ -15,17 +20,28 @@ router = APIRouter()
 @router.post("/", response_model=DataUploadResponse)
 async def upload_data(
     stamp_id: str,
-    request: Request,
-    content_type: str = "application/octet-stream"
+    content_type: str = "application/json",
+    file: UploadFile = File(...)
 ):
     """
-    Upload raw data to the Swarm network via the configured Bee node.
+    Upload data to the Swarm network via the configured Bee node.
 
-    Accepts raw binary data in the request body.
+    Upload a file containing JSON data (default) or raw binary data.
+    For JSON files: use Content-Type: application/json
+    For binary files: use appropriate Content-Type (e.g., application/octet-stream)
+
+    Example JSON structure (SWIP-compliant):
+    {
+        "content_hash": "sha256:9f86d...",
+        "provenance_standard": "DaTA v1.0.0",
+        "encryption": "none",
+        "data": { ... provenance data ... },
+        "stamp_id": "0xfe2f..."
+    }
     """
     try:
-        # Read raw data from request body
-        data_bytes = await request.body()
+        # Read file content as bytes
+        data_bytes = await file.read()
 
         # Upload to Swarm
         reference = upload_data_to_swarm(
@@ -36,7 +52,7 @@ async def upload_data(
 
         return DataUploadResponse(
             reference=reference,
-            message="Data uploaded successfully"
+            message=f"File '{file.filename}' uploaded successfully"
         )
 
     except RequestException as e:
@@ -82,6 +98,7 @@ async def download_data(
     except Exception as e:
         logger.error(f"Unexpected error during download: {e}")
         raise HTTPException(status_code=500, detail="Internal server error during download")
+
 
 
 @router.get("/{reference}/json", response_model=DataDownloadResponse)

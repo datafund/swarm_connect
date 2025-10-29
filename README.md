@@ -143,10 +143,12 @@ Swarm Connect is a FastAPI-based API gateway that provides comprehensive access 
 - **Enhanced Field Mapping**: Handles different field names between global and local APIs
 
 #### 📁 Data Operations API
-- **Raw Data Upload**: Upload binary data directly to Swarm network
+- **Unified Data Upload**: Single endpoint handles both JSON and binary data automatically
+- **SWIP-Compliant Examples**: Pre-filled with SWIP standard provenance data structure
+- **Content-Type Detection**: Automatic handling based on Content-Type header
 - **Raw Data Download**: Download data as binary stream or base64-encoded JSON
-- **Content-Type Support**: Configurable content types for uploaded data
 - **Reference-Based Access**: Access data using Swarm reference hashes
+- **Provenance Support**: Built-in examples for data lineage and provenance tracking
 
 #### 🔧 Technical Features
 - **FastAPI Framework**: Modern, fast web framework with automatic OpenAPI documentation
@@ -237,9 +239,11 @@ Extend an existing stamp by adding more funds.
 ### Data Operation Endpoints
 
 #### `POST /api/v1/data/?stamp_id={id}&content_type={type}`
-Upload raw binary data to Swarm.
-- **Request Body**: Raw binary data
+Upload data to Swarm (JSON or binary).
+- **Request Body**: JSON data (default) or raw binary data
+- **Content-Type**: `application/json` (default) or `application/octet-stream` for binary
 - **Response**: `{"reference": "...", "message": "Data uploaded successfully"}`
+- **Features**: Pre-filled with SWIP-compliant provenance data example structure
 
 #### `GET /api/v1/data/{reference}`
 Download raw data from Swarm as binary stream.
