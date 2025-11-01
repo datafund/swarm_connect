@@ -133,9 +133,11 @@ Swarm Connect is a FastAPI-based API gateway that simplifies access to Ethereum 
 ### Core Features
 
 #### 🚀 API Features
-- **Stamp Lookup**: Retrieve detailed information about specific Swarm postage stamps by batch ID
+- **Stamp Management**: Complete postage stamp lifecycle (purchase, lookup, extend, list)
+- **Data Operations**: Upload and download raw data to/from Swarm network
 - **Expiration Calculation**: Automatically calculates stamp expiration time (current time + TTL)
-- **Data Aggregation**: Fetches all stamps and filters for specific ones
+- **Stamp Purchase Options**: Both user-friendly (time/size) and advanced (amount/depth) interfaces
+- **Cost Estimation**: Pre-purchase cost calculations for stamps
 - **JSON API**: RESTful endpoints with structured JSON responses
 
 #### 🔧 Technical Features
@@ -145,6 +147,8 @@ Swarm Connect is a FastAPI-based API gateway that simplifies access to Ethereum 
 - **Error Handling**: Comprehensive error responses with appropriate HTTP status codes
 - **Configuration Management**: Environment-based settings with validation
 - **Development Server**: Hot-reload development server with SSL support
+- **Gateway Pattern**: Centralized API layer for all Swarm operations
+- **Binary Data Support**: Raw data upload/download with proper content handling
 
 #### 🛡️ Reliability Features
 - **Request Timeouts**: 10-second timeout for external API calls
@@ -184,10 +188,29 @@ Swarm Connect is a FastAPI-based API gateway that simplifies access to Ethereum 
 4. Response ← Pydantic Model ← Formatted Data
 ```
 
+### Available API Endpoints
+
+#### Core Endpoints
+- `GET /`: Health check endpoint
+
+#### Stamp Management
+- `POST /api/v1/stamps/`: Purchase new postage stamps with time-based or advanced parameters
+- `GET /api/v1/stamps/`: List all available stamps with expiration calculations
+- `GET /api/v1/stamps/{stamp_id}`: Retrieve specific stamp batch details
+- `PATCH /api/v1/stamps/{stamp_id}/extend`: Extend existing stamps with additional funds
+
+#### Data Operations
+- `POST /api/v1/data/?stamp_id={id}&content_type={type}`: Upload raw data to Swarm
+- `GET /api/v1/data/{reference}`: Download raw data from Swarm (returns bytes directly)
+- `GET /api/v1/data/{reference}/json`: Download data with JSON metadata (base64-encoded)
+
 ### Key Value Propositions
 
 1. **Simplified Interface**: Clean REST API vs complex Swarm protocols
-2. **Enhanced Data**: Adds calculated expiration times to raw stamp data
-3. **Reliability**: Robust error handling and timeout management
-4. **Developer Experience**: Auto-generated docs and type safety
-5. **Flexibility**: Configurable for different Swarm node endpoints
+2. **Complete Stamp Management**: Purchase, extend, list, and monitor stamps
+3. **Data Gateway**: Unified upload/download interface for Swarm storage
+4. **Enhanced Data**: Adds calculated expiration times and cost estimates
+5. **Reliability**: Robust error handling and timeout management
+6. **Developer Experience**: Auto-generated docs and type safety
+7. **Flexibility**: Configurable for different Swarm node endpoints
+8. **Gateway Architecture**: Central API layer enabling other tools (CLI, MCP)
