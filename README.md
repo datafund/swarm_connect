@@ -4,23 +4,23 @@ Simpler server for accessing some Swarm features.
 ## Project structure
 
 ```
-swarm_api_aggregator/
+swarm_connect/
 ├── app/                    # Main application package
 │   ├── __init__.py
 │   ├── main.py             # FastAPI app instantiation and router inclusion
 │   ├── api/                # API specific modules
 │   │   ├── __init__.py
-│   │   ├── deps.py         # Dependency injection functions (e.g., for auth later)
 │   │   ├── endpoints/      # API route definitions
 │   │   │   ├── __init__.py
-│   │   │   └── stamps.py   # Endpoint(s) related to Swarm Stamps
+│   │   │   ├── stamps.py   # Endpoints for Swarm stamp management
+│   │   │   └── data.py     # Endpoints for data upload/download
 │   │   └── models/         # Pydantic models for request/response validation
 │   │       ├── __init__.py
-│   │       └── stamp.py    # Pydantic model(s) for Stamp data
+│   │       ├── stamp.py    # Pydantic models for stamp data
+│   │       └── data.py     # Pydantic models for data operations
 │   ├── core/               # Core application logic/configuration
 │   │   ├── __init__.py
-│   │   ├── config.py       # Configuration management (e.g., loading .env)
-│   │   └── security.py     # Security related functions (auth, https setup later)
+│   │   └── config.py       # Configuration management (e.g., loading .env)
 │   └── services/           # Logic for interacting with external services
 │       ├── __init__.py
 │       └── swarm_api.py    # Functions to call the EthSwarm Bee API
@@ -57,7 +57,7 @@ export PORT=8001
 
 ## Architecture
 
-Swarm Connect is a FastAPI-based API gateway that simplifies access to Ethereum Swarm (distributed storage network) functionality. Instead of clients directly calling complex Swarm Bee node APIs, they can use this cleaner, more focused interface.
+Swarm Connect is a FastAPI-based API gateway that provides comprehensive access to Ethereum Swarm (distributed storage network) functionality. It offers complete postage stamp management and data operations through a clean, RESTful interface, eliminating the need for clients to interact directly with complex Swarm Bee node APIs.
 
 ### System Overview
 
@@ -77,8 +77,8 @@ Swarm Connect is a FastAPI-based API gateway that simplifies access to Ethereum 
 │  ┌─────────────────────────────────────────────────────────────────────┐   │
 │  │                        API LAYER                                   │   │
 │  │  ┌─────────────────┐  ┌─────────────────┐  ┌─────────────────────┐ │   │
-│  │  │   Health Check  │  │   OpenAPI Docs  │  │   Stamps Endpoint   │ │   │
-│  │  │   GET /         │  │   /docs /redoc  │  │ GET /api/v1/stamps/ │ │   │
+│  │  │   Health Check  │  │   OpenAPI Docs  │  │  Stamps & Data APIs │ │   │
+│  │  │   GET /         │  │   /docs /redoc  │  │   Complete CRUD     │ │   │
 │  │  └─────────────────┘  └─────────────────┘  └─────────────────────┘ │   │
 │  └─────────────────────────────────────────────────────────────────────┘   │
 │                                    │                                       │
@@ -132,13 +132,23 @@ Swarm Connect is a FastAPI-based API gateway that simplifies access to Ethereum 
 
 ### Core Features
 
-#### 🚀 API Features
-- **Stamp Management**: Complete postage stamp lifecycle (purchase, lookup, extend, list)
-- **Data Operations**: Upload and download raw data to/from Swarm network
+#### 🚀 Stamp Management API
+- **Purchase Stamps**: Create new postage stamps with specified amount and depth
+- **Extend Stamps**: Add funds to existing stamps to extend their validity
+- **List All Stamps**: Retrieve comprehensive list of all available stamps with enhanced data
+- **Get Stamp Details**: Fetch specific stamp information by batch ID
 - **Expiration Calculation**: Automatically calculates stamp expiration time (current time + TTL)
-- **Stamp Purchase Options**: Both user-friendly (time/size) and advanced (amount/depth) interfaces
-- **Cost Estimation**: Pre-purchase cost calculations for stamps
-- **JSON API**: RESTful endpoints with structured JSON responses
+- **Data Merging**: Merges global network data with local node information for complete stamp details
+- **Local Ownership Detection**: Identifies stamps owned/managed by the connected node
+- **Enhanced Field Mapping**: Handles different field names between global and local APIs
+
+#### 📁 Data Operations API
+- **Unified Data Upload**: Single endpoint handles both JSON and binary data automatically
+- **SWIP-Compliant Examples**: Pre-filled with SWIP standard provenance data structure
+- **Content-Type Detection**: Automatic handling based on Content-Type header
+- **Raw Data Download**: Download data as binary stream or base64-encoded JSON
+- **Reference-Based Access**: Access data using Swarm reference hashes
+- **Provenance Support**: Built-in examples for data lineage and provenance tracking
 
 #### 🔧 Technical Features
 - **FastAPI Framework**: Modern, fast web framework with automatic OpenAPI documentation
@@ -147,8 +157,8 @@ Swarm Connect is a FastAPI-based API gateway that simplifies access to Ethereum 
 - **Error Handling**: Comprehensive error responses with appropriate HTTP status codes
 - **Configuration Management**: Environment-based settings with validation
 - **Development Server**: Hot-reload development server with SSL support
-- **Gateway Pattern**: Centralized API layer for all Swarm operations
-- **Binary Data Support**: Raw data upload/download with proper content handling
+- **Binary Data Support**: Direct binary upload/download with optional JSON wrapping
+- **Modular Design**: Separate endpoints for stamps and data operations
 
 #### 🛡️ Reliability Features
 - **Request Timeouts**: 10-second timeout for external API calls
@@ -170,13 +180,19 @@ Swarm Connect is a FastAPI-based API gateway that simplifies access to Ethereum 
 - Returns structured JSON responses
 
 #### Service Layer (`app/services/swarm_api.py`)
-- Makes HTTP calls to Swarm Bee node
+- Makes HTTP calls to Swarm Bee node (both `/batches` and `/stamps` endpoints)
 - Handles network errors and timeouts
 - Parses and normalizes API responses
+- **Data Merging Logic**: Combines global stamp data with local node information
+- **Field Mapping**: Handles different field names between endpoints (`immutable` vs `immutableFlag`)
+- **Usability Calculation**: Determines stamp usability based on TTL, depth, and immutability
+- **Local Detection**: Identifies stamps owned by the connected node
 
 #### Model Layer (`app/api/models/stamp.py`)
-- Validates response data structure
+- Validates response data structure with enhanced fields
 - Handles optional fields and type conversion
+- **Local Ownership Field**: Boolean indicator for node-owned stamps
+- **Enhanced Nullable Fields**: Proper handling of potentially missing data from different endpoints
 - Formats output for API consumers
 
 ### Data Flow
@@ -206,11 +222,61 @@ Swarm Connect is a FastAPI-based API gateway that simplifies access to Ethereum 
 
 ### Key Value Propositions
 
-1. **Simplified Interface**: Clean REST API vs complex Swarm protocols
-2. **Complete Stamp Management**: Purchase, extend, list, and monitor stamps
-3. **Data Gateway**: Unified upload/download interface for Swarm storage
-4. **Enhanced Data**: Adds calculated expiration times and cost estimates
-5. **Reliability**: Robust error handling and timeout management
-6. **Developer Experience**: Auto-generated docs and type safety
-7. **Flexibility**: Configurable for different Swarm node endpoints
-8. **Gateway Architecture**: Central API layer enabling other tools (CLI, MCP)
+1. **Complete Gateway Solution**: Full stamp lifecycle and data operations in one service
+2. **Simplified Interface**: Clean REST API vs complex Swarm protocols
+3. **Enhanced Data**: Adds calculated expiration times to raw stamp data
+4. **Reliability**: Robust error handling and timeout management
+5. **Developer Experience**: Auto-generated docs and type safety
+6. **Flexibility**: Configurable for different Swarm node endpoints
+7. **Binary Support**: Native handling of raw data with multiple access patterns
+
+## API Endpoints
+
+### Stamp Management Endpoints
+
+#### `POST /api/v1/stamps/`
+Purchase a new postage stamp.
+- **Request Body**: `{"amount": 2000000000, "depth": 17, "label": "my-stamp"}`
+- **Response**: `{"batchID": "...", "message": "Postage stamp purchased successfully"}`
+
+#### `GET /api/v1/stamps/`
+List all available postage stamps.
+- **Response**: `{"stamps": [...], "total_count": N}`
+
+#### `GET /api/v1/stamps/{stamp_id}`
+Get detailed information about a specific stamp.
+- **Response**: Detailed stamp information with calculated expiration time
+
+#### `PATCH /api/v1/stamps/{stamp_id}/extend`
+Extend an existing stamp by adding more funds.
+- **Request Body**: `{"amount": 2000000000}`
+- **Response**: `{"batchID": "...", "message": "Postage stamp extended successfully"}`
+
+### Data Operation Endpoints
+
+#### `POST /api/v1/data/?stamp_id={id}&content_type={type}`
+Upload data to Swarm (JSON or binary).
+- **Request Body**: JSON data (default) or raw binary data
+- **Content-Type**: `application/json` (default) or `application/octet-stream` for binary
+- **Response**: `{"reference": "...", "message": "Data uploaded successfully"}`
+- **Features**: Pre-filled with SWIP-compliant provenance data example structure
+
+#### `GET /api/v1/data/{reference}`
+Download raw data from Swarm as a file (triggers browser download).
+- **Use case**: End users downloading files, browser integration
+- **Response**: Raw binary data with user-friendly filename
+- **Headers**:
+  - `Content-Disposition: attachment; filename="provenance-abc12345.json"`
+  - `Content-Type`: Auto-detected (application/json, image/png, etc.)
+- **Filenames**:
+  - JSON data → `provenance-{hash}.json`
+  - Images → `image-{hash}.png/jpg`
+  - PDFs → `document-{hash}.pdf`
+  - Text → `text-{hash}.txt`
+  - Binary → `data-{hash}.bin`
+
+#### `GET /api/v1/data/{reference}/json`
+Download data as JSON with metadata (for API clients).
+- **Use case**: Web apps, mobile apps, API integrations needing metadata
+- **Response**: `{"data": "base64-encoded-content", "content_type": "application/json", "size": 2048, "reference": "abc..."}`
+- **Benefits**: Get file metadata without triggering download, programmatic access

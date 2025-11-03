@@ -112,6 +112,34 @@ Optional environment variables:
 - SSL/HTTPS support built into development server
 - Logging configured at INFO level with structured error handling
 
+## Swarm Bee API Documentation
+
+### Using Context7 for Latest Documentation
+
+**IMPORTANT**: Always use the Context7 MCP server to get the latest Ethereum Swarm Bee API documentation instead of making assumptions about API endpoints or using deprecated documentation.
+
+#### How to Access Bee Documentation:
+1. **Use Context7 MCP Server**: The Context7 server provides access to up-to-date API documentation
+2. **Search for Bee Documentation**: Use `mcp__context7__resolve-library-id` with search terms like "ethersphere/bee", "swarm bee", or "ethereum swarm"
+3. **Get Current API Reference**: Use `mcp__context7__get-library-docs` to fetch the latest API documentation
+
+#### Common Pitfalls to Avoid:
+- **Don't assume API endpoints exist** without checking current documentation
+- **Don't use deprecated ports** like 1635 (debug API was deprecated)
+- **Don't hardcode API structures** that may have changed between versions
+- **Always verify endpoint availability** using Context7 before implementing
+
+#### Example Context7 Usage:
+```
+# Find Bee documentation
+mcp__context7__resolve-library-id with "ethersphere/bee"
+
+# Get latest API docs
+mcp__context7__get-library-docs with the resolved library ID
+```
+
+**Note**: If ethersphere/bee is not available in Context7, implement functionality based on observed API behavior and document any assumptions clearly.
+
 ## Documentation Maintenance
 
 ### Architecture Documentation

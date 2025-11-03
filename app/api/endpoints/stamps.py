@@ -9,18 +9,69 @@ from app.services import swarm_api
 from app.api.models.stamp import (
     StampDetails,
     StampPurchaseRequest,
-    StampPurchaseRequestAdvanced,
-    StampPurchaseResponse
+    StampPurchaseResponse,
+    StampExtensionRequest,
+    StampExtensionResponse,
+    StampListResponse
 )
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
 
 @router.get(
-    "/stamps/{stamp_id}",
+    "/",
+    response_model=StampListResponse,
+    summary="List All Swarm Stamp Batches"
+)
+async def list_stamps() -> Any:
+    """
+    Retrieves a list of all postage stamp batches from the Swarm network.
+
+    Fetches all available stamp batches, processes them to calculate expiration times,
+    and returns a comprehensive list with stamp details.
+
+    Returns:
+        StampListResponse: Contains list of all stamps and total count
+
+    Raises:
+        HTTPException: 502 if Swarm API is unreachable, 500 for other errors
+    """
+    try:
+        processed_stamps = swarm_api.get_all_stamps_processed()
+
+        # Convert to StampDetails objects for proper validation
+        stamp_details = []
+        for stamp_data in processed_stamps:
+            try:
+                stamp_detail = StampDetails(**stamp_data)
+                stamp_details.append(stamp_detail)
+            except Exception as e:
+                logger.warning(f"Skipping invalid stamp data: {e}")
+                continue
+
+        return StampListResponse(
+            stamps=stamp_details,
+            total_count=len(stamp_details)
+        )
+
+    except RequestException as e:
+        logger.error(f"Failed to retrieve stamps from Swarm API: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Could not fetch stamp data from the Swarm Bee node: {e}"
+        )
+    except Exception as e:
+        logger.error(f"Unexpected error fetching stamps: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="An unexpected error occurred while fetching stamp data."
+        )
+
+
+@router.get(
+    "/{stamp_id}",
     response_model=StampDetails,
-    summary="Get Specific Swarm Stamp Batch Details",
-    tags=["stamps"]
+    summary="Get Specific Swarm Stamp Batch Details"
 )
 async def get_stamp_details(
     stamp_id: str = Path(..., description="The Batch ID of the Swarm stamp to retrieve.", example="a1b2c3d4e5f6...")
@@ -33,7 +84,7 @@ async def get_stamp_details(
     and returns the relevant information.
     """
     try:
-        all_stamps = swarm_api.get_all_stamps()
+        all_stamps = swarm_api.get_all_stamps_processed()
     except RequestException as e:
         logger.error(f"Failed to retrieve data from upstream Swarm API: {e}")
         raise HTTPException(
@@ -61,35 +112,22 @@ async def get_stamp_details(
         )
 
     try:
-        batch_ttl = int(found_stamp.get("batchTTL", 0)) # Ensure TTL is an int, default to 0 if missing/invalid
-        if batch_ttl < 0:
-             logger.warning(f"Stamp {stamp_id} has negative TTL: {batch_ttl}. Treating as 0.")
-             batch_ttl = 0
-
-        # Calculate expiration based on current time + TTL
-        # IMPORTANT: Swarm's batchTTL is typically relative to the block it was created in.
-        # This calculation is based on the user request (current time + TTL).
-        # Consider if you need creation time + TTL instead.
-        now_utc = datetime.datetime.now(datetime.timezone.utc)
-        expiration_time_utc = now_utc + datetime.timedelta(seconds=batch_ttl)
-        # Format: YYYY-MM-DD-HH-MM (UTC)
-        expiration_str = expiration_time_utc.strftime('%Y-%m-%d-%H-%M')
-
-        # Prepare the response using the Pydantic model for validation and structure
-        # Ensure all required fields for StampDetails are present in found_stamp or handled
+        # Use the enhanced data directly from get_all_stamps_processed()
+        # which already includes calculated expiration, local data merging, etc.
         response_data = StampDetails(
             batchID=found_stamp.get("batchID"),
+            amount=str(found_stamp.get("amount", "")),
+            blockNumber=found_stamp.get("blockNumber"),
+            owner=found_stamp.get("owner"),
+            immutableFlag=found_stamp.get("immutableFlag"),
+            depth=found_stamp.get("depth"),
+            bucketDepth=found_stamp.get("bucketDepth"),
+            batchTTL=found_stamp.get("batchTTL"),
             utilization=found_stamp.get("utilization"),
             usable=found_stamp.get("usable"),
-            label=found_stamp.get("label"), # Handles None if missing
-            depth=found_stamp.get("depth"),
-            amount=str(found_stamp.get("amount")), # Ensure amount is string
-            bucketDepth=found_stamp.get("bucketDepth"),
-            blockNumber=found_stamp.get("blockNumber"),
-            immutableFlag=found_stamp.get("immutableFlag"),
-            batchTTL=batch_ttl, # Use the processed TTL
-            exists=found_stamp.get("exists", True), # Default to True if field is missing, adjust as needed
-            expectedExpiration=expiration_str
+            label=found_stamp.get("label"),
+            expectedExpiration=found_stamp.get("expectedExpiration"),
+            local=found_stamp.get("local")
         )
         return response_data
 
@@ -114,109 +152,112 @@ async def get_stamp_details(
 
 
 @router.post(
-    "/stamps",
+    "/",
     response_model=StampPurchaseResponse,
-    summary="Create New Swarm Stamp Batch",
-    tags=["stamps"]
+    status_code=status.HTTP_201_CREATED,
+    summary="Purchase a New Swarm Postage Stamp"
 )
-async def create_stamp_batch(
-    request: dict = Body(...)
+async def purchase_stamp(
+    stamp_request: StampPurchaseRequest
 ) -> Any:
     """
-    Create a new Swarm postage stamp batch.
+    Purchases a new postage stamp from the Swarm network.
 
-    Supports two request formats:
-    1. Time-based: Specify duration_days and data_size_mb for user-friendly interface
-    2. Advanced: Specify amount and depth for direct control over technical parameters
+    Creates a new postage stamp batch with the specified amount and depth.
+    Optional label can be provided for easier identification.
 
-    The API automatically converts time-based parameters to technical parameters when needed.
+    Args:
+        stamp_request: Purchase request containing amount, depth, and optional label
+
+    Returns:
+        StampPurchaseResponse: Contains the new batch ID and success message
+
+    Raises:
+        HTTPException: 502 if Swarm API is unreachable, 500 for other errors
     """
-
     try:
-        # Determine if this is a time-based or advanced request
-        if 'duration_days' in request and request['duration_days'] is not None:
-            # Time-based request - validate and convert to amount/depth
-            time_request = StampPurchaseRequest(**request)
-            logger.info(f"Processing time-based stamp request: {time_request.duration_days} days, {time_request.data_size_mb} MB")
-
-            amount, depth = swarm_api.calculate_stamp_parameters(
-                time_request.duration_days,
-                time_request.data_size_mb
-            )
-
-            # Store original request values for response
-            requested_duration_days = time_request.duration_days
-            requested_data_size_mb = time_request.data_size_mb
-            label = time_request.label
-            immutable = time_request.immutable
-
-        else:
-            # Advanced request - validate and use provided amount/depth directly
-            advanced_request = StampPurchaseRequestAdvanced(**request)
-            logger.info(f"Processing advanced stamp request: amount={advanced_request.amount}, depth={advanced_request.depth}")
-
-            amount = advanced_request.amount
-            depth = advanced_request.depth
-            requested_duration_days = None
-            requested_data_size_mb = None
-            label = advanced_request.label
-            immutable = advanced_request.immutable
-
-        # Estimate cost before creation
-        estimated_cost = swarm_api.estimate_stamp_cost(amount, depth)
-
-        # Create the stamp via Bee API
-        creation_result = swarm_api.create_stamp(
-            amount=amount,
-            depth=depth,
-            label=label,
-            immutable=immutable
+        batch_id = swarm_api.purchase_postage_stamp(
+            amount=stamp_request.amount,
+            depth=stamp_request.depth,
+            label=stamp_request.label
         )
 
-        # Calculate estimated expiration
-        # Note: This is an estimate based on current time + calculated duration
-        if requested_duration_days:
-            now_utc = datetime.datetime.now(datetime.timezone.utc)
-            expiration_time_utc = now_utc + datetime.timedelta(days=requested_duration_days)
-            estimated_expiration = expiration_time_utc.strftime('%Y-%m-%d-%H-%M')
-        else:
-            # For advanced requests, we can't easily calculate duration
-            # Could enhance this by reverse-calculating from amount/depth
-            estimated_expiration = "N/A (advanced request)"
-
-        # Prepare response
-        response_data = StampPurchaseResponse(
-            batchID=creation_result.get("batchID"),
-            estimatedExpiration=estimated_expiration,
-            estimatedCostBZZ=estimated_cost,
-            actualAmount=amount,
-            actualDepth=depth,
-            txHash=creation_result.get("txHash"),
-            blockNumber=creation_result.get("blockNumber"),
-            label=label,
-            immutable=immutable,
-            requestedDurationDays=requested_duration_days,
-            requestedDataSizeMB=requested_data_size_mb
+        return StampPurchaseResponse(
+            batchID=batch_id,
+            message="Postage stamp purchased successfully"
         )
-
-        logger.info(f"Successfully created stamp batch: {response_data.batchID}")
-        return response_data
 
     except RequestException as e:
-        logger.error(f"Failed to create stamp via Bee API: {e}")
+        logger.error(f"Failed to purchase stamp from Swarm API: {e}")
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"Could not create stamp via Swarm Bee node: {e}"
+            detail=f"Could not purchase stamp from the Swarm Bee node: {e}"
         )
     except ValueError as e:
-        logger.error(f"Invalid parameters for stamp creation: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Invalid stamp creation parameters: {e}"
-        )
-    except Exception as e:
-        logger.error(f"Unexpected error creating stamp: {e}", exc_info=True)
+        logger.error(f"Invalid response from Swarm API during stamp purchase: {e}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="An unexpected error occurred while creating the stamp."
+            detail=f"Invalid response from Swarm API: {e}"
+        )
+    except Exception as e:
+        logger.error(f"Unexpected error during stamp purchase: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="An unexpected error occurred while purchasing the stamp."
+        )
+
+
+@router.patch(
+    "/{stamp_id}/extend",
+    response_model=StampExtensionResponse,
+    summary="Extend an Existing Swarm Postage Stamp"
+)
+async def extend_stamp(
+    stamp_id: str = Path(..., description="The Batch ID of the stamp to extend.", example="a1b2c3d4e5f6..."),
+    extension_request: StampExtensionRequest = ...
+) -> Any:
+    """
+    Extends an existing postage stamp by adding more funds to it.
+
+    This operation adds the specified amount to the existing stamp,
+    extending its validity period and increasing its balance.
+
+    Args:
+        stamp_id: The batch ID of the stamp to extend
+        extension_request: Extension request containing the additional amount
+
+    Returns:
+        StampExtensionResponse: Contains the batch ID and success message
+
+    Raises:
+        HTTPException: 502 if Swarm API is unreachable, 500 for other errors
+    """
+    try:
+        batch_id = swarm_api.extend_postage_stamp(
+            stamp_id=stamp_id,
+            amount=extension_request.amount
+        )
+
+        return StampExtensionResponse(
+            batchID=batch_id,
+            message="Postage stamp extended successfully"
+        )
+
+    except RequestException as e:
+        logger.error(f"Failed to extend stamp {stamp_id} from Swarm API: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Could not extend stamp from the Swarm Bee node: {e}"
+        )
+    except ValueError as e:
+        logger.error(f"Invalid response from Swarm API during stamp extension: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Invalid response from Swarm API: {e}"
+        )
+    except Exception as e:
+        logger.error(f"Unexpected error during stamp extension for {stamp_id}: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="An unexpected error occurred while extending the stamp."
         )
