@@ -38,22 +38,42 @@ swarm_connect/
 
 ## Running
 
+### Setup and Installation
 
+```bash
+# Create virtual environment
+python3 -m venv venv
 
-```
-python3 -m venv /path/to/pythonvenv
-# use the binaries in that folder from now on
+# Activate virtual environment (Linux/Mac)
+source venv/bin/activate
+# On Windows: venv\Scripts\activate
 
+# Install dependencies
 pip install -r requirements.txt
 
-# Copy .env.example to .env.
-
-# Edit .env and ensure SWARM_BEE_API_URL points to your Bee node's API endpoint (e.g., http://localhost:1633 or the public gateway https://api.gateway.ethswarm.org).
-
-# if port 8000 is taken, use a different one, e.g.:
-export PORT=8001
-
+# Set up environment file
+cp .env.example .env
+# Edit .env and ensure SWARM_BEE_API_URL points to your Bee node's API endpoint
+# (e.g., http://localhost:1633 or the public gateway https://api.gateway.ethswarm.org)
 ```
+
+### Starting the Server
+
+```bash
+# Start the development server (with auto-reload)
+python run.py
+
+# Optional: Use different port if 8000 is taken
+PORT=8001 python run.py
+
+# For HTTPS development (requires SSL certificates)
+SSL_KEYFILE=./localhost+2-key.pem SSL_CERTFILE=./localhost+2.pem python run.py
+```
+
+The server will be available at:
+- HTTP: http://127.0.0.1:8000
+- API Documentation: http://127.0.0.1:8000/docs
+- Alternative docs: http://127.0.0.1:8000/redoc
 
 ## Architecture
 
