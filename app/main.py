@@ -1,7 +1,7 @@
 # app/main.py
 from fastapi import FastAPI
 from app.core.config import settings
-from app.api.endpoints import stamps, data
+from app.api.endpoints import stamps, data, wallet
 import logging
 
 # Configure basic logging
@@ -17,6 +17,7 @@ app = FastAPI(
 # The prefix ensures all routes start with /api/v1
 app.include_router(stamps.router, prefix=f"{settings.API_V1_STR}/stamps", tags=["stamps"])
 app.include_router(data.router, prefix=f"{settings.API_V1_STR}/data", tags=["data"])
+app.include_router(wallet.router, prefix=f"{settings.API_V1_STR}", tags=["wallet"])
 
 @app.get("/", summary="Health Check", tags=["default"])
 def read_root():

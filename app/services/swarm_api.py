@@ -422,3 +422,69 @@ def download_data_from_swarm(reference: str) -> bytes:
     except requests.exceptions.RequestException as e:
         logger.error(f"Error downloading data from Swarm API ({api_url}): {e}")
         raise
+
+
+def get_wallet_address() -> str:
+    """
+    Fetches the wallet address from the configured Swarm Bee node.
+
+    Returns:
+        The wallet address of the Bee node
+
+    Raises:
+        RequestException: If the HTTP request to the Swarm API fails
+        ValueError: If the response is malformed or missing expected fields
+    """
+    api_url = urljoin(str(settings.SWARM_BEE_API_URL), "wallet")
+    try:
+        response = requests.get(api_url, timeout=10)
+        response.raise_for_status()
+
+        response_json = response.json()
+        wallet_address = response_json.get("walletAddress")
+
+        if not wallet_address:
+            raise ValueError("API Response missing 'walletAddress' field")
+
+        logger.info(f"Successfully retrieved wallet address: {wallet_address}")
+        return wallet_address
+
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Error fetching wallet address from Swarm API ({api_url}): {e}")
+        raise
+    except (ValueError, KeyError) as e:
+        logger.error(f"Error parsing wallet response: {e}")
+        raise ValueError(f"Could not parse wallet response: {e}") from e
+
+
+def get_chequebook_address() -> str:
+    """
+    Fetches the chequebook address from the configured Swarm Bee node.
+
+    Returns:
+        The chequebook address of the Bee node
+
+    Raises:
+        RequestException: If the HTTP request to the Swarm API fails
+        ValueError: If the response is malformed or missing expected fields
+    """
+    api_url = urljoin(str(settings.SWARM_BEE_API_URL), "chequebook/address")
+    try:
+        response = requests.get(api_url, timeout=10)
+        response.raise_for_status()
+
+        response_json = response.json()
+        chequebook_address = response_json.get("chequebookAddress")
+
+        if not chequebook_address:
+            raise ValueError("API Response missing 'chequebookAddress' field")
+
+        logger.info(f"Successfully retrieved chequebook address: {chequebook_address}")
+        return chequebook_address
+
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Error fetching chequebook address from Swarm API ({api_url}): {e}")
+        raise
+    except (ValueError, KeyError) as e:
+        logger.error(f"Error parsing chequebook response: {e}")
+        raise ValueError(f"Could not parse chequebook response: {e}") from e

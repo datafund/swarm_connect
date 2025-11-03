@@ -13,11 +13,13 @@ swarm_connect/
 │   │   ├── endpoints/      # API route definitions
 │   │   │   ├── __init__.py
 │   │   │   ├── stamps.py   # Endpoints for Swarm stamp management
-│   │   │   └── data.py     # Endpoints for data upload/download
+│   │   │   ├── data.py     # Endpoints for data upload/download
+│   │   │   └── wallet.py   # Endpoints for wallet information
 │   │   └── models/         # Pydantic models for request/response validation
 │   │       ├── __init__.py
 │   │       ├── stamp.py    # Pydantic models for stamp data
-│   │       └── data.py     # Pydantic models for data operations
+│   │       ├── data.py     # Pydantic models for data operations
+│   │       └── wallet.py   # Pydantic models for wallet information
 │   ├── core/               # Core application logic/configuration
 │   │   ├── __init__.py
 │   │   └── config.py       # Configuration management (e.g., loading .env)
@@ -240,6 +242,10 @@ Swarm Connect is a FastAPI-based API gateway that provides comprehensive access 
 - `GET /api/v1/data/{reference}`: Download raw data from Swarm (returns bytes directly)
 - `GET /api/v1/data/{reference}/json`: Download data with JSON metadata (base64-encoded)
 
+#### Wallet Information
+- `GET /api/v1/wallet`: Get the wallet address of the Bee node
+- `GET /api/v1/chequebook/address`: Get the chequebook address of the Bee node
+
 ### Key Value Propositions
 
 1. **Complete Gateway Solution**: Full stamp lifecycle and data operations in one service
@@ -300,3 +306,17 @@ Download data as JSON with metadata (for API clients).
 - **Use case**: Web apps, mobile apps, API integrations needing metadata
 - **Response**: `{"data": "base64-encoded-content", "content_type": "application/json", "size": 2048, "reference": "abc..."}`
 - **Benefits**: Get file metadata without triggering download, programmatic access
+
+### Wallet Information Endpoints
+
+#### `GET /api/v1/wallet`
+Get the wallet address of the connected Bee node.
+- **Response**: `{"walletAddress": "0x..."}`
+- **Use case**: Identify the Ethereum wallet address associated with the Bee node
+- **Note**: Only available when connected to local Bee nodes, not public gateways
+
+#### `GET /api/v1/chequebook/address`
+Get the chequebook address of the connected Bee node.
+- **Response**: `{"chequebookAddress": "0x..."}`
+- **Use case**: Identify the chequebook smart contract address for the Bee node
+- **Note**: Only available when connected to local Bee nodes, not public gateways
