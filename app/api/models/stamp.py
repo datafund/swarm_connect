@@ -54,7 +54,7 @@ class StampDetails(BaseModel):
 
 class StampPurchaseRequest(BaseModel):
     """Request model for purchasing a new postage stamp."""
-    amount: int = Field(..., description="The amount of the postage stamp in wei.", example=2000000000)
+    amount: int = Field(..., description="The amount of the postage stamp in wei.", example=8000000000)
     depth: int = Field(..., description="The depth of the postage stamp.", example=17)
     label: Optional[str] = Field(None, description="Optional user-defined label for the stamp.", example="my-stamp")
 
@@ -75,7 +75,7 @@ class StampPurchaseResponse(BaseModel):
 
 class StampExtensionRequest(BaseModel):
     """Request model for extending a postage stamp."""
-    amount: int = Field(..., description="Additional amount to add to the stamp in wei.", example=2000000000)
+    amount: int = Field(..., description="Additional amount to add to the stamp in wei.", example=8000000000)
 
 
 class StampExtensionResponse(BaseModel):

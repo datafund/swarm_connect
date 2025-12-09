@@ -173,3 +173,8 @@ When making changes to the codebase, ensure the architecture documentation stays
 **IMPORTANT**: This repository pushes to `git@github.com:datafund/swarm_connect.git` (origin). When creating GitHub issues or pull requests, always use the `datafund/swarm_connect` repository, NOT the `crtahlin/swarm_connect` upstream repository.
 
 Use `git remote -v` to verify the correct repository before creating issues.
+
+## Commit Message Guidelines
+
+- Do NOT include Claude/AI mentions, co-author tags, or "Generated with Claude" footers in commit messages
+- Keep commit messages clean and professional - just describe the changes

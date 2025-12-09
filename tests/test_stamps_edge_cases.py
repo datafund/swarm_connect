@@ -66,7 +66,7 @@ class TestStampPurchaseEdgeCases:
     def test_purchase_stamp_minimum_depth(self):
         """Test purchasing stamp with minimum valid depth."""
         purchase_data = {
-            "amount": 2000000000,
+            "amount": 8000000000,
             "depth": 16  # Minimum reasonable depth
         }
 
@@ -79,7 +79,7 @@ class TestStampPurchaseEdgeCases:
     def test_purchase_stamp_maximum_depth(self):
         """Test purchasing stamp with maximum valid depth."""
         purchase_data = {
-            "amount": 2000000000,
+            "amount": 8000000000,
             "depth": 32  # Maximum reasonable depth
         }
 
@@ -92,7 +92,7 @@ class TestStampPurchaseEdgeCases:
     def test_purchase_stamp_invalid_low_depth(self):
         """Test purchasing stamp with too low depth should fail."""
         purchase_data = {
-            "amount": 2000000000,
+            "amount": 8000000000,
             "depth": 5  # Too low
         }
 
@@ -102,7 +102,7 @@ class TestStampPurchaseEdgeCases:
     def test_purchase_stamp_invalid_high_depth(self):
         """Test purchasing stamp with too high depth should fail."""
         purchase_data = {
-            "amount": 2000000000,
+            "amount": 8000000000,
             "depth": 50  # Too high
         }
 
@@ -112,7 +112,7 @@ class TestStampPurchaseEdgeCases:
     def test_purchase_stamp_very_long_label(self):
         """Test purchasing stamp with extremely long label."""
         purchase_data = {
-            "amount": 2000000000,
+            "amount": 8000000000,
             "depth": 17,
             "label": "a" * 1000  # Very long label
         }
@@ -137,7 +137,7 @@ class TestStampPurchaseEdgeCases:
 
         for label in special_labels:
             purchase_data = {
-                "amount": 2000000000,
+                "amount": 8000000000,
                 "depth": 17,
                 "label": label
             }
@@ -155,7 +155,7 @@ class TestStampPurchaseEdgeCases:
         mock_purchase.side_effect = ValueError("Invalid response format")
 
         purchase_data = {
-            "amount": 2000000000,
+            "amount": 8000000000,
             "depth": 17
         }
 
@@ -168,7 +168,7 @@ class TestStampPurchaseEdgeCases:
         mock_purchase.return_value = ""  # Empty batch ID
 
         purchase_data = {
-            "amount": 2000000000,
+            "amount": 8000000000,
             "depth": 17
         }
 
@@ -220,7 +220,7 @@ class TestStampDetailsEdgeCases:
                 "name": "missing_utilization",
                 "data": {
                     "batchID": "test456",
-                    "amount": "2000000000",
+                    "amount": "8000000000",
                     "owner": "0x1234567890abcdef",
                     "immutableFlag": False,
                     "depth": 20,
@@ -335,7 +335,7 @@ class TestStampExtensionEdgeCases:
         from requests.exceptions import RequestException
         mock_extend.side_effect = RequestException("Stamp not found")
 
-        extension_data = {"amount": 2000000000}
+        extension_data = {"amount": 8000000000}
 
         response = client.patch("/api/v1/stamps/nonexistent_id/extend", json=extension_data)
         assert response.status_code == 502
@@ -345,7 +345,7 @@ class TestStampExtensionEdgeCases:
         """Test when returned batch ID doesn't match request."""
         mock_extend.return_value = "different_batch_id"  # Different from request
 
-        extension_data = {"amount": 2000000000}
+        extension_data = {"amount": 8000000000}
 
         response = client.patch("/api/v1/stamps/original_batch_id/extend", json=extension_data)
 
@@ -371,7 +371,7 @@ class TestIntegrationWorkflows:
 
         initial_stamp_data = {
             "batchID": batch_id,
-            "amount": "2000000000",
+            "amount": "8000000000",
             "immutableFlag": False,
             "depth": 18,
             "bucketDepth": 16,
@@ -386,7 +386,7 @@ class TestIntegrationWorkflows:
         extended_stamp_data = {**initial_stamp_data, "amount": "4000000000", "batchTTL": 7200}
 
         # Step 1: Purchase stamp
-        purchase_data = {"amount": 2000000000, "depth": 18, "label": "lifecycle-test"}
+        purchase_data = {"amount": 8000000000, "depth": 18, "label": "lifecycle-test"}
         purchase_response = client.post("/api/v1/stamps/", json=purchase_data)
 
         assert purchase_response.status_code == 201
@@ -402,7 +402,7 @@ class TestIntegrationWorkflows:
         assert details["local"] is True
 
         # Step 3: Extend stamp
-        extend_data = {"amount": 2000000000}
+        extend_data = {"amount": 8000000000}
         extend_response = client.patch(f"/api/v1/stamps/{batch_id}/extend", json=extend_data)
 
         assert extend_response.status_code == 200
@@ -479,7 +479,7 @@ class TestSecurityAndValidation:
     def test_large_payload_handling(self):
         """Test handling of extremely large request payloads."""
         large_purchase_data = {
-            "amount": 2000000000,
+            "amount": 8000000000,
             "depth": 17,
             "label": "x" * 10000  # Very large label
         }
@@ -491,10 +491,10 @@ class TestSecurityAndValidation:
     def test_malformed_json_handling(self):
         """Test handling of malformed JSON in requests."""
         malformed_requests = [
-            '{"amount": 2000000000, "depth": 17,}',  # Trailing comma
-            '{"amount": 2000000000 "depth": 17}',    # Missing comma
+            '{"amount": 8000000000, "depth": 17,}',  # Trailing comma
+            '{"amount": 8000000000 "depth": 17}',    # Missing comma
             '{"amount": "not_a_number", "depth": 17}',  # Wrong type
-            '{amount: 2000000000, depth: 17}',       # Unquoted keys
+            '{amount: 8000000000, depth: 17}',       # Unquoted keys
         ]
 
         for malformed in malformed_requests:

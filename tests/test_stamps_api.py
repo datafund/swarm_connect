@@ -33,7 +33,7 @@ class TestStampsAPI:
             },
             {
                 "batchID": "test456",
-                "amount": "2000000000",
+                "amount": "8000000000",
                 "blockNumber": None,
                 "owner": None,
                 "immutableFlag": True,
@@ -105,7 +105,7 @@ class TestStampsAPI:
             },
             {
                 "batchID": "other456",
-                "amount": "2000000000",
+                "amount": "8000000000",
                 "local": False
             }
         ]
@@ -154,7 +154,7 @@ class TestStampsAPI:
         mock_purchase.return_value = "new_batch_id_123"
 
         purchase_data = {
-            "amount": 2000000000,
+            "amount": 8000000000,
             "depth": 17,
             "label": "test-purchase"
         }
@@ -167,7 +167,7 @@ class TestStampsAPI:
         assert "successfully" in data["message"].lower()
 
         # Verify the service was called with correct parameters
-        mock_purchase.assert_called_once_with(amount=2000000000, depth=17, label="test-purchase")
+        mock_purchase.assert_called_once_with(amount=8000000000, depth=17, label="test-purchase")
 
     @patch('app.services.swarm_api.purchase_postage_stamp')
     def test_purchase_stamp_without_label(self, mock_purchase):
@@ -221,7 +221,7 @@ class TestStampsAPI:
         mock_extend.return_value = "existing_batch_id"
 
         extension_data = {
-            "amount": 2000000000
+            "amount": 8000000000
         }
 
         response = client.patch("/api/v1/stamps/existing_batch_id/extend", json=extension_data)
@@ -232,7 +232,7 @@ class TestStampsAPI:
         assert "successfully" in data["message"].lower()
 
         # Verify the service was called with correct parameters
-        mock_extend.assert_called_once_with(stamp_id="existing_batch_id", amount=2000000000)
+        mock_extend.assert_called_once_with(stamp_id="existing_batch_id", amount=8000000000)
 
     @patch('app.services.swarm_api.extend_postage_stamp')
     def test_extend_stamp_api_error(self, mock_extend):
@@ -241,7 +241,7 @@ class TestStampsAPI:
         mock_extend.side_effect = RequestException("Extension failed")
 
         extension_data = {
-            "amount": 2000000000
+            "amount": 8000000000
         }
 
         response = client.patch("/api/v1/stamps/batch123/extend", json=extension_data)
@@ -325,7 +325,7 @@ class TestStampsDataIntegrity:
                 "batchTTL": 7200,
                 "expectedExpiration": "2024-12-01-17-30",
                 "local": True,
-                "amount": "2000000000"
+                "amount": "8000000000"
             }
         ]
 
@@ -359,7 +359,7 @@ class TestStampsDataIntegrity:
                 "batchTTL": 7200,
                 "expectedExpiration": "2024-12-01-17-30",
                 "immutableFlag": True,
-                "amount": "2000000000"
+                "amount": "8000000000"
             }
         ]
 

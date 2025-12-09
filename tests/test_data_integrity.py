@@ -31,7 +31,7 @@ class TestDataMerging:
 
         local_stamp = {
             "batchID": "test123",
-            "amount": 2000000000,  # Different amount
+            "amount": 8000000000,  # Different amount
             "owner": "local_owner",  # Different owner
             "immutableFlag": False,  # Different immutability
             "utilization": 50,
@@ -42,7 +42,7 @@ class TestDataMerging:
         result = merge_stamp_data(global_stamp, local_stamp)
 
         # Local data should take priority
-        assert result["amount"] == "2000000000"  # Local amount (converted to string)
+        assert result["amount"] == "8000000000"  # Local amount (converted to string)
         assert result["owner"] == "local_owner"
         assert result["immutableFlag"] is False  # Local immutableFlag
         assert result["utilization"] == 50

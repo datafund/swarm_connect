@@ -34,7 +34,7 @@ class TestSwarmAPIFunctions:
             "utilization": 50,
             "usable": True,
             "label": "my-test-stamp",
-            "amount": 2000000000,
+            "amount": 8000000000,
             "owner": "0x1234567890abcdef",
             "immutableFlag": True,
             "blockNumber": 12345
@@ -46,7 +46,7 @@ class TestSwarmAPIFunctions:
         assert result["utilization"] == 50
         assert result["usable"] is True
         assert result["label"] == "my-test-stamp"
-        assert result["amount"] == "2000000000"  # Converted to string
+        assert result["amount"] == "8000000000"  # Converted to string
         assert result["owner"] == "0x1234567890abcdef"
         assert result["blockNumber"] == 12345
         assert result["immutableFlag"] is True
@@ -158,7 +158,7 @@ class TestSwarmAPIFunctions:
         mock_response.json.return_value = {
             "batches": [
                 {"batchID": "test123", "amount": "1000000000", "depth": 18},
-                {"batchID": "test456", "amount": "2000000000", "depth": 20}
+                {"batchID": "test456", "amount": "8000000000", "depth": 20}
             ]
         }
         mock_get.return_value = mock_response
@@ -176,7 +176,7 @@ class TestSwarmAPIFunctions:
         mock_response.raise_for_status.return_value = None
         mock_response.json.return_value = [
             {"batchID": "test123", "amount": "1000000000"},
-            {"batchID": "test456", "amount": "2000000000"}
+            {"batchID": "test456", "amount": "8000000000"}
         ]
         mock_get.return_value = mock_response
 
@@ -229,7 +229,7 @@ class TestSwarmAPIFunctions:
             },
             {
                 "batchID": "global456",
-                "amount": "2000000000",
+                "amount": "8000000000",
                 "immutable": False,
                 "depth": 20,
                 "bucketDepth": 16,
