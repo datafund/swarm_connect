@@ -12,5 +12,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy the rest of the application code
 COPY . .
 
+# Version is passed as build arg and written to VERSION file
+ARG VERSION=0.0.0-unknown
+RUN echo "${VERSION}" > VERSION
+
 # Command to run the application
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
