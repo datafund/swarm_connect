@@ -67,40 +67,41 @@ class StampPurchaseRequest(BaseModel):
     - depth: Technical depth value (16-32)
 
     Duration can be specified using either:
-    - duration_hours: Desired duration in hours
+    - duration_hours: Desired duration in hours (minimum 24)
     - amount: Raw PLUR amount (legacy)
 
     Defaults: size="small" (depth 17), duration_hours=25
     """
     duration_hours: Optional[int] = Field(
-        None,
-        description="Desired stamp duration in hours. Default is 25 hours if neither duration_hours nor amount is provided.",
-        ge=1
+        default=None,
+        description="Desired stamp duration in hours. Minimum 24 hours. Default is 25 hours if neither duration_hours nor amount is provided.",
+        ge=24
     )
     amount: Optional[int] = Field(
-        None,
+        default=None,
         description="The amount of the postage stamp in PLUR (legacy). If provided, overrides duration_hours."
     )
     size: Optional[Literal["small", "medium", "large"]] = Field(
-        None,
+        default=None,
         description="Storage size preset. 'small': one small document, 'medium': several medium documents, 'large': several large documents. Overrides depth if provided."
     )
     depth: Optional[int] = Field(
-        None,
+        default=None,
         description="The depth of the postage stamp (advanced). Default is 17 if neither size nor depth is provided.",
         ge=16,
         le=32
     )
-    label: Optional[str] = Field(None, description="Optional user-defined label for the stamp.")
+    label: Optional[str] = Field(default=None, description="Optional user-defined label for the stamp.")
 
-    class Config:
-        schema_extra = {
+    model_config = {
+        "json_schema_extra": {
             "example": {
-                "duration_hours": 48,
-                "size": "medium",
+                "duration_hours": 25,
+                "size": "small",
                 "label": "my-stamp"
             }
         }
+    }
 
     def get_effective_depth(self) -> int:
         """Returns the effective depth based on size preset or explicit depth."""
@@ -133,21 +134,22 @@ class StampExtensionRequest(BaseModel):
     If amount is provided, it overrides duration_hours (legacy support).
     """
     duration_hours: Optional[int] = Field(
-        None,
-        description="Desired additional duration in hours. Default is 25 hours if neither duration_hours nor amount is provided.",
-        ge=1
+        default=None,
+        description="Desired additional duration in hours. Minimum 24 hours. Default is 25 hours if neither duration_hours nor amount is provided.",
+        ge=24
     )
     amount: Optional[int] = Field(
-        None,
+        default=None,
         description="Additional amount to add to the stamp in PLUR (legacy). If provided, overrides duration_hours."
     )
 
-    class Config:
-        schema_extra = {
+    model_config = {
+        "json_schema_extra": {
             "example": {
-                "duration_hours": 48
+                "duration_hours": 25
             }
         }
+    }
 
 
 class StampExtensionResponse(BaseModel):
