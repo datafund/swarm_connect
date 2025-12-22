@@ -75,13 +75,11 @@ class StampPurchaseRequest(BaseModel):
     duration_hours: Optional[int] = Field(
         None,
         description="Desired stamp duration in hours. Default is 25 hours if neither duration_hours nor amount is provided.",
-        example=25,
         ge=1
     )
     amount: Optional[int] = Field(
         None,
-        description="The amount of the postage stamp in PLUR (legacy). If provided, overrides duration_hours.",
-        example=8000000000
+        description="The amount of the postage stamp in PLUR (legacy). If provided, overrides duration_hours."
     )
     size: Optional[Literal["small", "medium", "large"]] = Field(
         None,
@@ -90,11 +88,19 @@ class StampPurchaseRequest(BaseModel):
     depth: Optional[int] = Field(
         None,
         description="The depth of the postage stamp (advanced). Default is 17 if neither size nor depth is provided.",
-        example=17,
         ge=16,
         le=32
     )
-    label: Optional[str] = Field(None, description="Optional user-defined label for the stamp.", example="my-stamp")
+    label: Optional[str] = Field(None, description="Optional user-defined label for the stamp.")
+
+    class Config:
+        schema_extra = {
+            "example": {
+                "duration_hours": 48,
+                "size": "medium",
+                "label": "my-stamp"
+            }
+        }
 
     def get_effective_depth(self) -> int:
         """Returns the effective depth based on size preset or explicit depth."""
@@ -129,14 +135,19 @@ class StampExtensionRequest(BaseModel):
     duration_hours: Optional[int] = Field(
         None,
         description="Desired additional duration in hours. Default is 25 hours if neither duration_hours nor amount is provided.",
-        example=25,
         ge=1
     )
     amount: Optional[int] = Field(
         None,
-        description="Additional amount to add to the stamp in PLUR (legacy). If provided, overrides duration_hours.",
-        example=8000000000
+        description="Additional amount to add to the stamp in PLUR (legacy). If provided, overrides duration_hours."
     )
+
+    class Config:
+        schema_extra = {
+            "example": {
+                "duration_hours": 48
+            }
+        }
 
 
 class StampExtensionResponse(BaseModel):
