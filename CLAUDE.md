@@ -168,9 +168,14 @@ When making changes to the codebase, ensure the architecture documentation stays
 
 **Important**: The architecture documentation serves as the primary reference for understanding the system. Always verify that changes to the codebase are reflected in both the README.md Architecture section and this CLAUDE.md file.
 
-## Git Repository Configuration
+## Git Workflow
 
-**IMPORTANT**: This repository pushes to `git@github.com:datafund/swarm_connect.git` (origin). When creating GitHub issues or pull requests, always use the `datafund/swarm_connect` repository, NOT the `crtahlin/swarm_connect` upstream repository.
+**IMPORTANT**: Never push directly to main. Always:
+1. Create a feature branch (e.g., `fix/docs-examples`, `feature/new-endpoint`)
+2. Make commits on the branch
+3. Create a PR and merge via GitHub
+
+**Repository**: This repository pushes to `git@github.com:datafund/swarm_connect.git` (origin). When creating GitHub issues or pull requests, always use the `datafund/swarm_connect` repository, NOT the `crtahlin/swarm_connect` upstream repository.
 
 Use `git remote -v` to verify the correct repository before creating issues.
 
