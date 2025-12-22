@@ -1,6 +1,7 @@
 # app/main.py
 from fastapi import FastAPI
 from app.core.config import settings
+from app.core.version import VERSION
 from app.api.endpoints import stamps, data, wallet
 import logging
 
@@ -10,6 +11,7 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI(
     title=settings.PROJECT_NAME,
+    version=VERSION,
     openapi_url=f"{settings.API_V1_STR}/openapi.json" # Standard location for OpenAPI spec
 )
 
