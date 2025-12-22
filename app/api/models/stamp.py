@@ -1,6 +1,13 @@
 # app/api/models/stamp.py
-from pydantic import BaseModel, Field
-from typing import Optional, List # Ensure Optional and List are imported
+from pydantic import BaseModel, Field, field_validator
+from typing import Optional, List, Literal
+
+# Size presets mapping to depth values
+SIZE_PRESETS = {
+    "small": 17,   # Use for one small document
+    "medium": 20,  # Use for several medium documents
+    "large": 22,   # Use for several large documents
+}
 
 class StampDetails(BaseModel):
     """
@@ -53,10 +60,49 @@ class StampDetails(BaseModel):
 
 
 class StampPurchaseRequest(BaseModel):
-    """Request model for purchasing a new postage stamp."""
-    amount: int = Field(..., description="The amount of the postage stamp in wei.", example=8000000000)
-    depth: int = Field(..., description="The depth of the postage stamp.", example=17)
+    """Request model for purchasing a new postage stamp.
+
+    Storage size can be specified using either:
+    - size: Human-friendly preset ("small", "medium", "large")
+    - depth: Technical depth value (16-32)
+
+    Duration can be specified using either:
+    - duration_hours: Desired duration in hours
+    - amount: Raw PLUR amount (legacy)
+
+    Defaults: size="small" (depth 17), duration_hours=25
+    """
+    duration_hours: Optional[int] = Field(
+        None,
+        description="Desired stamp duration in hours. Default is 25 hours if neither duration_hours nor amount is provided.",
+        example=25,
+        ge=1
+    )
+    amount: Optional[int] = Field(
+        None,
+        description="The amount of the postage stamp in PLUR (legacy). If provided, overrides duration_hours.",
+        example=8000000000
+    )
+    size: Optional[Literal["small", "medium", "large"]] = Field(
+        None,
+        description="Storage size preset. 'small': one small document, 'medium': several medium documents, 'large': several large documents. Overrides depth if provided."
+    )
+    depth: Optional[int] = Field(
+        None,
+        description="The depth of the postage stamp (advanced). Default is 17 if neither size nor depth is provided.",
+        example=17,
+        ge=16,
+        le=32
+    )
     label: Optional[str] = Field(None, description="Optional user-defined label for the stamp.", example="my-stamp")
+
+    def get_effective_depth(self) -> int:
+        """Returns the effective depth based on size preset or explicit depth."""
+        if self.size is not None:
+            return SIZE_PRESETS[self.size]
+        if self.depth is not None:
+            return self.depth
+        return 17  # Default
 
 
 class StampPurchaseResponse(BaseModel):
@@ -74,8 +120,23 @@ class StampPurchaseResponse(BaseModel):
 
 
 class StampExtensionRequest(BaseModel):
-    """Request model for extending a postage stamp."""
-    amount: int = Field(..., description="Additional amount to add to the stamp in wei.", example=8000000000)
+    """Request model for extending a postage stamp.
+
+    Either duration_hours or amount must be provided.
+    If duration_hours is provided, amount is calculated automatically based on current price.
+    If amount is provided, it overrides duration_hours (legacy support).
+    """
+    duration_hours: Optional[int] = Field(
+        None,
+        description="Desired additional duration in hours. Default is 25 hours if neither duration_hours nor amount is provided.",
+        example=25,
+        ge=1
+    )
+    amount: Optional[int] = Field(
+        None,
+        description="Additional amount to add to the stamp in PLUR (legacy). If provided, overrides duration_hours.",
+        example=8000000000
+    )
 
 
 class StampExtensionResponse(BaseModel):

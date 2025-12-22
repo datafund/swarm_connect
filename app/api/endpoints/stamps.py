@@ -163,22 +163,56 @@ async def purchase_stamp(
     """
     Purchases a new postage stamp from the Swarm network.
 
-    Creates a new postage stamp batch with the specified amount and depth.
-    Optional label can be provided for easier identification.
+    Creates a new postage stamp batch with the specified duration or amount and depth.
+    If duration_hours is provided, amount is calculated based on current network price.
+    If neither is provided, defaults to 25 hours duration.
+
+    The endpoint checks wallet balance before purchase and returns a meaningful error
+    if funds are insufficient.
 
     Args:
-        stamp_request: Purchase request containing amount, depth, and optional label
+        stamp_request: Purchase request containing duration_hours or amount, depth, and optional label
 
     Returns:
         StampPurchaseResponse: Contains the new batch ID and success message
 
     Raises:
-        HTTPException: 502 if Swarm API is unreachable, 500 for other errors
+        HTTPException: 400 if insufficient funds, 502 if Swarm API is unreachable
     """
     try:
+        # Get effective depth from size preset or explicit depth
+        effective_depth = stamp_request.get_effective_depth()
+
+        # Determine the amount to use
+        if stamp_request.amount is not None:
+            # Legacy mode: use provided amount directly
+            amount = stamp_request.amount
+        else:
+            # Calculate amount from duration (default 25 hours)
+            duration_hours = stamp_request.duration_hours or 25
+            chainstate = swarm_api.get_chainstate()
+            current_price = int(chainstate["currentPrice"])
+            amount = swarm_api.calculate_stamp_amount(duration_hours, current_price)
+            logger.info(f"Calculated amount {amount} for {duration_hours} hours at price {current_price}")
+
+        # Calculate total cost and check funds
+        total_cost = swarm_api.calculate_stamp_total_cost(amount, effective_depth)
+        funds_check = swarm_api.check_sufficient_funds(total_cost)
+
+        if not funds_check["sufficient"]:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    f"Insufficient funds to purchase stamp. "
+                    f"Required: {funds_check['required_bzz']:.6f} BZZ, "
+                    f"Available: {funds_check['wallet_balance_bzz']:.6f} BZZ, "
+                    f"Shortfall: {funds_check['shortfall_bzz']:.6f} BZZ"
+                )
+            )
+
         batch_id = swarm_api.purchase_postage_stamp(
-            amount=stamp_request.amount,
-            depth=stamp_request.depth,
+            amount=amount,
+            depth=effective_depth,
             label=stamp_request.label
         )
 
@@ -187,6 +221,8 @@ async def purchase_stamp(
             message="Postage stamp purchased successfully"
         )
 
+    except HTTPException:
+        raise  # Re-raise HTTP exceptions as-is
     except RequestException as e:
         logger.error(f"Failed to purchase stamp from Swarm API: {e}")
         raise HTTPException(
@@ -219,23 +255,71 @@ async def extend_stamp(
     """
     Extends an existing postage stamp by adding more funds to it.
 
-    This operation adds the specified amount to the existing stamp,
-    extending its validity period and increasing its balance.
+    This operation adds the specified duration or amount to the existing stamp,
+    extending its validity period. If duration_hours is provided, amount is
+    calculated based on current network price. If neither is provided, defaults
+    to 25 hours.
+
+    The endpoint checks wallet balance before extension and returns a meaningful
+    error if funds are insufficient.
 
     Args:
         stamp_id: The batch ID of the stamp to extend
-        extension_request: Extension request containing the additional amount
+        extension_request: Extension request containing duration_hours or amount
 
     Returns:
         StampExtensionResponse: Contains the batch ID and success message
 
     Raises:
-        HTTPException: 502 if Swarm API is unreachable, 500 for other errors
+        HTTPException: 400 if insufficient funds, 404 if stamp not found, 502 if Swarm API unreachable
     """
     try:
+        # First, get the stamp to verify it exists and get its depth
+        all_stamps = swarm_api.get_all_stamps_processed()
+        found_stamp = None
+        for stamp in all_stamps:
+            if stamp.get("batchID") == stamp_id:
+                found_stamp = stamp
+                break
+
+        if not found_stamp:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Stamp batch with ID '{stamp_id}' not found on the connected Swarm node."
+            )
+
+        stamp_depth = found_stamp.get("depth", 17)
+
+        # Determine the amount to use
+        if extension_request.amount is not None:
+            # Legacy mode: use provided amount directly
+            amount = extension_request.amount
+        else:
+            # Calculate amount from duration (default 25 hours)
+            duration_hours = extension_request.duration_hours or 25
+            chainstate = swarm_api.get_chainstate()
+            current_price = int(chainstate["currentPrice"])
+            amount = swarm_api.calculate_stamp_amount(duration_hours, current_price)
+            logger.info(f"Calculated extension amount {amount} for {duration_hours} hours at price {current_price}")
+
+        # Calculate total cost and check funds
+        total_cost = swarm_api.calculate_stamp_total_cost(amount, stamp_depth)
+        funds_check = swarm_api.check_sufficient_funds(total_cost)
+
+        if not funds_check["sufficient"]:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    f"Insufficient funds to extend stamp. "
+                    f"Required: {funds_check['required_bzz']:.6f} BZZ, "
+                    f"Available: {funds_check['wallet_balance_bzz']:.6f} BZZ, "
+                    f"Shortfall: {funds_check['shortfall_bzz']:.6f} BZZ"
+                )
+            )
+
         batch_id = swarm_api.extend_postage_stamp(
             stamp_id=stamp_id,
-            amount=extension_request.amount
+            amount=amount
         )
 
         return StampExtensionResponse(
@@ -243,6 +327,8 @@ async def extend_stamp(
             message="Postage stamp extended successfully"
         )
 
+    except HTTPException:
+        raise  # Re-raise HTTP exceptions as-is
     except RequestException as e:
         logger.error(f"Failed to extend stamp {stamp_id} from Swarm API: {e}")
         raise HTTPException(

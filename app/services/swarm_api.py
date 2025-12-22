@@ -350,9 +350,15 @@ def get_all_stamps_processed() -> List[Dict[str, Any]]:
     return processed_stamps
 
 
+# Default redundancy level for erasure coding (2 = medium redundancy)
+DEFAULT_REDUNDANCY_LEVEL = 2
+
+
 def upload_data_to_swarm(data: bytes, stamp_id: str, content_type: str = "application/json") -> str:
     """
     Uploads data to the Swarm network using the configured Bee node.
+
+    Erasure coding is enabled by default with redundancy level 2 for reliability.
 
     Args:
         data: The data to upload as bytes
@@ -369,7 +375,8 @@ def upload_data_to_swarm(data: bytes, stamp_id: str, content_type: str = "applic
     api_url = urljoin(str(settings.SWARM_BEE_API_URL), "bzz")
     headers = {
         "Swarm-Postage-Batch-Id": stamp_id.lower(),
-        "Content-Type": content_type
+        "Content-Type": content_type,
+        "Swarm-Redundancy-Level": str(DEFAULT_REDUNDANCY_LEVEL)
     }
 
     try:
@@ -566,3 +573,112 @@ def get_chequebook_address() -> str:
     """
     chequebook_info = get_chequebook_info()
     return chequebook_info["chequebookAddress"]
+
+
+def get_chainstate() -> Dict[str, Any]:
+    """
+    Fetches chainstate information from the configured Swarm Bee node.
+    This includes the current price per chunk per block.
+
+    Returns:
+        Dictionary containing chainTip, block, totalAmount, and currentPrice
+
+    Raises:
+        RequestException: If the HTTP request to the Swarm API fails
+        ValueError: If the response is malformed or missing expected fields
+    """
+    api_url = urljoin(str(settings.SWARM_BEE_API_URL), "chainstate")
+    try:
+        response = requests.get(api_url, timeout=10)
+        response.raise_for_status()
+
+        response_json = response.json()
+        current_price = response_json.get("currentPrice")
+
+        if current_price is None:
+            raise ValueError("API Response missing 'currentPrice' field")
+
+        logger.info(f"Successfully retrieved chainstate: currentPrice={current_price}")
+        return response_json
+
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Error fetching chainstate from Swarm API ({api_url}): {e}")
+        raise
+    except (ValueError, KeyError) as e:
+        logger.error(f"Error parsing chainstate response: {e}")
+        raise ValueError(f"Could not parse chainstate response: {e}") from e
+
+
+def calculate_stamp_amount(duration_hours: int, current_price: int) -> int:
+    """
+    Calculates the amount needed for a stamp based on desired duration.
+
+    Formula: amount = currentPrice * duration_in_blocks
+    Gnosis chain has ~5 second block time, so 720 blocks per hour.
+
+    Args:
+        duration_hours: Desired stamp duration in hours
+        current_price: Current price per chunk per block (from chainstate)
+
+    Returns:
+        The amount in PLUR needed for the stamp
+    """
+    blocks_per_hour = 720  # 3600 seconds / 5 seconds per block
+    duration_blocks = duration_hours * blocks_per_hour
+    amount = current_price * duration_blocks
+    return amount
+
+
+def calculate_stamp_total_cost(amount: int, depth: int) -> int:
+    """
+    Calculates the total BZZ cost for a stamp based on amount and depth.
+
+    Formula: totalCost = amount * 2^depth
+
+    Args:
+        amount: The amount per chunk (in PLUR)
+        depth: The stamp depth (determines storage size)
+
+    Returns:
+        The total cost in PLUR
+    """
+    return amount * (2 ** depth)
+
+
+def check_sufficient_funds(required_plur: int) -> Dict[str, Any]:
+    """
+    Checks if the wallet has sufficient BZZ funds for a stamp purchase.
+
+    Args:
+        required_plur: Required amount in PLUR (1 BZZ = 10^16 PLUR)
+
+    Returns:
+        Dictionary with:
+            - sufficient: bool indicating if funds are available
+            - wallet_balance_plur: current wallet balance in PLUR
+            - wallet_balance_bzz: current wallet balance in BZZ
+            - required_plur: required amount in PLUR
+            - required_bzz: required amount in BZZ
+            - shortfall_bzz: amount missing (if insufficient)
+
+    Raises:
+        RequestException: If the HTTP request to the Swarm API fails
+    """
+    wallet_info = get_wallet_info()
+    wallet_balance_plur = int(wallet_info.get("bzzBalance", 0))
+
+    plur_per_bzz = 10 ** 16
+    wallet_balance_bzz = wallet_balance_plur / plur_per_bzz
+    required_bzz = required_plur / plur_per_bzz
+
+    sufficient = wallet_balance_plur >= required_plur
+    shortfall_bzz = 0.0 if sufficient else required_bzz - wallet_balance_bzz
+
+    return {
+        "sufficient": sufficient,
+        "wallet_balance_plur": wallet_balance_plur,
+        "wallet_balance_bzz": wallet_balance_bzz,
+        "required_plur": required_plur,
+        "required_bzz": required_bzz,
+        "shortfall_bzz": shortfall_bzz
+    }

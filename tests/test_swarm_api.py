@@ -9,7 +9,11 @@ from app.services.swarm_api import (
     get_local_stamps,
     merge_stamp_data,
     calculate_usable_status,
-    get_all_stamps_processed
+    get_all_stamps_processed,
+    get_chainstate,
+    calculate_stamp_amount,
+    calculate_stamp_total_cost,
+    check_sufficient_funds
 )
 
 
@@ -307,3 +311,135 @@ class TestSwarmAPIFunctions:
         assert result["batchID"] == "test123"
         assert result["immutableFlag"] is True
         assert result["depth"] == 18
+
+
+class TestStampCostCalculations:
+    """Test suite for stamp cost calculation functions."""
+
+    def test_calculate_stamp_amount_basic(self):
+        """Test basic amount calculation from duration."""
+        # 25 hours at price 100000 = 25 * 720 * 100000 = 1,800,000,000
+        result = calculate_stamp_amount(25, 100000)
+        assert result == 1800000000
+
+    def test_calculate_stamp_amount_one_hour(self):
+        """Test amount calculation for 1 hour."""
+        # 1 hour at price 150000 = 1 * 720 * 150000 = 108,000,000
+        result = calculate_stamp_amount(1, 150000)
+        assert result == 108000000
+
+    def test_calculate_stamp_amount_large_duration(self):
+        """Test amount calculation for longer duration (30 days)."""
+        # 720 hours (30 days) at price 100000 = 720 * 720 * 100000 = 51,840,000,000
+        result = calculate_stamp_amount(720, 100000)
+        assert result == 51840000000
+
+    def test_calculate_stamp_total_cost_depth_17(self):
+        """Test total cost calculation at depth 17."""
+        # amount * 2^17 = 1000000000 * 131072 = 131,072,000,000,000
+        result = calculate_stamp_total_cost(1000000000, 17)
+        assert result == 131072000000000
+
+    def test_calculate_stamp_total_cost_depth_20(self):
+        """Test total cost calculation at depth 20."""
+        # amount * 2^20 = 1000000000 * 1048576 = 1,048,576,000,000,000
+        result = calculate_stamp_total_cost(1000000000, 20)
+        assert result == 1048576000000000
+
+    def test_calculate_stamp_total_cost_increases_with_depth(self):
+        """Test that total cost increases exponentially with depth."""
+        amount = 1000000000
+        cost_17 = calculate_stamp_total_cost(amount, 17)
+        cost_18 = calculate_stamp_total_cost(amount, 18)
+        cost_19 = calculate_stamp_total_cost(amount, 19)
+
+        # Each depth increase should double the cost
+        assert cost_18 == cost_17 * 2
+        assert cost_19 == cost_18 * 2
+
+    @patch('app.services.swarm_api.requests.get')
+    def test_get_chainstate_success(self, mock_get):
+        """Test successful chainstate retrieval."""
+        mock_response = MagicMock()
+        mock_response.raise_for_status.return_value = None
+        mock_response.json.return_value = {
+            "chainTip": 43778502,
+            "block": 43778495,
+            "totalAmount": "464165918747",
+            "currentPrice": "149324"
+        }
+        mock_get.return_value = mock_response
+
+        result = get_chainstate()
+
+        assert result["currentPrice"] == "149324"
+        assert result["block"] == 43778495
+
+    @patch('app.services.swarm_api.requests.get')
+    def test_get_chainstate_missing_price(self, mock_get):
+        """Test chainstate retrieval fails when currentPrice is missing."""
+        mock_response = MagicMock()
+        mock_response.raise_for_status.return_value = None
+        mock_response.json.return_value = {
+            "block": 43778495
+            # Missing currentPrice
+        }
+        mock_get.return_value = mock_response
+
+        with pytest.raises(ValueError) as excinfo:
+            get_chainstate()
+
+        assert "currentPrice" in str(excinfo.value)
+
+    @patch('app.services.swarm_api.get_wallet_info')
+    def test_check_sufficient_funds_enough(self, mock_wallet):
+        """Test funds check when sufficient funds available."""
+        mock_wallet.return_value = {
+            "bzzBalance": "10000000000000000"  # 1 BZZ
+        }
+
+        # Request 0.5 BZZ worth
+        result = check_sufficient_funds(5000000000000000)
+
+        assert result["sufficient"] is True
+        assert result["wallet_balance_bzz"] == 1.0
+        assert result["required_bzz"] == 0.5
+        assert result["shortfall_bzz"] == 0.0
+
+    @patch('app.services.swarm_api.get_wallet_info')
+    def test_check_sufficient_funds_not_enough(self, mock_wallet):
+        """Test funds check when insufficient funds available."""
+        mock_wallet.return_value = {
+            "bzzBalance": "5000000000000000"  # 0.5 BZZ
+        }
+
+        # Request 1 BZZ worth
+        result = check_sufficient_funds(10000000000000000)
+
+        assert result["sufficient"] is False
+        assert result["wallet_balance_bzz"] == 0.5
+        assert result["required_bzz"] == 1.0
+        assert result["shortfall_bzz"] == 0.5
+
+    @patch('app.services.swarm_api.get_wallet_info')
+    def test_check_sufficient_funds_exact_amount(self, mock_wallet):
+        """Test funds check when exactly enough funds available."""
+        mock_wallet.return_value = {
+            "bzzBalance": "10000000000000000"  # 1 BZZ
+        }
+
+        # Request exactly 1 BZZ
+        result = check_sufficient_funds(10000000000000000)
+
+        assert result["sufficient"] is True
+        assert result["shortfall_bzz"] == 0.0
+
+    def test_calculate_stamp_amount_zero_price(self):
+        """Test amount calculation with zero price."""
+        result = calculate_stamp_amount(25, 0)
+        assert result == 0
+
+    def test_calculate_stamp_total_cost_zero_amount(self):
+        """Test total cost with zero amount."""
+        result = calculate_stamp_total_cost(0, 17)
+        assert result == 0

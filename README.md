@@ -161,8 +161,11 @@ Swarm Connect is a FastAPI-based API gateway that provides comprehensive access 
 ### Core Features
 
 #### 🚀 Stamp Management API
-- **Purchase Stamps**: Create new postage stamps with specified amount and depth
-- **Extend Stamps**: Add funds to existing stamps to extend their validity
+- **Duration-Based Purchasing**: Specify stamp duration in hours instead of raw PLUR amounts
+- **Dynamic Price Calculation**: Automatically calculates costs based on current network price
+- **Wallet Balance Verification**: Checks sufficient funds before purchase/extension with clear error messages
+- **Purchase Stamps**: Create new postage stamps with duration (hours) or legacy amount
+- **Extend Stamps**: Add time to existing stamps using duration or legacy amount
 - **List All Stamps**: Retrieve comprehensive list of all available stamps with enhanced data
 - **Get Stamp Details**: Fetch specific stamp information by batch ID
 - **Expiration Calculation**: Automatically calculates stamp expiration time (current time + TTL)
@@ -267,9 +270,44 @@ Swarm Connect is a FastAPI-based API gateway that provides comprehensive access 
 ### Stamp Management Endpoints
 
 #### `POST /api/v1/stamps/`
-Purchase a new postage stamp.
-- **Request Body**: `{"amount": 8000000000, "depth": 17, "label": "my-stamp"}`
-- **Response**: `{"batchID": "...", "message": "Postage stamp purchased successfully"}`
+Purchase a new postage stamp with duration-based or legacy amount pricing.
+
+**Simple usage with size presets (recommended):**
+```json
+{"duration_hours": 48, "size": "small", "label": "my-stamp"}
+```
+
+**Size presets:**
+| Size | Use case |
+|------|----------|
+| `small` | One small document (default) |
+| `medium` | Several medium documents |
+| `large` | Several large documents |
+
+**Parameters:**
+- `duration_hours`: Desired stamp duration in hours (default: 25)
+- `size`: Storage size preset - "small", "medium", or "large" (default: "small")
+- `depth`: Advanced - explicit depth value 16-32 (overridden by size if both provided)
+- `label`: Optional user-defined label
+
+**Using defaults (25 hours, size small):**
+```json
+{}
+```
+
+**Legacy amount mode:**
+```json
+{"amount": 8000000000, "depth": 17}
+```
+
+**Response**: `{"batchID": "...", "message": "Postage stamp purchased successfully"}`
+
+**Error (insufficient funds):**
+```json
+{
+  "detail": "Insufficient funds to purchase stamp. Required: 1.50 BZZ, Available: 0.25 BZZ, Shortfall: 1.25 BZZ"
+}
+```
 
 #### `GET /api/v1/stamps/`
 List all available postage stamps.
@@ -280,9 +318,24 @@ Get detailed information about a specific stamp.
 - **Response**: Detailed stamp information with calculated expiration time
 
 #### `PATCH /api/v1/stamps/{stamp_id}/extend`
-Extend an existing stamp by adding more funds.
-- **Request Body**: `{"amount": 8000000000}`
-- **Response**: `{"batchID": "...", "message": "Postage stamp extended successfully"}`
+Extend an existing stamp by adding more time.
+
+**Duration-based (recommended):**
+```json
+{"duration_hours": 48}
+```
+
+**Using default (25 hours):**
+```json
+{}
+```
+
+**Legacy amount mode:**
+```json
+{"amount": 8000000000}
+```
+
+**Response**: `{"batchID": "...", "message": "Postage stamp extended successfully"}`
 
 ### Data Operation Endpoints
 

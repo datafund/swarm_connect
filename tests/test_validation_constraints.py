@@ -166,26 +166,33 @@ class TestLabelValidation:
 class TestRequestStructureValidation:
     """Tests for overall request structure validation."""
 
-    def test_missing_required_fields(self):
-        """Test that missing required fields are rejected."""
-        # Missing amount
+    def test_optional_fields_with_defaults(self):
+        """Test that amount and depth are optional with sensible defaults.
+
+        Since we now support duration-based purchasing with defaults:
+        - duration_hours defaults to 25
+        - size defaults to 'small' (depth 17)
+        - Empty request should succeed using defaults
+        """
+        # Missing amount - should use duration-based calculation
         request_data = {"depth": 17}
         response = client.post("/api/v1/stamps/", json=request_data)
-        assert response.status_code == 422, "Missing amount should be rejected"
+        # Should succeed (502 means it reached Bee API, which is expected in tests)
+        assert response.status_code in [201, 400, 502], "Missing amount should use duration default"
 
-        # Missing depth
+        # Missing depth - should use default depth 17
         request_data = {"amount": 8000000000}
         response = client.post("/api/v1/stamps/", json=request_data)
-        assert response.status_code == 422, "Missing depth should be rejected"
+        assert response.status_code in [201, 400, 502], "Missing depth should use default"
 
-        # Missing both
+        # Only label provided - should use all defaults
         request_data = {"label": "test"}
         response = client.post("/api/v1/stamps/", json=request_data)
-        assert response.status_code == 422, "Missing required fields should be rejected"
+        assert response.status_code in [201, 400, 502], "Should use all defaults"
 
-        # Empty request
+        # Empty request - should use all defaults (25 hours, depth 17)
         response = client.post("/api/v1/stamps/", json={})
-        assert response.status_code == 422, "Empty request should be rejected"
+        assert response.status_code in [201, 400, 502], "Empty request should use defaults"
 
     def test_extra_fields_handling(self):
         """Test handling of extra/unknown fields in requests."""
