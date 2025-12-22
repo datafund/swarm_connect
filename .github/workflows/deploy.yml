@@ -16,8 +16,19 @@ jobs:
         uses: actions/checkout@v4
         with:
           submodules: recursive
+          fetch-depth: 0  # Need full history for commit count
+
+      - name: generate version
+        id: version
+        run: |
+          COMMIT_COUNT=$(git rev-list --count HEAD)
+          SHORT_HASH=$(git rev-parse --short HEAD)
+          VERSION="0.${COMMIT_COUNT}.${SHORT_HASH}"
+          echo "version=${VERSION}" >> $GITHUB_OUTPUT
+          echo "Generated version: ${VERSION}"
+
       - name: build docker image
-        run: docker build -t swarm_connect:$GITHUB_REF_NAME .
+        run: docker build --build-arg VERSION=${{ steps.version.outputs.version }} -t swarm_connect:$GITHUB_REF_NAME .
 
       - name: deploy
         run: >
