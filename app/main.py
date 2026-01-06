@@ -22,9 +22,10 @@ app.include_router(data.router, prefix=f"{settings.API_V1_STR}/data", tags=["dat
 app.include_router(wallet.router, prefix=f"{settings.API_V1_STR}", tags=["wallet"])
 
 @app.get("/", summary="Health Check", tags=["default"])
+@app.get("/health", summary="Health Check", tags=["default"], include_in_schema=False)
 def read_root():
     """ Basic health check endpoint. """
-    logger.info("Root endpoint '/' accessed.")
+    logger.info("Health check endpoint accessed.")
     return {"status": "ok", "message": f"Welcome to {settings.PROJECT_NAME}"}
 
 # --- Placeholder for Future Enhancements ---
