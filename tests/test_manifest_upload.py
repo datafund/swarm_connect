@@ -308,6 +308,70 @@ class TestTarHelperFunctions:
         assert count_tar_files(tar_bytes) == 1
 
 
+class TestEdgeCases:
+    """Test edge cases for manifest uploads."""
+
+    @patch('app.api.endpoints.data.upload_collection_to_swarm')
+    def test_special_characters_in_filename(self, mock_upload):
+        """Test TAR with special characters in filenames."""
+        mock_upload.return_value = "special_chars_ref"
+
+        files = {
+            "file with spaces.json": b'{"id": 1}',
+            "file-with-dashes.json": b'{"id": 2}',
+            "file_with_underscores.json": b'{"id": 3}',
+        }
+        tar_bytes = create_tar_archive(files)
+
+        response = client.post(
+            "/api/v1/data/manifest?stamp_id=test_stamp",
+            files={"file": ("special.tar", io.BytesIO(tar_bytes), "application/x-tar")}
+        )
+
+        assert response.status_code == 200
+        assert response.json()["file_count"] == 3
+
+    @patch('app.api.endpoints.data.upload_collection_to_swarm')
+    def test_unicode_filenames(self, mock_upload):
+        """Test TAR with unicode characters in filenames."""
+        mock_upload.return_value = "unicode_ref"
+
+        files = {
+            "données.json": b'{"id": 1}',
+            "文件.json": b'{"id": 2}',
+        }
+        tar_bytes = create_tar_archive(files)
+
+        response = client.post(
+            "/api/v1/data/manifest?stamp_id=test_stamp",
+            files={"file": ("unicode.tar", io.BytesIO(tar_bytes), "application/x-tar")}
+        )
+
+        assert response.status_code == 200
+        assert response.json()["file_count"] == 2
+
+    @patch('app.api.endpoints.data.upload_collection_to_swarm')
+    def test_binary_file_content(self, mock_upload):
+        """Test TAR with binary file content."""
+        mock_upload.return_value = "binary_ref"
+
+        # Create files with various binary content
+        files = {
+            "image.bin": bytes(range(256)),  # All possible byte values
+            "null_bytes.bin": b'\x00\x00\x00',
+            "random.bin": b'\xde\xad\xbe\xef',
+        }
+        tar_bytes = create_tar_archive(files)
+
+        response = client.post(
+            "/api/v1/data/manifest?stamp_id=test_stamp",
+            files={"file": ("binary.tar", io.BytesIO(tar_bytes), "application/x-tar")}
+        )
+
+        assert response.status_code == 200
+        assert response.json()["file_count"] == 3
+
+
 class TestCompressedTar:
     """Test handling of compressed TAR archives."""
 
