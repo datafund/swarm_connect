@@ -35,7 +35,13 @@ SSL_KEYFILE=./localhost+2-key.pem SSL_CERTFILE=./localhost+2.pem python run.py
 ```
 
 ### Testing
-Currently no test framework is configured. Tests would go in the `tests/` directory.
+```bash
+# Run all tests
+source venv/bin/activate && python -m pytest tests/ -v
+
+# Run specific test file
+python -m pytest tests/test_manifest_upload.py -v
+```
 
 ## Architecture Overview
 
@@ -91,8 +97,9 @@ Optional environment variables:
 - `GET /api/v1/stamps/{stamp_id}`: Retrieve specific stamp batch details
 - `PATCH /api/v1/stamps/{stamp_id}/extend`: Extend existing stamps with additional funds
 
-#### Data Operations (NEW)
+#### Data Operations
 - `POST /api/v1/data/?stamp_id={id}&content_type={type}`: Upload raw data to Swarm
+- `POST /api/v1/data/manifest?stamp_id={id}`: Upload TAR archive as collection/manifest (15x faster for batch uploads)
 - `GET /api/v1/data/{reference}`: Download raw data from Swarm (returns bytes directly)
 - `GET /api/v1/data/{reference}/json`: Download data with JSON metadata (base64-encoded)
 
@@ -106,7 +113,7 @@ Optional environment variables:
 
 ### Development Notes
 
-- No tests are currently implemented
+- Tests are implemented using pytest with mocking (see `tests/` directory)
 - CORS middleware is commented out but ready to enable
 - Authentication/authorization placeholder code exists but not implemented
 - SSL/HTTPS support built into development server

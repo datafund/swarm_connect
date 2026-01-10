@@ -682,3 +682,89 @@ def check_sufficient_funds(required_plur: int) -> Dict[str, Any]:
         "required_bzz": required_bzz,
         "shortfall_bzz": shortfall_bzz
     }
+
+
+def validate_tar(tar_bytes: bytes) -> None:
+    """
+    Validates that the provided bytes are a valid TAR archive with at least one file.
+
+    Args:
+        tar_bytes: The TAR archive data as bytes
+
+    Raises:
+        ValueError: If the TAR is invalid, corrupt, or contains no files
+    """
+    import tarfile
+    import io
+
+    try:
+        with tarfile.open(fileobj=io.BytesIO(tar_bytes), mode='r:*') as tar:
+            has_files = any(member.isfile() for member in tar.getmembers())
+            if not has_files:
+                raise ValueError("TAR archive contains no files")
+    except tarfile.TarError as e:
+        raise ValueError(f"Invalid TAR archive: {e}")
+
+
+def count_tar_files(tar_bytes: bytes) -> int:
+    """
+    Counts the number of files in a TAR archive.
+
+    Args:
+        tar_bytes: The TAR archive data as bytes
+
+    Returns:
+        The number of files in the archive
+    """
+    import tarfile
+    import io
+
+    with tarfile.open(fileobj=io.BytesIO(tar_bytes), mode='r:*') as tar:
+        return sum(1 for member in tar.getmembers() if member.isfile())
+
+
+def upload_collection_to_swarm(tar_data: bytes, stamp_id: str) -> str:
+    """
+    Uploads a TAR archive as a collection/manifest to the Swarm network.
+
+    The TAR is uploaded with the Swarm-Collection header, which causes Bee to
+    create a manifest that maps file paths to their individual Swarm references.
+
+    Args:
+        tar_data: The TAR archive data as bytes
+        stamp_id: The postage stamp batch ID to use for the upload
+
+    Returns:
+        The Swarm manifest reference hash
+
+    Raises:
+        RequestException: If the HTTP request to the Swarm API fails
+        ValueError: If the response is malformed or missing expected fields
+    """
+    api_url = urljoin(str(settings.SWARM_BEE_API_URL), "bzz")
+    headers = {
+        "Swarm-Postage-Batch-Id": stamp_id.lower(),
+        "Content-Type": "application/x-tar",
+        "Swarm-Collection": "true",
+        "Swarm-Redundancy-Level": str(DEFAULT_REDUNDANCY_LEVEL)
+    }
+
+    try:
+        # Use longer timeout for collections (may contain many files)
+        response = requests.post(api_url, data=tar_data, headers=headers, timeout=120)
+        response.raise_for_status()
+
+        response_json = response.json()
+        reference = response_json.get("reference")
+        if not reference:
+            raise ValueError("API Response missing 'reference' from collection upload")
+
+        logger.info(f"Successfully uploaded collection to Swarm with manifest reference: {reference}")
+        return reference
+
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Error uploading collection to Swarm API ({api_url}): {e}")
+        raise
+    except (ValueError, KeyError) as e:
+        logger.error(f"Error parsing collection upload response: {e}")
+        raise ValueError(f"Could not parse collection upload response: {e}") from e
