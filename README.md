@@ -179,6 +179,7 @@ Swarm Connect is a FastAPI-based API gateway that provides comprehensive access 
 #### 📁 Data Operations API
 - **Unified Data Upload**: Single endpoint handles both JSON and binary data automatically
 - **Collection/Manifest Upload**: Upload multiple files as TAR archive for 15x performance improvement
+- **Deferred Upload Mode**: Optional deferred mode for faster upload response (data syncs to network asynchronously)
 - **Pre-Upload Stamp Validation**: Optional validation to check stamp usability before upload
 - **Enhanced Error Messages**: Detailed feedback when uploads fail due to stamp capacity
 - **SWIP-Compliant Examples**: Pre-filled with SWIP standard provenance data structure
@@ -374,27 +375,43 @@ Extend an existing stamp by adding more time.
 
 ### Data Operation Endpoints
 
-#### `POST /api/v1/data/?stamp_id={id}&content_type={type}&validate_stamp={bool}`
+#### `POST /api/v1/data/?stamp_id={id}&content_type={type}&validate_stamp={bool}&deferred={bool}`
 Upload data to Swarm (JSON or binary).
 - **Request Body**: JSON data (default) or raw binary data
 - **Content-Type**: `application/json` (default) or `application/octet-stream` for binary
 - **validate_stamp**: Optional (default: false) - Pre-validate stamp before upload
+- **deferred**: Optional (default: false) - Use deferred upload mode
 - **Response**: `{"reference": "...", "message": "Data uploaded successfully"}`
 - **Features**: Pre-filled with SWIP-compliant provenance data example structure
 
-**Pre-upload validation (opt-in):**
+**Deferred vs Direct Upload:**
+| Mode | Parameter | Description |
+|------|-----------|-------------|
+| Direct | `deferred=false` (default) | Chunks uploaded directly to network. Ensures immediate availability. Safer for gateway use cases. |
+| Deferred | `deferred=true` | Data goes to local node first, syncs to network asynchronously. Faster upload response but data may not be immediately retrievable. |
+
+**Examples:**
 ```bash
+# Standard upload (direct mode, default)
+curl -X POST "http://localhost:8000/api/v1/data/?stamp_id=YOUR_STAMP_ID" \
+     -F "file=@data.json"
+
+# Upload with deferred mode (faster response)
+curl -X POST "http://localhost:8000/api/v1/data/?stamp_id=YOUR_STAMP_ID&deferred=true" \
+     -F "file=@data.json"
+
 # Upload with stamp validation
 curl -X POST "http://localhost:8000/api/v1/data/?stamp_id=YOUR_STAMP_ID&validate_stamp=true" \
      -F "file=@data.json"
 ```
 Returns 400 if stamp is full (100% utilized) or not usable, 404 if stamp not found.
 
-#### `POST /api/v1/data/manifest?stamp_id={id}&validate_stamp={bool}`
+#### `POST /api/v1/data/manifest?stamp_id={id}&validate_stamp={bool}&deferred={bool}`
 Upload multiple files as a TAR archive collection/manifest.
 - **Performance**: 15x faster than individual uploads (50 files in ~500ms vs ~14s)
 - **Request**: Multipart form-data with TAR archive file
 - **validate_stamp**: Optional (default: false) - Pre-validate stamp before upload
+- **deferred**: Optional (default: false) - Use deferred upload mode (see table above)
 - **Response**: `{"reference": "manifest-hash...", "file_count": 50, "message": "Collection uploaded successfully"}`
 
 **Usage Example:**
@@ -402,8 +419,12 @@ Upload multiple files as a TAR archive collection/manifest.
 # Create TAR archive with multiple files
 tar -cvf files.tar file1.json file2.json file3.json
 
-# Upload as collection
+# Upload as collection (direct mode, default)
 curl -X POST "http://localhost:8000/api/v1/data/manifest?stamp_id=YOUR_STAMP_ID" \
+     -F "file=@files.tar"
+
+# Upload with deferred mode (faster response)
+curl -X POST "http://localhost:8000/api/v1/data/manifest?stamp_id=YOUR_STAMP_ID&deferred=true" \
      -F "file=@files.tar"
 
 # Upload with pre-validation

@@ -471,7 +471,7 @@ def get_all_stamps_processed() -> List[Dict[str, Any]]:
 DEFAULT_REDUNDANCY_LEVEL = 2
 
 
-def upload_data_to_swarm(data: bytes, stamp_id: str, content_type: str = "application/json") -> str:
+def upload_data_to_swarm(data: bytes, stamp_id: str, content_type: str = "application/json", deferred: bool = False) -> str:
     """
     Uploads data to the Swarm network using the configured Bee node.
 
@@ -481,6 +481,9 @@ def upload_data_to_swarm(data: bytes, stamp_id: str, content_type: str = "applic
         data: The data to upload as bytes
         stamp_id: The postage stamp batch ID to use for the upload
         content_type: MIME type of the content
+        deferred: If True, use deferred upload mode (data goes to local node first,
+                  then syncs to network asynchronously). If False (default), use direct
+                  upload mode (chunks uploaded directly to network, ensuring immediate availability).
 
     Returns:
         The Swarm reference hash of the uploaded data
@@ -493,7 +496,8 @@ def upload_data_to_swarm(data: bytes, stamp_id: str, content_type: str = "applic
     headers = {
         "Swarm-Postage-Batch-Id": stamp_id.lower(),
         "Content-Type": content_type,
-        "Swarm-Redundancy-Level": str(DEFAULT_REDUNDANCY_LEVEL)
+        "Swarm-Redundancy-Level": str(DEFAULT_REDUNDANCY_LEVEL),
+        "Swarm-Deferred-Upload": str(deferred).lower()
     }
 
     try:
@@ -840,7 +844,7 @@ def count_tar_files(tar_bytes: bytes) -> int:
         return sum(1 for member in tar.getmembers() if member.isfile())
 
 
-def upload_collection_to_swarm(tar_data: bytes, stamp_id: str) -> str:
+def upload_collection_to_swarm(tar_data: bytes, stamp_id: str, deferred: bool = False) -> str:
     """
     Uploads a TAR archive as a collection/manifest to the Swarm network.
 
@@ -850,6 +854,9 @@ def upload_collection_to_swarm(tar_data: bytes, stamp_id: str) -> str:
     Args:
         tar_data: The TAR archive data as bytes
         stamp_id: The postage stamp batch ID to use for the upload
+        deferred: If True, use deferred upload mode (data goes to local node first,
+                  then syncs to network asynchronously). If False (default), use direct
+                  upload mode (chunks uploaded directly to network, ensuring immediate availability).
 
     Returns:
         The Swarm manifest reference hash
@@ -863,7 +870,8 @@ def upload_collection_to_swarm(tar_data: bytes, stamp_id: str) -> str:
         "Swarm-Postage-Batch-Id": stamp_id.lower(),
         "Content-Type": "application/x-tar",
         "Swarm-Collection": "true",
-        "Swarm-Redundancy-Level": str(DEFAULT_REDUNDANCY_LEVEL)
+        "Swarm-Redundancy-Level": str(DEFAULT_REDUNDANCY_LEVEL),
+        "Swarm-Deferred-Upload": str(deferred).lower()
     }
 
     try:
