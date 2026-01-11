@@ -180,6 +180,7 @@ Swarm Connect is a FastAPI-based API gateway that provides comprehensive access 
 - **Unified Data Upload**: Single endpoint handles both JSON and binary data automatically
 - **Collection/Manifest Upload**: Upload multiple files as TAR archive for 15x performance improvement
 - **Deferred Upload Mode**: Optional deferred mode for faster upload response (data syncs to network asynchronously)
+- **Configurable Redundancy**: Optional erasure coding level (0-4) for data durability vs storage cost tradeoff
 - **Pre-Upload Stamp Validation**: Optional validation to check stamp usability before upload
 - **Performance Timing**: W3C Server-Timing headers and optional JSON timing breakdown for latency profiling
 - **Enhanced Error Messages**: Detailed feedback when uploads fail due to stamp capacity
@@ -377,13 +378,14 @@ Extend an existing stamp by adding more time.
 
 ### Data Operation Endpoints
 
-#### `POST /api/v1/data/?stamp_id={id}&content_type={type}&validate_stamp={bool}&deferred={bool}&include_timing={bool}`
+#### `POST /api/v1/data/?stamp_id={id}&content_type={type}&validate_stamp={bool}&deferred={bool}&include_timing={bool}&redundancy={level}`
 Upload data to Swarm (JSON or binary).
 - **Request Body**: JSON data (default) or raw binary data
 - **Content-Type**: `application/json` (default) or `application/octet-stream` for binary
 - **validate_stamp**: Optional (default: false) - Pre-validate stamp before upload
 - **deferred**: Optional (default: false) - Use deferred upload mode
 - **include_timing**: Optional (default: false) - Include timing breakdown in response
+- **redundancy**: Optional (default: 2) - Erasure coding level (0-4)
 - **Response**: `{"reference": "...", "message": "Data uploaded successfully", "timing": null}`
 - **Features**: Pre-filled with SWIP-compliant provenance data example structure
 
@@ -393,9 +395,20 @@ Upload data to Swarm (JSON or binary).
 | Direct | `deferred=false` (default) | Chunks uploaded directly to network. Ensures immediate availability. Safer for gateway use cases. |
 | Deferred | `deferred=true` | Data goes to local node first, syncs to network asynchronously. Faster upload response but data may not be immediately retrievable. |
 
+**Redundancy Levels (Erasure Coding):**
+| Level | Name | Chunk Loss Tolerance | Use Case |
+|-------|------|---------------------|----------|
+| 0 | none | 0% | Maximum storage efficiency, no redundancy |
+| 1 | medium | 1% | Basic redundancy for stable networks |
+| 2 | strong | 5% | **Default** - Good balance of durability and cost |
+| 3 | insane | 10% | High durability for important data |
+| 4 | paranoid | 50% | Maximum durability for critical data |
+
+Higher redundancy levels increase data durability at the cost of more storage space (and stamp usage).
+
 **Examples:**
 ```bash
-# Standard upload (direct mode, default)
+# Standard upload (direct mode, default redundancy=2)
 curl -X POST "http://localhost:8000/api/v1/data/?stamp_id=YOUR_STAMP_ID" \
      -F "file=@data.json"
 
@@ -410,8 +423,16 @@ curl -X POST "http://localhost:8000/api/v1/data/?stamp_id=YOUR_STAMP_ID&validate
 # Upload with timing information
 curl -X POST "http://localhost:8000/api/v1/data/?stamp_id=YOUR_STAMP_ID&include_timing=true" \
      -F "file=@data.json"
+
+# Upload with maximum redundancy (paranoid mode)
+curl -X POST "http://localhost:8000/api/v1/data/?stamp_id=YOUR_STAMP_ID&redundancy=4" \
+     -F "file=@data.json"
+
+# Upload with no redundancy (storage-efficient)
+curl -X POST "http://localhost:8000/api/v1/data/?stamp_id=YOUR_STAMP_ID&redundancy=0" \
+     -F "file=@data.json"
 ```
-Returns 400 if stamp is full (100% utilized) or not usable, 404 if stamp not found.
+Returns 400 if stamp is full (100% utilized), not usable, or invalid redundancy level. Returns 404 if stamp not found.
 
 **Performance Timing Response** (when `include_timing=true`):
 ```json
@@ -433,13 +454,14 @@ Server-Timing: file-read-ms;dur=0.12, bee-upload-ms;dur=145.67, total-ms;dur=146
 ```
 The W3C Server-Timing header is visible in browser DevTools Network tab for easy performance profiling.
 
-#### `POST /api/v1/data/manifest?stamp_id={id}&validate_stamp={bool}&deferred={bool}&include_timing={bool}`
+#### `POST /api/v1/data/manifest?stamp_id={id}&validate_stamp={bool}&deferred={bool}&include_timing={bool}&redundancy={level}`
 Upload multiple files as a TAR archive collection/manifest.
 - **Performance**: 15x faster than individual uploads (50 files in ~500ms vs ~14s)
 - **Request**: Multipart form-data with TAR archive file
 - **validate_stamp**: Optional (default: false) - Pre-validate stamp before upload
 - **deferred**: Optional (default: false) - Use deferred upload mode (see table above)
 - **include_timing**: Optional (default: false) - Include timing breakdown in response
+- **redundancy**: Optional (default: 2) - Erasure coding level (0-4) - see redundancy table above
 - **Response**: `{"reference": "manifest-hash...", "file_count": 50, "message": "Collection uploaded successfully", "timing": null}`
 
 **Usage Example:**
@@ -447,7 +469,7 @@ Upload multiple files as a TAR archive collection/manifest.
 # Create TAR archive with multiple files
 tar -cvf files.tar file1.json file2.json file3.json
 
-# Upload as collection (direct mode, default)
+# Upload as collection (direct mode, default redundancy=2)
 curl -X POST "http://localhost:8000/api/v1/data/manifest?stamp_id=YOUR_STAMP_ID" \
      -F "file=@files.tar"
 
@@ -461,6 +483,10 @@ curl -X POST "http://localhost:8000/api/v1/data/manifest?stamp_id=YOUR_STAMP_ID&
 
 # Upload with timing information
 curl -X POST "http://localhost:8000/api/v1/data/manifest?stamp_id=YOUR_STAMP_ID&include_timing=true" \
+     -F "file=@files.tar"
+
+# Upload with maximum redundancy for critical archives
+curl -X POST "http://localhost:8000/api/v1/data/manifest?stamp_id=YOUR_STAMP_ID&redundancy=4" \
      -F "file=@files.tar"
 ```
 

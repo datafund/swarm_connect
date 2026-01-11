@@ -100,8 +100,8 @@ Optional environment variables:
 - `PATCH /api/v1/stamps/{stamp_id}/extend`: Extend existing stamps with additional funds
 
 #### Data Operations
-- `POST /api/v1/data/?stamp_id={id}&content_type={type}`: Upload raw data to Swarm
-- `POST /api/v1/data/manifest?stamp_id={id}`: Upload TAR archive as collection/manifest (15x faster for batch uploads)
+- `POST /api/v1/data/?stamp_id={id}&content_type={type}&redundancy={level}`: Upload raw data to Swarm (redundancy 0-4, default 2)
+- `POST /api/v1/data/manifest?stamp_id={id}&redundancy={level}`: Upload TAR archive as collection/manifest (15x faster for batch uploads)
 - `GET /api/v1/data/{reference}`: Download raw data from Swarm (returns bytes directly)
 - `GET /api/v1/data/{reference}/json`: Download data with JSON metadata (base64-encoded)
 

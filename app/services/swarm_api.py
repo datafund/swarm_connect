@@ -467,15 +467,48 @@ def get_all_stamps_processed() -> List[Dict[str, Any]]:
     return processed_stamps
 
 
-# Default redundancy level for erasure coding (2 = medium redundancy)
+# Default redundancy level for erasure coding (2 = Strong)
 DEFAULT_REDUNDANCY_LEVEL = 2
 
+# Valid redundancy levels and their names
+# See: https://docs.ethswarm.org/docs/concepts/DISC/erasure-coding/
+REDUNDANCY_LEVELS = {
+    0: "none",      # No erasure coding, 0% chunk loss tolerance
+    1: "medium",    # 1% chunk loss tolerance
+    2: "strong",    # 5% chunk loss tolerance (default)
+    3: "insane",    # 10% chunk loss tolerance
+    4: "paranoid",  # 50% chunk loss tolerance
+}
 
-def upload_data_to_swarm(data: bytes, stamp_id: str, content_type: str = "application/json", deferred: bool = False) -> str:
+
+def validate_redundancy_level(level: int) -> None:
+    """
+    Validate that a redundancy level is within the valid range (0-4).
+
+    Args:
+        level: The redundancy level to validate
+
+    Raises:
+        ValueError: If level is not in the valid range
+    """
+    if level not in REDUNDANCY_LEVELS:
+        valid_levels = ", ".join(f"{k}={v}" for k, v in REDUNDANCY_LEVELS.items())
+        raise ValueError(
+            f"Invalid redundancy level {level}. Must be 0-4 ({valid_levels})"
+        )
+
+
+def upload_data_to_swarm(
+    data: bytes,
+    stamp_id: str,
+    content_type: str = "application/json",
+    deferred: bool = False,
+    redundancy_level: int | None = None
+) -> str:
     """
     Uploads data to the Swarm network using the configured Bee node.
 
-    Erasure coding is enabled by default with redundancy level 2 for reliability.
+    Erasure coding is enabled by default with redundancy level 2 (Strong) for reliability.
 
     Args:
         data: The data to upload as bytes
@@ -484,19 +517,25 @@ def upload_data_to_swarm(data: bytes, stamp_id: str, content_type: str = "applic
         deferred: If True, use deferred upload mode (data goes to local node first,
                   then syncs to network asynchronously). If False (default), use direct
                   upload mode (chunks uploaded directly to network, ensuring immediate availability).
+        redundancy_level: Erasure coding level (0-4). If None, uses DEFAULT_REDUNDANCY_LEVEL (2).
+                         0=none, 1=medium, 2=strong, 3=insane, 4=paranoid
 
     Returns:
         The Swarm reference hash of the uploaded data
 
     Raises:
         RequestException: If the HTTP request to the Swarm API fails
-        ValueError: If the response is malformed or missing expected fields
+        ValueError: If the response is malformed, missing expected fields, or redundancy level invalid
     """
+    # Determine and validate redundancy level
+    effective_redundancy = redundancy_level if redundancy_level is not None else DEFAULT_REDUNDANCY_LEVEL
+    validate_redundancy_level(effective_redundancy)
+
     api_url = urljoin(str(settings.SWARM_BEE_API_URL), "bzz")
     headers = {
         "Swarm-Postage-Batch-Id": stamp_id.lower(),
         "Content-Type": content_type,
-        "Swarm-Redundancy-Level": str(DEFAULT_REDUNDANCY_LEVEL),
+        "Swarm-Redundancy-Level": str(effective_redundancy),
         "Swarm-Deferred-Upload": str(deferred).lower()
     }
 
@@ -844,7 +883,12 @@ def count_tar_files(tar_bytes: bytes) -> int:
         return sum(1 for member in tar.getmembers() if member.isfile())
 
 
-def upload_collection_to_swarm(tar_data: bytes, stamp_id: str, deferred: bool = False) -> str:
+def upload_collection_to_swarm(
+    tar_data: bytes,
+    stamp_id: str,
+    deferred: bool = False,
+    redundancy_level: int | None = None
+) -> str:
     """
     Uploads a TAR archive as a collection/manifest to the Swarm network.
 
@@ -857,20 +901,26 @@ def upload_collection_to_swarm(tar_data: bytes, stamp_id: str, deferred: bool = 
         deferred: If True, use deferred upload mode (data goes to local node first,
                   then syncs to network asynchronously). If False (default), use direct
                   upload mode (chunks uploaded directly to network, ensuring immediate availability).
+        redundancy_level: Erasure coding level (0-4). If None, uses DEFAULT_REDUNDANCY_LEVEL (2).
+                         0=none, 1=medium, 2=strong, 3=insane, 4=paranoid
 
     Returns:
         The Swarm manifest reference hash
 
     Raises:
         RequestException: If the HTTP request to the Swarm API fails
-        ValueError: If the response is malformed or missing expected fields
+        ValueError: If the response is malformed, missing expected fields, or redundancy level invalid
     """
+    # Determine and validate redundancy level
+    effective_redundancy = redundancy_level if redundancy_level is not None else DEFAULT_REDUNDANCY_LEVEL
+    validate_redundancy_level(effective_redundancy)
+
     api_url = urljoin(str(settings.SWARM_BEE_API_URL), "bzz")
     headers = {
         "Swarm-Postage-Batch-Id": stamp_id.lower(),
         "Content-Type": "application/x-tar",
         "Swarm-Collection": "true",
-        "Swarm-Redundancy-Level": str(DEFAULT_REDUNDANCY_LEVEL),
+        "Swarm-Redundancy-Level": str(effective_redundancy),
         "Swarm-Deferred-Upload": str(deferred).lower()
     }
 
