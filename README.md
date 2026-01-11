@@ -6,6 +6,7 @@ Simpler server for accessing some Swarm features.
 
 > ⚠️ **DATA PERSISTENCE WARNING**
 > Storage on Swarm is **rented storage** with limited time periods. The default configuration uses very short rental periods (approximately **1 day**). **Do not expect uploaded data to persist longer than the rental period.** Data will become unavailable when the postage stamp expires.
+>
 
 ## Project structure
 
