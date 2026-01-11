@@ -183,11 +183,16 @@ When making changes to the codebase, ensure the architecture documentation stays
 2. Make commits on the branch
 3. Create a PR and merge via GitHub
 
-**Repository**: This repository pushes to `git@github.com:datafund/swarm_connect.git` (origin). When creating GitHub issues or pull requests, always use the `datafund/swarm_connect` repository, NOT the `crtahlin/swarm_connect` upstream repository.
+**Repository**: This repository pushes to `git@github.com:datafund/swarm_connect.git` (origin).
 
-Use `git remote -v` to verify the correct repository before creating issues.
+**CRITICAL - Always use datafund repo**:
+- When creating GitHub issues: `gh issue create --repo datafund/swarm_connect`
+- When creating PRs: `gh pr create --repo datafund/swarm_connect`
+- NEVER use `crtahlin/swarm_connect` - that is the upstream fork, not the main repo
+- Use `git remote -v` to verify remotes if unsure
 
 ## Commit Message Guidelines
 
 - Do NOT include Claude/AI mentions, co-author tags, or "Generated with Claude" footers in commit messages
-- Keep commit messages clean and professional - just describe the changes
+- Do NOT include "Generated with Claude Code" or similar footers in PR descriptions
+- Keep commit messages and PR descriptions clean and professional - just describe the changes

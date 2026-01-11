@@ -31,7 +31,15 @@ class StampDetails(BaseModel):
     # --- Fields enhanced with local stamp data ---
     utilization: Optional[int] = Field(None, description="Stamp utilization - raw bucket fill level (from local /stamps endpoint when available).")
     utilizationPercent: Optional[float] = Field(None, description="Stamp utilization as percentage (0-100). Calculated as: (utilization / 2^(depth-bucketDepth)) * 100.")
-    usable: Optional[bool] = Field(None, description="Stamp usability status (from local /stamps endpoint or calculated).")
+    utilizationStatus: Optional[Literal["ok", "warning", "critical", "full"]] = Field(
+        None,
+        description="Utilization status: 'ok' (0-80%), 'warning' (80-95%), 'critical' (95-99.99%), 'full' (100%). Null if utilization unknown."
+    )
+    utilizationWarning: Optional[str] = Field(
+        None,
+        description="Human-readable warning message when stamp utilization is elevated. Null when status is 'ok' or unknown."
+    )
+    usable: Optional[bool] = Field(None, description="Stamp usability status. False when stamp is expired, invalid, or at 100% utilization.")
     label: Optional[str] = Field(None, description="User-defined label (from local /stamps endpoint when available).")
 
     # --- Calculated Fields ---
@@ -53,6 +61,8 @@ class StampDetails(BaseModel):
                 "batchTTL": 16971999,
                 "utilization": 8,
                 "utilizationPercent": 50.0,
+                "utilizationStatus": "ok",
+                "utilizationWarning": None,
                 "usable": True,
                 "label": None,
                 "expectedExpiration": "2024-08-15-10-30",

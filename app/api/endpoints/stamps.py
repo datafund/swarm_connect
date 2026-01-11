@@ -125,6 +125,8 @@ async def get_stamp_details(
             batchTTL=found_stamp.get("batchTTL"),
             utilization=found_stamp.get("utilization"),
             utilizationPercent=found_stamp.get("utilizationPercent"),
+            utilizationStatus=found_stamp.get("utilizationStatus"),
+            utilizationWarning=found_stamp.get("utilizationWarning"),
             usable=found_stamp.get("usable"),
             label=found_stamp.get("label"),
             expectedExpiration=found_stamp.get("expectedExpiration"),
