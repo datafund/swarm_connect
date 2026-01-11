@@ -96,6 +96,7 @@ Optional environment variables:
 - `POST /api/v1/stamps/`: Purchase new postage stamps
 - `GET /api/v1/stamps/`: List all available stamps with expiration calculations
 - `GET /api/v1/stamps/{stamp_id}`: Retrieve specific stamp batch details
+- `GET /api/v1/stamps/{stamp_id}/check`: Check stamp health for uploads (errors, warnings, can_upload status)
 - `PATCH /api/v1/stamps/{stamp_id}/extend`: Extend existing stamps with additional funds
 
 #### Data Operations
