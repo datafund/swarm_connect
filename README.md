@@ -181,6 +181,7 @@ Swarm Connect is a FastAPI-based API gateway that provides comprehensive access 
 - **Collection/Manifest Upload**: Upload multiple files as TAR archive for 15x performance improvement
 - **Deferred Upload Mode**: Optional deferred mode for faster upload response (data syncs to network asynchronously)
 - **Pre-Upload Stamp Validation**: Optional validation to check stamp usability before upload
+- **Performance Timing**: W3C Server-Timing headers and optional JSON timing breakdown for latency profiling
 - **Enhanced Error Messages**: Detailed feedback when uploads fail due to stamp capacity
 - **SWIP-Compliant Examples**: Pre-filled with SWIP standard provenance data structure
 - **Content-Type Detection**: Automatic handling based on Content-Type header
@@ -375,13 +376,14 @@ Extend an existing stamp by adding more time.
 
 ### Data Operation Endpoints
 
-#### `POST /api/v1/data/?stamp_id={id}&content_type={type}&validate_stamp={bool}&deferred={bool}`
+#### `POST /api/v1/data/?stamp_id={id}&content_type={type}&validate_stamp={bool}&deferred={bool}&include_timing={bool}`
 Upload data to Swarm (JSON or binary).
 - **Request Body**: JSON data (default) or raw binary data
 - **Content-Type**: `application/json` (default) or `application/octet-stream` for binary
 - **validate_stamp**: Optional (default: false) - Pre-validate stamp before upload
 - **deferred**: Optional (default: false) - Use deferred upload mode
-- **Response**: `{"reference": "...", "message": "Data uploaded successfully"}`
+- **include_timing**: Optional (default: false) - Include timing breakdown in response
+- **Response**: `{"reference": "...", "message": "Data uploaded successfully", "timing": null}`
 - **Features**: Pre-filled with SWIP-compliant provenance data example structure
 
 **Deferred vs Direct Upload:**
@@ -403,16 +405,41 @@ curl -X POST "http://localhost:8000/api/v1/data/?stamp_id=YOUR_STAMP_ID&deferred
 # Upload with stamp validation
 curl -X POST "http://localhost:8000/api/v1/data/?stamp_id=YOUR_STAMP_ID&validate_stamp=true" \
      -F "file=@data.json"
+
+# Upload with timing information
+curl -X POST "http://localhost:8000/api/v1/data/?stamp_id=YOUR_STAMP_ID&include_timing=true" \
+     -F "file=@data.json"
 ```
 Returns 400 if stamp is full (100% utilized) or not usable, 404 if stamp not found.
 
-#### `POST /api/v1/data/manifest?stamp_id={id}&validate_stamp={bool}&deferred={bool}`
+**Performance Timing Response** (when `include_timing=true`):
+```json
+{
+  "reference": "abc123...",
+  "message": "File 'data.json' uploaded successfully",
+  "timing": {
+    "stamp_validate_ms": null,
+    "file_read_ms": 0.12,
+    "bee_upload_ms": 145.67,
+    "total_ms": 146.01
+  }
+}
+```
+
+**Server-Timing Header** (always included):
+```
+Server-Timing: file-read-ms;dur=0.12, bee-upload-ms;dur=145.67, total-ms;dur=146.01
+```
+The W3C Server-Timing header is visible in browser DevTools Network tab for easy performance profiling.
+
+#### `POST /api/v1/data/manifest?stamp_id={id}&validate_stamp={bool}&deferred={bool}&include_timing={bool}`
 Upload multiple files as a TAR archive collection/manifest.
 - **Performance**: 15x faster than individual uploads (50 files in ~500ms vs ~14s)
 - **Request**: Multipart form-data with TAR archive file
 - **validate_stamp**: Optional (default: false) - Pre-validate stamp before upload
 - **deferred**: Optional (default: false) - Use deferred upload mode (see table above)
-- **Response**: `{"reference": "manifest-hash...", "file_count": 50, "message": "Collection uploaded successfully"}`
+- **include_timing**: Optional (default: false) - Include timing breakdown in response
+- **Response**: `{"reference": "manifest-hash...", "file_count": 50, "message": "Collection uploaded successfully", "timing": null}`
 
 **Usage Example:**
 ```bash
@@ -430,7 +457,32 @@ curl -X POST "http://localhost:8000/api/v1/data/manifest?stamp_id=YOUR_STAMP_ID&
 # Upload with pre-validation
 curl -X POST "http://localhost:8000/api/v1/data/manifest?stamp_id=YOUR_STAMP_ID&validate_stamp=true" \
      -F "file=@files.tar"
+
+# Upload with timing information
+curl -X POST "http://localhost:8000/api/v1/data/manifest?stamp_id=YOUR_STAMP_ID&include_timing=true" \
+     -F "file=@files.tar"
 ```
+
+**Manifest Timing Response** (when `include_timing=true`):
+```json
+{
+  "reference": "manifest-hash...",
+  "file_count": 50,
+  "message": "Collection uploaded successfully with 50 files",
+  "timing": {
+    "stamp_validate_ms": null,
+    "file_read_ms": 0.35,
+    "tar_validate_ms": 1.22,
+    "tar_count_ms": 0.89,
+    "bee_upload_ms": 487.15,
+    "total_ms": 489.92,
+    "file_count": 50,
+    "ms_per_file": 9.80,
+    "files_per_second": 102.06
+  }
+}
+```
+The `ms_per_file` and `files_per_second` metrics are useful for comparing local Bee node performance vs gateway performance.
 
 **Accessing individual files after upload:**
 - Via Bee node: `GET /bzz/{manifest_reference}/{file_path}`

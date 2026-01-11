@@ -2,6 +2,7 @@
 import base64
 import json
 import logging
+import time
 from fastapi import APIRouter, HTTPException, Path, Request, Body, File, UploadFile
 from fastapi.responses import Response
 from requests.exceptions import RequestException
@@ -10,7 +11,9 @@ from app.api.models.data import (
     DataUploadRequest,
     DataUploadResponse,
     DataDownloadResponse,
-    ManifestUploadResponse
+    ManifestUploadResponse,
+    UploadTiming,
+    ManifestUploadTiming
 )
 from app.services.swarm_api import (
     upload_data_to_swarm,
@@ -25,6 +28,22 @@ from app.services.swarm_api import (
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+
+
+def _build_server_timing_header(timing_dict: dict) -> str:
+    """
+    Build W3C Server-Timing header value from timing dictionary.
+
+    Format: metric;dur=value, metric2;dur=value2
+    Example: file-read;dur=0.5, bee-upload;dur=123.4, total;dur=124.1
+    """
+    parts = []
+    for key, value in timing_dict.items():
+        if value is not None:
+            # Convert snake_case to kebab-case for header
+            metric_name = key.replace("_", "-")
+            parts.append(f"{metric_name};dur={value:.2f}")
+    return ", ".join(parts)
 
 
 def _detect_content_type_and_filename(data_bytes: bytes, reference: str) -> tuple[str, str]:
@@ -75,6 +94,7 @@ async def upload_data(
     content_type: str = "application/json",
     validate_stamp: bool = False,
     deferred: bool = False,
+    include_timing: bool = False,
     file: UploadFile = File(...)
 ):
     """
@@ -86,6 +106,7 @@ async def upload_data(
     - Optional `content_type` parameter (defaults to application/json)
     - Optional `validate_stamp` parameter (defaults to false)
     - Optional `deferred` parameter (defaults to false)
+    - Optional `include_timing` parameter (defaults to false)
 
     **Stamp Validation** (opt-in with `validate_stamp=true`):
     When enabled, validates the stamp before upload:
@@ -100,6 +121,13 @@ async def upload_data(
       network asynchronously. Faster upload response but data may not be immediately
       retrievable from the network.
 
+    **Performance Timing** (opt-in with `include_timing=true`):
+    When enabled, includes timing breakdown in response and Server-Timing header:
+    - `stamp_validate_ms`: Time validating stamp (only if validate_stamp=true)
+    - `file_read_ms`: Time reading uploaded file
+    - `bee_upload_ms`: Time uploading to Bee node
+    - `total_ms`: Total request processing time
+
     **Usage Examples**:
     ```bash
     # Upload JSON file (direct mode, default)
@@ -112,6 +140,10 @@ async def upload_data(
 
     # Upload with pre-validation
     curl -X POST "http://localhost:8000/api/v1/data/?stamp_id=ABC123&validate_stamp=true" \\
+         -F "file=@data.json"
+
+    # Upload with timing information
+    curl -X POST "http://localhost:8000/api/v1/data/?stamp_id=ABC123&include_timing=true" \\
          -F "file=@data.json"
 
     # Upload binary file
@@ -132,9 +164,15 @@ async def upload_data(
     }
     ```
     """
+    start_time = time.perf_counter()
+    stamp_validate_ms = None
+    file_read_ms = None
+    bee_upload_ms = None
+
     try:
         # Optional pre-upload stamp validation
         if validate_stamp:
+            stamp_start = time.perf_counter()
             try:
                 validate_stamp_for_upload(stamp_id)
             except StampValidationError as e:
@@ -142,21 +180,54 @@ async def upload_data(
                     raise HTTPException(status_code=404, detail=e.message)
                 else:
                     raise HTTPException(status_code=400, detail=e.message)
+            stamp_validate_ms = (time.perf_counter() - stamp_start) * 1000
 
         # Read file content as bytes
+        file_start = time.perf_counter()
         data_bytes = await file.read()
+        file_read_ms = (time.perf_counter() - file_start) * 1000
 
         # Upload to Swarm
+        bee_start = time.perf_counter()
         reference = upload_data_to_swarm(
             data=data_bytes,
             stamp_id=stamp_id,
             content_type=content_type,
             deferred=deferred
         )
+        bee_upload_ms = (time.perf_counter() - bee_start) * 1000
 
-        return DataUploadResponse(
+        total_ms = (time.perf_counter() - start_time) * 1000
+
+        # Build response
+        timing = None
+        if include_timing:
+            timing = UploadTiming(
+                stamp_validate_ms=stamp_validate_ms,
+                file_read_ms=file_read_ms,
+                bee_upload_ms=bee_upload_ms,
+                total_ms=total_ms
+            )
+
+        response = DataUploadResponse(
             reference=reference,
-            message=f"File '{file.filename}' uploaded successfully"
+            message=f"File '{file.filename}' uploaded successfully",
+            timing=timing
+        )
+
+        # Always add Server-Timing header (useful for browser devtools)
+        timing_dict = {
+            "stamp_validate_ms": stamp_validate_ms,
+            "file_read_ms": file_read_ms,
+            "bee_upload_ms": bee_upload_ms,
+            "total_ms": total_ms
+        }
+        server_timing = _build_server_timing_header(timing_dict)
+
+        return Response(
+            content=response.model_dump_json(),
+            media_type="application/json",
+            headers={"Server-Timing": server_timing}
         )
 
     except HTTPException:
@@ -278,6 +349,7 @@ async def upload_manifest(
     stamp_id: str,
     validate_stamp: bool = False,
     deferred: bool = False,
+    include_timing: bool = False,
     file: UploadFile = File(...)
 ):
     """
@@ -296,6 +368,7 @@ async def upload_manifest(
     - TAR must contain at least one file
     - Optional `validate_stamp` parameter (defaults to false)
     - Optional `deferred` parameter (defaults to false)
+    - Optional `include_timing` parameter (defaults to false)
 
     **Stamp Validation** (opt-in with `validate_stamp=true`):
     When enabled, validates the stamp before upload:
@@ -309,6 +382,18 @@ async def upload_manifest(
     - `deferred=true`: Deferred upload - data goes to local node first, then syncs to
       network asynchronously. Faster upload response but data may not be immediately
       retrievable from the network.
+
+    **Performance Timing** (opt-in with `include_timing=true`):
+    When enabled, includes timing breakdown in response and Server-Timing header:
+    - `stamp_validate_ms`: Time validating stamp (only if validate_stamp=true)
+    - `file_read_ms`: Time reading uploaded file
+    - `tar_validate_ms`: Time validating TAR archive
+    - `tar_count_ms`: Time counting files in TAR
+    - `bee_upload_ms`: Time uploading to Bee node
+    - `total_ms`: Total request processing time
+    - `file_count`: Number of files in the TAR archive
+    - `ms_per_file`: Average milliseconds per file
+    - `files_per_second`: Upload throughput
 
     **Usage Examples**:
     ```bash
@@ -326,6 +411,10 @@ async def upload_manifest(
     # Upload with pre-validation
     curl -X POST "http://localhost:8000/api/v1/data/manifest?stamp_id=ABC123&validate_stamp=true" \\
          -F "file=@files.tar"
+
+    # Upload with timing information
+    curl -X POST "http://localhost:8000/api/v1/data/manifest?stamp_id=ABC123&include_timing=true" \\
+         -F "file=@files.tar"
     ```
 
     **Accessing individual files**:
@@ -342,9 +431,17 @@ async def upload_manifest(
     }
     ```
     """
+    start_time = time.perf_counter()
+    stamp_validate_ms = None
+    file_read_ms = None
+    tar_validate_ms = None
+    tar_count_ms = None
+    bee_upload_ms = None
+
     try:
         # Optional pre-upload stamp validation
         if validate_stamp:
+            stamp_start = time.perf_counter()
             try:
                 validate_stamp_for_upload(stamp_id)
             except StampValidationError as e:
@@ -352,26 +449,76 @@ async def upload_manifest(
                     raise HTTPException(status_code=404, detail=e.message)
                 else:
                     raise HTTPException(status_code=400, detail=e.message)
+            stamp_validate_ms = (time.perf_counter() - stamp_start) * 1000
 
         # Read TAR file content
+        file_start = time.perf_counter()
         tar_bytes = await file.read()
+        file_read_ms = (time.perf_counter() - file_start) * 1000
 
         # Validate TAR archive
+        tar_validate_start = time.perf_counter()
         try:
             validate_tar(tar_bytes)
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
+        tar_validate_ms = (time.perf_counter() - tar_validate_start) * 1000
 
         # Count files for response
+        tar_count_start = time.perf_counter()
         file_count = count_tar_files(tar_bytes)
+        tar_count_ms = (time.perf_counter() - tar_count_start) * 1000
 
         # Upload to Swarm as collection
+        bee_start = time.perf_counter()
         reference = upload_collection_to_swarm(tar_bytes, stamp_id, deferred=deferred)
+        bee_upload_ms = (time.perf_counter() - bee_start) * 1000
 
-        return ManifestUploadResponse(
+        total_ms = (time.perf_counter() - start_time) * 1000
+
+        # Calculate derived metrics
+        ms_per_file = total_ms / file_count if file_count > 0 else 0
+        files_per_second = (file_count / (total_ms / 1000)) if total_ms > 0 else 0
+
+        # Build response
+        timing = None
+        if include_timing:
+            timing = ManifestUploadTiming(
+                stamp_validate_ms=stamp_validate_ms,
+                file_read_ms=file_read_ms,
+                tar_validate_ms=tar_validate_ms,
+                tar_count_ms=tar_count_ms,
+                bee_upload_ms=bee_upload_ms,
+                total_ms=total_ms,
+                file_count=file_count,
+                ms_per_file=ms_per_file,
+                files_per_second=files_per_second
+            )
+
+        response = ManifestUploadResponse(
             reference=reference,
             file_count=file_count,
-            message=f"Collection uploaded successfully with {file_count} files"
+            message=f"Collection uploaded successfully with {file_count} files",
+            timing=timing
+        )
+
+        # Always add Server-Timing header (useful for browser devtools)
+        timing_dict = {
+            "stamp_validate_ms": stamp_validate_ms,
+            "file_read_ms": file_read_ms,
+            "tar_validate_ms": tar_validate_ms,
+            "tar_count_ms": tar_count_ms,
+            "bee_upload_ms": bee_upload_ms,
+            "total_ms": total_ms,
+            "ms_per_file": ms_per_file,
+            "files_per_second": files_per_second
+        }
+        server_timing = _build_server_timing_header(timing_dict)
+
+        return Response(
+            content=response.model_dump_json(),
+            media_type="application/json",
+            headers={"Server-Timing": server_timing}
         )
 
     except HTTPException:
