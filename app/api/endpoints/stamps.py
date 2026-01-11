@@ -12,7 +12,10 @@ from app.api.models.stamp import (
     StampPurchaseResponse,
     StampExtensionRequest,
     StampExtensionResponse,
-    StampListResponse
+    StampListResponse,
+    StampHealthCheckResponse,
+    StampHealthStatus,
+    StampHealthIssue
 )
 
 router = APIRouter()
@@ -65,6 +68,101 @@ async def list_stamps() -> Any:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="An unexpected error occurred while fetching stamp data."
+        )
+
+
+@router.get(
+    "/{stamp_id}/check",
+    response_model=StampHealthCheckResponse,
+    summary="Check Stamp Health for Uploads"
+)
+async def check_stamp_health(
+    stamp_id: str = Path(..., description="The Batch ID of the Swarm stamp to check.", example="a1b2c3d4e5f6...")
+) -> Any:
+    """
+    Performs a comprehensive health check on a stamp to determine if it can be used for uploads.
+
+    This endpoint checks for all potential issues that could prevent uploads:
+    - **Errors** (blocking): Issues that will prevent uploads
+    - **Warnings** (non-blocking): Issues to be aware of but won't block uploads
+
+    **Error Codes**:
+    - `NOT_FOUND`: Stamp doesn't exist on the connected node
+    - `NOT_LOCAL`: Stamp exists but isn't owned by this Bee node
+    - `EXPIRED`: Stamp TTL has reached 0
+    - `NOT_USABLE`: Stamp is not yet usable (e.g., propagation delay after purchase)
+    - `FULL`: Stamp is at 100% utilization
+
+    **Warning Codes**:
+    - `LOW_TTL`: Stamp expires in less than 1 hour
+    - `NEARLY_FULL`: Stamp is 95%+ utilized
+    - `HIGH_UTILIZATION`: Stamp is 80%+ utilized
+
+    **Use Cases**:
+    - Check if a recently purchased stamp is ready for use
+    - Verify a stamp before starting a large batch upload
+    - Diagnose why uploads are failing
+
+    **Example Response**:
+    ```json
+    {
+        "stamp_id": "abc123...",
+        "can_upload": true,
+        "errors": [],
+        "warnings": [
+            {
+                "code": "HIGH_UTILIZATION",
+                "message": "Stamp is 82% utilized.",
+                "suggestion": "Monitor usage and consider purchasing additional stamps."
+            }
+        ],
+        "status": {
+            "exists": true,
+            "local": true,
+            "usable": true,
+            "utilizationPercent": 82.5,
+            "utilizationStatus": "warning",
+            "batchTTL": 86400,
+            "expectedExpiration": "2026-01-12-17-30"
+        }
+    }
+    ```
+    """
+    try:
+        health_check = swarm_api.get_stamp_health_check(stamp_id)
+
+        # Convert to response model
+        errors = [StampHealthIssue(**e) for e in health_check.get("errors", [])]
+        warnings = [StampHealthIssue(**w) for w in health_check.get("warnings", [])]
+        status_data = health_check.get("status", {})
+
+        return StampHealthCheckResponse(
+            stamp_id=health_check.get("stamp_id", stamp_id),
+            can_upload=health_check.get("can_upload", False),
+            errors=errors,
+            warnings=warnings,
+            status=StampHealthStatus(
+                exists=status_data.get("exists", False),
+                local=status_data.get("local", False),
+                usable=status_data.get("usable"),
+                utilizationPercent=status_data.get("utilizationPercent"),
+                utilizationStatus=status_data.get("utilizationStatus"),
+                batchTTL=status_data.get("batchTTL"),
+                expectedExpiration=status_data.get("expectedExpiration")
+            )
+        )
+
+    except RequestException as e:
+        logger.error(f"Failed to check stamp health from Swarm API: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Could not fetch stamp data from the Swarm Bee node: {e}"
+        )
+    except Exception as e:
+        logger.error(f"Unexpected error during stamp health check: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="An unexpected error occurred during stamp health check."
         )
 
 

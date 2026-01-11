@@ -176,10 +176,27 @@ async def upload_data(
             try:
                 validate_stamp_for_upload(stamp_id)
             except StampValidationError as e:
+                # Build structured error response
+                detail = {
+                    "code": e.code,
+                    "message": e.message,
+                    "suggestion": e.suggestion,
+                    "stamp_id": stamp_id
+                }
+                if e.stamp_data:
+                    detail["stamp_status"] = {
+                        "exists": True,
+                        "local": e.stamp_data.get("local", False),
+                        "usable": e.stamp_data.get("usable"),
+                        "utilizationPercent": e.stamp_data.get("utilizationPercent"),
+                        "utilizationStatus": e.stamp_data.get("utilizationStatus"),
+                        "batchTTL": e.stamp_data.get("batchTTL"),
+                        "expectedExpiration": e.stamp_data.get("expectedExpiration")
+                    }
                 if e.status == "not_found":
-                    raise HTTPException(status_code=404, detail=e.message)
+                    raise HTTPException(status_code=404, detail=detail)
                 else:
-                    raise HTTPException(status_code=400, detail=e.message)
+                    raise HTTPException(status_code=400, detail=detail)
             stamp_validate_ms = (time.perf_counter() - stamp_start) * 1000
 
         # Read file content as bytes
@@ -234,10 +251,18 @@ async def upload_data(
         raise  # Re-raise HTTP exceptions as-is
     except RequestException as e:
         logger.error(f"Swarm API error during upload: {e}")
-        # Check if the failure was due to stamp utilization
-        enhanced_message = check_upload_failure_reason(stamp_id, str(e))
-        if enhanced_message:
-            raise HTTPException(status_code=400, detail=enhanced_message)
+        # Check if the failure was due to stamp issues
+        failure_info = check_upload_failure_reason(stamp_id, str(e))
+        if failure_info:
+            # Return structured error response
+            detail = {
+                "code": failure_info.get("code"),
+                "message": failure_info.get("message"),
+                "suggestion": failure_info.get("suggestion"),
+                "stamp_id": stamp_id,
+                "stamp_status": failure_info.get("stamp_status")
+            }
+            raise HTTPException(status_code=400, detail=detail)
         raise HTTPException(status_code=502, detail=f"Failed to upload data to Swarm: {e}")
     except ValueError as e:
         logger.error(f"Data processing error during upload: {e}")
@@ -445,10 +470,27 @@ async def upload_manifest(
             try:
                 validate_stamp_for_upload(stamp_id)
             except StampValidationError as e:
+                # Build structured error response
+                detail = {
+                    "code": e.code,
+                    "message": e.message,
+                    "suggestion": e.suggestion,
+                    "stamp_id": stamp_id
+                }
+                if e.stamp_data:
+                    detail["stamp_status"] = {
+                        "exists": True,
+                        "local": e.stamp_data.get("local", False),
+                        "usable": e.stamp_data.get("usable"),
+                        "utilizationPercent": e.stamp_data.get("utilizationPercent"),
+                        "utilizationStatus": e.stamp_data.get("utilizationStatus"),
+                        "batchTTL": e.stamp_data.get("batchTTL"),
+                        "expectedExpiration": e.stamp_data.get("expectedExpiration")
+                    }
                 if e.status == "not_found":
-                    raise HTTPException(status_code=404, detail=e.message)
+                    raise HTTPException(status_code=404, detail=detail)
                 else:
-                    raise HTTPException(status_code=400, detail=e.message)
+                    raise HTTPException(status_code=400, detail=detail)
             stamp_validate_ms = (time.perf_counter() - stamp_start) * 1000
 
         # Read TAR file content
@@ -526,10 +568,18 @@ async def upload_manifest(
         raise
     except RequestException as e:
         logger.error(f"Swarm API error during manifest upload: {e}")
-        # Check if the failure was due to stamp utilization
-        enhanced_message = check_upload_failure_reason(stamp_id, str(e))
-        if enhanced_message:
-            raise HTTPException(status_code=400, detail=enhanced_message)
+        # Check if the failure was due to stamp issues
+        failure_info = check_upload_failure_reason(stamp_id, str(e))
+        if failure_info:
+            # Return structured error response
+            detail = {
+                "code": failure_info.get("code"),
+                "message": failure_info.get("message"),
+                "suggestion": failure_info.get("suggestion"),
+                "stamp_id": stamp_id,
+                "stamp_status": failure_info.get("stamp_status")
+            }
+            raise HTTPException(status_code=400, detail=detail)
         raise HTTPException(status_code=502, detail=f"Failed to upload collection to Swarm: {e}")
     except ValueError as e:
         logger.error(f"Data processing error during manifest upload: {e}")

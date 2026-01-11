@@ -207,3 +207,64 @@ class StampListResponse(BaseModel):
             }
         }
 
+
+class StampHealthIssue(BaseModel):
+    """Represents an issue found during stamp health check."""
+    code: str = Field(..., description="Error code (e.g., NOT_LOCAL, NOT_USABLE, EXPIRED, FULL)")
+    message: str = Field(..., description="Human-readable error message")
+    suggestion: str = Field(..., description="Actionable suggestion to fix the issue")
+
+
+class StampHealthStatus(BaseModel):
+    """Detailed status information for a stamp."""
+    exists: bool = Field(..., description="Whether the stamp exists on the network")
+    local: bool = Field(..., description="Whether the stamp is owned by the local node")
+    usable: Optional[bool] = Field(None, description="Whether the stamp is currently usable for uploads")
+    utilizationPercent: Optional[float] = Field(None, description="Current utilization as percentage (0-100)")
+    utilizationStatus: Optional[Literal["ok", "warning", "critical", "full"]] = Field(None, description="Utilization status category")
+    batchTTL: Optional[int] = Field(None, description="Time-to-live in seconds")
+    expectedExpiration: Optional[str] = Field(None, description="Expected expiration timestamp (YYYY-MM-DD-HH-MM UTC)")
+
+
+class StampHealthCheckResponse(BaseModel):
+    """Response model for stamp health check endpoint."""
+    stamp_id: str = Field(..., description="The batch ID of the checked stamp")
+    can_upload: bool = Field(..., description="Whether uploads can proceed with this stamp (no blocking errors)")
+    errors: List[StampHealthIssue] = Field(default_factory=list, description="Blocking issues that prevent uploads")
+    warnings: List[StampHealthIssue] = Field(default_factory=list, description="Non-blocking issues to be aware of")
+    status: StampHealthStatus = Field(..., description="Current stamp status details")
+
+    class Config:
+        schema_extra = {
+            "example": {
+                "stamp_id": "000de42079daebd58347bb38ce05bdc477701d93651d3bba318a9aee3fbd786a",
+                "can_upload": True,
+                "errors": [],
+                "warnings": [
+                    {
+                        "code": "NEARLY_FULL",
+                        "message": "Stamp is 82% utilized.",
+                        "suggestion": "Consider purchasing a new stamp soon to avoid upload failures."
+                    }
+                ],
+                "status": {
+                    "exists": True,
+                    "local": True,
+                    "usable": True,
+                    "utilizationPercent": 82.5,
+                    "utilizationStatus": "warning",
+                    "batchTTL": 86400,
+                    "expectedExpiration": "2026-01-12-17-30"
+                }
+            }
+        }
+
+
+class StampValidationErrorDetail(BaseModel):
+    """Structured error detail for stamp validation failures."""
+    code: str = Field(..., description="Error code (e.g., NOT_LOCAL, NOT_USABLE, EXPIRED, FULL)")
+    message: str = Field(..., description="Human-readable error message")
+    suggestion: str = Field(..., description="Actionable suggestion to fix the issue")
+    stamp_id: str = Field(..., description="The batch ID of the problematic stamp")
+    stamp_status: Optional[StampHealthStatus] = Field(None, description="Current stamp status if available")
+

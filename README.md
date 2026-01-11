@@ -253,6 +253,7 @@ Swarm Connect is a FastAPI-based API gateway that provides comprehensive access 
 - `POST /api/v1/stamps/`: Purchase new postage stamps with time-based or advanced parameters
 - `GET /api/v1/stamps/`: List all available stamps with expiration calculations
 - `GET /api/v1/stamps/{stamp_id}`: Retrieve specific stamp batch details
+- `GET /api/v1/stamps/{stamp_id}/check`: Check stamp health for uploads (errors and warnings)
 - `PATCH /api/v1/stamps/{stamp_id}/extend`: Extend existing stamps with additional funds
 
 #### Data Operations
@@ -525,6 +526,149 @@ Get the chequebook address and balance information of the connected Bee node.
   - `availableBalance`: Funds available for creating new postage stamps (in wei)
   - `totalBalance`: Total funds in the chequebook (in wei)
 - **Note**: Only available when connected to local Bee nodes, not public gateways
+
+### Stamp Health Check Endpoint
+
+#### `GET /api/v1/stamps/{stamp_id}/check`
+Perform a comprehensive health check on a stamp to determine if it can be used for uploads.
+
+**Use cases:**
+- Check if a recently purchased stamp is ready for use (propagation delay)
+- Verify a stamp before starting a large batch upload
+- Diagnose why uploads are failing
+
+**Response:**
+```json
+{
+  "stamp_id": "abc123...",
+  "can_upload": true,
+  "errors": [],
+  "warnings": [
+    {
+      "code": "HIGH_UTILIZATION",
+      "message": "Stamp is 82% utilized.",
+      "suggestion": "Monitor usage and consider purchasing additional stamps."
+    }
+  ],
+  "status": {
+    "exists": true,
+    "local": true,
+    "usable": true,
+    "utilizationPercent": 82.5,
+    "utilizationStatus": "warning",
+    "batchTTL": 86400,
+    "expectedExpiration": "2026-01-12-17-30"
+  }
+}
+```
+
+**Error Codes** (blocking - `can_upload: false`):
+| Code | Description |
+|------|-------------|
+| `NOT_FOUND` | Stamp doesn't exist on the connected node |
+| `NOT_LOCAL` | Stamp exists but isn't owned by this Bee node |
+| `EXPIRED` | Stamp TTL has reached 0 |
+| `NOT_USABLE` | Stamp not yet usable (e.g., propagation delay) |
+| `FULL` | Stamp is at 100% utilization |
+
+**Warning Codes** (non-blocking - `can_upload: true`):
+| Code | Description |
+|------|-------------|
+| `LOW_TTL` | Stamp expires in less than 1 hour |
+| `NEARLY_FULL` | Stamp is 95%+ utilized |
+| `HIGH_UTILIZATION` | Stamp is 80%+ utilized |
+
+## Troubleshooting
+
+### Common Upload Errors
+
+#### "Stamp not found" (404)
+**Cause:** The stamp ID doesn't exist on the connected Bee node.
+
+**Solutions:**
+1. Verify the stamp ID is correct
+2. Check you're connected to the right Bee node with `GET /api/v1/stamps/`
+3. The stamp may have expired and been removed from the network
+
+#### "Stamp is not owned by the connected Bee node" (NOT_LOCAL)
+**Cause:** The stamp exists on the network but wasn't purchased through this node.
+
+**Solutions:**
+1. Use a stamp with `"local": true` from `GET /api/v1/stamps/`
+2. Connect to the Bee node that owns this stamp
+3. Purchase a new stamp through this node
+
+#### "Stamp is not yet usable" (NOT_USABLE)
+**Cause:** After purchasing a stamp, there's a 30-90 second propagation delay before it can be used.
+
+**Solutions:**
+1. Wait 30-90 seconds after purchase
+2. Check stamp status with `GET /api/v1/stamps/{stamp_id}/check`
+3. The `usable` field will change from `false` to `true` when ready
+
+**Example workflow after purchase:**
+```bash
+# Purchase stamp
+curl -X POST "http://localhost:8000/api/v1/stamps/" \
+     -H "Content-Type: application/json" \
+     -d '{"duration_hours": 25, "size": "small"}'
+# Response: {"batchID": "abc123...", "message": "..."}
+
+# Check if ready (repeat until can_upload=true)
+curl "http://localhost:8000/api/v1/stamps/abc123.../check"
+# Wait for: {"can_upload": true, ...}
+
+# Now upload
+curl -X POST "http://localhost:8000/api/v1/data/?stamp_id=abc123..." \
+     -F "file=@data.json"
+```
+
+#### "Stamp has expired" (EXPIRED)
+**Cause:** The stamp's TTL has reached 0.
+
+**Solutions:**
+1. Purchase a new stamp with `POST /api/v1/stamps/`
+2. Extend an existing non-expired stamp with `PATCH /api/v1/stamps/{id}/extend`
+
+#### "Stamp is completely full" (FULL)
+**Cause:** The stamp has reached 100% utilization and cannot accept more data.
+
+**Solutions:**
+1. Purchase a new stamp with larger capacity (`size: "large"`)
+2. Use a different stamp that has remaining capacity
+
+### Structured Error Responses
+
+When uploads fail due to stamp issues, the API returns structured error responses with actionable suggestions:
+
+```json
+{
+  "detail": {
+    "code": "NOT_USABLE",
+    "message": "Stamp is not yet usable for uploads. If this stamp was recently purchased, it may take 30-90 seconds for the network to propagate the stamp.",
+    "suggestion": "Wait 30-90 seconds after purchase and try again. Check stamp status with GET /api/v1/stamps/{stamp_id}/check to monitor when it becomes usable.",
+    "stamp_id": "abc123...",
+    "stamp_status": {
+      "exists": true,
+      "local": true,
+      "usable": false,
+      "utilizationPercent": 0,
+      "batchTTL": 86400
+    }
+  }
+}
+```
+
+### Pre-Upload Validation
+
+Use `validate_stamp=true` to check stamp validity before upload:
+
+```bash
+curl -X POST "http://localhost:8000/api/v1/data/?stamp_id=abc123...&validate_stamp=true" \
+     -F "file=@data.json"
+```
+
+This adds a small latency overhead but catches common stamp issues early with clear error messages.
 
 ## License
 

@@ -898,96 +898,194 @@ def upload_collection_to_swarm(tar_data: bytes, stamp_id: str, deferred: bool = 
 class StampValidationError(Exception):
     """Raised when stamp validation fails (e.g., stamp is full or not usable)."""
 
-    def __init__(self, message: str, status: str, utilization_percent: Optional[float] = None):
+    def __init__(
+        self,
+        message: str,
+        status: str,
+        utilization_percent: Optional[float] = None,
+        code: Optional[str] = None,
+        suggestion: Optional[str] = None,
+        stamp_data: Optional[Dict[str, Any]] = None
+    ):
         self.message = message
-        self.status = status  # "full", "critical", "warning", "not_found", "not_usable"
+        self.status = status  # "full", "critical", "warning", "not_found", "not_usable", "not_local", "expired"
         self.utilization_percent = utilization_percent
+        self.code = code or status.upper().replace("_", "_")  # e.g., "NOT_USABLE"
+        self.suggestion = suggestion or ""
+        self.stamp_data = stamp_data  # Full stamp data for structured error response
         super().__init__(self.message)
+
+
+# TTL threshold constants
+TTL_THRESHOLD_EXPIRED = 0          # 0 seconds - stamp is expired
+TTL_THRESHOLD_LOW = 3600           # 1 hour - warn about low TTL
 
 
 def validate_stamp_for_upload(stamp_id: str) -> Dict[str, Any]:
     """
     Validates that a stamp is suitable for uploading data.
 
-    Checks:
-    1. Stamp exists and is accessible
-    2. Stamp is not at 100% utilization (full)
-    3. Stamp is marked as usable
+    Checks (in order):
+    1. Stamp exists on the network
+    2. Stamp is local (owned by connected node)
+    3. Stamp is not expired (TTL > 0)
+    4. Stamp is marked as usable (handles propagation delay)
+    5. Stamp is not at 100% utilization (full)
 
     Args:
         stamp_id: The batch ID of the stamp to validate
 
     Returns:
-        Dict with stamp information including utilization status
+        Dict with stamp information including utilization status and any warnings
 
     Raises:
-        StampValidationError: If stamp is full, not usable, or not found
+        StampValidationError: If stamp fails any blocking validation check
         RequestException: If unable to reach Swarm API
     """
     # Get all processed stamps (includes utilization calculation)
     all_stamps = get_all_stamps_processed()
 
-    # Find the requested stamp
+    # Find the requested stamp (case-insensitive)
     found_stamp = None
     for stamp in all_stamps:
         if stamp.get("batchID") == stamp_id or stamp.get("batchID", "").lower() == stamp_id.lower():
             found_stamp = stamp
             break
 
+    # Check 1: Stamp exists
     if not found_stamp:
         raise StampValidationError(
             message=f"Stamp '{stamp_id}' not found on the connected Swarm node.",
-            status="not_found"
+            status="not_found",
+            code="NOT_FOUND",
+            suggestion="Verify the stamp ID is correct. Use GET /api/v1/stamps/ to list available stamps."
         )
 
     utilization_percent = found_stamp.get("utilizationPercent")
     utilization_status = found_stamp.get("utilizationStatus")
     usable = found_stamp.get("usable")
+    is_local = found_stamp.get("local", False)
+    batch_ttl = found_stamp.get("batchTTL", 0)
 
-    # Check if stamp is at 100% utilization
+    # Check 2: Stamp is local (owned by connected node)
+    if not is_local:
+        raise StampValidationError(
+            message=(
+                "This stamp exists on the network but is not owned by the connected Bee node. "
+                "Only stamps purchased through or owned by this node can be used for uploads."
+            ),
+            status="not_local",
+            code="NOT_LOCAL",
+            suggestion=(
+                "Use a stamp that was purchased through this node, or connect to the Bee node "
+                "that owns this stamp. Use GET /api/v1/stamps/ to see stamps with 'local: true'."
+            ),
+            utilization_percent=utilization_percent,
+            stamp_data=found_stamp
+        )
+
+    # Check 3: Stamp is not expired
+    if batch_ttl <= TTL_THRESHOLD_EXPIRED:
+        raise StampValidationError(
+            message="Stamp has expired (TTL is 0 or negative). It can no longer be used for uploads.",
+            status="expired",
+            code="EXPIRED",
+            suggestion="Purchase a new stamp with POST /api/v1/stamps/ or extend an existing one.",
+            utilization_percent=utilization_percent,
+            stamp_data=found_stamp
+        )
+
+    # Check 4: Stamp is usable (handles propagation delay case)
+    if usable is False:
+        raise StampValidationError(
+            message=(
+                "Stamp is not yet usable for uploads. If this stamp was recently purchased, "
+                "it may take 30-90 seconds for the network to propagate the stamp."
+            ),
+            status="not_usable",
+            code="NOT_USABLE",
+            suggestion=(
+                "Wait 30-90 seconds after purchase and try again. "
+                "Check stamp status with GET /api/v1/stamps/{stamp_id}/check to monitor when it becomes usable."
+            ),
+            utilization_percent=utilization_percent,
+            stamp_data=found_stamp
+        )
+
+    # Check 5: Stamp is not at 100% utilization
     if utilization_percent is not None and utilization_percent >= UTILIZATION_THRESHOLD_FULL:
         raise StampValidationError(
             message=(
                 "Stamp is completely full (100% utilized). "
-                "No more data can be uploaded with this stamp. "
-                "Please purchase a new stamp or use a different one."
+                "No more data can be uploaded with this stamp."
             ),
             status="full",
-            utilization_percent=utilization_percent
+            code="FULL",
+            suggestion="Purchase a new stamp with POST /api/v1/stamps/ or use a different stamp.",
+            utilization_percent=utilization_percent,
+            stamp_data=found_stamp
         )
 
-    # Check if stamp is usable
-    if usable is False:
-        raise StampValidationError(
-            message=(
-                "Stamp is not usable. This may be because the stamp has expired, "
-                "has invalid parameters, or is at full capacity."
-            ),
-            status="not_usable",
-            utilization_percent=utilization_percent
-        )
+    # Build warnings (non-blocking issues)
+    warnings = []
+
+    # Warning: Low TTL
+    if batch_ttl > 0 and batch_ttl < TTL_THRESHOLD_LOW:
+        hours_remaining = batch_ttl / 3600
+        warnings.append({
+            "code": "LOW_TTL",
+            "message": f"Stamp expires in less than 1 hour ({hours_remaining:.1f} hours remaining).",
+            "suggestion": "Consider extending the stamp or purchasing a new one soon."
+        })
+
+    # Warning: Nearly full (95%+)
+    if utilization_percent is not None and utilization_percent >= UTILIZATION_THRESHOLD_CRITICAL:
+        warnings.append({
+            "code": "NEARLY_FULL",
+            "message": f"Stamp is {utilization_percent}% utilized and nearly full.",
+            "suggestion": "Uploads may fail for large files. Consider purchasing a new stamp."
+        })
+    # Warning: Approaching full (80%+)
+    elif utilization_percent is not None and utilization_percent >= UTILIZATION_THRESHOLD_WARNING:
+        warnings.append({
+            "code": "HIGH_UTILIZATION",
+            "message": f"Stamp is {utilization_percent}% utilized.",
+            "suggestion": "Monitor usage and consider purchasing additional stamps."
+        })
 
     return {
         "batchID": found_stamp.get("batchID"),
         "utilizationPercent": utilization_percent,
         "utilizationStatus": utilization_status,
         "utilizationWarning": found_stamp.get("utilizationWarning"),
-        "usable": usable
+        "usable": usable,
+        "local": is_local,
+        "batchTTL": batch_ttl,
+        "expectedExpiration": found_stamp.get("expectedExpiration"),
+        "warnings": warnings
     }
 
 
-def check_upload_failure_reason(stamp_id: str, error_message: str) -> Optional[str]:
+def check_upload_failure_reason(stamp_id: str, error_message: str) -> Optional[Dict[str, Any]]:
     """
-    Checks if an upload failure was due to stamp being full.
+    Checks if an upload failure was due to stamp issues and provides structured diagnostics.
 
     This is called after Bee rejects an upload to provide a more helpful error message.
+    It checks for common stamp-related failure reasons in priority order.
 
     Args:
         stamp_id: The batch ID of the stamp that was used
         error_message: The error message from the failed upload
 
     Returns:
-        Enhanced error message if stamp utilization was the cause, otherwise None
+        Dict with structured error info if stamp issue was the cause:
+        {
+            "code": str,          # Error code (e.g., "FULL", "NOT_LOCAL")
+            "message": str,       # Human-readable error message
+            "suggestion": str,    # Actionable suggestion
+            "stamp_status": dict  # Stamp status info if available
+        }
+        Returns None if unable to determine the cause.
     """
     try:
         # Get stamp information
@@ -998,27 +1096,269 @@ def check_upload_failure_reason(stamp_id: str, error_message: str) -> Optional[s
                 found_stamp = stamp
                 break
 
+        # Stamp not found - possibly wrong node or deleted
         if not found_stamp:
-            return None
+            return {
+                "code": "NOT_FOUND",
+                "message": f"Stamp '{stamp_id[:16]}...' was not found on the connected Swarm node.",
+                "suggestion": "Verify the stamp ID is correct and that you're connected to the right Bee node.",
+                "stamp_status": None
+            }
 
         utilization_percent = found_stamp.get("utilizationPercent")
         utilization_status = found_stamp.get("utilizationStatus")
+        is_local = found_stamp.get("local", False)
+        usable = found_stamp.get("usable")
+        batch_ttl = found_stamp.get("batchTTL", 0)
 
-        # Check if the stamp is full or nearly full
+        stamp_status = {
+            "exists": True,
+            "local": is_local,
+            "usable": usable,
+            "utilizationPercent": utilization_percent,
+            "utilizationStatus": utilization_status,
+            "batchTTL": batch_ttl,
+            "expectedExpiration": found_stamp.get("expectedExpiration")
+        }
+
+        # Check issues in priority order (most specific first)
+
+        # 1. Stamp is not local
+        if not is_local:
+            return {
+                "code": "NOT_LOCAL",
+                "message": (
+                    f"Upload failed because stamp '{stamp_id[:16]}...' is not owned by this Bee node. "
+                    "Only stamps purchased through this node can be used for uploads."
+                ),
+                "suggestion": (
+                    "Use a stamp with 'local: true' from GET /api/v1/stamps/, "
+                    "or connect to the Bee node that owns this stamp."
+                ),
+                "stamp_status": stamp_status
+            }
+
+        # 2. Stamp is expired
+        if batch_ttl <= 0:
+            return {
+                "code": "EXPIRED",
+                "message": f"Upload failed because stamp '{stamp_id[:16]}...' has expired.",
+                "suggestion": "Purchase a new stamp with POST /api/v1/stamps/ or extend an existing one.",
+                "stamp_status": stamp_status
+            }
+
+        # 3. Stamp is not usable (propagation delay)
+        if usable is False:
+            return {
+                "code": "NOT_USABLE",
+                "message": (
+                    f"Upload failed because stamp '{stamp_id[:16]}...' is not yet usable. "
+                    "If recently purchased, it may take 30-90 seconds to propagate."
+                ),
+                "suggestion": (
+                    "Wait 30-90 seconds and try again. "
+                    "Check stamp status with GET /api/v1/stamps/{stamp_id}/check."
+                ),
+                "stamp_status": stamp_status
+            }
+
+        # 4. Stamp is full
         if utilization_percent is not None and utilization_percent >= UTILIZATION_THRESHOLD_FULL:
-            return (
-                f"Upload failed because stamp is completely full (100% utilized). "
-                f"The stamp '{stamp_id[:16]}...' cannot accept any more data. "
-                f"Please purchase a new stamp or use a different one."
-            )
-        elif utilization_status == "critical":
-            return (
-                f"Upload may have failed because stamp is nearly full ({utilization_percent}% utilized). "
-                f"Consider purchasing a new stamp. Original error: {error_message}"
-            )
+            return {
+                "code": "FULL",
+                "message": (
+                    f"Upload failed because stamp '{stamp_id[:16]}...' is completely full (100% utilized). "
+                    "No more data can be uploaded with this stamp."
+                ),
+                "suggestion": "Purchase a new stamp with POST /api/v1/stamps/ or use a different stamp.",
+                "stamp_status": stamp_status
+            }
 
+        # 5. Stamp is nearly full (may have caused failure for large files)
+        if utilization_status == "critical":
+            return {
+                "code": "NEARLY_FULL",
+                "message": (
+                    f"Upload may have failed because stamp '{stamp_id[:16]}...' is nearly full "
+                    f"({utilization_percent}% utilized). Large files may not fit."
+                ),
+                "suggestion": "Try with a smaller file, or purchase a new stamp with more capacity.",
+                "stamp_status": stamp_status,
+                "original_error": error_message
+            }
+
+        # Could not determine specific cause
         return None
 
     except Exception as e:
         logger.warning(f"Error checking upload failure reason: {e}")
         return None
+
+
+def get_stamp_health_check(stamp_id: str) -> Dict[str, Any]:
+    """
+    Performs a comprehensive health check on a stamp for the /check endpoint.
+
+    Returns all errors and warnings without throwing exceptions.
+
+    Args:
+        stamp_id: The batch ID of the stamp to check
+
+    Returns:
+        Dict with:
+        {
+            "stamp_id": str,
+            "can_upload": bool,
+            "errors": List[Dict],   # Blocking issues
+            "warnings": List[Dict], # Non-blocking issues
+            "status": Dict          # Current stamp status
+        }
+    """
+    errors = []
+    warnings = []
+
+    # Get all processed stamps
+    try:
+        all_stamps = get_all_stamps_processed()
+    except Exception as e:
+        logger.error(f"Failed to fetch stamps for health check: {e}")
+        return {
+            "stamp_id": stamp_id,
+            "can_upload": False,
+            "errors": [{
+                "code": "API_ERROR",
+                "message": "Failed to fetch stamp data from Bee node.",
+                "suggestion": "Check that the Bee node is running and accessible."
+            }],
+            "warnings": [],
+            "status": {
+                "exists": False,
+                "local": False,
+                "usable": None,
+                "utilizationPercent": None,
+                "utilizationStatus": None,
+                "batchTTL": None,
+                "expectedExpiration": None
+            }
+        }
+
+    # Find the requested stamp
+    found_stamp = None
+    for stamp in all_stamps:
+        if stamp.get("batchID") == stamp_id or stamp.get("batchID", "").lower() == stamp_id.lower():
+            found_stamp = stamp
+            break
+
+    # Check: Stamp exists
+    if not found_stamp:
+        return {
+            "stamp_id": stamp_id,
+            "can_upload": False,
+            "errors": [{
+                "code": "NOT_FOUND",
+                "message": f"Stamp '{stamp_id}' not found on the connected Swarm node.",
+                "suggestion": "Verify the stamp ID is correct. Use GET /api/v1/stamps/ to list available stamps."
+            }],
+            "warnings": [],
+            "status": {
+                "exists": False,
+                "local": False,
+                "usable": None,
+                "utilizationPercent": None,
+                "utilizationStatus": None,
+                "batchTTL": None,
+                "expectedExpiration": None
+            }
+        }
+
+    # Extract stamp properties
+    utilization_percent = found_stamp.get("utilizationPercent")
+    utilization_status = found_stamp.get("utilizationStatus")
+    usable = found_stamp.get("usable")
+    is_local = found_stamp.get("local", False)
+    batch_ttl = found_stamp.get("batchTTL", 0)
+    expected_expiration = found_stamp.get("expectedExpiration")
+
+    status = {
+        "exists": True,
+        "local": is_local,
+        "usable": usable,
+        "utilizationPercent": utilization_percent,
+        "utilizationStatus": utilization_status,
+        "batchTTL": batch_ttl,
+        "expectedExpiration": expected_expiration
+    }
+
+    # Check for errors (blocking issues)
+
+    # Error: Not local
+    if not is_local:
+        errors.append({
+            "code": "NOT_LOCAL",
+            "message": "This stamp is not owned by the connected Bee node.",
+            "suggestion": (
+                "Use a stamp that was purchased through this node, or connect to the Bee node "
+                "that owns this stamp. Use GET /api/v1/stamps/ to see stamps with 'local: true'."
+            )
+        })
+
+    # Error: Expired
+    if batch_ttl <= TTL_THRESHOLD_EXPIRED:
+        errors.append({
+            "code": "EXPIRED",
+            "message": "Stamp has expired (TTL is 0 or negative).",
+            "suggestion": "Purchase a new stamp with POST /api/v1/stamps/ or extend an existing one."
+        })
+
+    # Error: Not usable
+    if usable is False and batch_ttl > 0:  # Only if not already expired
+        errors.append({
+            "code": "NOT_USABLE",
+            "message": (
+                "Stamp is not yet usable. If recently purchased, it may take 30-90 seconds "
+                "for the network to propagate the stamp."
+            ),
+            "suggestion": "Wait 30-90 seconds after purchase and check again."
+        })
+
+    # Error: Full
+    if utilization_percent is not None and utilization_percent >= UTILIZATION_THRESHOLD_FULL:
+        errors.append({
+            "code": "FULL",
+            "message": "Stamp is completely full (100% utilized).",
+            "suggestion": "Purchase a new stamp with POST /api/v1/stamps/ or use a different stamp."
+        })
+
+    # Check for warnings (non-blocking issues)
+
+    # Warning: Low TTL
+    if batch_ttl > 0 and batch_ttl < TTL_THRESHOLD_LOW:
+        hours_remaining = batch_ttl / 3600
+        warnings.append({
+            "code": "LOW_TTL",
+            "message": f"Stamp expires in less than 1 hour ({hours_remaining:.1f} hours remaining).",
+            "suggestion": "Consider extending the stamp or purchasing a new one soon."
+        })
+
+    # Warning: Nearly full (95%+)
+    if utilization_percent is not None and utilization_percent >= UTILIZATION_THRESHOLD_CRITICAL and utilization_percent < UTILIZATION_THRESHOLD_FULL:
+        warnings.append({
+            "code": "NEARLY_FULL",
+            "message": f"Stamp is {utilization_percent}% utilized and nearly full.",
+            "suggestion": "Uploads may fail for large files. Consider purchasing a new stamp."
+        })
+    # Warning: High utilization (80%+)
+    elif utilization_percent is not None and utilization_percent >= UTILIZATION_THRESHOLD_WARNING:
+        warnings.append({
+            "code": "HIGH_UTILIZATION",
+            "message": f"Stamp is {utilization_percent}% utilized.",
+            "suggestion": "Monitor usage and consider purchasing additional stamps."
+        })
+
+    return {
+        "stamp_id": found_stamp.get("batchID"),
+        "can_upload": len(errors) == 0,
+        "errors": errors,
+        "warnings": warnings,
+        "status": status
+    }
