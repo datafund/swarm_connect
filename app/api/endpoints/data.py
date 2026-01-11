@@ -15,6 +15,7 @@ from app.api.models.data import (
     UploadTiming,
     ManifestUploadTiming
 )
+from typing import Optional
 from app.services.swarm_api import (
     upload_data_to_swarm,
     download_data_from_swarm,
@@ -23,7 +24,8 @@ from app.services.swarm_api import (
     count_tar_files,
     validate_stamp_for_upload,
     check_upload_failure_reason,
-    StampValidationError
+    StampValidationError,
+    REDUNDANCY_LEVELS
 )
 
 logger = logging.getLogger(__name__)
@@ -95,6 +97,7 @@ async def upload_data(
     validate_stamp: bool = False,
     deferred: bool = False,
     include_timing: bool = False,
+    redundancy: Optional[int] = None,
     file: UploadFile = File(...)
 ):
     """
@@ -107,12 +110,23 @@ async def upload_data(
     - Optional `validate_stamp` parameter (defaults to false)
     - Optional `deferred` parameter (defaults to false)
     - Optional `include_timing` parameter (defaults to false)
+    - Optional `redundancy` parameter (0-4, defaults to 2=strong)
 
     **Stamp Validation** (opt-in with `validate_stamp=true`):
     When enabled, validates the stamp before upload:
     - Returns 400 if stamp is at 100% utilization (full)
     - Returns 400 if stamp is not usable (expired, invalid)
     - Returns 404 if stamp is not found
+
+    **Redundancy Levels** (erasure coding for data durability):
+    - `0` = None: No erasure coding (0% chunk loss tolerance)
+    - `1` = Medium: 1% chunk loss tolerance
+    - `2` = Strong: 5% chunk loss tolerance (default)
+    - `3` = Insane: 10% chunk loss tolerance
+    - `4` = Paranoid: 50% chunk loss tolerance
+
+    Higher redundancy levels increase storage cost but improve data durability.
+    See: https://docs.ethswarm.org/docs/concepts/DISC/erasure-coding/
 
     **Deferred Mode** (opt-in with `deferred=true`):
     - `deferred=false` (default): Direct upload - chunks uploaded directly to network,
@@ -170,6 +184,14 @@ async def upload_data(
     bee_upload_ms = None
 
     try:
+        # Validate redundancy level if provided
+        if redundancy is not None and redundancy not in REDUNDANCY_LEVELS:
+            valid_levels = ", ".join(f"{k}={v}" for k, v in REDUNDANCY_LEVELS.items())
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid redundancy level {redundancy}. Must be 0-4 ({valid_levels})"
+            )
+
         # Optional pre-upload stamp validation
         if validate_stamp:
             stamp_start = time.perf_counter()
@@ -210,7 +232,8 @@ async def upload_data(
             data=data_bytes,
             stamp_id=stamp_id,
             content_type=content_type,
-            deferred=deferred
+            deferred=deferred,
+            redundancy_level=redundancy
         )
         bee_upload_ms = (time.perf_counter() - bee_start) * 1000
 
@@ -375,6 +398,7 @@ async def upload_manifest(
     validate_stamp: bool = False,
     deferred: bool = False,
     include_timing: bool = False,
+    redundancy: Optional[int] = None,
     file: UploadFile = File(...)
 ):
     """
@@ -394,12 +418,23 @@ async def upload_manifest(
     - Optional `validate_stamp` parameter (defaults to false)
     - Optional `deferred` parameter (defaults to false)
     - Optional `include_timing` parameter (defaults to false)
+    - Optional `redundancy` parameter (0-4, defaults to 2=strong)
 
     **Stamp Validation** (opt-in with `validate_stamp=true`):
     When enabled, validates the stamp before upload:
     - Returns 400 if stamp is at 100% utilization (full)
     - Returns 400 if stamp is not usable (expired, invalid)
     - Returns 404 if stamp is not found
+
+    **Redundancy Levels** (erasure coding for data durability):
+    - `0` = None: No erasure coding (0% chunk loss tolerance)
+    - `1` = Medium: 1% chunk loss tolerance
+    - `2` = Strong: 5% chunk loss tolerance (default)
+    - `3` = Insane: 10% chunk loss tolerance
+    - `4` = Paranoid: 50% chunk loss tolerance
+
+    Higher redundancy levels increase storage cost but improve data durability.
+    See: https://docs.ethswarm.org/docs/concepts/DISC/erasure-coding/
 
     **Deferred Mode** (opt-in with `deferred=true`):
     - `deferred=false` (default): Direct upload - chunks uploaded directly to network,
@@ -464,6 +499,14 @@ async def upload_manifest(
     bee_upload_ms = None
 
     try:
+        # Validate redundancy level if provided
+        if redundancy is not None and redundancy not in REDUNDANCY_LEVELS:
+            valid_levels = ", ".join(f"{k}={v}" for k, v in REDUNDANCY_LEVELS.items())
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid redundancy level {redundancy}. Must be 0-4 ({valid_levels})"
+            )
+
         # Optional pre-upload stamp validation
         if validate_stamp:
             stamp_start = time.perf_counter()
@@ -513,7 +556,9 @@ async def upload_manifest(
 
         # Upload to Swarm as collection
         bee_start = time.perf_counter()
-        reference = upload_collection_to_swarm(tar_bytes, stamp_id, deferred=deferred)
+        reference = upload_collection_to_swarm(
+            tar_bytes, stamp_id, deferred=deferred, redundancy_level=redundancy
+        )
         bee_upload_ms = (time.perf_counter() - bee_start) * 1000
 
         total_ms = (time.perf_counter() - start_time) * 1000
