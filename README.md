@@ -169,6 +169,7 @@ Swarm Connect is a FastAPI-based API gateway that provides comprehensive access 
 - **List All Stamps**: Retrieve comprehensive list of all available stamps with enhanced data
 - **Get Stamp Details**: Fetch specific stamp information by batch ID
 - **Expiration Calculation**: Automatically calculates stamp expiration time (current time + TTL)
+- **Utilization Percentage**: Calculates human-readable stamp usage percentage (0-100%)
 - **Data Merging**: Merges global network data with local node information for complete stamp details
 - **Local Ownership Detection**: Identifies stamps owned/managed by the connected node
 - **Enhanced Field Mapping**: Handles different field names between global and local APIs
@@ -218,6 +219,7 @@ Swarm Connect is a FastAPI-based API gateway that provides comprehensive access 
 - **Data Merging Logic**: Combines global stamp data with local node information
 - **Field Mapping**: Handles different field names between endpoints (`immutable` vs `immutableFlag`)
 - **Usability Calculation**: Determines stamp usability based on TTL, depth, and immutability
+- **Utilization Calculation**: Computes stamp usage as percentage: `(utilization / 2^(depth-bucketDepth)) * 100`
 - **Local Detection**: Identifies stamps owned by the connected node
 
 #### Model Layer (`app/api/models/stamp.py`)

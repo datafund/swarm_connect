@@ -74,6 +74,7 @@ python -m pytest tests/test_manifest_upload.py -v
 - `StampDetails` model with optional fields to handle missing data from upstream API
 - Field aliases for API compatibility (`amount` aliased as `value`, etc.)
 - Calculated `expectedExpiration` field in `YYYY-MM-DD-HH-MM` UTC format
+- Calculated `utilizationPercent` field showing stamp usage as percentage (0-100%)
 
 ### Environment Configuration
 

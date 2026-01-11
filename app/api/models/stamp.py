@@ -29,7 +29,8 @@ class StampDetails(BaseModel):
     batchTTL: int = Field(..., description="Original Time-To-Live in seconds (from API).") # Assuming always present
 
     # --- Fields enhanced with local stamp data ---
-    utilization: Optional[int] = Field(None, description="Stamp utilization (from local /stamps endpoint when available).")
+    utilization: Optional[int] = Field(None, description="Stamp utilization - raw bucket fill level (from local /stamps endpoint when available).")
+    utilizationPercent: Optional[float] = Field(None, description="Stamp utilization as percentage (0-100). Calculated as: (utilization / 2^(depth-bucketDepth)) * 100.")
     usable: Optional[bool] = Field(None, description="Stamp usability status (from local /stamps endpoint or calculated).")
     label: Optional[str] = Field(None, description="User-defined label (from local /stamps endpoint when available).")
 
@@ -50,11 +51,12 @@ class StampDetails(BaseModel):
                 "bucketDepth": 16,
                 "immutableFlag": False,     # Can be null
                 "batchTTL": 16971999,
-                "utilization": None,
-                "usable": None,
+                "utilization": 8,
+                "utilizationPercent": 50.0,
+                "usable": True,
                 "label": None,
                 "expectedExpiration": "2024-08-15-10-30",
-                "local": False
+                "local": True
             }
         }
 

@@ -272,6 +272,51 @@ def merge_stamp_data(global_stamp: Dict[str, Any], local_stamp: Optional[Dict[st
     return merged
 
 
+def calculate_utilization_percent(
+    utilization: Optional[int],
+    depth: Optional[int],
+    bucket_depth: Optional[int]
+) -> Optional[float]:
+    """
+    Calculates the utilization percentage of a stamp.
+
+    The utilization field from Bee represents the maximum bucket fill level.
+    Total buckets = 2^(depth - bucketDepth)
+    Percentage = (utilization / totalBuckets) * 100
+
+    Args:
+        utilization: Raw utilization value (max bucket fill level)
+        depth: Stamp depth
+        bucket_depth: Bucket depth
+
+    Returns:
+        Utilization as a percentage (0-100), rounded to 2 decimal places.
+        Returns None if any required value is missing.
+    """
+    if utilization is None or depth is None or bucket_depth is None:
+        return None
+
+    try:
+        # Calculate total buckets: 2^(depth - bucketDepth)
+        total_buckets = 2 ** (depth - bucket_depth)
+
+        if total_buckets <= 0:
+            return None
+
+        # Calculate percentage
+        percent = (utilization / total_buckets) * 100
+
+        # Cap at 100% (defensive, shouldn't happen normally)
+        percent = min(percent, 100.0)
+
+        # Round to 2 decimal places
+        return round(percent, 2)
+
+    except (ValueError, TypeError, OverflowError) as e:
+        logger.warning(f"Error calculating utilization percent: {e}")
+        return None
+
+
 def get_all_stamps_processed() -> List[Dict[str, Any]]:
     """
     Fetches all postage stamp batches and processes them with expiration calculations.
@@ -324,10 +369,18 @@ def get_all_stamps_processed() -> List[Dict[str, Any]]:
             if usable is None:
                 usable = calculate_usable_status(merged_stamp)
 
+            # Calculate utilization percentage
+            utilization_percent = calculate_utilization_percent(
+                merged_stamp.get("utilization"),
+                merged_stamp.get("depth"),
+                merged_stamp.get("bucketDepth")
+            )
+
             # Create processed stamp data
             processed_stamp = {
                 "batchID": batch_id,
                 "utilization": merged_stamp.get("utilization"),
+                "utilizationPercent": utilization_percent,
                 "usable": usable,
                 "label": merged_stamp.get("label"),
                 "depth": merged_stamp.get("depth"),
