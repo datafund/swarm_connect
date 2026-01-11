@@ -170,6 +170,8 @@ Swarm Connect is a FastAPI-based API gateway that provides comprehensive access 
 - **Get Stamp Details**: Fetch specific stamp information by batch ID
 - **Expiration Calculation**: Automatically calculates stamp expiration time (current time + TTL)
 - **Utilization Percentage**: Calculates human-readable stamp usage percentage (0-100%)
+- **Utilization Status Warnings**: Status levels ("ok", "warning", "critical", "full") with actionable messages
+- **Usable Flag**: Stamps at 100% utilization automatically marked as unusable
 - **Data Merging**: Merges global network data with local node information for complete stamp details
 - **Local Ownership Detection**: Identifies stamps owned/managed by the connected node
 - **Enhanced Field Mapping**: Handles different field names between global and local APIs
@@ -177,6 +179,8 @@ Swarm Connect is a FastAPI-based API gateway that provides comprehensive access 
 #### 📁 Data Operations API
 - **Unified Data Upload**: Single endpoint handles both JSON and binary data automatically
 - **Collection/Manifest Upload**: Upload multiple files as TAR archive for 15x performance improvement
+- **Pre-Upload Stamp Validation**: Optional validation to check stamp usability before upload
+- **Enhanced Error Messages**: Detailed feedback when uploads fail due to stamp capacity
 - **SWIP-Compliant Examples**: Pre-filled with SWIP standard provenance data structure
 - **Content-Type Detection**: Automatic handling based on Content-Type header
 - **Raw Data Download**: Download data as binary stream or base64-encoded JSON
@@ -321,6 +325,33 @@ List all available postage stamps.
 Get detailed information about a specific stamp.
 - **Response**: Detailed stamp information with calculated expiration time
 
+**Stamp Utilization Status Fields:**
+| Field | Description |
+|-------|-------------|
+| `utilizationPercent` | Usage percentage (0-100%) |
+| `utilizationStatus` | Status level: "ok", "warning", "critical", "full" |
+| `utilizationWarning` | Actionable message when status is elevated |
+| `usable` | Boolean - false when stamp is expired, invalid, or 100% full |
+
+**Status Thresholds:**
+| Status | Range | Meaning |
+|--------|-------|---------|
+| `ok` | 0-80% | Plenty of capacity |
+| `warning` | 80-95% | Approaching full capacity |
+| `critical` | 95-99.99% | Nearly full, action recommended |
+| `full` | 100% | Cannot accept more data |
+
+**Example response with warning:**
+```json
+{
+  "batchID": "abc123...",
+  "utilizationPercent": 87.5,
+  "utilizationStatus": "warning",
+  "utilizationWarning": "Stamp is approaching full capacity (87.5% utilized). Monitor usage and consider purchasing additional stamps.",
+  "usable": true
+}
+```
+
 #### `PATCH /api/v1/stamps/{stamp_id}/extend`
 Extend an existing stamp by adding more time.
 
@@ -343,17 +374,27 @@ Extend an existing stamp by adding more time.
 
 ### Data Operation Endpoints
 
-#### `POST /api/v1/data/?stamp_id={id}&content_type={type}`
+#### `POST /api/v1/data/?stamp_id={id}&content_type={type}&validate_stamp={bool}`
 Upload data to Swarm (JSON or binary).
 - **Request Body**: JSON data (default) or raw binary data
 - **Content-Type**: `application/json` (default) or `application/octet-stream` for binary
+- **validate_stamp**: Optional (default: false) - Pre-validate stamp before upload
 - **Response**: `{"reference": "...", "message": "Data uploaded successfully"}`
 - **Features**: Pre-filled with SWIP-compliant provenance data example structure
 
-#### `POST /api/v1/data/manifest?stamp_id={id}`
+**Pre-upload validation (opt-in):**
+```bash
+# Upload with stamp validation
+curl -X POST "http://localhost:8000/api/v1/data/?stamp_id=YOUR_STAMP_ID&validate_stamp=true" \
+     -F "file=@data.json"
+```
+Returns 400 if stamp is full (100% utilized) or not usable, 404 if stamp not found.
+
+#### `POST /api/v1/data/manifest?stamp_id={id}&validate_stamp={bool}`
 Upload multiple files as a TAR archive collection/manifest.
 - **Performance**: 15x faster than individual uploads (50 files in ~500ms vs ~14s)
 - **Request**: Multipart form-data with TAR archive file
+- **validate_stamp**: Optional (default: false) - Pre-validate stamp before upload
 - **Response**: `{"reference": "manifest-hash...", "file_count": 50, "message": "Collection uploaded successfully"}`
 
 **Usage Example:**
@@ -363,6 +404,10 @@ tar -cvf files.tar file1.json file2.json file3.json
 
 # Upload as collection
 curl -X POST "http://localhost:8000/api/v1/data/manifest?stamp_id=YOUR_STAMP_ID" \
+     -F "file=@files.tar"
+
+# Upload with pre-validation
+curl -X POST "http://localhost:8000/api/v1/data/manifest?stamp_id=YOUR_STAMP_ID&validate_stamp=true" \
      -F "file=@files.tar"
 ```
 

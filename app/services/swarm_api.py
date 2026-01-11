@@ -183,16 +183,18 @@ def extend_postage_stamp(stamp_id: str, amount: int) -> str:
         raise ValueError(f"Could not parse stamp extension response: {e}") from e
 
 
-def calculate_usable_status(stamp: Dict[str, Any]) -> bool:
+def calculate_usable_status(stamp: Dict[str, Any], utilization_percent: Optional[float] = None) -> bool:
     """
     Calculates if a stamp is usable based on available data.
     A stamp is considered usable if:
     1. It has a positive TTL (not expired)
     2. It exists
     3. It's not immutable or has reasonable depth for uploads
+    4. It's not at 100% utilization (completely full)
 
     Args:
         stamp: The stamp data from /batches endpoint
+        utilization_percent: Pre-calculated utilization percentage (0-100), or None
 
     Returns:
         Boolean indicating if the stamp is usable
@@ -221,6 +223,11 @@ def calculate_usable_status(stamp: Dict[str, Any]) -> bool:
         # - Amount validation (sufficient balance)
         depth = stamp.get("depth", 0)
         if depth < 16 or depth > 32:  # Reasonable depth range
+            return False
+
+        # Check if stamp is at 100% utilization (completely full)
+        # A full stamp cannot accept any more data
+        if utilization_percent is not None and utilization_percent >= UTILIZATION_THRESHOLD_FULL:
             return False
 
         return True
@@ -317,6 +324,57 @@ def calculate_utilization_percent(
         return None
 
 
+# Utilization threshold constants
+UTILIZATION_THRESHOLD_WARNING = 80.0   # 80% - approaching full
+UTILIZATION_THRESHOLD_CRITICAL = 95.0  # 95% - nearly full
+UTILIZATION_THRESHOLD_FULL = 100.0     # 100% - completely full
+
+
+def calculate_utilization_status(
+    utilization_percent: Optional[float]
+) -> tuple[Optional[str], Optional[str]]:
+    """
+    Calculates the utilization status and warning message based on percentage.
+
+    Thresholds:
+    - 0-80%: "ok" - Stamp has plenty of capacity
+    - 80-95%: "warning" - Stamp is approaching full capacity
+    - 95-99.99%: "critical" - Stamp is nearly full
+    - 100%: "full" - Stamp is completely full, cannot accept more data
+
+    Args:
+        utilization_percent: Utilization as a percentage (0-100)
+
+    Returns:
+        Tuple of (status, warning_message):
+        - status: One of "ok", "warning", "critical", "full", or None if unknown
+        - warning_message: Human-readable warning message, or None if ok/unknown
+    """
+    if utilization_percent is None:
+        return (None, None)
+
+    if utilization_percent >= UTILIZATION_THRESHOLD_FULL:
+        return (
+            "full",
+            "Stamp is completely full (100% utilized). No more data can be uploaded with this stamp. "
+            "Please purchase a new stamp or extend an existing one with more capacity."
+        )
+    elif utilization_percent >= UTILIZATION_THRESHOLD_CRITICAL:
+        return (
+            "critical",
+            f"Stamp is nearly full ({utilization_percent}% utilized). "
+            "Consider purchasing a new stamp soon to avoid upload failures."
+        )
+    elif utilization_percent >= UTILIZATION_THRESHOLD_WARNING:
+        return (
+            "warning",
+            f"Stamp is approaching full capacity ({utilization_percent}% utilized). "
+            "Monitor usage and consider purchasing additional stamps."
+        )
+    else:
+        return ("ok", None)
+
+
 def get_all_stamps_processed() -> List[Dict[str, Any]]:
     """
     Fetches all postage stamp batches and processes them with expiration calculations.
@@ -364,23 +422,29 @@ def get_all_stamps_processed() -> List[Dict[str, Any]]:
             expiration_time_utc = now_utc + datetime.timedelta(seconds=batch_ttl)
             expiration_str = expiration_time_utc.strftime('%Y-%m-%d-%H-%M')
 
-            # Use local usable status if available, otherwise calculate
-            usable = merged_stamp.get("usable")
-            if usable is None:
-                usable = calculate_usable_status(merged_stamp)
-
-            # Calculate utilization percentage
+            # Calculate utilization percentage first (needed for usable status)
             utilization_percent = calculate_utilization_percent(
                 merged_stamp.get("utilization"),
                 merged_stamp.get("depth"),
                 merged_stamp.get("bucketDepth")
             )
 
+            # Calculate utilization status and warning
+            utilization_status, utilization_warning = calculate_utilization_status(utilization_percent)
+
+            # Use local usable status if available, otherwise calculate
+            # Note: We always recalculate if utilization is 100% to ensure usable=false
+            usable = merged_stamp.get("usable")
+            if usable is None or (utilization_percent is not None and utilization_percent >= UTILIZATION_THRESHOLD_FULL):
+                usable = calculate_usable_status(merged_stamp, utilization_percent)
+
             # Create processed stamp data
             processed_stamp = {
                 "batchID": batch_id,
                 "utilization": merged_stamp.get("utilization"),
                 "utilizationPercent": utilization_percent,
+                "utilizationStatus": utilization_status,
+                "utilizationWarning": utilization_warning,
                 "usable": usable,
                 "label": merged_stamp.get("label"),
                 "depth": merged_stamp.get("depth"),
@@ -821,3 +885,132 @@ def upload_collection_to_swarm(tar_data: bytes, stamp_id: str) -> str:
     except (ValueError, KeyError) as e:
         logger.error(f"Error parsing collection upload response: {e}")
         raise ValueError(f"Could not parse collection upload response: {e}") from e
+
+
+class StampValidationError(Exception):
+    """Raised when stamp validation fails (e.g., stamp is full or not usable)."""
+
+    def __init__(self, message: str, status: str, utilization_percent: Optional[float] = None):
+        self.message = message
+        self.status = status  # "full", "critical", "warning", "not_found", "not_usable"
+        self.utilization_percent = utilization_percent
+        super().__init__(self.message)
+
+
+def validate_stamp_for_upload(stamp_id: str) -> Dict[str, Any]:
+    """
+    Validates that a stamp is suitable for uploading data.
+
+    Checks:
+    1. Stamp exists and is accessible
+    2. Stamp is not at 100% utilization (full)
+    3. Stamp is marked as usable
+
+    Args:
+        stamp_id: The batch ID of the stamp to validate
+
+    Returns:
+        Dict with stamp information including utilization status
+
+    Raises:
+        StampValidationError: If stamp is full, not usable, or not found
+        RequestException: If unable to reach Swarm API
+    """
+    # Get all processed stamps (includes utilization calculation)
+    all_stamps = get_all_stamps_processed()
+
+    # Find the requested stamp
+    found_stamp = None
+    for stamp in all_stamps:
+        if stamp.get("batchID") == stamp_id or stamp.get("batchID", "").lower() == stamp_id.lower():
+            found_stamp = stamp
+            break
+
+    if not found_stamp:
+        raise StampValidationError(
+            message=f"Stamp '{stamp_id}' not found on the connected Swarm node.",
+            status="not_found"
+        )
+
+    utilization_percent = found_stamp.get("utilizationPercent")
+    utilization_status = found_stamp.get("utilizationStatus")
+    usable = found_stamp.get("usable")
+
+    # Check if stamp is at 100% utilization
+    if utilization_percent is not None and utilization_percent >= UTILIZATION_THRESHOLD_FULL:
+        raise StampValidationError(
+            message=(
+                "Stamp is completely full (100% utilized). "
+                "No more data can be uploaded with this stamp. "
+                "Please purchase a new stamp or use a different one."
+            ),
+            status="full",
+            utilization_percent=utilization_percent
+        )
+
+    # Check if stamp is usable
+    if usable is False:
+        raise StampValidationError(
+            message=(
+                "Stamp is not usable. This may be because the stamp has expired, "
+                "has invalid parameters, or is at full capacity."
+            ),
+            status="not_usable",
+            utilization_percent=utilization_percent
+        )
+
+    return {
+        "batchID": found_stamp.get("batchID"),
+        "utilizationPercent": utilization_percent,
+        "utilizationStatus": utilization_status,
+        "utilizationWarning": found_stamp.get("utilizationWarning"),
+        "usable": usable
+    }
+
+
+def check_upload_failure_reason(stamp_id: str, error_message: str) -> Optional[str]:
+    """
+    Checks if an upload failure was due to stamp being full.
+
+    This is called after Bee rejects an upload to provide a more helpful error message.
+
+    Args:
+        stamp_id: The batch ID of the stamp that was used
+        error_message: The error message from the failed upload
+
+    Returns:
+        Enhanced error message if stamp utilization was the cause, otherwise None
+    """
+    try:
+        # Get stamp information
+        all_stamps = get_all_stamps_processed()
+        found_stamp = None
+        for stamp in all_stamps:
+            if stamp.get("batchID") == stamp_id or stamp.get("batchID", "").lower() == stamp_id.lower():
+                found_stamp = stamp
+                break
+
+        if not found_stamp:
+            return None
+
+        utilization_percent = found_stamp.get("utilizationPercent")
+        utilization_status = found_stamp.get("utilizationStatus")
+
+        # Check if the stamp is full or nearly full
+        if utilization_percent is not None and utilization_percent >= UTILIZATION_THRESHOLD_FULL:
+            return (
+                f"Upload failed because stamp is completely full (100% utilized). "
+                f"The stamp '{stamp_id[:16]}...' cannot accept any more data. "
+                f"Please purchase a new stamp or use a different one."
+            )
+        elif utilization_status == "critical":
+            return (
+                f"Upload may have failed because stamp is nearly full ({utilization_percent}% utilized). "
+                f"Consider purchasing a new stamp. Original error: {error_message}"
+            )
+
+        return None
+
+    except Exception as e:
+        logger.warning(f"Error checking upload failure reason: {e}")
+        return None

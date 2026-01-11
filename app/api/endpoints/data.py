@@ -17,7 +17,10 @@ from app.services.swarm_api import (
     download_data_from_swarm,
     upload_collection_to_swarm,
     validate_tar,
-    count_tar_files
+    count_tar_files,
+    validate_stamp_for_upload,
+    check_upload_failure_reason,
+    StampValidationError
 )
 
 logger = logging.getLogger(__name__)
@@ -70,6 +73,7 @@ def _detect_content_type_and_filename(data_bytes: bytes, reference: str) -> tupl
 async def upload_data(
     stamp_id: str,
     content_type: str = "application/json",
+    validate_stamp: bool = False,
     file: UploadFile = File(...)
 ):
     """
@@ -79,11 +83,22 @@ async def upload_data(
     - Upload as **multipart/form-data** with a `file` field
     - Valid `stamp_id` query parameter required
     - Optional `content_type` parameter (defaults to application/json)
+    - Optional `validate_stamp` parameter (defaults to false)
+
+    **Stamp Validation** (opt-in with `validate_stamp=true`):
+    When enabled, validates the stamp before upload:
+    - Returns 400 if stamp is at 100% utilization (full)
+    - Returns 400 if stamp is not usable (expired, invalid)
+    - Returns 404 if stamp is not found
 
     **Usage Examples**:
     ```bash
     # Upload JSON file
     curl -X POST "http://localhost:8000/api/v1/data/?stamp_id=ABC123&content_type=application/json" \\
+         -F "file=@data.json"
+
+    # Upload with pre-validation
+    curl -X POST "http://localhost:8000/api/v1/data/?stamp_id=ABC123&validate_stamp=true" \\
          -F "file=@data.json"
 
     # Upload binary file
@@ -105,6 +120,16 @@ async def upload_data(
     ```
     """
     try:
+        # Optional pre-upload stamp validation
+        if validate_stamp:
+            try:
+                validate_stamp_for_upload(stamp_id)
+            except StampValidationError as e:
+                if e.status == "not_found":
+                    raise HTTPException(status_code=404, detail=e.message)
+                else:
+                    raise HTTPException(status_code=400, detail=e.message)
+
         # Read file content as bytes
         data_bytes = await file.read()
 
@@ -120,8 +145,14 @@ async def upload_data(
             message=f"File '{file.filename}' uploaded successfully"
         )
 
+    except HTTPException:
+        raise  # Re-raise HTTP exceptions as-is
     except RequestException as e:
         logger.error(f"Swarm API error during upload: {e}")
+        # Check if the failure was due to stamp utilization
+        enhanced_message = check_upload_failure_reason(stamp_id, str(e))
+        if enhanced_message:
+            raise HTTPException(status_code=400, detail=enhanced_message)
         raise HTTPException(status_code=502, detail=f"Failed to upload data to Swarm: {e}")
     except ValueError as e:
         logger.error(f"Data processing error during upload: {e}")
@@ -231,6 +262,7 @@ async def download_data_json(
 @router.post("/manifest", response_model=ManifestUploadResponse)
 async def upload_manifest(
     stamp_id: str,
+    validate_stamp: bool = False,
     file: UploadFile = File(...)
 ):
     """
@@ -247,6 +279,13 @@ async def upload_manifest(
     - Upload as **multipart/form-data** with a `file` field containing a TAR archive
     - Valid `stamp_id` query parameter required
     - TAR must contain at least one file
+    - Optional `validate_stamp` parameter (defaults to false)
+
+    **Stamp Validation** (opt-in with `validate_stamp=true`):
+    When enabled, validates the stamp before upload:
+    - Returns 400 if stamp is at 100% utilization (full)
+    - Returns 400 if stamp is not usable (expired, invalid)
+    - Returns 404 if stamp is not found
 
     **Usage Examples**:
     ```bash
@@ -255,6 +294,10 @@ async def upload_manifest(
 
     # Upload TAR as collection
     curl -X POST "http://localhost:8000/api/v1/data/manifest?stamp_id=ABC123" \\
+         -F "file=@files.tar"
+
+    # Upload with pre-validation
+    curl -X POST "http://localhost:8000/api/v1/data/manifest?stamp_id=ABC123&validate_stamp=true" \\
          -F "file=@files.tar"
     ```
 
@@ -273,6 +316,16 @@ async def upload_manifest(
     ```
     """
     try:
+        # Optional pre-upload stamp validation
+        if validate_stamp:
+            try:
+                validate_stamp_for_upload(stamp_id)
+            except StampValidationError as e:
+                if e.status == "not_found":
+                    raise HTTPException(status_code=404, detail=e.message)
+                else:
+                    raise HTTPException(status_code=400, detail=e.message)
+
         # Read TAR file content
         tar_bytes = await file.read()
 
@@ -299,6 +352,10 @@ async def upload_manifest(
         raise
     except RequestException as e:
         logger.error(f"Swarm API error during manifest upload: {e}")
+        # Check if the failure was due to stamp utilization
+        enhanced_message = check_upload_failure_reason(stamp_id, str(e))
+        if enhanced_message:
+            raise HTTPException(status_code=400, detail=enhanced_message)
         raise HTTPException(status_code=502, detail=f"Failed to upload collection to Swarm: {e}")
     except ValueError as e:
         logger.error(f"Data processing error during manifest upload: {e}")
