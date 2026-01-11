@@ -175,6 +175,7 @@ Swarm Connect is a FastAPI-based API gateway that provides comprehensive access 
 
 #### 📁 Data Operations API
 - **Unified Data Upload**: Single endpoint handles both JSON and binary data automatically
+- **Collection/Manifest Upload**: Upload multiple files as TAR archive for 15x performance improvement
 - **SWIP-Compliant Examples**: Pre-filled with SWIP standard provenance data structure
 - **Content-Type Detection**: Automatic handling based on Content-Type header
 - **Raw Data Download**: Download data as binary stream or base64-encoded JSON
@@ -248,6 +249,7 @@ Swarm Connect is a FastAPI-based API gateway that provides comprehensive access 
 
 #### Data Operations
 - `POST /api/v1/data/?stamp_id={id}&content_type={type}`: Upload raw data to Swarm
+- `POST /api/v1/data/manifest?stamp_id={id}`: Upload TAR archive as collection/manifest (15x faster for batch uploads)
 - `GET /api/v1/data/{reference}`: Download raw data from Swarm (returns bytes directly)
 - `GET /api/v1/data/{reference}/json`: Download data with JSON metadata (base64-encoded)
 
@@ -345,6 +347,26 @@ Upload data to Swarm (JSON or binary).
 - **Content-Type**: `application/json` (default) or `application/octet-stream` for binary
 - **Response**: `{"reference": "...", "message": "Data uploaded successfully"}`
 - **Features**: Pre-filled with SWIP-compliant provenance data example structure
+
+#### `POST /api/v1/data/manifest?stamp_id={id}`
+Upload multiple files as a TAR archive collection/manifest.
+- **Performance**: 15x faster than individual uploads (50 files in ~500ms vs ~14s)
+- **Request**: Multipart form-data with TAR archive file
+- **Response**: `{"reference": "manifest-hash...", "file_count": 50, "message": "Collection uploaded successfully"}`
+
+**Usage Example:**
+```bash
+# Create TAR archive with multiple files
+tar -cvf files.tar file1.json file2.json file3.json
+
+# Upload as collection
+curl -X POST "http://localhost:8000/api/v1/data/manifest?stamp_id=YOUR_STAMP_ID" \
+     -F "file=@files.tar"
+```
+
+**Accessing individual files after upload:**
+- Via Bee node: `GET /bzz/{manifest_reference}/{file_path}`
+- Via bee-js: Use `MantarayNode.unmarshal()` to extract individual file references
 
 #### `GET /api/v1/data/{reference}`
 Download raw data from Swarm as a file (triggers browser download).

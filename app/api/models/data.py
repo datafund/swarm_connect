@@ -31,3 +31,21 @@ class DataDownloadResponse(BaseModel):
     content_type: Optional[str] = Field(default=None, description="MIME type of the content if available")
     size: int = Field(..., description="Size of the data in bytes")
     reference: str = Field(..., description="Swarm reference hash that was downloaded")
+
+
+class ManifestUploadResponse(BaseModel):
+    """Response model for collection/manifest upload."""
+    reference: str = Field(
+        ...,
+        description="Swarm manifest reference hash",
+        example="a1b2c3d4e5f6789012345678901234567890123456789012345678901234abcd"
+    )
+    file_count: int = Field(
+        ...,
+        description="Number of files in the uploaded collection",
+        example=50
+    )
+    message: str = Field(
+        default="Collection uploaded successfully",
+        description="Success message"
+    )
