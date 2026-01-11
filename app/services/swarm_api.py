@@ -503,7 +503,7 @@ def upload_data_to_swarm(
     stamp_id: str,
     content_type: str = "application/json",
     deferred: bool = False,
-    redundancy_level: int | None = None
+    redundancy_level: Optional[int] = None
 ) -> str:
     """
     Uploads data to the Swarm network using the configured Bee node.
@@ -887,7 +887,7 @@ def upload_collection_to_swarm(
     tar_data: bytes,
     stamp_id: str,
     deferred: bool = False,
-    redundancy_level: int | None = None
+    redundancy_level: Optional[int] = None
 ) -> str:
     """
     Uploads a TAR archive as a collection/manifest to the Swarm network.
