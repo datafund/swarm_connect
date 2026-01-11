@@ -192,6 +192,30 @@ When making changes to the codebase, ensure the architecture documentation stays
 - NEVER use `crtahlin/swarm_connect` - that is the upstream fork, not the main repo
 - Use `git remote -v` to verify remotes if unsure
 
+## Deployment Troubleshooting
+
+If the remote gateway (provenance-gateway.datafund.io) returns 503 or appears broken after a merge:
+
+1. **Test locally with Docker** to verify the build works:
+   ```bash
+   docker-compose up --build
+   ```
+
+2. **Check for Python version compatibility issues**:
+   - Docker uses Python 3.9
+   - Avoid `int | None` syntax (use `Optional[int]` instead)
+   - Avoid other Python 3.10+ features
+
+3. **Common issues**:
+   - `TypeError: unsupported operand type(s) for |: 'type' and 'NoneType'` → Use `Optional[T]` instead of `T | None`
+   - Import errors → Check all dependencies are in requirements.txt
+
+4. **Quick fix workflow**:
+   - Fix the issue locally
+   - Create a fix branch, commit, push, and merge PR
+   - Wait ~60 seconds for auto-deployment
+   - Test the gateway again
+
 ## Commit Message Guidelines
 
 - Do NOT include Claude/AI mentions, co-author tags, or "Generated with Claude" footers in commit messages
