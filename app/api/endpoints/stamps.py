@@ -124,6 +124,7 @@ async def get_stamp_details(
             bucketDepth=found_stamp.get("bucketDepth"),
             batchTTL=found_stamp.get("batchTTL"),
             utilization=found_stamp.get("utilization"),
+            utilizationPercent=found_stamp.get("utilizationPercent"),
             usable=found_stamp.get("usable"),
             label=found_stamp.get("label"),
             expectedExpiration=found_stamp.get("expectedExpiration"),
