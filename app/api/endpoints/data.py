@@ -74,6 +74,7 @@ async def upload_data(
     stamp_id: str,
     content_type: str = "application/json",
     validate_stamp: bool = False,
+    deferred: bool = False,
     file: UploadFile = File(...)
 ):
     """
@@ -84,6 +85,7 @@ async def upload_data(
     - Valid `stamp_id` query parameter required
     - Optional `content_type` parameter (defaults to application/json)
     - Optional `validate_stamp` parameter (defaults to false)
+    - Optional `deferred` parameter (defaults to false)
 
     **Stamp Validation** (opt-in with `validate_stamp=true`):
     When enabled, validates the stamp before upload:
@@ -91,10 +93,21 @@ async def upload_data(
     - Returns 400 if stamp is not usable (expired, invalid)
     - Returns 404 if stamp is not found
 
+    **Deferred Mode** (opt-in with `deferred=true`):
+    - `deferred=false` (default): Direct upload - chunks uploaded directly to network,
+      ensuring immediate availability. Safer for gateway use cases.
+    - `deferred=true`: Deferred upload - data goes to local node first, then syncs to
+      network asynchronously. Faster upload response but data may not be immediately
+      retrievable from the network.
+
     **Usage Examples**:
     ```bash
-    # Upload JSON file
+    # Upload JSON file (direct mode, default)
     curl -X POST "http://localhost:8000/api/v1/data/?stamp_id=ABC123&content_type=application/json" \\
+         -F "file=@data.json"
+
+    # Upload with deferred mode (faster response)
+    curl -X POST "http://localhost:8000/api/v1/data/?stamp_id=ABC123&deferred=true" \\
          -F "file=@data.json"
 
     # Upload with pre-validation
@@ -137,7 +150,8 @@ async def upload_data(
         reference = upload_data_to_swarm(
             data=data_bytes,
             stamp_id=stamp_id,
-            content_type=content_type
+            content_type=content_type,
+            deferred=deferred
         )
 
         return DataUploadResponse(
@@ -263,6 +277,7 @@ async def download_data_json(
 async def upload_manifest(
     stamp_id: str,
     validate_stamp: bool = False,
+    deferred: bool = False,
     file: UploadFile = File(...)
 ):
     """
@@ -280,6 +295,7 @@ async def upload_manifest(
     - Valid `stamp_id` query parameter required
     - TAR must contain at least one file
     - Optional `validate_stamp` parameter (defaults to false)
+    - Optional `deferred` parameter (defaults to false)
 
     **Stamp Validation** (opt-in with `validate_stamp=true`):
     When enabled, validates the stamp before upload:
@@ -287,13 +303,24 @@ async def upload_manifest(
     - Returns 400 if stamp is not usable (expired, invalid)
     - Returns 404 if stamp is not found
 
+    **Deferred Mode** (opt-in with `deferred=true`):
+    - `deferred=false` (default): Direct upload - chunks uploaded directly to network,
+      ensuring immediate availability. Safer for gateway use cases.
+    - `deferred=true`: Deferred upload - data goes to local node first, then syncs to
+      network asynchronously. Faster upload response but data may not be immediately
+      retrievable from the network.
+
     **Usage Examples**:
     ```bash
     # Create TAR archive
     tar -cvf files.tar file1.json file2.json file3.json
 
-    # Upload TAR as collection
+    # Upload TAR as collection (direct mode, default)
     curl -X POST "http://localhost:8000/api/v1/data/manifest?stamp_id=ABC123" \\
+         -F "file=@files.tar"
+
+    # Upload with deferred mode (faster response)
+    curl -X POST "http://localhost:8000/api/v1/data/manifest?stamp_id=ABC123&deferred=true" \\
          -F "file=@files.tar"
 
     # Upload with pre-validation
@@ -339,7 +366,7 @@ async def upload_manifest(
         file_count = count_tar_files(tar_bytes)
 
         # Upload to Swarm as collection
-        reference = upload_collection_to_swarm(tar_bytes, stamp_id)
+        reference = upload_collection_to_swarm(tar_bytes, stamp_id, deferred=deferred)
 
         return ManifestUploadResponse(
             reference=reference,
