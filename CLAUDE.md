@@ -121,6 +121,71 @@ Optional environment variables:
 - SSL/HTTPS support built into development server
 - Logging configured at INFO level with structured error handling
 
+## x402 Payment Integration
+
+### Overview
+
+The gateway supports x402 payment protocol for pay-per-request access without user accounts. When enabled, clients pay in USDC on Base chain to access stamp purchase and data upload endpoints.
+
+**Current Status**: Development on `main-x402-upgrade` branch (testnet only)
+
+**Parent Issue**: [datafund/provenance-fellowship#23](https://github.com/datafund/provenance-fellowship/issues/23)
+
+### Key Architecture Decisions
+
+- **Two-wallet system**: USDC on Base, xBZZ on Gnosis (no bridging)
+- **SDK**: Official `x402` Python package (v1 - v2 under development)
+- **Facilitator**: x402.org public facilitator for testnet
+- **Scope**: Uploads gated, downloads free
+
+### x402 Module Structure
+
+```
+app/x402/
+├── __init__.py      # Module init
+├── middleware.py    # FastAPI middleware for payment verification
+├── preflight.py     # Gateway balance checks
+├── pricing.py       # Price calculation (BZZ → USD)
+├── access.py        # IP whitelist/blacklist
+└── audit.py         # Transaction audit logging
+```
+
+### Key Configuration
+
+```bash
+X402_ENABLED=false           # Master switch (default: off)
+X402_FACILITATOR_URL=...     # Payment facilitator
+X402_PAY_TO_ADDRESS=0x...    # USDC receiving wallet (Base)
+X402_NETWORK=base-sepolia    # Network identifier
+```
+
+### Protected Endpoints (when X402_ENABLED=true)
+
+- `POST /api/v1/stamps/` - Requires payment
+- `POST /api/v1/data/` - Requires payment
+- `POST /api/v1/data/manifest` - Requires payment
+- `GET /api/v1/data/{ref}` - FREE (no payment required)
+
+### Development Notes
+
+- Branch: `main-x402-upgrade` - DO NOT MERGE TO MAIN without approval
+- Python SDK is v1 only (v2 under development)
+- See `docs/x402-operator-guide.md` for operator setup instructions
+- All x402 transactions logged to `logs/x402_audit.jsonl`
+
+### Testing x402
+
+```bash
+# With x402 disabled (default behavior)
+X402_ENABLED=false python run.py
+
+# With x402 enabled (requires facilitator)
+X402_ENABLED=true X402_PAY_TO_ADDRESS=0x... python run.py
+
+# Run x402 tests
+python -m pytest tests/test_x402_*.py -v
+```
+
 ## Swarm Bee API Documentation
 
 ### Using Context7 for Latest Documentation

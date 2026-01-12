@@ -8,6 +8,10 @@ python-multipart>=0.0.20  # For file upload support in FastAPI
 # For timezone handling if needed beyond basic UTC
 # pytz
 
+# x402 payment protocol (v1 - v2 under development)
+x402>=0.1.0               # Official x402 Python SDK
+eth-account>=0.8.0        # For wallet signature verification
+
 # Testing dependencies
 pytest>=7.0.0
 pytest-asyncio>=0.21.0
