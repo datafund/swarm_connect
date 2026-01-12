@@ -277,6 +277,87 @@ Swarm Connect is a FastAPI-based API gateway that provides comprehensive access 
 5. **Developer Experience**: Auto-generated docs and type safety
 6. **Flexibility**: Configurable for different Swarm node endpoints
 7. **Binary Support**: Native handling of raw data with multiple access patterns
+8. **x402 Payment Support**: Optional pay-per-request monetization via USDC
+
+## x402 Payment Gateway (Optional)
+
+The gateway supports optional x402 payment integration, enabling pay-per-request access without user accounts.
+
+### Overview
+
+When `X402_ENABLED=true`, protected endpoints (`POST /stamps/`, `POST /data/`) require USDC payment on Base chain. The gateway uses received payments to fund Swarm operations.
+
+```
+┌──────────────┐     USDC      ┌──────────────┐     xBZZ      ┌──────────────┐
+│    Client    │ ────────────> │   Gateway    │ ────────────> │  Swarm Bee   │
+│  (Base chain)│               │  (2 wallets) │               │ (Gnosis chain)│
+└──────────────┘               └──────────────┘               └──────────────┘
+```
+
+### Quick Start
+
+1. **Enable x402** in `.env`:
+   ```bash
+   X402_ENABLED=true
+   X402_PAY_TO_ADDRESS=0xYourBaseWallet
+   ```
+
+2. **Without payment**, protected endpoints return HTTP 402:
+   ```bash
+   curl -X POST http://localhost:8000/api/v1/stamps/
+   # Returns 402 with payment requirements
+   ```
+
+3. **With payment** (using x402 client):
+   ```bash
+   curl -X POST http://localhost:8000/api/v1/stamps/ \
+        -H "X-PAYMENT: <base64-encoded-payment>"
+   # Returns 200 with stamp details
+   ```
+
+### Features
+
+- **Pay-per-request**: No accounts, no subscriptions
+- **Access control**: IP whitelist/blacklist with CIDR support
+- **Rate limiting**: Per-IP request throttling (default: 10/min)
+- **Audit logging**: JSON lines format for all transactions
+- **Pre-flight checks**: Validates gateway wallet balances before accepting payments
+
+### Protected Endpoints
+
+| Endpoint | Payment Required |
+|----------|-----------------|
+| `POST /api/v1/stamps/` | Yes |
+| `POST /api/v1/data/` | Yes |
+| `POST /api/v1/data/manifest` | Yes |
+| `GET /api/v1/data/{ref}` | No (free) |
+| `GET /api/v1/stamps/` | No (free) |
+
+### Configuration
+
+```bash
+# Core
+X402_ENABLED=true
+X402_PAY_TO_ADDRESS=0x...       # Your USDC receiving wallet
+X402_NETWORK=base-sepolia       # or "base" for mainnet
+
+# Pricing
+X402_BZZ_USD_RATE=0.50          # BZZ to USD rate
+X402_MARKUP_PERCENT=50          # Profit margin
+X402_MIN_PRICE_USD=0.01         # Minimum charge
+
+# Access Control
+X402_WHITELIST_IPS=127.0.0.1    # Free access
+X402_BLACKLIST_IPS=             # Blocked IPs
+X402_RATE_LIMIT_PER_IP=10       # Requests/min per IP
+
+# Audit
+X402_AUDIT_LOG_PATH=logs/x402_audit.jsonl
+```
+
+### Documentation
+
+See [x402 Operator Guide](docs/x402-operator-guide.md) for complete setup instructions.
 
 ## API Endpoints
 

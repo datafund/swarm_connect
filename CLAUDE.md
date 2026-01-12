@@ -51,6 +51,7 @@ python -m pytest tests/test_manifest_upload.py -v
 - **API Layer**: Organized under `app/api/` with separate endpoints and models
 - **Service Layer**: External API integration handled in `app/services/`
 - **Models**: Pydantic models for request/response validation in `app/api/models/`
+- **x402 Module**: Optional payment gateway in `app/x402/` (see x402 section below)
 
 ### Key Components
 
@@ -147,7 +148,21 @@ app/x402/
 ├── preflight.py     # Gateway balance checks
 ├── pricing.py       # Price calculation (BZZ → USD)
 ├── access.py        # IP whitelist/blacklist
-└── audit.py         # Transaction audit logging
+├── audit.py         # Transaction audit logging
+└── ratelimit.py     # Per-IP rate limiting
+```
+
+### x402 Test Coverage (190 tests)
+
+```
+tests/
+├── test_x402_preflight.py    # 21 tests - Balance checks
+├── test_x402_pricing.py      # 25 tests - Price calculations
+├── test_x402_middleware.py   # 33 tests - HTTP middleware
+├── test_x402_access.py       # 36 tests - IP access control
+├── test_x402_audit.py        # 29 tests - Audit logging
+├── test_x402_ratelimit.py    # 25 tests - Rate limiting
+└── test_x402_integration.py  # 21 tests - Full flow tests
 ```
 
 ### Key Configuration
