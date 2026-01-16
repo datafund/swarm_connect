@@ -700,3 +700,266 @@ class TestEndToEndScenarios:
         # Prices should be different
         assert stamp_price == 100000  # 0.10 USD
         assert data_price == 50000    # 0.05 USD
+
+
+class TestHealthEndpointWithX402:
+    """Test health endpoint x402 status integration."""
+
+    def setup_method(self):
+        """Clear balance cache before each test."""
+        from app.x402.base_balance import clear_balance_cache
+        clear_balance_cache()
+
+    def teardown_method(self):
+        """Clear balance cache after each test."""
+        from app.x402.base_balance import clear_balance_cache
+        clear_balance_cache()
+
+    @patch("app.main.settings")
+    def test_health_without_x402(self, mock_settings):
+        """Health endpoint returns simple response when x402 disabled."""
+        mock_settings.X402_ENABLED = False
+        mock_settings.PROJECT_NAME = "Test Gateway"
+
+        from app.main import read_root
+        response = read_root()
+
+        assert response["status"] == "ok"
+        assert "x402" not in response
+
+    @patch("app.x402.preflight.check_preflight_balances")
+    @patch("app.x402.base_balance.check_base_eth_balance")
+    @patch("app.main.settings")
+    def test_health_with_x402_healthy(self, mock_settings, mock_base_balance, mock_preflight):
+        """Health endpoint returns x402 status when enabled and healthy."""
+        mock_settings.X402_ENABLED = True
+        mock_settings.PROJECT_NAME = "Test Gateway"
+
+        mock_base_balance.return_value = {
+            "ok": True,
+            "is_critical": False,
+            "balance_wei": int(0.01 * 10**18),
+            "balance_eth": 0.01,
+            "threshold_eth": 0.005,
+            "critical_eth": 0.001,
+            "address": "0xTestAddress",
+            "warning": None
+        }
+
+        mock_preflight.return_value = {
+            "can_accept": True,
+            "xbzz_ok": True,
+            "xdai_ok": True,
+            "chequebook_ok": True,
+            "balances": {"xbzz": {}, "xdai": {}, "chequebook": {}},
+            "warnings": [],
+            "errors": []
+        }
+
+        from app.main import read_root
+        response = read_root()
+
+        assert response["status"] == "ok"
+        assert "x402" in response
+        assert response["x402"]["enabled"] is True
+        assert response["x402"]["base_wallet"]["ok"] is True
+        assert response["x402"]["gnosis_wallet"]["can_accept"] is True
+        assert len(response["x402"]["warnings"]) == 0
+        assert len(response["x402"]["errors"]) == 0
+
+    @patch("app.x402.preflight.check_preflight_balances")
+    @patch("app.x402.base_balance.check_base_eth_balance")
+    @patch("app.main.settings")
+    def test_health_with_x402_degraded(self, mock_settings, mock_base_balance, mock_preflight):
+        """Health endpoint returns degraded status when balance below warning threshold."""
+        mock_settings.X402_ENABLED = True
+        mock_settings.PROJECT_NAME = "Test Gateway"
+
+        mock_base_balance.return_value = {
+            "ok": False,
+            "is_critical": False,
+            "balance_wei": int(0.003 * 10**18),
+            "balance_eth": 0.003,
+            "threshold_eth": 0.005,
+            "critical_eth": 0.001,
+            "address": "0xTestAddress",
+            "warning": "Base wallet ETH (0.003) below threshold (0.005)"
+        }
+
+        mock_preflight.return_value = {
+            "can_accept": True,
+            "xbzz_ok": True,
+            "xdai_ok": True,
+            "chequebook_ok": True,
+            "balances": {"xbzz": {}, "xdai": {}, "chequebook": {}},
+            "warnings": [],
+            "errors": []
+        }
+
+        from app.main import read_root
+        response = read_root()
+
+        assert response["status"] == "degraded"
+        assert response["x402"]["base_wallet"]["ok"] is False
+        assert len(response["x402"]["warnings"]) == 1
+        assert "below threshold" in response["x402"]["warnings"][0]
+
+    @patch("app.x402.preflight.check_preflight_balances")
+    @patch("app.x402.base_balance.check_base_eth_balance")
+    @patch("app.main.settings")
+    def test_health_with_x402_critical_returns_503(self, mock_settings, mock_base_balance, mock_preflight):
+        """Health endpoint returns 503 when balance critically low."""
+        mock_settings.X402_ENABLED = True
+        mock_settings.PROJECT_NAME = "Test Gateway"
+
+        mock_base_balance.return_value = {
+            "ok": False,
+            "is_critical": True,
+            "balance_wei": int(0.0005 * 10**18),
+            "balance_eth": 0.0005,
+            "threshold_eth": 0.005,
+            "critical_eth": 0.001,
+            "address": "0xTestAddress",
+            "warning": "Base wallet ETH critically low (0.0005)"
+        }
+
+        mock_preflight.return_value = {
+            "can_accept": True,
+            "xbzz_ok": True,
+            "xdai_ok": True,
+            "chequebook_ok": True,
+            "balances": {"xbzz": {}, "xdai": {}, "chequebook": {}},
+            "warnings": [],
+            "errors": []
+        }
+
+        from app.main import read_root
+        response = read_root()
+
+        # Should be JSONResponse with 503
+        assert response.status_code == 503
+        data = json.loads(response.body.decode())
+        assert data["status"] == "critical"
+        assert len(data["x402"]["errors"]) == 1
+
+    @patch("app.x402.preflight.check_preflight_balances")
+    @patch("app.x402.base_balance.check_base_eth_balance")
+    @patch("app.main.settings")
+    def test_health_includes_wallet_addresses(self, mock_settings, mock_base_balance, mock_preflight):
+        """Health endpoint includes wallet addresses in response."""
+        mock_settings.X402_ENABLED = True
+        mock_settings.PROJECT_NAME = "Test Gateway"
+
+        test_address = "0x1234567890abcdef1234567890abcdef12345678"
+        mock_base_balance.return_value = {
+            "ok": True,
+            "is_critical": False,
+            "balance_wei": int(0.01 * 10**18),
+            "balance_eth": 0.01,
+            "threshold_eth": 0.005,
+            "critical_eth": 0.001,
+            "address": test_address,
+            "warning": None
+        }
+
+        mock_preflight.return_value = {
+            "can_accept": True,
+            "xbzz_ok": True,
+            "xdai_ok": True,
+            "chequebook_ok": True,
+            "balances": {"xbzz": {}, "xdai": {}, "chequebook": {}},
+            "warnings": [],
+            "errors": []
+        }
+
+        from app.main import read_root
+        response = read_root()
+
+        assert response["x402"]["base_wallet"]["address"] == test_address
+
+
+class TestMiddlewareWithCriticalBalance:
+    """Test middleware blocks requests when balance is critical."""
+
+    def setup_method(self):
+        """Reset state before each test."""
+        reset_rate_limiter()
+        from app.x402.base_balance import clear_balance_cache
+        clear_balance_cache()
+
+    def teardown_method(self):
+        """Reset state after each test."""
+        reset_rate_limiter()
+        from app.x402.base_balance import clear_balance_cache
+        clear_balance_cache()
+
+    @patch("app.x402.middleware.check_base_eth_balance")
+    @patch("app.x402.middleware.settings")
+    @patch("app.x402.middleware.get_price_quote")
+    def test_critical_balance_returns_503(
+        self, mock_price_quote, mock_settings, mock_base_balance
+    ):
+        """Middleware returns 503 when balance is critical."""
+        mock_settings.X402_ENABLED = True
+        mock_settings.X402_FREE_TIER_ENABLED = False
+        mock_settings.X402_FACILITATOR_URL = "https://x402.org/facilitator"
+        mock_settings.X402_PAY_TO_ADDRESS = "0xpayee"
+        mock_settings.X402_NETWORK = "base-sepolia"
+        mock_settings.X402_MIN_PRICE_USD = 0.01
+
+        mock_base_balance.return_value = {
+            "ok": False,
+            "is_critical": True,
+            "balance_wei": int(0.0005 * 10**18),
+            "balance_eth": 0.0005,
+            "threshold_eth": 0.005,
+            "critical_eth": 0.001,
+            "address": "0xpayee",
+            "warning": "Base wallet ETH critically low"
+        }
+
+        mock_price_quote.return_value = {"price_usd": 0.05, "description": "Test"}
+
+        app = create_test_app(x402_enabled=True)
+        client = TestClient(app)
+
+        response = client.post("/api/v1/stamps/")
+
+        assert response.status_code == 503
+        assert "temporarily unavailable" in response.json()["error"]
+        assert response.json()["x402_status"] == "critical"
+
+    @patch("app.x402.middleware.check_base_eth_balance")
+    @patch("app.x402.middleware.settings")
+    @patch("app.x402.middleware.get_price_quote")
+    def test_warning_balance_allows_requests(
+        self, mock_price_quote, mock_settings, mock_base_balance
+    ):
+        """Middleware allows requests when balance is low but not critical."""
+        mock_settings.X402_ENABLED = True
+        mock_settings.X402_FREE_TIER_ENABLED = False
+        mock_settings.X402_FACILITATOR_URL = "https://x402.org/facilitator"
+        mock_settings.X402_PAY_TO_ADDRESS = "0xpayee"
+        mock_settings.X402_NETWORK = "base-sepolia"
+        mock_settings.X402_MIN_PRICE_USD = 0.01
+
+        mock_base_balance.return_value = {
+            "ok": False,  # Below warning threshold
+            "is_critical": False,  # But not critical
+            "balance_wei": int(0.003 * 10**18),
+            "balance_eth": 0.003,
+            "threshold_eth": 0.005,
+            "critical_eth": 0.001,
+            "address": "0xpayee",
+            "warning": "Base wallet ETH below warning threshold"
+        }
+
+        mock_price_quote.return_value = {"price_usd": 0.05, "description": "Test"}
+
+        app = create_test_app(x402_enabled=True)
+        client = TestClient(app)
+
+        response = client.post("/api/v1/stamps/")
+
+        # Should return 402 (payment required), not 503
+        assert response.status_code == 402
