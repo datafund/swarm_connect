@@ -50,6 +50,10 @@ class Settings(BaseSettings):
     # === Base Chain Settings (for monitoring USDC receipts) ===
     BASE_RPC_URL: str = "https://sepolia.base.org"
 
+    # === Base Sepolia Gateway Wallet Monitoring ===
+    X402_BASE_ETH_WARN_THRESHOLD: float = 0.005  # Warn if ETH < threshold (~50 txs)
+    X402_BASE_ETH_CRITICAL_THRESHOLD: float = 0.001  # Block if ETH < critical (~10 txs)
+
     @field_validator("X402_BLACKLIST_IPS", "X402_WHITELIST_IPS", mode="before")
     @classmethod
     def empty_str_to_empty(cls, v: str) -> str:

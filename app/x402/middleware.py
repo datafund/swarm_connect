@@ -26,6 +26,7 @@ from x402.encoding import safe_base64_decode, safe_base64_encode
 from app.core.config import settings
 from app.x402.pricing import get_price_quote
 from app.x402.ratelimit import check_rate_limit, get_rate_limit_headers
+from app.x402.base_balance import check_base_eth_balance
 
 logger = logging.getLogger(__name__)
 
@@ -245,6 +246,23 @@ class X402Middleware(BaseHTTPMiddleware):
         # Skip if not a protected endpoint
         if not is_protected_endpoint(request.method, request.url.path):
             return await call_next(request)
+
+        # Check if gateway wallet has sufficient ETH for gas
+        base_balance = check_base_eth_balance()
+        if base_balance.get("is_critical"):
+            logger.error(
+                f"x402: Gateway ETH critically low ({base_balance.get('balance_eth', 0):.6f} ETH). "
+                f"Cannot process payments."
+            )
+            return JSONResponse(
+                status_code=503,
+                content={
+                    "error": "Gateway temporarily unavailable",
+                    "detail": "Gateway wallet has insufficient ETH for gas. Please try again later.",
+                    "x402_status": "critical",
+                    "balance_eth": base_balance.get("balance_eth", 0),
+                }
+            )
 
         client_ip = get_client_ip(request)
         logger.info(f"x402: Processing protected request from {client_ip}: {request.method} {request.url.path}")

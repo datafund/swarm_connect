@@ -1,5 +1,6 @@
 # app/main.py
 from fastapi import FastAPI
+from fastapi.responses import JSONResponse
 from app.core.config import settings
 from app.core.version import VERSION
 from app.api.endpoints import stamps, data, wallet
@@ -24,9 +25,76 @@ app.include_router(wallet.router, prefix=f"{settings.API_V1_STR}", tags=["wallet
 @app.get("/", summary="Health Check", tags=["default"])
 @app.get("/health", summary="Health Check", tags=["default"], include_in_schema=False)
 def read_root():
-    """ Basic health check endpoint. """
+    """
+    Health check endpoint.
+
+    When X402_ENABLED=true, includes x402 wallet status:
+    - status: "ok" | "degraded" | "critical"
+    - x402: detailed wallet balances and warnings
+
+    Returns 503 when x402 is enabled and gateway wallet is critically low on ETH.
+    """
     logger.info("Health check endpoint accessed.")
-    return {"status": "ok", "message": f"Welcome to {settings.PROJECT_NAME}"}
+
+    response_data = {
+        "status": "ok",
+        "message": f"Welcome to {settings.PROJECT_NAME}"
+    }
+
+    # If x402 is enabled, include wallet status
+    if settings.X402_ENABLED:
+        from app.x402.base_balance import check_base_eth_balance
+        from app.x402.preflight import check_preflight_balances
+
+        base_eth = check_base_eth_balance()
+        gnosis = check_preflight_balances()
+
+        warnings = []
+        errors = []
+
+        # Collect warnings and errors
+        if base_eth.get("warning"):
+            if base_eth.get("is_critical"):
+                errors.append(base_eth["warning"])
+            else:
+                warnings.append(base_eth["warning"])
+
+        warnings.extend(gnosis.get("warnings", []))
+        errors.extend(gnosis.get("errors", []))
+
+        # Determine overall status
+        if base_eth.get("is_critical") or len(errors) > 0:
+            response_data["status"] = "critical"
+        elif not base_eth["ok"] or not gnosis["can_accept"]:
+            response_data["status"] = "degraded"
+
+        # Add x402 details
+        response_data["x402"] = {
+            "enabled": True,
+            "base_wallet": {
+                "address": base_eth.get("address"),
+                "balance_eth": base_eth.get("balance_eth"),
+                "threshold_eth": base_eth.get("threshold_eth"),
+                "critical_eth": base_eth.get("critical_eth"),
+                "ok": base_eth.get("ok"),
+                "is_critical": base_eth.get("is_critical"),
+            },
+            "gnosis_wallet": {
+                "can_accept": gnosis.get("can_accept"),
+                "xbzz_ok": gnosis.get("xbzz_ok"),
+                "xdai_ok": gnosis.get("xdai_ok"),
+                "chequebook_ok": gnosis.get("chequebook_ok"),
+                "balances": gnosis.get("balances"),
+            },
+            "warnings": warnings,
+            "errors": errors,
+        }
+
+        # Return 503 if critical
+        if response_data["status"] == "critical":
+            return JSONResponse(status_code=503, content=response_data)
+
+    return response_data
 
 # --- Placeholder for Future Enhancements ---
 
