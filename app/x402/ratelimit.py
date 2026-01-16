@@ -233,7 +233,7 @@ def get_rate_limiter() -> RateLimiter:
     return _rate_limiter
 
 
-def check_rate_limit(client_ip: str) -> Tuple[bool, str, Dict[str, any]]:
+def check_rate_limit(client_ip: str, is_free_tier: bool = False) -> Tuple[bool, Optional[str], Dict[str, any]]:
     """
     Check if a client IP is rate limited.
 
@@ -241,6 +241,7 @@ def check_rate_limit(client_ip: str) -> Tuple[bool, str, Dict[str, any]]:
 
     Args:
         client_ip: The client's IP address
+        is_free_tier: If True, use stricter free tier rate limit
 
     Returns:
         Tuple of (is_allowed, reason, stats):
@@ -249,19 +250,32 @@ def check_rate_limit(client_ip: str) -> Tuple[bool, str, Dict[str, any]]:
         - stats: Rate limit statistics for headers
     """
     limiter = get_rate_limiter()
-    is_limited, requests_made, limit = limiter.is_rate_limited(client_ip)
+
+    # Use appropriate limit based on tier
+    if is_free_tier:
+        effective_limit = settings.X402_FREE_TIER_RATE_LIMIT
+    else:
+        effective_limit = limiter.requests_per_minute
+
+    is_limited, requests_made, _ = limiter.is_rate_limited(client_ip)
+
+    # For free tier, check against the stricter limit
+    if is_free_tier and requests_made > effective_limit:
+        is_limited = True
 
     stats = {
         "requests_made": requests_made,
-        "limit": limit,
-        "remaining": max(0, limit - requests_made),
+        "limit": effective_limit,
+        "remaining": max(0, effective_limit - requests_made),
         "window_seconds": limiter.window_seconds,
+        "is_free_tier": is_free_tier,
     }
 
     if is_limited:
+        tier_name = "free tier" if is_free_tier else "paid"
         return (
             False,
-            f"Rate limit exceeded: {requests_made}/{limit} requests per minute",
+            f"Rate limit exceeded ({tier_name}): {requests_made}/{effective_limit} requests per minute",
             stats
         )
 

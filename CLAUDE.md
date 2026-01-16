@@ -152,13 +152,13 @@ app/x402/
 └── ratelimit.py     # Per-IP rate limiting
 ```
 
-### x402 Test Coverage (190 tests)
+### x402 Test Coverage (196 tests)
 
 ```
 tests/
 ├── test_x402_preflight.py    # 21 tests - Balance checks
 ├── test_x402_pricing.py      # 25 tests - Price calculations
-├── test_x402_middleware.py   # 33 tests - HTTP middleware
+├── test_x402_middleware.py   # 39 tests - HTTP middleware + free tier
 ├── test_x402_access.py       # 36 tests - IP access control
 ├── test_x402_audit.py        # 29 tests - Audit logging
 ├── test_x402_ratelimit.py    # 25 tests - Rate limiting
@@ -172,21 +172,53 @@ X402_ENABLED=false           # Master switch (default: off)
 X402_FACILITATOR_URL=...     # Payment facilitator
 X402_PAY_TO_ADDRESS=0x...    # USDC receiving wallet (Base)
 X402_NETWORK=base-sepolia    # Network identifier
+
+# Free tier settings (for users without x402 capability)
+X402_FREE_TIER_ENABLED=true  # Allow non-paying users (default: on)
+X402_FREE_TIER_RATE_LIMIT=3  # Requests/minute for free tier (default: 3)
 ```
+
+### Access Modes (when X402_ENABLED=true)
+
+| User Type | Access | Rate Limit | Headers |
+|-----------|--------|------------|---------|
+| **Paying users** | Full access | 10/min | `X-PAYMENT-RESPONSE` |
+| **Free tier** | Limited access | 3/min | `X-Payment-Mode: free-tier` |
+| **Whitelisted IPs** | Full access | No limit | - |
+| **Blacklisted IPs** | Blocked | - | 403 |
 
 ### Protected Endpoints (when X402_ENABLED=true)
 
-- `POST /api/v1/stamps/` - Requires payment
-- `POST /api/v1/data/` - Requires payment
-- `POST /api/v1/data/manifest` - Requires payment
+- `POST /api/v1/stamps/` - Requires payment OR free tier
+- `POST /api/v1/data/` - Requires payment OR free tier
+- `POST /api/v1/data/manifest` - Requires payment OR free tier
 - `GET /api/v1/data/{ref}` - FREE (no payment required)
+
+### Free Tier Behavior
+
+When `X402_FREE_TIER_ENABLED=true` (default):
+- Users without x402 payment can still access protected endpoints
+- Stricter rate limit applied (3 requests/minute by default)
+- Response includes `X-Payment-Mode: free-tier` header
+- When rate limit exceeded, returns 429 with payment upgrade info
+
+When `X402_FREE_TIER_ENABLED=false`:
+- Users without payment get HTTP 402 immediately
+- Must provide valid x402 payment to access protected endpoints
 
 ### Development Notes
 
 - Branch: `main-x402-upgrade` - DO NOT MERGE TO MAIN without approval
 - Python SDK is v1 only (v2 under development)
-- See `docs/x402-operator-guide.md` for operator setup instructions
 - All x402 transactions logged to `logs/x402_audit.jsonl`
+
+### x402 Documentation
+
+| Document | Purpose |
+|----------|---------|
+| `docs/x402-operator-guide.md` | Gateway operator setup and configuration |
+| `docs/x402-testing-guide.md` | Local testing with testnet wallets |
+| `docs/x402-client-integration.md` | CLI and MCP client integration guide |
 
 ### Testing x402
 
@@ -197,9 +229,21 @@ X402_ENABLED=false python run.py
 # With x402 enabled (requires facilitator)
 X402_ENABLED=true X402_PAY_TO_ADDRESS=0x... python run.py
 
-# Run x402 tests
+# Run x402 unit tests (mocked)
 python -m pytest tests/test_x402_*.py -v
+
+# Run live tests (requires testnet setup)
+RUN_LIVE_TESTS=1 pytest tests/test_x402_live.py -v
 ```
+
+### Future Work: CLI/MCP Integration
+
+The x402 **server** side is complete. **Client** integration is needed for:
+
+1. **CLI tool** - Add x402 payment support to command-line interface
+2. **MCP server** - Enable AI agents to make paid requests
+
+See `docs/x402-client-integration.md` for implementation requirements.
 
 ## Swarm Bee API Documentation
 

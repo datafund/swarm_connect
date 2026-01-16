@@ -316,11 +316,12 @@ class TestX402MiddlewareFlow:
     @patch("app.x402.middleware.settings")
     @patch("app.x402.middleware.get_price_quote")
     def test_protected_endpoint_returns_402_without_payment(self, mock_price_quote, mock_settings):
-        """Protected endpoint returns 402 without X-PAYMENT header."""
+        """Protected endpoint returns 402 without X-PAYMENT header when free tier disabled."""
         mock_settings.X402_ENABLED = True
         mock_settings.X402_NETWORK = "base-sepolia"
         mock_settings.X402_PAY_TO_ADDRESS = "0x1234"
         mock_settings.X402_MIN_PRICE_USD = 0.01
+        mock_settings.X402_FREE_TIER_ENABLED = False  # Disable free tier to test 402
 
         mock_price_quote.return_value = {
             "price_usd": 0.05,
@@ -449,6 +450,7 @@ class TestMiddlewarePriceCalculation:
         mock_settings.X402_NETWORK = "base-sepolia"
         mock_settings.X402_PAY_TO_ADDRESS = "0x1234"
         mock_settings.X402_MIN_PRICE_USD = 0.01
+        mock_settings.X402_FREE_TIER_ENABLED = False  # Disable free tier to test 402
 
         mock_price_quote.return_value = {
             "price_usd": 1.50,
@@ -479,6 +481,7 @@ class TestMiddlewarePriceCalculation:
         mock_settings.X402_NETWORK = "base-sepolia"
         mock_settings.X402_PAY_TO_ADDRESS = "0x1234"
         mock_settings.X402_MIN_PRICE_USD = 0.01
+        mock_settings.X402_FREE_TIER_ENABLED = False  # Disable free tier to test 402
 
         mock_price_quote.return_value = {
             "price_usd": 0.10,
@@ -531,3 +534,243 @@ class TestProtectedEndpoints:
         """GET methods should not be in protected list."""
         for method, path in PROTECTED_ENDPOINTS:
             assert method != "GET"
+
+
+class TestFreeTierAccess:
+    """Test free tier access for users without x402 payment capability."""
+
+    def setup_method(self):
+        """Reset rate limiter before each test."""
+        from app.x402.ratelimit import reset_rate_limiter
+        reset_rate_limiter()
+
+    def teardown_method(self):
+        """Reset rate limiter after each test."""
+        from app.x402.ratelimit import reset_rate_limiter
+        reset_rate_limiter()
+
+    @patch("app.x402.middleware.settings")
+    @patch("app.x402.middleware.get_price_quote")
+    def test_free_tier_allows_access_without_payment(self, mock_price_quote, mock_settings):
+        """Free tier enabled allows access without X-PAYMENT header."""
+        mock_settings.X402_ENABLED = True
+        mock_settings.X402_FREE_TIER_ENABLED = True
+        mock_settings.X402_FREE_TIER_RATE_LIMIT = 3
+        mock_settings.X402_NETWORK = "base-sepolia"
+        mock_settings.X402_PAY_TO_ADDRESS = "0x1234"
+        mock_settings.X402_MIN_PRICE_USD = 0.01
+
+        mock_price_quote.return_value = {
+            "price_usd": 0.05,
+            "description": "Data upload"
+        }
+
+        app = FastAPI()
+        app.add_middleware(X402Middleware)
+
+        @app.post("/api/v1/data/")
+        async def upload_data():
+            return {"status": "uploaded"}
+
+        client = TestClient(app)
+        response = client.post("/api/v1/data/")
+
+        # Should succeed with 200, not 402
+        assert response.status_code == 200
+        assert response.json() == {"status": "uploaded"}
+        # Should have free tier header
+        assert response.headers.get("X-Payment-Mode") == "free-tier"
+        # Should have rate limit headers
+        assert "X-RateLimit-Limit" in response.headers
+        assert "X-RateLimit-Remaining" in response.headers
+
+    @patch("app.x402.ratelimit.settings")
+    @patch("app.x402.middleware.settings")
+    @patch("app.x402.middleware.get_price_quote")
+    def test_free_tier_rate_limit_enforced(self, mock_price_quote, mock_middleware_settings, mock_ratelimit_settings):
+        """Free tier enforces stricter rate limit."""
+        # Configure middleware settings
+        mock_middleware_settings.X402_ENABLED = True
+        mock_middleware_settings.X402_FREE_TIER_ENABLED = True
+        mock_middleware_settings.X402_FREE_TIER_RATE_LIMIT = 2
+        mock_middleware_settings.X402_NETWORK = "base-sepolia"
+        mock_middleware_settings.X402_PAY_TO_ADDRESS = "0x1234"
+        mock_middleware_settings.X402_MIN_PRICE_USD = 0.01
+
+        # Configure ratelimit settings
+        mock_ratelimit_settings.X402_FREE_TIER_RATE_LIMIT = 2  # Only 2 requests per minute
+        mock_ratelimit_settings.X402_RATE_LIMIT_PER_IP = 10  # Paid tier would allow 10
+
+        mock_price_quote.return_value = {
+            "price_usd": 0.05,
+            "description": "Data upload"
+        }
+
+        app = FastAPI()
+        app.add_middleware(X402Middleware)
+
+        @app.post("/api/v1/data/")
+        async def upload_data():
+            return {"status": "uploaded"}
+
+        client = TestClient(app)
+
+        # First 2 requests should succeed
+        for i in range(2):
+            response = client.post("/api/v1/data/")
+            assert response.status_code == 200, f"Request {i+1} should succeed"
+
+        # 3rd request should be rate limited
+        response = client.post("/api/v1/data/")
+        assert response.status_code == 429
+        body = response.json()
+        assert body["error"] == "Rate limit exceeded"
+        assert "free tier" in body["detail"].lower()
+        # Should include payment info for upgrade
+        assert "payment_info" in body
+        assert body["payment_info"]["price_usd"] == 0.05
+
+    @patch("app.x402.middleware.settings")
+    @patch("app.x402.middleware.get_price_quote")
+    def test_free_tier_disabled_returns_402(self, mock_price_quote, mock_settings):
+        """When free tier is disabled, requests without payment get 402."""
+        mock_settings.X402_ENABLED = True
+        mock_settings.X402_FREE_TIER_ENABLED = False  # Disable free tier
+        mock_settings.X402_NETWORK = "base-sepolia"
+        mock_settings.X402_PAY_TO_ADDRESS = "0x1234"
+        mock_settings.X402_MIN_PRICE_USD = 0.01
+
+        mock_price_quote.return_value = {
+            "price_usd": 0.05,
+            "description": "Data upload"
+        }
+
+        app = FastAPI()
+        app.add_middleware(X402Middleware)
+
+        @app.post("/api/v1/data/")
+        async def upload_data():
+            return {"status": "uploaded"}
+
+        client = TestClient(app)
+        response = client.post("/api/v1/data/")
+
+        # Should return 402 when free tier disabled
+        assert response.status_code == 402
+
+    @patch("app.x402.ratelimit.settings")
+    @patch("app.x402.middleware.settings")
+    @patch("app.x402.middleware.get_price_quote")
+    def test_free_tier_rate_limit_headers_present(self, mock_price_quote, mock_middleware_settings, mock_ratelimit_settings):
+        """Free tier responses include rate limit headers."""
+        mock_middleware_settings.X402_ENABLED = True
+        mock_middleware_settings.X402_FREE_TIER_ENABLED = True
+        mock_middleware_settings.X402_FREE_TIER_RATE_LIMIT = 5
+        mock_middleware_settings.X402_NETWORK = "base-sepolia"
+        mock_middleware_settings.X402_PAY_TO_ADDRESS = "0x1234"
+        mock_middleware_settings.X402_MIN_PRICE_USD = 0.01
+
+        mock_ratelimit_settings.X402_FREE_TIER_RATE_LIMIT = 5
+        mock_ratelimit_settings.X402_RATE_LIMIT_PER_IP = 10
+
+        mock_price_quote.return_value = {
+            "price_usd": 0.05,
+            "description": "Data upload"
+        }
+
+        app = FastAPI()
+        app.add_middleware(X402Middleware)
+
+        @app.post("/api/v1/data/")
+        async def upload_data():
+            return {"status": "uploaded"}
+
+        client = TestClient(app)
+        response = client.post("/api/v1/data/")
+
+        assert response.status_code == 200
+        assert response.headers["X-RateLimit-Limit"] == "5"
+        assert response.headers["X-RateLimit-Remaining"] == "4"  # 5 - 1 = 4
+        assert response.headers["X-Payment-Mode"] == "free-tier"
+
+    @patch("app.x402.ratelimit.settings")
+    @patch("app.x402.middleware.settings")
+    @patch("app.x402.middleware.get_price_quote")
+    def test_free_tier_429_includes_upgrade_info(self, mock_price_quote, mock_middleware_settings, mock_ratelimit_settings):
+        """Rate limit exceeded response includes info on how to upgrade."""
+        mock_middleware_settings.X402_ENABLED = True
+        mock_middleware_settings.X402_FREE_TIER_ENABLED = True
+        mock_middleware_settings.X402_FREE_TIER_RATE_LIMIT = 1
+        mock_middleware_settings.X402_NETWORK = "base-sepolia"
+        mock_middleware_settings.X402_PAY_TO_ADDRESS = "0xPaymentWallet"
+        mock_middleware_settings.X402_MIN_PRICE_USD = 0.01
+
+        mock_ratelimit_settings.X402_FREE_TIER_RATE_LIMIT = 1
+        mock_ratelimit_settings.X402_RATE_LIMIT_PER_IP = 10
+
+        mock_price_quote.return_value = {
+            "price_usd": 0.10,
+            "description": "Stamp purchase"
+        }
+
+        app = FastAPI()
+        app.add_middleware(X402Middleware)
+
+        @app.post("/api/v1/stamps/")
+        async def purchase_stamp():
+            return {"status": "purchased"}
+
+        client = TestClient(app)
+
+        # First request succeeds
+        response = client.post("/api/v1/stamps/")
+        assert response.status_code == 200
+
+        # Second request hits rate limit
+        response = client.post("/api/v1/stamps/")
+        assert response.status_code == 429
+
+        body = response.json()
+        assert "payment_info" in body
+        assert body["payment_info"]["network"] == "base-sepolia"
+        assert body["payment_info"]["pay_to"] == "0xPaymentWallet"
+        assert body["payment_info"]["price_usd"] == 0.10
+        assert "Use x402 payment for higher limits" in body["message"]
+
+    @patch("app.x402.middleware.settings")
+    @patch("app.x402.middleware.get_price_quote")
+    def test_different_endpoints_share_free_tier_limit(self, mock_price_quote, mock_settings):
+        """Free tier rate limit is shared across all protected endpoints."""
+        mock_settings.X402_ENABLED = True
+        mock_settings.X402_FREE_TIER_ENABLED = True
+        mock_settings.X402_FREE_TIER_RATE_LIMIT = 3
+        mock_settings.X402_NETWORK = "base-sepolia"
+        mock_settings.X402_PAY_TO_ADDRESS = "0x1234"
+        mock_settings.X402_MIN_PRICE_USD = 0.01
+
+        mock_price_quote.return_value = {
+            "price_usd": 0.05,
+            "description": "Operation"
+        }
+
+        app = FastAPI()
+        app.add_middleware(X402Middleware)
+
+        @app.post("/api/v1/stamps/")
+        async def purchase_stamp():
+            return {"status": "purchased"}
+
+        @app.post("/api/v1/data/")
+        async def upload_data():
+            return {"status": "uploaded"}
+
+        client = TestClient(app)
+
+        # Mix of endpoints should share the rate limit
+        assert client.post("/api/v1/stamps/").status_code == 200
+        assert client.post("/api/v1/data/").status_code == 200
+        assert client.post("/api/v1/stamps/").status_code == 200
+
+        # 4th request should be rate limited
+        response = client.post("/api/v1/data/")
+        assert response.status_code == 429

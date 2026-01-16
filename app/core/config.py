@@ -1,7 +1,7 @@
 # app/core/config.py
 import os
 from typing import Optional, List
-from pydantic_settings import BaseSettings
+from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic import AnyHttpUrl, field_validator
 from functools import lru_cache
 from dotenv import load_dotenv
@@ -33,7 +33,12 @@ class Settings(BaseSettings):
 
     # === x402 Limits ===
     X402_MAX_STAMP_BZZ: float = 5.0  # Max single stamp purchase in BZZ
-    X402_RATE_LIMIT_PER_IP: int = 10  # Requests per minute per IP
+    X402_RATE_LIMIT_PER_IP: int = 10  # Requests per minute per IP (for paying users)
+
+    # === x402 Free Tier Settings ===
+    # When enabled, users without x402 payment can still access with stricter rate limits
+    X402_FREE_TIER_ENABLED: bool = True  # Allow non-paying users with rate limits
+    X402_FREE_TIER_RATE_LIMIT: int = 3  # Requests per minute for free tier (lower than paid)
 
     # === x402 Access Control ===
     X402_BLACKLIST_IPS: str = ""  # Comma-separated blocked IPs
@@ -63,10 +68,11 @@ class Settings(BaseSettings):
             return []
         return [ip.strip() for ip in self.X402_WHITELIST_IPS.split(",") if ip.strip()]
 
-    class Config:
-        env_file = ".env"
-        case_sensitive = True
-        extra = "ignore"  # Ignore extra fields from .env
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        case_sensitive=True,
+        extra="ignore",  # Ignore extra fields from .env
+    )
 
 
 @lru_cache()  # Cache the settings object for performance

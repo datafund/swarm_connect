@@ -139,8 +139,9 @@ class TestMiddlewareIntegration:
     def test_protected_endpoint_returns_402_without_payment(
         self, mock_price_quote, mock_settings
     ):
-        """Protected endpoint returns 402 without X-PAYMENT header."""
+        """Protected endpoint returns 402 without X-PAYMENT header (when free tier disabled)."""
         mock_settings.X402_ENABLED = True
+        mock_settings.X402_FREE_TIER_ENABLED = False  # Disable free tier to test 402
         mock_settings.X402_FACILITATOR_URL = "https://x402.org/facilitator"
         mock_settings.X402_PAY_TO_ADDRESS = "0xpayee"
         mock_settings.X402_NETWORK = "base-sepolia"
@@ -170,6 +171,7 @@ class TestMiddlewareIntegration:
     ):
         """402 response contains proper payment requirements."""
         mock_settings.X402_ENABLED = True
+        mock_settings.X402_FREE_TIER_ENABLED = False  # Disable free tier to test 402
         mock_settings.X402_FACILITATOR_URL = "https://x402.org/facilitator"
         mock_settings.X402_PAY_TO_ADDRESS = "0xTestPayee"
         mock_settings.X402_NETWORK = "base-sepolia"
@@ -540,8 +542,9 @@ class TestProtectedEndpoints:
     @patch("app.x402.middleware.settings")
     @patch("app.x402.middleware.get_price_quote")
     def test_stamps_endpoint_protected(self, mock_price_quote, mock_settings):
-        """POST /api/v1/stamps/ is protected."""
+        """POST /api/v1/stamps/ is protected (returns 402 when free tier disabled)."""
         mock_settings.X402_ENABLED = True
+        mock_settings.X402_FREE_TIER_ENABLED = False  # Disable free tier to test 402
         mock_settings.X402_FACILITATOR_URL = "https://x402.org/facilitator"
         mock_settings.X402_PAY_TO_ADDRESS = "0xpayee"
         mock_settings.X402_NETWORK = "base-sepolia"
@@ -558,8 +561,9 @@ class TestProtectedEndpoints:
     @patch("app.x402.middleware.settings")
     @patch("app.x402.middleware.get_price_quote")
     def test_data_endpoint_protected(self, mock_price_quote, mock_settings):
-        """POST /api/v1/data/ is protected."""
+        """POST /api/v1/data/ is protected (returns 402 when free tier disabled)."""
         mock_settings.X402_ENABLED = True
+        mock_settings.X402_FREE_TIER_ENABLED = False  # Disable free tier to test 402
         mock_settings.X402_FACILITATOR_URL = "https://x402.org/facilitator"
         mock_settings.X402_PAY_TO_ADDRESS = "0xpayee"
         mock_settings.X402_NETWORK = "base-sepolia"
@@ -576,8 +580,9 @@ class TestProtectedEndpoints:
     @patch("app.x402.middleware.settings")
     @patch("app.x402.middleware.get_price_quote")
     def test_manifest_endpoint_protected(self, mock_price_quote, mock_settings):
-        """POST /api/v1/data/manifest is protected."""
+        """POST /api/v1/data/manifest is protected (returns 402 when free tier disabled)."""
         mock_settings.X402_ENABLED = True
+        mock_settings.X402_FREE_TIER_ENABLED = False  # Disable free tier to test 402
         mock_settings.X402_FACILITATOR_URL = "https://x402.org/facilitator"
         mock_settings.X402_PAY_TO_ADDRESS = "0xpayee"
         mock_settings.X402_NETWORK = "base-sepolia"
@@ -609,7 +614,7 @@ class TestEndToEndScenarios:
         """
         Simulate a gateway operator workflow:
         1. Start with x402 disabled
-        2. Enable x402
+        2. Enable x402 with free tier disabled
         3. Requests without payment get 402
         4. Requests with valid payment succeed
         """
@@ -629,8 +634,9 @@ class TestEndToEndScenarios:
         response = client.post("/api/v1/stamps/")
         assert response.status_code == 200
 
-        # Step 2: Enable x402
+        # Step 2: Enable x402 with free tier disabled (to test 402 behavior)
         mock_settings.X402_ENABLED = True
+        mock_settings.X402_FREE_TIER_ENABLED = False  # Disable free tier to test 402
         mock_price_quote.return_value = {"price_usd": 0.05, "description": "Test"}
 
         # Need to recreate app to pick up new setting
@@ -655,7 +661,7 @@ class TestEndToEndScenarios:
         app2.add_middleware(X402Middleware, facilitator_client=mock_facilitator)
         client2 = TestClient(app2)
 
-        # Step 3: Without payment, get 402
+        # Step 3: Without payment, get 402 (free tier disabled)
         response = client2.post("/api/v1/stamps/")
         assert response.status_code == 402
 
@@ -670,8 +676,9 @@ class TestEndToEndScenarios:
     @patch("app.x402.middleware.settings")
     @patch("app.x402.middleware.get_price_quote")
     def test_price_varies_by_endpoint(self, mock_price_quote, mock_settings):
-        """Different endpoints can have different prices."""
+        """Different endpoints can have different prices (when free tier disabled)."""
         mock_settings.X402_ENABLED = True
+        mock_settings.X402_FREE_TIER_ENABLED = False  # Disable free tier to test 402
         mock_settings.X402_FACILITATOR_URL = "https://x402.org/facilitator"
         mock_settings.X402_PAY_TO_ADDRESS = "0xpayee"
         mock_settings.X402_NETWORK = "base-sepolia"
