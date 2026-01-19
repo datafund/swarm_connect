@@ -52,7 +52,14 @@ Content-Type: application/json
       }
     }
   ],
-  "error": "X-PAYMENT header is required"
+  "error": "Payment required. Use X-PAYMENT header for paid access or X-Payment-Mode: free for free tier.",
+  "freeTier": {
+    "available": true,
+    "requestsRemaining": 5,
+    "requestsLimit": 5,
+    "windowSeconds": 60,
+    "instruction": "Add header 'X-Payment-Mode: free' to use free tier"
+  }
 }
 ```
 
@@ -282,18 +289,104 @@ class X402Budget:
 
 ## Free Tier Handling
 
-When `X402_FREE_TIER_ENABLED=true` on the gateway:
+When `X402_FREE_TIER_ENABLED=true` on the gateway, clients can choose between paid and free access. The gateway **always returns HTTP 402 first** with both payment requirements and free tier availability.
 
-- Requests without payment may succeed (within rate limits)
-- Response includes `X-Payment-Mode: free-tier` header
-- Rate limit headers: `X-RateLimit-Limit`, `X-RateLimit-Remaining`
+### Client Decision Flow
 
-CLI should detect free tier:
+```
+1. Make request to protected endpoint
+   ↓
+2. Receive HTTP 402 with:
+   - Payment requirements (accepts[])
+   - Free tier info (freeTier{})
+   ↓
+3. Client chooses:
+   a) Paid: Retry with X-PAYMENT header
+   b) Free: Retry with X-Payment-Mode: free header
+```
+
+### Using Free Tier
+
+To use free tier, add the `X-Payment-Mode: free` header:
+
+```python
+# Check 402 response for free tier availability
+if response.status_code == 402:
+    data = response.json()
+    free_tier = data.get("freeTier", {})
+
+    if free_tier.get("available") and free_tier.get("requestsRemaining", 0) > 0:
+        # Use free tier
+        response = requests.post(
+            url,
+            headers={"X-Payment-Mode": "free"},
+            **kwargs
+        )
+    else:
+        # Must pay - no free tier or exhausted
+        response = make_paid_request(url, **kwargs)
+```
+
+### Free Tier Response
+
+Successful free tier responses include rate limit headers:
+
+```
+HTTP/1.1 200 OK
+X-Payment-Mode: free-tier
+X-RateLimit-Limit: 5
+X-RateLimit-Remaining: 4
+X-RateLimit-Reset: 60
+```
+
+CLI should display free tier status:
 
 ```python
 if response.headers.get("X-Payment-Mode") == "free-tier":
     remaining = response.headers.get("X-RateLimit-Remaining", "?")
-    print(f"Free tier request ({remaining} remaining)")
+    limit = response.headers.get("X-RateLimit-Limit", "?")
+    print(f"Free tier request ({remaining}/{limit} remaining)")
+```
+
+### Rate Limit Exceeded (429)
+
+When free tier rate limit is exhausted:
+
+```json
+{
+  "error": "Rate limit exceeded",
+  "detail": "Rate limit exceeded (free tier): 6/5 requests per minute",
+  "message": "Free tier rate limit exceeded. Use x402 payment for higher limits.",
+  "payment_info": {
+    "price_usd": 0.01,
+    "network": "base-sepolia",
+    "pay_to": "0x..."
+  }
+}
+```
+
+### Recommended Client Logic
+
+```python
+def smart_request(url, prefer_free=True, **kwargs):
+    """Make request with intelligent payment/free tier handling."""
+    response = requests.post(url, **kwargs)
+
+    if response.status_code != 402:
+        return response
+
+    data = response.json()
+    free_tier = data.get("freeTier", {})
+
+    # Try free tier first if available and preferred
+    if prefer_free and free_tier.get("available") and free_tier.get("requestsRemaining", 0) > 0:
+        response = requests.post(url, headers={"X-Payment-Mode": "free"}, **kwargs)
+        if response.status_code == 200:
+            return response
+        # Fall through to payment if free tier failed
+
+    # Make paid request
+    return make_paid_request(url, data["accepts"][0], **kwargs)
 ```
 
 ## Dependencies
