@@ -25,7 +25,7 @@ from x402.encoding import safe_base64_decode, safe_base64_encode
 
 from app.core.config import settings
 from app.x402.pricing import get_price_quote
-from app.x402.ratelimit import check_rate_limit, get_rate_limit_headers
+from app.x402.ratelimit import check_rate_limit, get_rate_limit_headers, get_free_tier_stats
 from app.x402.base_balance import check_base_eth_balance
 
 logger = logging.getLogger(__name__)
@@ -34,6 +34,7 @@ logger = logging.getLogger(__name__)
 X402_VERSION = 1
 X_PAYMENT_HEADER = "X-PAYMENT"
 X_PAYMENT_RESPONSE_HEADER = "X-PAYMENT-RESPONSE"
+X_PAYMENT_MODE_HEADER = "X-Payment-Mode"
 
 # USDC contract addresses by network
 USDC_ADDRESSES = {
@@ -126,7 +127,8 @@ def create_payment_requirements(
 
 def create_402_response(
     payment_requirements: PaymentRequirements,
-    error_message: str = "Payment required"
+    error_message: str = "Payment required",
+    free_tier_info: Optional[dict] = None
 ) -> JSONResponse:
     """
     Create an HTTP 402 Payment Required response.
@@ -134,6 +136,7 @@ def create_402_response(
     Args:
         payment_requirements: The payment requirements to include
         error_message: Error message for the response
+        free_tier_info: Optional free tier information to include
 
     Returns:
         JSONResponse with 402 status and payment details
@@ -143,6 +146,10 @@ def create_402_response(
         "error": error_message,
         "accepts": [payment_requirements.model_dump(by_alias=True)]
     }
+
+    # Include free tier info if available
+    if free_tier_info and free_tier_info.get("available"):
+        response_body["freeTier"] = free_tier_info
 
     return JSONResponse(
         status_code=402,
@@ -289,58 +296,73 @@ class X402Middleware(BaseHTTPMiddleware):
             description=description
         )
 
-        # If no payment header, check for free tier access
-        if not payment_header:
-            # Check if free tier is enabled
-            if settings.X402_FREE_TIER_ENABLED:
-                # Check free tier rate limit
-                is_allowed, reason, stats = check_rate_limit(client_ip, is_free_tier=True)
+        # Check for X-Payment-Mode header (free tier opt-in)
+        payment_mode = request.headers.get(X_PAYMENT_MODE_HEADER, "").lower()
 
-                if is_allowed:
-                    logger.info(f"x402: Free tier access granted for {client_ip} ({stats['requests_made']}/{stats['limit']} requests)")
-                    # Process request with rate limit headers
-                    response = await call_next(request)
+        # If no payment header AND no free tier opt-in, return 402
+        if not payment_header and payment_mode != "free":
+            # Get free tier stats to include in 402 response
+            free_tier_info = get_free_tier_stats(client_ip) if settings.X402_FREE_TIER_ENABLED else None
 
-                    # Add rate limit headers to response
-                    body = b""
-                    async for chunk in response.body_iterator:
-                        body += chunk
-
-                    new_response = Response(
-                        content=body,
-                        status_code=response.status_code,
-                        headers=dict(response.headers),
-                        media_type=response.media_type
-                    )
-                    for header, value in get_rate_limit_headers(stats).items():
-                        new_response.headers[header] = value
-                    new_response.headers["X-Payment-Mode"] = "free-tier"
-
-                    return new_response
-                else:
-                    # Free tier rate limit exceeded - return 429
-                    logger.warning(f"x402: Free tier rate limit exceeded for {client_ip}: {reason}")
-                    return JSONResponse(
-                        status_code=429,
-                        content={
-                            "error": "Rate limit exceeded",
-                            "detail": reason,
-                            "message": "Free tier rate limit exceeded. Use x402 payment for higher limits.",
-                            "payment_info": {
-                                "price_usd": price_usd,
-                                "network": settings.X402_NETWORK,
-                                "pay_to": settings.X402_PAY_TO_ADDRESS,
-                            }
-                        },
-                        headers=get_rate_limit_headers(stats)
-                    )
-
-            # Free tier disabled - return 402
-            logger.info(f"x402: No X-PAYMENT header, returning 402 for ${price_usd}")
+            logger.info(f"x402: No payment header, returning 402 for ${price_usd}")
             return create_402_response(
                 payment_requirements=payment_requirements,
-                error_message="X-PAYMENT header is required"
+                error_message="Payment required. Use X-PAYMENT header for paid access or X-Payment-Mode: free for free tier.",
+                free_tier_info=free_tier_info
             )
+
+        # Handle free tier opt-in
+        if payment_mode == "free":
+            if not settings.X402_FREE_TIER_ENABLED:
+                logger.warning(f"x402: Free tier requested but disabled for {client_ip}")
+                return create_402_response(
+                    payment_requirements=payment_requirements,
+                    error_message="Free tier is not available. Payment required."
+                )
+
+            # Check free tier rate limit
+            is_allowed, reason, stats = check_rate_limit(client_ip, is_free_tier=True)
+
+            if is_allowed:
+                logger.info(f"x402: Free tier access granted for {client_ip} ({stats['requests_made']}/{stats['limit']} requests)")
+                # Process request with rate limit headers
+                response = await call_next(request)
+
+                # Add rate limit headers to response
+                body = b""
+                async for chunk in response.body_iterator:
+                    body += chunk
+
+                new_response = Response(
+                    content=body,
+                    status_code=response.status_code,
+                    headers=dict(response.headers),
+                    media_type=response.media_type
+                )
+                for header, value in get_rate_limit_headers(stats).items():
+                    new_response.headers[header] = value
+                new_response.headers["X-Payment-Mode"] = "free-tier"
+
+                return new_response
+            else:
+                # Free tier rate limit exceeded - return 429
+                logger.warning(f"x402: Free tier rate limit exceeded for {client_ip}: {reason}")
+                return JSONResponse(
+                    status_code=429,
+                    content={
+                        "error": "Rate limit exceeded",
+                        "detail": reason,
+                        "message": "Free tier rate limit exceeded. Use x402 payment for higher limits.",
+                        "payment_info": {
+                            "price_usd": price_usd,
+                            "network": settings.X402_NETWORK,
+                            "pay_to": settings.X402_PAY_TO_ADDRESS,
+                        }
+                    },
+                    headers=get_rate_limit_headers(stats)
+                )
+
+        # At this point, we have an X-PAYMENT header - continue to payment verification
 
         # Decode payment header
         payment_payload = decode_payment_header(payment_header)

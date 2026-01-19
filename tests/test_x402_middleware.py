@@ -341,7 +341,7 @@ class TestX402MiddlewareFlow:
         assert response.status_code == 402
         body = response.json()
         assert body["x402Version"] == 1
-        assert "X-PAYMENT header is required" in body["error"]
+        assert "Payment required" in body["error"]
         assert "accepts" in body
 
     @patch("app.x402.middleware.settings")
@@ -552,7 +552,7 @@ class TestFreeTierAccess:
     @patch("app.x402.middleware.settings")
     @patch("app.x402.middleware.get_price_quote")
     def test_free_tier_allows_access_without_payment(self, mock_price_quote, mock_settings):
-        """Free tier enabled allows access without X-PAYMENT header."""
+        """Free tier enabled allows access with X-Payment-Mode: free header."""
         mock_settings.X402_ENABLED = True
         mock_settings.X402_FREE_TIER_ENABLED = True
         mock_settings.X402_FREE_TIER_RATE_LIMIT = 3
@@ -573,7 +573,8 @@ class TestFreeTierAccess:
             return {"status": "uploaded"}
 
         client = TestClient(app)
-        response = client.post("/api/v1/data/")
+        # Must include X-Payment-Mode: free header to opt into free tier
+        response = client.post("/api/v1/data/", headers={"X-Payment-Mode": "free"})
 
         # Should succeed with 200, not 402
         assert response.status_code == 200
@@ -615,13 +616,13 @@ class TestFreeTierAccess:
 
         client = TestClient(app)
 
-        # First 2 requests should succeed
+        # First 2 requests should succeed (with X-Payment-Mode: free header)
         for i in range(2):
-            response = client.post("/api/v1/data/")
+            response = client.post("/api/v1/data/", headers={"X-Payment-Mode": "free"})
             assert response.status_code == 200, f"Request {i+1} should succeed"
 
         # 3rd request should be rate limited
-        response = client.post("/api/v1/data/")
+        response = client.post("/api/v1/data/", headers={"X-Payment-Mode": "free"})
         assert response.status_code == 429
         body = response.json()
         assert body["error"] == "Rate limit exceeded"
@@ -686,7 +687,8 @@ class TestFreeTierAccess:
             return {"status": "uploaded"}
 
         client = TestClient(app)
-        response = client.post("/api/v1/data/")
+        # Must include X-Payment-Mode: free header to opt into free tier
+        response = client.post("/api/v1/data/", headers={"X-Payment-Mode": "free"})
 
         assert response.status_code == 200
         assert response.headers["X-RateLimit-Limit"] == "5"
@@ -722,12 +724,12 @@ class TestFreeTierAccess:
 
         client = TestClient(app)
 
-        # First request succeeds
-        response = client.post("/api/v1/stamps/")
+        # First request succeeds (with X-Payment-Mode: free header)
+        response = client.post("/api/v1/stamps/", headers={"X-Payment-Mode": "free"})
         assert response.status_code == 200
 
         # Second request hits rate limit
-        response = client.post("/api/v1/stamps/")
+        response = client.post("/api/v1/stamps/", headers={"X-Payment-Mode": "free"})
         assert response.status_code == 429
 
         body = response.json()
@@ -766,11 +768,122 @@ class TestFreeTierAccess:
 
         client = TestClient(app)
 
-        # Mix of endpoints should share the rate limit
-        assert client.post("/api/v1/stamps/").status_code == 200
-        assert client.post("/api/v1/data/").status_code == 200
-        assert client.post("/api/v1/stamps/").status_code == 200
+        # Mix of endpoints should share the rate limit (with X-Payment-Mode: free header)
+        assert client.post("/api/v1/stamps/", headers={"X-Payment-Mode": "free"}).status_code == 200
+        assert client.post("/api/v1/data/", headers={"X-Payment-Mode": "free"}).status_code == 200
+        assert client.post("/api/v1/stamps/", headers={"X-Payment-Mode": "free"}).status_code == 200
 
         # 4th request should be rate limited
-        response = client.post("/api/v1/data/")
+        response = client.post("/api/v1/data/", headers={"X-Payment-Mode": "free"})
         assert response.status_code == 429
+
+    @patch("app.x402.ratelimit.settings")
+    @patch("app.x402.middleware.settings")
+    @patch("app.x402.middleware.get_price_quote")
+    def test_402_response_includes_free_tier_info(self, mock_price_quote, mock_middleware_settings, mock_ratelimit_settings):
+        """402 response includes free tier information when enabled."""
+        mock_middleware_settings.X402_ENABLED = True
+        mock_middleware_settings.X402_FREE_TIER_ENABLED = True
+        mock_middleware_settings.X402_FREE_TIER_RATE_LIMIT = 5
+        mock_middleware_settings.X402_NETWORK = "base-sepolia"
+        mock_middleware_settings.X402_PAY_TO_ADDRESS = "0x1234"
+        mock_middleware_settings.X402_MIN_PRICE_USD = 0.01
+
+        mock_ratelimit_settings.X402_FREE_TIER_ENABLED = True
+        mock_ratelimit_settings.X402_FREE_TIER_RATE_LIMIT = 5
+        mock_ratelimit_settings.X402_RATE_LIMIT_PER_IP = 10
+
+        mock_price_quote.return_value = {
+            "price_usd": 0.05,
+            "description": "Data upload"
+        }
+
+        app = FastAPI()
+        app.add_middleware(X402Middleware)
+
+        @app.post("/api/v1/data/")
+        async def upload_data():
+            return {"status": "uploaded"}
+
+        client = TestClient(app)
+        # Request without any payment headers
+        response = client.post("/api/v1/data/")
+
+        assert response.status_code == 402
+        body = response.json()
+
+        # Should have standard x402 payment info
+        assert body["x402Version"] == 1
+        assert "accepts" in body
+
+        # Should also include free tier info
+        assert "freeTier" in body
+        assert body["freeTier"]["available"] is True
+        assert body["freeTier"]["requestsLimit"] == 5
+        assert "instruction" in body["freeTier"]
+        assert "X-Payment-Mode: free" in body["freeTier"]["instruction"]
+
+    @patch("app.x402.middleware.settings")
+    @patch("app.x402.middleware.get_price_quote")
+    def test_402_response_no_free_tier_when_disabled(self, mock_price_quote, mock_settings):
+        """402 response does not include free tier info when disabled."""
+        mock_settings.X402_ENABLED = True
+        mock_settings.X402_FREE_TIER_ENABLED = False
+        mock_settings.X402_NETWORK = "base-sepolia"
+        mock_settings.X402_PAY_TO_ADDRESS = "0x1234"
+        mock_settings.X402_MIN_PRICE_USD = 0.01
+
+        mock_price_quote.return_value = {
+            "price_usd": 0.05,
+            "description": "Data upload"
+        }
+
+        app = FastAPI()
+        app.add_middleware(X402Middleware)
+
+        @app.post("/api/v1/data/")
+        async def upload_data():
+            return {"status": "uploaded"}
+
+        client = TestClient(app)
+        response = client.post("/api/v1/data/")
+
+        assert response.status_code == 402
+        body = response.json()
+
+        # Should have standard x402 payment info
+        assert body["x402Version"] == 1
+        assert "accepts" in body
+
+        # Should NOT include free tier info
+        assert "freeTier" not in body
+
+    @patch("app.x402.middleware.settings")
+    @patch("app.x402.middleware.get_price_quote")
+    def test_free_tier_request_disabled_returns_402(self, mock_price_quote, mock_settings):
+        """Requesting free tier when disabled returns 402."""
+        mock_settings.X402_ENABLED = True
+        mock_settings.X402_FREE_TIER_ENABLED = False
+        mock_settings.X402_NETWORK = "base-sepolia"
+        mock_settings.X402_PAY_TO_ADDRESS = "0x1234"
+        mock_settings.X402_MIN_PRICE_USD = 0.01
+
+        mock_price_quote.return_value = {
+            "price_usd": 0.05,
+            "description": "Data upload"
+        }
+
+        app = FastAPI()
+        app.add_middleware(X402Middleware)
+
+        @app.post("/api/v1/data/")
+        async def upload_data():
+            return {"status": "uploaded"}
+
+        client = TestClient(app)
+        # Try to use free tier when disabled
+        response = client.post("/api/v1/data/", headers={"X-Payment-Mode": "free"})
+
+        assert response.status_code == 402
+        body = response.json()
+        assert "Free tier is not available" in body["error"]

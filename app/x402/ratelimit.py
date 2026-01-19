@@ -306,3 +306,30 @@ def reset_rate_limiter() -> None:
         if _rate_limiter is not None:
             _rate_limiter.reset_all()
         _rate_limiter = None
+
+
+def get_free_tier_stats(client_ip: str) -> Dict[str, any]:
+    """
+    Get free tier rate limit stats without consuming a request.
+
+    Used to include free tier info in 402 responses.
+
+    Args:
+        client_ip: The client's IP address
+
+    Returns:
+        Dict with free tier availability and limits
+    """
+    limiter = get_rate_limiter()
+    stats = limiter.get_client_stats(client_ip)
+
+    free_tier_limit = settings.X402_FREE_TIER_RATE_LIMIT
+    requests_in_window = stats["requests_in_window"]
+
+    return {
+        "available": settings.X402_FREE_TIER_ENABLED,
+        "requestsRemaining": max(0, free_tier_limit - requests_in_window),
+        "requestsLimit": free_tier_limit,
+        "windowSeconds": stats["window_seconds"],
+        "instruction": "Add header 'X-Payment-Mode: free' to use free tier"
+    }

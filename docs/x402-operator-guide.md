@@ -74,6 +74,10 @@ X402_BASE_ETH_CRITICAL_THRESHOLD=0.001  # Block if Base ETH < 0.001 (~10 txs)
 X402_MAX_STAMP_BZZ=5                 # Max 5 BZZ per stamp purchase
 X402_RATE_LIMIT_PER_IP=10            # 10 requests/minute per IP
 
+# === Free Tier ===
+X402_FREE_TIER_ENABLED=true          # Enable rate-limited free tier (default: true)
+X402_FREE_TIER_RATE_LIMIT=5          # Free tier requests per minute per IP (default: 5)
+
 # === Access Control ===
 X402_BLACKLIST_IPS=                  # Comma-separated: 192.168.1.100,10.0.0.50
 X402_WHITELIST_IPS=127.0.0.1         # Free access for these IPs
@@ -134,6 +138,104 @@ X402_BLACKLIST_IPS=203.0.113.50
 Use for:
 - Known bad actors
 - Abuse prevention
+
+## Free Tier
+
+The gateway supports a rate-limited free tier that allows clients to use protected endpoints without payment. When enabled, clients receive information about both payment options and free tier availability in the 402 response.
+
+### Configuration
+
+```bash
+# === Free Tier ===
+X402_FREE_TIER_ENABLED=true           # Enable free tier (default: true)
+X402_FREE_TIER_RATE_LIMIT=5           # Requests per minute for free tier (default: 5)
+```
+
+### How It Works
+
+1. **Client makes request** to a protected endpoint without any payment headers
+2. **Gateway returns HTTP 402** with:
+   - Payment requirements (price, network, address)
+   - Free tier info (if enabled): remaining requests, limit, instructions
+3. **Client chooses**:
+   - **Paid access**: Add `X-PAYMENT` header with signed payment
+   - **Free tier**: Add `X-Payment-Mode: free` header
+
+### 402 Response Format
+
+When a client hits a protected endpoint without proper headers:
+
+```json
+{
+  "x402Version": 1,
+  "error": "Payment required. Use X-PAYMENT header for paid access or X-Payment-Mode: free for free tier.",
+  "accepts": [
+    {
+      "scheme": "exact",
+      "network": "base-sepolia",
+      "maxAmountRequired": "10000",
+      "resource": "http://localhost:8000/api/v1/data/",
+      "description": "Data upload (1024 bytes, 24h)",
+      "mimeType": "application/json",
+      "payTo": "0xYourAddress...",
+      "maxTimeoutSeconds": 300,
+      "asset": "0x036CbD53842c5426634e7929541eC2318f3dCF7e"
+    }
+  ],
+  "freeTier": {
+    "available": true,
+    "requestsRemaining": 5,
+    "requestsLimit": 5,
+    "windowSeconds": 60,
+    "instruction": "Add header 'X-Payment-Mode: free' to use free tier"
+  }
+}
+```
+
+### Client Headers
+
+| Header | Value | Purpose |
+|--------|-------|---------|
+| `X-PAYMENT` | Base64-encoded payment payload | Use paid tier |
+| `X-Payment-Mode` | `free` | Use free tier |
+
+### Free Tier Response Headers
+
+When using free tier, responses include rate limit headers:
+
+```
+X-RateLimit-Limit: 5
+X-RateLimit-Remaining: 4
+X-RateLimit-Reset: 60
+X-Payment-Mode: free-tier
+```
+
+### Rate Limit Exceeded (429)
+
+When free tier rate limit is exceeded:
+
+```json
+{
+  "error": "Rate limit exceeded",
+  "detail": "Rate limit exceeded (free tier): 6/5 requests per minute",
+  "message": "Free tier rate limit exceeded. Use x402 payment for higher limits.",
+  "payment_info": {
+    "price_usd": 0.01,
+    "network": "base-sepolia",
+    "pay_to": "0xYourAddress..."
+  }
+}
+```
+
+### Disabling Free Tier
+
+To require payment for all requests:
+
+```bash
+X402_FREE_TIER_ENABLED=false
+```
+
+When disabled, 402 responses will not include the `freeTier` block, and requests with `X-Payment-Mode: free` will receive a 402 requiring payment.
 
 ## Audit Logs
 
