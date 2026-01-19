@@ -1,5 +1,5 @@
 # swarm_connect
-Simpler server for accessing some Swarm features.
+A simpler server for accessing some Swarm features.
 
 > ⚠️ **ALPHA SOFTWARE - PROOF OF CONCEPT**
 > This software is in **Alpha stage** and should be considered a **Proof of Concept**. Use for testing and experimentation only. Not recommended for production use.
