@@ -1,3 +1,4 @@
+---
 name: deploy
 
 on:
@@ -5,6 +6,7 @@ on:
     branches:
       - master
       - main
+      - dev
 
 jobs:
   build:
