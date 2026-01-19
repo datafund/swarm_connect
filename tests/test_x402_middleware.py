@@ -391,15 +391,16 @@ class TestX402MiddlewareFlow:
             "description": "Data upload"
         }
 
-        # Mock facilitator client to return invalid verification
+        # Mock facilitator client to return invalid verification (async method)
         from x402.types import VerifyResponse
         mock_facilitator = MagicMock()
         # VerifyResponse requires 'payer' field
-        mock_facilitator.verify.return_value = VerifyResponse(
+        # verify() is an async method, so we need AsyncMock
+        mock_facilitator.verify = AsyncMock(return_value=VerifyResponse(
             is_valid=False,
             invalid_reason="Insufficient balance",
             payer=None  # Invalid payments may not have payer identified
-        )
+        ))
         mock_facilitator_class.return_value = mock_facilitator
 
         app = FastAPI()

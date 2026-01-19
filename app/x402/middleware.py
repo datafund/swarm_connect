@@ -20,7 +20,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import JSONResponse
 
 from x402.types import PaymentRequirements, PaymentPayload, VerifyResponse, SettleResponse
-from x402.facilitator import FacilitatorClient
+from x402.facilitator import FacilitatorClient, FacilitatorConfig
 from x402.encoding import safe_base64_decode, safe_base64_encode
 
 from app.core.config import settings
@@ -40,6 +40,19 @@ X_PAYMENT_MODE_HEADER = "X-Payment-Mode"
 USDC_ADDRESSES = {
     "base": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
     "base-sepolia": "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+}
+
+# USDC token metadata for EIP-3009 signing
+# The "name" and "version" fields are required for EIP-712 domain separator
+USDC_TOKEN_METADATA = {
+    "base": {
+        "name": "USD Coin",
+        "version": "2",
+    },
+    "base-sepolia": {
+        "name": "USD Coin",
+        "version": "2",
+    },
 }
 
 # Protected endpoints configuration
@@ -108,6 +121,10 @@ def create_payment_requirements(
     # Get USDC address for the configured network
     asset = USDC_ADDRESSES.get(network, USDC_ADDRESSES["base-sepolia"])
 
+    # Get USDC token metadata for EIP-712 domain separator
+    # This is required for clients to construct proper EIP-3009 signatures
+    token_metadata = USDC_TOKEN_METADATA.get(network, USDC_TOKEN_METADATA["base-sepolia"])
+
     # Build resource path
     resource = str(request.url)
 
@@ -121,7 +138,7 @@ def create_payment_requirements(
         pay_to=pay_to,
         max_timeout_seconds=300,  # 5 minutes
         asset=asset,
-        extra=None
+        extra=token_metadata
     )
 
 
@@ -225,9 +242,8 @@ class X402Middleware(BaseHTTPMiddleware):
     def facilitator_client(self) -> FacilitatorClient:
         """Lazy initialization of facilitator client."""
         if self._facilitator_client is None:
-            self._facilitator_client = FacilitatorClient(
-                base_url=settings.X402_FACILITATOR_URL
-            )
+            config: FacilitatorConfig = {"url": settings.X402_FACILITATOR_URL}
+            self._facilitator_client = FacilitatorClient(config=config)
         return self._facilitator_client
 
     async def dispatch(
@@ -373,24 +389,32 @@ class X402Middleware(BaseHTTPMiddleware):
                 error_message="Invalid X-PAYMENT header format"
             )
 
-        # Verify payment with facilitator
+        # Verify payment with facilitator (async method - must await)
         try:
-            verify_response = self.facilitator_client.verify(
+            logger.debug(f"x402: Calling facilitator verify at {settings.X402_FACILITATOR_URL}")
+            verify_response = await self.facilitator_client.verify(
                 payment=payment_payload,
                 payment_requirements=payment_requirements
             )
+            logger.debug(f"x402: Verify response: is_valid={verify_response.is_valid}, payer={getattr(verify_response, 'payer', 'unknown')}")
         except Exception as e:
-            logger.error(f"x402: Facilitator verification failed: {e}")
+            logger.error(f"x402: Facilitator verification failed: {type(e).__name__}: {e}", exc_info=True)
             return JSONResponse(
                 status_code=502,
-                content={"error": "Payment verification failed", "detail": str(e)}
+                content={
+                    "error": "Payment verification failed",
+                    "detail": str(e),
+                    "error_type": type(e).__name__,
+                    "facilitator_url": settings.X402_FACILITATOR_URL,
+                }
             )
 
         if not verify_response.is_valid:
-            logger.warning(f"x402: Payment verification failed: {verify_response.invalid_reason}")
+            invalid_reason = getattr(verify_response, 'invalid_reason', None) or 'Unknown reason'
+            logger.warning(f"x402: Payment verification failed: {invalid_reason}")
             return create_402_response(
                 payment_requirements=payment_requirements,
-                error_message=f"Payment verification failed: {verify_response.invalid_reason or 'Unknown reason'}"
+                error_message=f"Payment verification failed: {invalid_reason}"
             )
 
         logger.info(f"x402: Payment verified for payer {verify_response.payer}")
@@ -398,15 +422,16 @@ class X402Middleware(BaseHTTPMiddleware):
         # Process the request
         response = await call_next(request)
 
-        # If request succeeded, settle the payment
+        # If request succeeded, settle the payment (async method - must await)
         if 200 <= response.status_code < 300:
             try:
-                settle_response = self.facilitator_client.settle(
+                logger.debug(f"x402: Calling facilitator settle at {settings.X402_FACILITATOR_URL}")
+                settle_response = await self.facilitator_client.settle(
                     payment=payment_payload,
                     payment_requirements=payment_requirements
                 )
 
-                logger.info(f"x402: Payment settled successfully")
+                logger.info(f"x402: Payment settled successfully, tx_hash={getattr(settle_response, 'transaction_hash', 'unknown')}")
 
                 # Add settlement response header
                 encoded_response = encode_payment_response(settle_response)
@@ -428,10 +453,20 @@ class X402Middleware(BaseHTTPMiddleware):
                 return new_response
 
             except Exception as e:
-                logger.error(f"x402: Payment settlement failed: {e}")
+                logger.error(f"x402: Payment settlement failed: {type(e).__name__}: {e}", exc_info=True)
                 # Request already succeeded, so return success but log the error
                 # In production, you might want to handle this differently
-                return response
+                # Read response body before returning
+                body = b""
+                async for chunk in response.body_iterator:
+                    body += chunk
+
+                return Response(
+                    content=body,
+                    status_code=response.status_code,
+                    headers=dict(response.headers),
+                    media_type=response.media_type
+                )
 
         return response
 

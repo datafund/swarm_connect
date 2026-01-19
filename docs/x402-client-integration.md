@@ -2,6 +2,18 @@
 
 This document describes how to integrate x402 payment support into CLI tools and MCP servers that interact with the Swarm Connect gateway.
 
+## Protocol Version
+
+**This gateway implements x402 protocol version 1 (v1).**
+
+Key v1 characteristics:
+- Uses string network identifiers: `"base-sepolia"`, `"base"` (not CAIP-2 format like `eip155:84532`)
+- Response includes `"x402Version": 1`
+- Payment scheme: `"exact"` with EIP-3009 `transferWithAuthorization`
+- Asset: USDC on Base chain
+
+Clients should check the `x402Version` field in 402 responses to confirm compatibility.
+
 ## Overview
 
 When the gateway has `X402_ENABLED=true`, protected endpoints require payment via the x402 protocol. Clients must:
@@ -47,8 +59,8 @@ Content-Type: application/json
       "maxTimeoutSeconds": 300,
       "asset": "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
       "extra": {
-        "name": "USDC",
-        "decimals": 6
+        "name": "USD Coin",
+        "version": "2"
       }
     }
   ],
