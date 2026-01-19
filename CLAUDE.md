@@ -128,7 +128,7 @@ Optional environment variables:
 
 The gateway supports x402 payment protocol for pay-per-request access without user accounts. When enabled, clients pay in USDC on Base chain to access stamp purchase and data upload endpoints.
 
-**Current Status**: Development on `main-x402-upgrade` branch (testnet only)
+**Current Status**: Available on `development` branch (testnet only)
 
 **Parent Issue**: [datafund/provenance-fellowship#23](https://github.com/datafund/provenance-fellowship/issues/23)
 
@@ -208,7 +208,7 @@ When `X402_FREE_TIER_ENABLED=false`:
 
 ### Development Notes
 
-- Branch: `main-x402-upgrade` - DO NOT MERGE TO MAIN without approval
+- x402 code is on `development` branch - test on staging before merging to `main`
 - Python SDK is v1 only (v2 under development)
 - All x402 transactions logged to `logs/x402_audit.jsonl`
 
@@ -303,10 +303,56 @@ When making changes to the codebase, ensure the architecture documentation stays
 
 ## Git Workflow
 
-**IMPORTANT**: Never push directly to main. Always:
-1. Create a feature branch (e.g., `fix/docs-examples`, `feature/new-endpoint`)
-2. Make commits on the branch
-3. Create a PR and merge via GitHub
+### Branching Strategy
+
+This project uses a three-tier branching model:
+
+```
+feature branches → development → main
+        ↓              ↓           ↓
+    local dev    staging/test  production
+```
+
+| Branch | Purpose | Deployment |
+|--------|---------|------------|
+| `main` | Production-ready code | `provenance-gateway.datafund.io` |
+| `development` | Integration/staging branch | `provenance-gateway.dev.datafund.io` |
+| `feature/*`, `fix/*` | Feature development | Local only |
+
+### Workflow
+
+1. **Create a feature branch** from `development`:
+   ```bash
+   git checkout development
+   git pull origin development
+   git checkout -b feature/my-feature
+   ```
+
+2. **Develop and test locally** on the feature branch
+
+3. **Create PR to merge into `development`**:
+   - All code must go through PR review
+   - CI/CD automatically deploys to staging (`provenance-gateway.dev.datafund.io`)
+
+4. **Test on staging environment** before promoting to production
+
+5. **Create PR to merge `development` into `main`**:
+   - Only after staging validation
+   - CI/CD automatically deploys to production (`provenance-gateway.datafund.io`)
+
+### Branch Protection Rules
+
+- **Never push directly to `main`** - always use PRs
+- **Never push directly to `development`** - always use PRs from feature branches
+- Feature branches can be pushed directly
+
+### Deployment Environments
+
+| Environment | URL | Branch | Purpose |
+|-------------|-----|--------|---------|
+| **Production** | `provenance-gateway.datafund.io` | `main` | Live users |
+| **Staging** | `provenance-gateway.dev.datafund.io` | `development` | Testing before production |
+| **Local** | `localhost:8000` | any | Development |
 
 **Repository**: This repository pushes to `git@github.com:datafund/swarm_connect.git` (origin).
 
