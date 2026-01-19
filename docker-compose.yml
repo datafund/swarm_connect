@@ -14,16 +14,16 @@ services:
       timeout: 10s
       retries: 3
 
-    provenance_gateway_dev:
-      build: .
-      image: swarm_connect:dev
-      ports:
-        - "8900:8000"
-      environment:
-        - SWARM_BEE_API_URL=http://192.168.45.30:1633
-      restart: unless-stopped
-      healthcheck:
-        test: ["CMD", "curl", "-f", "http://localhost:8000/"]
-        interval: 30s
-        timeout: 10s
-        retries: 3
+  provenance_gateway_dev:
+    build: .
+    image: swarm_connect:dev
+    ports:
+      - "8900:8000"
+    environment:
+      - SWARM_BEE_API_URL=http://192.168.45.30:1633
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
