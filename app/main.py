@@ -16,6 +16,12 @@ app = FastAPI(
     openapi_url=f"{settings.API_V1_STR}/openapi.json" # Standard location for OpenAPI spec
 )
 
+# Add x402 payment middleware if enabled
+if settings.X402_ENABLED:
+    from app.x402.middleware import X402Middleware
+    app.add_middleware(X402Middleware)
+    logger.info("x402 middleware enabled")
+
 # Include the API router(s)
 # The prefix ensures all routes start with /api/v1
 app.include_router(stamps.router, prefix=f"{settings.API_V1_STR}/stamps", tags=["stamps"])
