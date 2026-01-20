@@ -1,5 +1,6 @@
 # Use an official Python runtime as a parent image
-FROM python:3.9-slim
+# Python 3.10+ required for x402 SDK
+FROM python:3.10-slim
 
 # Set the working directory in the container
 WORKDIR /app
