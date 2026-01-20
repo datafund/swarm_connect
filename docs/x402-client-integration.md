@@ -59,7 +59,7 @@ Content-Type: application/json
       "maxTimeoutSeconds": 300,
       "asset": "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
       "extra": {
-        "name": "USD Coin",
+        "name": "USDC",
         "version": "2"
       }
     }

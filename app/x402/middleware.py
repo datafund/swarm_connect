@@ -44,13 +44,15 @@ USDC_ADDRESSES = {
 
 # USDC token metadata for EIP-3009 signing
 # The "name" and "version" fields are required for EIP-712 domain separator
+# IMPORTANT: The name MUST match the on-chain DOMAIN_SEPARATOR exactly
+# Circle's USDC uses "USDC" (not "USD Coin") in the EIP-712 domain
 USDC_TOKEN_METADATA = {
     "base": {
-        "name": "USD Coin",
+        "name": "USDC",  # Matches on-chain EIP-712 domain
         "version": "2",
     },
     "base-sepolia": {
-        "name": "USD Coin",
+        "name": "USDC",  # Matches on-chain EIP-712 domain
         "version": "2",
     },
 }
