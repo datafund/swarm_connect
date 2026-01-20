@@ -431,7 +431,8 @@ class X402Middleware(BaseHTTPMiddleware):
                     payment_requirements=payment_requirements
                 )
 
-                logger.info(f"x402: Payment settled successfully, tx_hash={getattr(settle_response, 'transaction_hash', 'unknown')}")
+                tx_hash = getattr(settle_response, 'transaction_hash', 'unknown')
+                logger.info(f"x402: Payment settled successfully, tx_hash={tx_hash}")
 
                 # Add settlement response header
                 encoded_response = encode_payment_response(settle_response)
@@ -449,23 +450,25 @@ class X402Middleware(BaseHTTPMiddleware):
                     media_type=response.media_type
                 )
                 new_response.headers[X_PAYMENT_RESPONSE_HEADER] = encoded_response
+                new_response.headers["X-Payment-Mode"] = "paid"
+                new_response.headers["X-Payment-Transaction"] = tx_hash
 
                 return new_response
 
             except Exception as e:
                 logger.error(f"x402: Payment settlement failed: {type(e).__name__}: {e}", exc_info=True)
-                # Request already succeeded, so return success but log the error
-                # In production, you might want to handle this differently
-                # Read response body before returning
-                body = b""
-                async for chunk in response.body_iterator:
-                    body += chunk
-
-                return Response(
-                    content=body,
-                    status_code=response.status_code,
-                    headers=dict(response.headers),
-                    media_type=response.media_type
+                # Settlement failed - return error, don't silently succeed
+                # This is critical: if settlement fails, the payment wasn't collected
+                # The client should know and can retry or use free tier explicitly
+                return JSONResponse(
+                    status_code=500,
+                    content={
+                        "error": "Payment settlement failed",
+                        "detail": f"Your request was processed but payment settlement failed: {str(e)}",
+                        "x402_status": "settlement_failed",
+                        "message": "Please retry with a new payment or use X-Payment-Mode: free for free tier access"
+                    },
+                    headers={"X-Payment-Mode": "failed"}
                 )
 
         return response
