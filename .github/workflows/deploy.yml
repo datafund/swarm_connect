@@ -12,6 +12,8 @@ jobs:
   build:
     name: build
     runs-on: [self-hosted, pljudfbee1]
+    # Use staging environment for dev branch (gets variables from GitHub)
+    environment: ${{ github.ref == 'refs/heads/dev' && 'staging' || '' }}
 
     steps:
       - name: checkout
@@ -31,6 +33,17 @@ jobs:
 
       - name: build docker image
         run: docker build --build-arg VERSION=${{ steps.version.outputs.version }} -t swarm_connect:$GITHUB_REF_NAME .
+
+      - name: write env file for dev
+        if: github.ref == 'refs/heads/dev'
+        run: |
+          cat > /opt/swarm_connect_dev.env << 'EOF'
+          X402_ENABLED=${{ vars.X402_ENABLED || 'false' }}
+          X402_PAY_TO_ADDRESS=${{ vars.X402_PAY_TO_ADDRESS || '' }}
+          X402_NETWORK=${{ vars.X402_NETWORK || 'base-sepolia' }}
+          X402_FACILITATOR_URL=${{ vars.X402_FACILITATOR_URL || 'https://x402.org/facilitator' }}
+          X402_FREE_TIER_ENABLED=${{ vars.X402_FREE_TIER_ENABLED || 'true' }}
+          EOF
 
       - name: deploy
         run: >
