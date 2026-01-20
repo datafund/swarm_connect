@@ -23,6 +23,7 @@ from app.x402.middleware import (
     X_PAYMENT_HEADER,
     X_PAYMENT_RESPONSE_HEADER,
     USDC_ADDRESSES,
+    USDC_TOKEN_METADATA,
     PROTECTED_ENDPOINTS,
 )
 
@@ -517,6 +518,90 @@ class TestUSDCAddresses:
     def test_base_sepolia_address(self):
         """Base Sepolia USDC address is correct."""
         assert USDC_ADDRESSES["base-sepolia"] == "0x036CbD53842c5426634e7929541eC2318f3dCF7e"
+
+
+class TestTokenMetadata:
+    """Test EIP-712 token metadata for payment signatures.
+
+    CRITICAL: The token metadata 'name' field MUST match the on-chain
+    DOMAIN_SEPARATOR exactly. Using the wrong name causes:
+    - Signature verification mismatch between gateway and on-chain
+    - transferWithAuthorization to fail even with valid signatures
+
+    See issue #60 for details on the USDC "USD Coin" vs "USDC" bug.
+    """
+
+    def test_all_networks_have_token_metadata(self):
+        """Every network with an address should have token metadata."""
+        for network in USDC_ADDRESSES.keys():
+            assert network in USDC_TOKEN_METADATA, \
+                f"Missing token metadata for network: {network}"
+
+    def test_token_metadata_has_required_fields(self):
+        """Token metadata must have 'name' and 'version' for EIP-712."""
+        for network, metadata in USDC_TOKEN_METADATA.items():
+            assert "name" in metadata, \
+                f"Missing 'name' in token metadata for {network}"
+            assert "version" in metadata, \
+                f"Missing 'version' in token metadata for {network}"
+
+    def test_token_name_is_not_empty(self):
+        """Token name must not be empty."""
+        for network, metadata in USDC_TOKEN_METADATA.items():
+            assert metadata["name"], \
+                f"Empty 'name' in token metadata for {network}"
+            assert len(metadata["name"]) > 0, \
+                f"Empty 'name' in token metadata for {network}"
+
+    def test_token_version_is_valid(self):
+        """Token version must be a non-empty string."""
+        for network, metadata in USDC_TOKEN_METADATA.items():
+            assert metadata["version"], \
+                f"Empty 'version' in token metadata for {network}"
+            assert isinstance(metadata["version"], str), \
+                f"Version must be string for {network}"
+
+    def test_usdc_domain_name_matches_onchain(self):
+        """USDC domain name must be 'USDC' to match on-chain DOMAIN_SEPARATOR.
+
+        Circle's USDC contract uses 'USDC' (not 'USD Coin') in the EIP-712
+        domain separator. Using the wrong name causes signature verification
+        to fail on-chain even though the gateway might accept it.
+
+        Verified DOMAIN_SEPARATOR for Base Sepolia USDC:
+        - With 'USDC': 0x71f17a3b2ff373b803d70a5a07c046c1a2bc8e89c09ef722fcb047abe94c9818
+        - With 'USD Coin': 0x2f5ab5eec6c6d261a8ad2b303ae4ef05c8509de2250e072c3a2df0ad7f9f068b (WRONG)
+        """
+        # This test prevents regression of issue #60
+        assert USDC_TOKEN_METADATA["base"]["name"] == "USDC", \
+            "Base mainnet USDC must use 'USDC' as EIP-712 domain name"
+        assert USDC_TOKEN_METADATA["base-sepolia"]["name"] == "USDC", \
+            "Base Sepolia USDC must use 'USDC' as EIP-712 domain name"
+
+    def test_token_name_not_human_readable_variation(self):
+        """Token name should not be a human-readable variation.
+
+        Common mistake: using 'USD Coin' instead of 'USDC'.
+        The EIP-712 domain name must match what's hardcoded in the contract,
+        not what appears in the token's name() function or on block explorers.
+        """
+        forbidden_names = ["USD Coin", "Usd Coin", "usd coin"]
+        for network, metadata in USDC_TOKEN_METADATA.items():
+            assert metadata["name"] not in forbidden_names, \
+                f"Token name for {network} uses human-readable variation '{metadata['name']}'. " \
+                f"Must use exact on-chain DOMAIN_SEPARATOR name."
+
+    def test_mainnet_and_testnet_metadata_consistent(self):
+        """Mainnet and testnet should use the same token metadata.
+
+        Circle deploys USDC with the same EIP-712 domain on all networks.
+        If these differ, one is probably wrong.
+        """
+        if "base" in USDC_TOKEN_METADATA and "base-sepolia" in USDC_TOKEN_METADATA:
+            assert USDC_TOKEN_METADATA["base"]["name"] == USDC_TOKEN_METADATA["base-sepolia"]["name"], \
+                "Base mainnet and Base Sepolia should use the same USDC domain name"
+            assert USDC_TOKEN_METADATA["base"]["version"] == USDC_TOKEN_METADATA["base-sepolia"]["version"], \
+                "Base mainnet and Base Sepolia should use the same USDC version"
 
 
 class TestProtectedEndpoints:
