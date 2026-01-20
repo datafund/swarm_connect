@@ -16,8 +16,10 @@ app = FastAPI(
     openapi_url=f"{settings.API_V1_STR}/openapi.json" # Standard location for OpenAPI spec
 )
 
-# Add x402 payment middleware if enabled
+# Validate and add x402 payment middleware if enabled
 if settings.X402_ENABLED:
+    from app.x402.validation import check_x402_startup
+    check_x402_startup()  # Will raise X402ConfigurationError if invalid
     from app.x402.middleware import X402Middleware
     app.add_middleware(X402Middleware)
     logger.info("x402 middleware enabled")
