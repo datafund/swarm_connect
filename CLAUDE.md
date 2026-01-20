@@ -51,6 +51,7 @@ python -m pytest tests/test_manifest_upload.py -v
 - **API Layer**: Organized under `app/api/` with separate endpoints and models
 - **Service Layer**: External API integration handled in `app/services/`
 - **Models**: Pydantic models for request/response validation in `app/api/models/`
+- **x402 Module**: Optional payment gateway in `app/x402/` (see x402 section below)
 
 ### Key Components
 
@@ -121,6 +122,129 @@ Optional environment variables:
 - SSL/HTTPS support built into development server
 - Logging configured at INFO level with structured error handling
 
+## x402 Payment Integration
+
+### Overview
+
+The gateway supports x402 payment protocol for pay-per-request access without user accounts. When enabled, clients pay in USDC on Base chain to access stamp purchase and data upload endpoints.
+
+**Current Status**: Available on `dev` branch (testnet only)
+
+**Parent Issue**: [datafund/provenance-fellowship#23](https://github.com/datafund/provenance-fellowship/issues/23)
+
+### Key Architecture Decisions
+
+- **Two-wallet system**: USDC on Base, xBZZ on Gnosis (no bridging)
+- **SDK**: Official `x402` Python package (v1 - v2 under development)
+- **Facilitator**: x402.org public facilitator for testnet
+- **Scope**: Uploads gated, downloads free
+
+### x402 Module Structure
+
+```
+app/x402/
+├── __init__.py      # Module init
+├── middleware.py    # FastAPI middleware for payment verification
+├── preflight.py     # Gateway balance checks
+├── pricing.py       # Price calculation (BZZ → USD)
+├── access.py        # IP whitelist/blacklist
+├── audit.py         # Transaction audit logging
+└── ratelimit.py     # Per-IP rate limiting
+```
+
+### x402 Test Coverage (196 tests)
+
+```
+tests/
+├── test_x402_preflight.py    # 21 tests - Balance checks
+├── test_x402_pricing.py      # 25 tests - Price calculations
+├── test_x402_middleware.py   # 39 tests - HTTP middleware + free tier
+├── test_x402_access.py       # 36 tests - IP access control
+├── test_x402_audit.py        # 29 tests - Audit logging
+├── test_x402_ratelimit.py    # 25 tests - Rate limiting
+└── test_x402_integration.py  # 21 tests - Full flow tests
+```
+
+### Key Configuration
+
+```bash
+X402_ENABLED=false           # Master switch (default: off)
+X402_FACILITATOR_URL=...     # Payment facilitator
+X402_PAY_TO_ADDRESS=0x...    # USDC receiving wallet (Base)
+X402_NETWORK=base-sepolia    # Network identifier
+
+# Free tier settings (for users without x402 capability)
+X402_FREE_TIER_ENABLED=true  # Allow non-paying users (default: on)
+X402_FREE_TIER_RATE_LIMIT=3  # Requests/minute for free tier (default: 3)
+```
+
+### Access Modes (when X402_ENABLED=true)
+
+| User Type | Access | Rate Limit | Headers |
+|-----------|--------|------------|---------|
+| **Paying users** | Full access | 10/min | `X-PAYMENT-RESPONSE` |
+| **Free tier** | Limited access | 3/min | `X-Payment-Mode: free-tier` |
+| **Whitelisted IPs** | Full access | No limit | - |
+| **Blacklisted IPs** | Blocked | - | 403 |
+
+### Protected Endpoints (when X402_ENABLED=true)
+
+- `POST /api/v1/stamps/` - Requires payment OR free tier
+- `POST /api/v1/data/` - Requires payment OR free tier
+- `POST /api/v1/data/manifest` - Requires payment OR free tier
+- `GET /api/v1/data/{ref}` - FREE (no payment required)
+
+### Free Tier Behavior
+
+When `X402_FREE_TIER_ENABLED=true` (default):
+- Users without x402 payment can still access protected endpoints
+- Stricter rate limit applied (3 requests/minute by default)
+- Response includes `X-Payment-Mode: free-tier` header
+- When rate limit exceeded, returns 429 with payment upgrade info
+
+When `X402_FREE_TIER_ENABLED=false`:
+- Users without payment get HTTP 402 immediately
+- Must provide valid x402 payment to access protected endpoints
+
+### Development Notes
+
+- x402 code is on `dev` branch - test on staging before merging to `main`
+- Python SDK is v1 only (v2 under development)
+- All x402 transactions logged to `logs/x402_audit.jsonl`
+
+### x402 Documentation
+
+| Document | Purpose |
+|----------|---------|
+| `docs/x402-operator-guide.md` | Gateway operator setup and configuration |
+| `docs/x402-testing-guide.md` | Local testing with testnet wallets |
+| `docs/x402-client-integration.md` | CLI and MCP client integration guide |
+
+### Testing x402
+
+```bash
+# With x402 disabled (default behavior)
+X402_ENABLED=false python run.py
+
+# With x402 enabled (requires facilitator)
+X402_ENABLED=true X402_PAY_TO_ADDRESS=0x... python run.py
+
+# Run x402 unit tests (mocked)
+python -m pytest tests/test_x402_*.py -v
+
+# Run live tests (requires testnet setup)
+RUN_LIVE_TESTS=1 pytest tests/test_x402_live.py -v
+```
+
+### Future Work: CLI/MCP Integration
+
+The x402 **server** side is complete. **Client** integration is needed for:
+
+1. **CLI tool** - Add x402 payment support to command-line interface
+2. **MCP server** - Enable AI agents to make paid requests
+
+See `docs/x402-client-integration.md` for implementation requirements.
+
 ## Swarm Bee API Documentation
 
 ### Using Context7 for Latest Documentation
@@ -179,10 +303,56 @@ When making changes to the codebase, ensure the architecture documentation stays
 
 ## Git Workflow
 
-**IMPORTANT**: Never push directly to main. Always:
-1. Create a feature branch (e.g., `fix/docs-examples`, `feature/new-endpoint`)
-2. Make commits on the branch
-3. Create a PR and merge via GitHub
+### Branching Strategy
+
+This project uses a three-tier branching model:
+
+```
+feature branches → dev → main
+        ↓           ↓       ↓
+    local dev   staging  production
+```
+
+| Branch | Purpose | Deployment |
+|--------|---------|------------|
+| `main` | Production-ready code | `provenance-gateway.datafund.io` |
+| `dev` | Integration/staging branch | `provenance-gateway.dev.datafund.io` |
+| `feature/*`, `fix/*` | Feature development | Local only |
+
+### Workflow
+
+1. **Create a feature branch** from `dev`:
+   ```bash
+   git checkout dev
+   git pull origin dev
+   git checkout -b feature/my-feature
+   ```
+
+2. **Develop and test locally** on the feature branch
+
+3. **Create PR to merge into `dev`**:
+   - All code must go through PR review
+   - CI/CD automatically deploys to staging (`provenance-gateway.dev.datafund.io`)
+
+4. **Test on staging environment** before promoting to production
+
+5. **Create PR to merge `dev` into `main`**:
+   - Only after staging validation
+   - CI/CD automatically deploys to production (`provenance-gateway.datafund.io`)
+
+### Branch Protection Rules
+
+- **Never push directly to `main`** - always use PRs
+- **Never push directly to `dev`** - always use PRs from feature branches
+- Feature branches can be pushed directly
+
+### Deployment Environments
+
+| Environment | URL | Branch | Purpose |
+|-------------|-----|--------|---------|
+| **Production** | `provenance-gateway.datafund.io` | `main` | Live users |
+| **Staging** | `provenance-gateway.dev.datafund.io` | `dev` | Testing before production |
+| **Local** | `localhost:8000` | any | Development |
 
 **Repository**: This repository pushes to `git@github.com:datafund/swarm_connect.git` (origin).
 
