@@ -779,13 +779,15 @@ def calculate_stamp_amount(duration_hours: int, current_price: int) -> int:
     Args:
         duration_hours: Desired stamp duration in hours
         current_price: Current price per chunk per block (from chainstate)
+                       Note: Bee API returns this as a string, so we convert to int
 
     Returns:
         The amount in PLUR needed for the stamp
     """
     blocks_per_hour = 720  # 3600 seconds / 5 seconds per block
     duration_blocks = duration_hours * blocks_per_hour
-    amount = current_price * duration_blocks
+    # Ensure current_price is an integer (Bee API returns it as a string)
+    amount = int(current_price) * duration_blocks
     return amount
 
 
