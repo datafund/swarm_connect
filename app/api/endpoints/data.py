@@ -27,6 +27,13 @@ from app.services.swarm_api import (
     StampValidationError,
     REDUNDANCY_LEVELS
 )
+from app.core.config import settings
+from app.services.provenance import (
+    get_provenance_service,
+    DocumentValidationError,
+    NotaryNotEnabledError
+)
+from app.services.signing import NotConfiguredError
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -98,6 +105,7 @@ async def upload_data(
     deferred: bool = False,
     include_timing: bool = False,
     redundancy: Optional[int] = None,
+    sign: Optional[str] = None,
     file: UploadFile = File(...)
 ):
     """
@@ -111,6 +119,7 @@ async def upload_data(
     - Optional `deferred` parameter (defaults to false)
     - Optional `include_timing` parameter (defaults to false)
     - Optional `redundancy` parameter (0-4, defaults to 2=strong)
+    - Optional `sign` parameter ("notary" to add gateway notary signature)
 
     **Stamp Validation** (opt-in with `validate_stamp=true`):
     When enabled, validates the stamp before upload:
@@ -142,6 +151,14 @@ async def upload_data(
     - `bee_upload_ms`: Time uploading to Bee node
     - `total_ms`: Total request processing time
 
+    **Notary Signing** (opt-in with `sign=notary`):
+    When enabled, the gateway adds a cryptographic signature to prove data existed at upload time.
+    - Requires `NOTARY_ENABLED=true` and `NOTARY_PRIVATE_KEY` to be configured
+    - Document must be JSON with a `data` field: `{"data": {...}, "signatures": [...]}`
+    - Gateway adds a notary signature to the signatures array
+    - Check `/api/v1/notary/info` for notary availability and public address
+    - Returns 400 if document format is invalid or notary is not configured
+
     **Usage Examples**:
     ```bash
     # Upload JSON file (direct mode, default)
@@ -163,6 +180,10 @@ async def upload_data(
     # Upload binary file
     curl -X POST "http://localhost:8000/api/v1/data/?stamp_id=ABC123&content_type=image/png" \\
          -F "file=@image.png"
+
+    # Upload with notary signing (requires NOTARY_ENABLED=true)
+    curl -X POST "http://localhost:8000/api/v1/data/?stamp_id=ABC123&sign=notary" \\
+         -F "file=@provenance-doc.json"
     ```
 
     **Supported Content Types**: JSON, text, images, PDFs, or any binary data.
@@ -225,6 +246,51 @@ async def upload_data(
         file_start = time.perf_counter()
         data_bytes = await file.read()
         file_read_ms = (time.perf_counter() - file_start) * 1000
+
+        # Optional notary signing
+        if sign == "notary":
+            try:
+                provenance_service = get_provenance_service()
+                signed_doc = provenance_service.sign_document(data_bytes)
+                data_bytes = signed_doc.raw_json.encode('utf-8')
+                content_type = "application/json"  # Signed documents are always JSON
+                logger.info(f"Document signed by notary, signatures count: {len(signed_doc.signatures)}")
+            except NotaryNotEnabledError as e:
+                raise HTTPException(
+                    status_code=400,
+                    detail={
+                        "code": "NOTARY_NOT_ENABLED",
+                        "message": str(e),
+                        "suggestion": "Set NOTARY_ENABLED=true to enable notary signing"
+                    }
+                )
+            except NotConfiguredError as e:
+                raise HTTPException(
+                    status_code=400,
+                    detail={
+                        "code": "NOTARY_NOT_CONFIGURED",
+                        "message": str(e),
+                        "suggestion": "Set NOTARY_PRIVATE_KEY to configure the notary signing key"
+                    }
+                )
+            except DocumentValidationError as e:
+                raise HTTPException(
+                    status_code=400,
+                    detail={
+                        "code": "INVALID_DOCUMENT_FORMAT",
+                        "message": str(e),
+                        "suggestion": "Document must be JSON with a 'data' field: {\"data\": {...}, \"signatures\": [...]}"
+                    }
+                )
+        elif sign is not None:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "code": "INVALID_SIGN_OPTION",
+                    "message": f"Invalid sign option: {sign}",
+                    "suggestion": "Use sign=notary for gateway notary signing"
+                }
+            )
 
         # Upload to Swarm
         bee_start = time.perf_counter()
