@@ -88,6 +88,10 @@ Optional environment variables:
 - `RELOAD`: Enable auto-reload (default: `true`)
 - `SSL_KEYFILE`/`SSL_CERTFILE`: For HTTPS development
 
+Notary signing (optional):
+- `NOTARY_ENABLED`: Enable notary signing feature (default: `false`)
+- `NOTARY_PRIVATE_KEY`: Hex-encoded Ethereum private key for signing (64 characters, no 0x prefix)
+
 ### API Endpoints
 
 #### Core Endpoints
@@ -111,6 +115,11 @@ Optional environment variables:
 - `POST /api/v1/pool/acquire`: Acquire stamp from pool instantly (<5 seconds vs >1 minute)
 - `GET /api/v1/pool/available`: List available stamps in pool
 - `POST /api/v1/pool/check`: Trigger manual pool maintenance
+
+#### Notary Signing (Provenance)
+- `GET /api/v1/notary/info`: Check notary availability and get public address for verification
+- `GET /api/v1/notary/status`: Simplified notary status for health checks
+- `POST /api/v1/data/?sign=notary`: Upload with notary signature (adds `sign` parameter to data upload)
 
 ### Dependencies and Tech Stack
 
