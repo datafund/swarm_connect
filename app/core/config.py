@@ -54,6 +54,28 @@ class Settings(BaseSettings):
     X402_BASE_ETH_WARN_THRESHOLD: float = 0.005  # Warn if ETH < threshold (~50 txs)
     X402_BASE_ETH_CRITICAL_THRESHOLD: float = 0.001  # Block if ETH < critical (~10 txs)
 
+    # === Stamp Pool Settings ===
+    # Stamp pool maintains pre-purchased stamps for low-latency provisioning.
+    # When enabled, clients can request stamps immediately without waiting for
+    # blockchain confirmation (~1 minute).
+    STAMP_POOL_ENABLED: bool = False  # Master switch for stamp pool feature
+
+    # Reserve configuration by depth level (JSON string or dict)
+    # Format: {"depth": count} - depth 17=small, 20=medium, 22=large
+    # Default: 1 small (depth 17), 1 medium (depth 20), 0 large (depth 22)
+    STAMP_POOL_RESERVE_SMALL: int = 1   # Number of depth-17 stamps to keep in reserve
+    STAMP_POOL_RESERVE_MEDIUM: int = 1  # Number of depth-20 stamps to keep in reserve
+    STAMP_POOL_RESERVE_LARGE: int = 0   # Number of depth-22 stamps to keep in reserve
+
+    # Pool monitoring settings
+    STAMP_POOL_CHECK_INTERVAL_SECONDS: int = 900  # How often to check pool (15 minutes)
+    STAMP_POOL_MIN_TTL_HOURS: int = 24  # Top up if TTL below this
+    STAMP_POOL_TOPUP_HOURS: int = 168   # How much TTL to add (1 week)
+    STAMP_POOL_LOW_RESERVE_THRESHOLD: int = 1  # Alert when reserve drops to this level
+
+    # Stamp duration for new pool stamps (in hours)
+    STAMP_POOL_DEFAULT_DURATION_HOURS: int = 168  # 1 week default for pool stamps
+
     @field_validator("X402_BLACKLIST_IPS", "X402_WHITELIST_IPS", mode="before")
     @classmethod
     def empty_str_to_empty(cls, v: str) -> str:
@@ -71,6 +93,21 @@ class Settings(BaseSettings):
         if not self.X402_WHITELIST_IPS:
             return []
         return [ip.strip() for ip in self.X402_WHITELIST_IPS.split(",") if ip.strip()]
+
+    def get_stamp_pool_reserve_config(self) -> dict:
+        """Get stamp pool reserve configuration as {depth: count} dict.
+
+        Only includes depths with count > 0.
+        Maps: small=17, medium=20, large=22
+        """
+        config = {}
+        if self.STAMP_POOL_RESERVE_SMALL > 0:
+            config[17] = self.STAMP_POOL_RESERVE_SMALL
+        if self.STAMP_POOL_RESERVE_MEDIUM > 0:
+            config[20] = self.STAMP_POOL_RESERVE_MEDIUM
+        if self.STAMP_POOL_RESERVE_LARGE > 0:
+            config[22] = self.STAMP_POOL_RESERVE_LARGE
+        return config
 
     model_config = SettingsConfigDict(
         env_file=".env",

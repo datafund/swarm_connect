@@ -106,6 +106,12 @@ Optional environment variables:
 - `GET /api/v1/data/{reference}`: Download raw data from Swarm (returns bytes directly)
 - `GET /api/v1/data/{reference}/json`: Download data with JSON metadata (base64-encoded)
 
+#### Stamp Pool (Low-Latency Provisioning)
+- `GET /api/v1/pool/status`: Get pool status and reserve levels
+- `POST /api/v1/pool/acquire`: Acquire stamp from pool instantly (<5 seconds vs >1 minute)
+- `GET /api/v1/pool/available`: List available stamps in pool
+- `POST /api/v1/pool/check`: Trigger manual pool maintenance
+
 ### Dependencies and Tech Stack
 
 - **FastAPI**: Web framework with automatic OpenAPI documentation
