@@ -368,6 +368,55 @@ feature branches → dev → main
 - NEVER use `crtahlin/swarm_connect` - that is the upstream fork, not the main repo
 - Use `git remote -v` to verify remotes if unsure
 
+## Deployment Workflow
+
+### Auto-Deployment Triggers
+
+Both `dev` and `main` branches have auto-deployment configured via GitHub Actions:
+
+| Branch | Trigger | Target | Deployment Time |
+|--------|---------|--------|-----------------|
+| `dev` | Push/merge | `provenance-gateway.dev.datafund.io` | ~20-30 seconds |
+| `main` | Push/merge | `provenance-gateway.datafund.io` | ~20-30 seconds |
+
+### Environment Variables in deploy.yml
+
+**CRITICAL**: When adding new environment variables that need to be available at runtime:
+
+1. **Add to GitHub Environment Variables** (Settings → Environments → staging/production)
+2. **Update `.github/workflows/deploy.yml`** to write the variable to the env file
+
+The workflow writes variables to `/opt/swarm_connect_dev.env` for the `dev` branch. If a variable is set in GitHub but not written by the workflow, **the application won't see it**.
+
+Example from `deploy.yml`:
+```yaml
+- name: write env file for dev
+  if: github.ref == 'refs/heads/dev'
+  run: |
+    cat > /opt/swarm_connect_dev.env << 'EOF'
+    X402_ENABLED=${{ vars.X402_ENABLED || 'false' }}
+    STAMP_POOL_ENABLED=${{ vars.STAMP_POOL_ENABLED || 'false' }}
+    # ... all other variables
+    EOF
+```
+
+**When adding new features with env vars:**
+1. Add defaults to `app/core/config.py`
+2. Document in `.env.example`
+3. Add to `deploy.yml` for staging/production
+4. Set values in GitHub environment variables
+
+### Verifying Deployment
+
+After merging to `dev` or `main`:
+```bash
+# Check workflow status
+gh run list --repo datafund/swarm_connect --limit 3
+
+# Wait for completion, then test
+curl -s https://provenance-gateway.dev.datafund.io/health | python3 -m json.tool
+```
+
 ## Deployment Troubleshooting
 
 If the remote gateway (provenance-gateway.datafund.io) returns 503 or appears broken after a merge:
