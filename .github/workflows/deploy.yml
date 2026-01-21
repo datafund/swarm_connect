@@ -51,6 +51,8 @@ jobs:
           STAMP_POOL_MIN_TTL_HOURS=${{ vars.STAMP_POOL_MIN_TTL_HOURS || '24' }}
           STAMP_POOL_TOPUP_HOURS=${{ vars.STAMP_POOL_TOPUP_HOURS || '168' }}
           STAMP_POOL_DEFAULT_DURATION_HOURS=${{ vars.STAMP_POOL_DEFAULT_DURATION_HOURS || '168' }}
+          NOTARY_ENABLED=${{ vars.NOTARY_ENABLED || 'false' }}
+          NOTARY_PRIVATE_KEY=${{ secrets.NOTARY_PRIVATE_KEY || '' }}
           EOF
 
       - name: deploy
