@@ -382,8 +382,9 @@ class StampPoolManager:
             chainstate = swarm_api.get_chainstate()
             current_price = chainstate.get("currentPrice", 0)
 
-            # Calculate amount for configured duration
-            duration_hours = settings.STAMP_POOL_DEFAULT_DURATION_HOURS
+            # Calculate amount for configured duration + 1 hour buffer
+            # The extra hour ensures the stamp meets minimum TTL requirements
+            duration_hours = settings.STAMP_POOL_DEFAULT_DURATION_HOURS + 1
             amount = swarm_api.calculate_stamp_amount(duration_hours, current_price)
 
             # Generate pool label
