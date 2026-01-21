@@ -76,6 +76,12 @@ class Settings(BaseSettings):
     # Stamp duration for new pool stamps (in hours)
     STAMP_POOL_DEFAULT_DURATION_HOURS: int = 168  # 1 week default for pool stamps
 
+    # === Notary/Provenance Signing Settings ===
+    # The notary feature allows the gateway to sign documents with an authoritative timestamp.
+    # This provides proof that a document existed at a specific time, signed by the gateway.
+    NOTARY_ENABLED: bool = False  # Master switch for notary signing feature
+    NOTARY_PRIVATE_KEY: Optional[str] = None  # Hex-encoded private key for signing (without 0x prefix)
+
     @field_validator("X402_BLACKLIST_IPS", "X402_WHITELIST_IPS", mode="before")
     @classmethod
     def empty_str_to_empty(cls, v: str) -> str:
