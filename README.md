@@ -190,6 +190,7 @@ Swarm Connect is a FastAPI-based API gateway that provides comprehensive access 
 - **Raw Data Download**: Download data as binary stream or base64-encoded JSON
 - **Reference-Based Access**: Access data using Swarm reference hashes
 - **Provenance Support**: Built-in examples for data lineage and provenance tracking
+- **Notary Signing**: Optional cryptographic signatures proving data existed at upload time (see [Notary Guide](docs/notary-guide.md))
 
 #### 🔧 Technical Features
 - **FastAPI Framework**: Modern, fast web framework with automatic OpenAPI documentation
@@ -267,6 +268,11 @@ Swarm Connect is a FastAPI-based API gateway that provides comprehensive access 
 #### Wallet Information
 - `GET /api/v1/wallet`: Get the wallet address and BZZ balance of the Bee node
 - `GET /api/v1/chequebook`: Get the chequebook address and balance information of the Bee node
+
+#### Notary Signing
+- `GET /api/v1/notary/info`: Check notary availability and get public address for verification
+- `GET /api/v1/notary/status`: Simplified notary status for health checks
+- `POST /api/v1/data/?sign=notary`: Upload with notary signature (see [Notary Guide](docs/notary-guide.md))
 
 ### Key Value Propositions
 
