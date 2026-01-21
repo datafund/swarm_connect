@@ -1,19 +1,42 @@
 # app/main.py
+from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 from app.core.config import settings
 from app.core.version import VERSION
-from app.api.endpoints import stamps, data, wallet
+from app.api.endpoints import stamps, data, wallet, pool
 import logging
 
 # Configure basic logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Application lifespan handler for startup/shutdown tasks."""
+    # === Startup ===
+    # Start stamp pool background task if enabled
+    if settings.STAMP_POOL_ENABLED:
+        from app.services.stamp_pool import stamp_pool_manager
+        logger.info("Starting stamp pool background task")
+        await stamp_pool_manager.start_background_task()
+
+    yield
+
+    # === Shutdown ===
+    # Stop stamp pool background task if running
+    if settings.STAMP_POOL_ENABLED:
+        from app.services.stamp_pool import stamp_pool_manager
+        logger.info("Stopping stamp pool background task")
+        await stamp_pool_manager.stop_background_task()
+
+
 app = FastAPI(
     title=settings.PROJECT_NAME,
     version=VERSION,
-    openapi_url=f"{settings.API_V1_STR}/openapi.json" # Standard location for OpenAPI spec
+    openapi_url=f"{settings.API_V1_STR}/openapi.json",  # Standard location for OpenAPI spec
+    lifespan=lifespan
 )
 
 # Add x402 payment middleware if enabled
@@ -27,6 +50,7 @@ if settings.X402_ENABLED:
 app.include_router(stamps.router, prefix=f"{settings.API_V1_STR}/stamps", tags=["stamps"])
 app.include_router(data.router, prefix=f"{settings.API_V1_STR}/data", tags=["data"])
 app.include_router(wallet.router, prefix=f"{settings.API_V1_STR}", tags=["wallet"])
+app.include_router(pool.router, prefix=f"{settings.API_V1_STR}/pool", tags=["pool"])
 
 @app.get("/", summary="Health Check", tags=["default"])
 @app.get("/health", summary="Health Check", tags=["default"], include_in_schema=False)
