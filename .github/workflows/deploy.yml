@@ -43,6 +43,14 @@ jobs:
           X402_NETWORK=${{ vars.X402_NETWORK || 'base-sepolia' }}
           X402_FACILITATOR_URL=${{ vars.X402_FACILITATOR_URL || 'https://x402.org/facilitator' }}
           X402_FREE_TIER_ENABLED=${{ vars.X402_FREE_TIER_ENABLED || 'true' }}
+          STAMP_POOL_ENABLED=${{ vars.STAMP_POOL_ENABLED || 'false' }}
+          STAMP_POOL_RESERVE_SMALL=${{ vars.STAMP_POOL_RESERVE_SMALL || '1' }}
+          STAMP_POOL_RESERVE_MEDIUM=${{ vars.STAMP_POOL_RESERVE_MEDIUM || '1' }}
+          STAMP_POOL_RESERVE_LARGE=${{ vars.STAMP_POOL_RESERVE_LARGE || '0' }}
+          STAMP_POOL_CHECK_INTERVAL_SECONDS=${{ vars.STAMP_POOL_CHECK_INTERVAL_SECONDS || '900' }}
+          STAMP_POOL_MIN_TTL_HOURS=${{ vars.STAMP_POOL_MIN_TTL_HOURS || '24' }}
+          STAMP_POOL_TOPUP_HOURS=${{ vars.STAMP_POOL_TOPUP_HOURS || '168' }}
+          STAMP_POOL_DEFAULT_DURATION_HOURS=${{ vars.STAMP_POOL_DEFAULT_DURATION_HOURS || '168' }}
           EOF
 
       - name: deploy
