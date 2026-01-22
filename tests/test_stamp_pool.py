@@ -318,6 +318,104 @@ class TestPoolAPIDisabled:
             assert response.status_code == 503
 
 
+class TestImmediateReplenishment:
+    """Test immediate replenishment after stamp release."""
+
+    @pytest.fixture
+    def manager(self):
+        """Create a fresh StampPoolManager for each test."""
+        return StampPoolManager()
+
+    def test_trigger_replenishment_when_below_target(self, manager):
+        """Test that replenishment is triggered when pool drops below target."""
+        # Add a stamp and configure target to 1
+        manager.add_stamp_to_pool("stamp17", 17, 1000000, 604800)
+
+        with patch.object(manager, 'get_reserve_config', return_value={17: 1}):
+            with patch('app.services.stamp_pool.settings') as mock_settings:
+                mock_settings.STAMP_POOL_IMMEDIATE_REPLENISH = True
+
+                # Release the stamp, pool is now at 0, below target 1
+                manager.release_stamp("stamp17")
+
+                # Now trigger should return True (needs replenishment)
+                # Need to mock asyncio.create_task to prevent actual task creation
+                with patch('asyncio.create_task') as mock_create_task:
+                    triggered = manager.trigger_replenishment_if_needed(17)
+                    assert triggered is True
+                    mock_create_task.assert_called_once()
+
+    def test_no_trigger_when_at_target(self, manager):
+        """Test no replenishment triggered when pool is at target."""
+        # Add two stamps
+        manager.add_stamp_to_pool("stamp17a", 17, 1000000, 604800)
+        manager.add_stamp_to_pool("stamp17b", 17, 1000000, 604800)
+
+        with patch.object(manager, 'get_reserve_config', return_value={17: 1}):
+            with patch('app.services.stamp_pool.settings') as mock_settings:
+                mock_settings.STAMP_POOL_IMMEDIATE_REPLENISH = True
+
+                # Release one stamp, pool is now at 1, equal to target 1
+                manager.release_stamp("stamp17a")
+
+                # Should not trigger - we're at target
+                triggered = manager.trigger_replenishment_if_needed(17)
+                assert triggered is False
+
+    def test_no_trigger_when_disabled(self, manager):
+        """Test no replenishment when immediate replenishment is disabled."""
+        manager.add_stamp_to_pool("stamp17", 17, 1000000, 604800)
+
+        with patch.object(manager, 'get_reserve_config', return_value={17: 1}):
+            with patch('app.services.stamp_pool.settings') as mock_settings:
+                mock_settings.STAMP_POOL_IMMEDIATE_REPLENISH = False
+
+                # Release the stamp
+                manager.release_stamp("stamp17")
+
+                # Should not trigger - feature disabled
+                triggered = manager.trigger_replenishment_if_needed(17)
+                assert triggered is False
+
+    def test_no_trigger_for_unconfigured_depth(self, manager):
+        """Test no replenishment for depths not in reserve config."""
+        manager.add_stamp_to_pool("stamp22", 22, 1000000, 604800)
+
+        with patch.object(manager, 'get_reserve_config', return_value={17: 1, 20: 1}):  # No 22
+            with patch('app.services.stamp_pool.settings') as mock_settings:
+                mock_settings.STAMP_POOL_IMMEDIATE_REPLENISH = True
+
+                # Release the stamp
+                manager.release_stamp("stamp22")
+
+                # Should not trigger - depth 22 not configured
+                triggered = manager.trigger_replenishment_if_needed(22)
+                assert triggered is False
+
+    def test_pending_replenishments_tracked(self, manager):
+        """Test that pending replenishments are tracked to avoid over-ordering."""
+        with patch.object(manager, 'get_reserve_config', return_value={17: 2}):
+            with patch('app.services.stamp_pool.settings') as mock_settings:
+                mock_settings.STAMP_POOL_IMMEDIATE_REPLENISH = True
+
+                with patch('asyncio.create_task') as mock_create_task:
+                    # First trigger should succeed
+                    triggered1 = manager.trigger_replenishment_if_needed(17)
+                    assert triggered1 is True
+                    assert manager._pending_replenishments.get(17) == 1
+
+                    # Second trigger should also succeed since we need 2
+                    triggered2 = manager.trigger_replenishment_if_needed(17)
+                    assert triggered2 is True
+                    assert manager._pending_replenishments.get(17) == 2
+
+                    # Third trigger should fail - we have 2 pending, target is 2
+                    triggered3 = manager.trigger_replenishment_if_needed(17)
+                    assert triggered3 is False
+
+                    assert mock_create_task.call_count == 2
+
+
 class TestLowReserveWarning:
     """Test low reserve warning logic."""
 
