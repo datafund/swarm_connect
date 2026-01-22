@@ -10,6 +10,7 @@ Run with: pytest tests/test_integration_gateway.py -v -s
 
 To skip these tests in CI, they are marked with @pytest.mark.integration
 """
+import json
 import pytest
 import requests
 import tarfile
@@ -278,6 +279,140 @@ class TestManifestUploadIntegration:
         )
 
         assert response.status_code == 422  # FastAPI validation error
+
+
+@pytest.mark.integration
+class TestNotarySigningIntegration:
+    """Integration tests for notary provenance signing."""
+
+    def test_notary_info_endpoint(self, gateway_available):
+        """Test that notary info endpoint returns expected structure."""
+        if not gateway_available:
+            pytest.skip("Gateway not available")
+
+        response = requests.get(
+            f"{GATEWAY_URL}/api/v1/notary/info",
+            timeout=10
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert "enabled" in data
+        assert "available" in data
+        # If enabled, should have address
+        if data.get("enabled") and data.get("available"):
+            assert "address" in data
+            assert data["address"].startswith("0x")
+
+    def test_notary_signing_success(self, gateway_available, usable_stamp):
+        """Test uploading a document with notary signature."""
+        if not gateway_available:
+            pytest.skip("Gateway not available")
+
+        # Check if notary is available
+        info_response = requests.get(f"{GATEWAY_URL}/api/v1/notary/info", timeout=10)
+        if not info_response.json().get("available"):
+            pytest.skip("Notary signing not available on this gateway")
+
+        notary_address = info_response.json().get("address")
+
+        # Create a test document with required 'data' field
+        test_doc = {
+            "data": {
+                "test": "integration test",
+                "timestamp": "2026-01-22T00:00:00Z"
+            }
+        }
+
+        # Upload with notary signing
+        response = requests.post(
+            f"{GATEWAY_URL}/api/v1/data/",
+            params={"stamp_id": usable_stamp, "sign": "notary"},
+            files={"file": ("test.json", json.dumps(test_doc).encode(), "application/json")},
+            headers={"X-Payment-Mode": "free"},  # For x402 gateways with free tier
+            timeout=60
+        )
+
+        assert response.status_code == 200, f"Upload failed: {response.text}"
+        data = response.json()
+
+        assert "reference" in data
+        assert len(data["reference"]) == 64
+
+        # Store for verification test
+        pytest.notary_reference = data["reference"]
+        pytest.notary_address = notary_address
+
+    def test_notary_signature_verification(self, gateway_available):
+        """Test that the signed document can be downloaded and verified."""
+        if not gateway_available:
+            pytest.skip("Gateway not available")
+
+        if not hasattr(pytest, "notary_reference"):
+            pytest.skip("No notary reference from previous test")
+
+        reference = pytest.notary_reference
+        expected_address = pytest.notary_address
+
+        # Download the signed document
+        response = requests.get(
+            f"{GATEWAY_URL}/api/v1/data/{reference}",
+            timeout=60
+        )
+
+        assert response.status_code == 200
+
+        # Parse the signed document
+        signed_doc = response.json()
+
+        # Verify structure
+        assert "data" in signed_doc
+        assert "signatures" in signed_doc
+        assert len(signed_doc["signatures"]) >= 1
+
+        # Find notary signature
+        notary_sig = next(
+            (s for s in signed_doc["signatures"] if s.get("type") == "notary"),
+            None
+        )
+        assert notary_sig is not None, "No notary signature found"
+
+        # Verify signature structure matches docs
+        assert notary_sig["type"] == "notary"
+        assert notary_sig["signer"].startswith("0x")
+        assert "timestamp" in notary_sig
+        assert "data_hash" in notary_sig
+        assert "signature" in notary_sig
+        assert notary_sig["hashed_fields"] == ["data"]
+        assert notary_sig["signed_message_format"] == "{data_hash}|{timestamp}"
+
+        # Verify signer matches gateway's notary address
+        if expected_address:
+            assert notary_sig["signer"].lower() == expected_address.lower()
+
+    def test_notary_rejects_invalid_document(self, gateway_available, usable_stamp):
+        """Test that notary signing rejects documents without 'data' field."""
+        if not gateway_available:
+            pytest.skip("Gateway not available")
+
+        # Check if notary is available
+        info_response = requests.get(f"{GATEWAY_URL}/api/v1/notary/info", timeout=10)
+        if not info_response.json().get("available"):
+            pytest.skip("Notary signing not available on this gateway")
+
+        # Document missing required 'data' field
+        invalid_doc = {"content": "no data field"}
+
+        response = requests.post(
+            f"{GATEWAY_URL}/api/v1/data/",
+            params={"stamp_id": usable_stamp, "sign": "notary"},
+            files={"file": ("invalid.json", json.dumps(invalid_doc).encode(), "application/json")},
+            headers={"X-Payment-Mode": "free"},
+            timeout=60
+        )
+
+        assert response.status_code == 400
+        assert "data" in response.json().get("detail", "").lower()
 
 
 @pytest.mark.integration
