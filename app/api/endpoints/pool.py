@@ -211,6 +211,12 @@ async def acquire_stamp(
             fallback_used=False
         )
 
+    # Trigger immediate replenishment if pool is below target
+    # This runs in the background and doesn't affect the response
+    replenishment_triggered = stamp_pool_manager.trigger_replenishment_if_needed(released.depth)
+    if replenishment_triggered:
+        logger.info(f"Triggered immediate replenishment for depth {released.depth}")
+
     size_name = depth_to_size_name(released.depth)
 
     message = f"Stamp acquired from pool (depth={released.depth}, size={size_name})"

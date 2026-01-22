@@ -76,6 +76,10 @@ class Settings(BaseSettings):
     # Stamp duration for new pool stamps (in hours)
     STAMP_POOL_DEFAULT_DURATION_HOURS: int = 168  # 1 week default for pool stamps
 
+    # Immediate replenishment: when true, purchasing a replacement stamp starts
+    # immediately (async) when a stamp is released from the pool
+    STAMP_POOL_IMMEDIATE_REPLENISH: bool = True
+
     # === Notary/Provenance Signing Settings ===
     # The notary feature allows the gateway to sign documents with an authoritative timestamp.
     # This provides proof that a document existed at a specific time, signed by the gateway.

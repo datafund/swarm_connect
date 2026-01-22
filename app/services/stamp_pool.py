@@ -79,6 +79,7 @@ class StampPoolManager:
         self._task: Optional[asyncio.Task] = None
         self._last_check: Optional[datetime] = None
         self._errors: List[str] = []
+        self._pending_replenishments: Dict[int, int] = {}  # depth -> count of pending purchases
 
     @property
     def is_enabled(self) -> bool:
@@ -200,6 +201,87 @@ class StampPoolManager:
             del self._pool[batch_id]
 
             return stamp
+
+    def trigger_replenishment_if_needed(self, depth: int) -> bool:
+        """
+        Check if replenishment is needed for the given depth and trigger async purchase.
+
+        This is called after a stamp is released to immediately start purchasing
+        a replacement if the reserve count is below target.
+
+        Args:
+            depth: The depth of the stamp that was just released
+
+        Returns:
+            True if a replenishment task was triggered, False otherwise
+        """
+        if not settings.STAMP_POOL_IMMEDIATE_REPLENISH:
+            logger.debug(f"Immediate replenishment disabled, skipping for depth {depth}")
+            return False
+
+        reserve_config = self.get_reserve_config()
+        target_count = reserve_config.get(depth, 0)
+
+        if target_count == 0:
+            # This depth is not configured for pooling
+            return False
+
+        # Count current available stamps for this depth
+        with self._lock:
+            current_count = len([
+                s for s in self._pool.values()
+                if s.depth == depth and s.status == PoolStampStatus.AVAILABLE
+            ])
+            pending_count = self._pending_replenishments.get(depth, 0)
+
+        # If we're at or above target (including pending), no action needed
+        effective_count = current_count + pending_count
+        if effective_count >= target_count:
+            logger.debug(
+                f"Pool depth {depth}: no replenishment needed "
+                f"(have {current_count}, pending {pending_count}, target {target_count})"
+            )
+            return False
+
+        # Need to replenish - spawn async task
+        logger.info(
+            f"Pool depth {depth}: triggering immediate replenishment "
+            f"(have {current_count}, pending {pending_count}, target {target_count})"
+        )
+
+        # Track pending replenishment
+        with self._lock:
+            self._pending_replenishments[depth] = pending_count + 1
+
+        # Spawn fire-and-forget async task
+        asyncio.create_task(self._async_replenish_one(depth))
+
+        return True
+
+    async def _async_replenish_one(self, depth: int):
+        """
+        Async task to purchase one stamp for replenishment.
+
+        This is fire-and-forget - errors are logged but don't affect the caller.
+        """
+        try:
+            logger.info(f"Immediate replenishment: starting purchase for depth {depth}")
+            batch_id = await self._purchase_stamp(depth)
+            if batch_id:
+                logger.info(f"Immediate replenishment: successfully purchased stamp {batch_id[:16]}... for depth {depth}")
+            else:
+                logger.warning(f"Immediate replenishment: purchase returned no batch_id for depth {depth}")
+        except Exception as e:
+            logger.error(f"Immediate replenishment failed for depth {depth}: {e}")
+            self._errors.append(f"Immediate replenishment failed (depth {depth}): {str(e)}")
+        finally:
+            # Remove from pending count
+            with self._lock:
+                current_pending = self._pending_replenishments.get(depth, 1)
+                if current_pending <= 1:
+                    self._pending_replenishments.pop(depth, None)
+                else:
+                    self._pending_replenishments[depth] = current_pending - 1
 
     def add_stamp_to_pool(self, batch_id: str, depth: int, amount: int, ttl: int, label: Optional[str] = None) -> PoolStamp:
         """
