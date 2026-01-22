@@ -44,7 +44,8 @@ class NotarySignature:
     timestamp: str  # ISO 8601
     data_hash: str  # SHA-256 of data field
     signature: str  # EIP-191 signature
-    signed_fields: List[str]  # Fields that were signed
+    hashed_fields: List[str]  # Fields that were hashed to create data_hash
+    signed_message_format: str  # Format of the EIP-191 signed message
 
 
 @dataclass
@@ -76,7 +77,8 @@ class ProvenanceService:
                 "timestamp": "2026-01-21T14:00:00Z",
                 "data_hash": "abc123...",
                 "signature": "def456...",
-                "signed_fields": ["data"]
+                "hashed_fields": ["data"],
+                "signed_message_format": "{data_hash}|{timestamp}"
             }
         ]
     }
@@ -191,7 +193,8 @@ class ProvenanceService:
             "timestamp": timestamp_iso,
             "data_hash": data_hash,
             "signature": signature,
-            "signed_fields": ["data"]
+            "hashed_fields": ["data"],  # Fields that were hashed to create data_hash
+            "signed_message_format": "{data_hash}|{timestamp}"  # Actual EIP-191 signed message
         }
 
         # Get existing signatures or create empty array
