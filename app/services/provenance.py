@@ -135,6 +135,15 @@ class ProvenanceService:
             if not isinstance(document["signatures"], list):
                 raise DocumentValidationError("'signatures' field must be an array")
 
+        # Log guidance for SWIP compliance (non-blocking)
+        swip_fields = ["content_hash", "provenance_standard", "encryption", "stamp_id"]
+        missing_swip = [f for f in swip_fields if f not in document]
+        if missing_swip:
+            logger.debug(
+                f"Document missing optional SWIP fields: {missing_swip}. "
+                "Consider using SWIP-37 compliant structure for future compatibility."
+            )
+
         return document, document["data"]
 
     def sign_document(
@@ -188,11 +197,9 @@ class ProvenanceService:
         # Get existing signatures or create empty array
         existing_signatures = document.get("signatures", [])
 
-        # Create output document
-        output_document = {
-            "data": data_value,
-            "signatures": existing_signatures + [notary_signature]
-        }
+        # Create output document - preserve all original fields, update signatures
+        output_document = document.copy()
+        output_document["signatures"] = existing_signatures + [notary_signature]
 
         # Serialize to JSON
         output_json = json.dumps(output_document, indent=2)
