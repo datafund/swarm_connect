@@ -176,7 +176,8 @@ class TestSignDocument:
         assert "timestamp" in sig
         assert "data_hash" in sig
         assert "signature" in sig
-        assert sig["signed_fields"] == ["data"]
+        assert sig["hashed_fields"] == ["data"]
+        assert sig["signed_message_format"] == "{data_hash}|{timestamp}"
 
     def test_sign_document_with_custom_timestamp(self, real_service):
         """Test signing with a custom timestamp."""

@@ -87,7 +87,8 @@ The returned document includes the notary signature:
       "timestamp": "2026-01-21T14:30:00+00:00",
       "data_hash": "abc123...def456",
       "signature": "0x...",
-      "signed_fields": ["data"]
+      "hashed_fields": ["data"],
+      "signed_message_format": "{data_hash}|{timestamp}"
     }
   ]
 }
@@ -98,8 +99,9 @@ The returned document includes the notary signature:
 - `signer`: The gateway's Ethereum address (matches `/notary/info`)
 - `timestamp`: ISO 8601 timestamp when the document was signed
 - `data_hash`: SHA-256 hash of the canonical JSON `data` field
-- `signature`: EIP-191 signature of `"data_hash|timestamp"`
-- `signed_fields`: Which fields were included in the hash (always `["data"]`)
+- `signature`: EIP-191 signature of the message `"data_hash|timestamp"`
+- `hashed_fields`: Which document fields were hashed to create `data_hash` (always `["data"]`)
+- `signed_message_format`: The format of the actual signed message (always `"{data_hash}|{timestamp}"`)
 
 ---
 
@@ -167,7 +169,8 @@ file: <your JSON document>
       "timestamp": "2026-01-21T14:30:00+00:00",
       "data_hash": "...",
       "signature": "...",
-      "signed_fields": ["data"]
+      "hashed_fields": ["data"],
+      "signed_message_format": "{data_hash}|{timestamp}"
     }
   ]
 }
@@ -247,7 +250,8 @@ document = {
             "timestamp": "2026-01-21T14:30:00+00:00",
             "data_hash": "abc123...",
             "signature": "0x...",
-            "signed_fields": ["data"]
+            "hashed_fields": ["data"],
+            "signed_message_format": "{data_hash}|{timestamp}"
         }
     ]
 }
