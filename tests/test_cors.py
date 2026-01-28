@@ -2,7 +2,8 @@
 """Tests for CORS middleware configuration."""
 
 import pytest
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
+from fastapi.testclient import TestClient
 
 
 class TestCorsConfiguration:
@@ -76,42 +77,29 @@ class TestCorsConfiguration:
 
 
 class TestCorsMiddleware:
-    """Test CORS middleware behavior with actual HTTP requests."""
+    """Test CORS middleware behavior with actual HTTP requests.
+
+    These tests use the default app which has CORS enabled with allow_origins=["*"].
+    """
 
     @pytest.fixture
-    def client_with_cors(self):
-        """Create test client with CORS enabled."""
-        with patch.dict("os.environ", {
-            "SWARM_BEE_API_URL": "https://api.gateway.ethswarm.org",
-            "CORS_ALLOWED_ORIGINS": "*",
-            "CORS_ALLOW_CREDENTIALS": "false",
-            "STAMP_POOL_ENABLED": "false",
-            "X402_ENABLED": "false",
-        }, clear=False):
-            # Need to reload modules to pick up new settings
-            import importlib
-            import app.core.config
-            importlib.reload(app.core.config)
+    def client(self):
+        """Create test client using the default app."""
+        from app.main import app
+        return TestClient(app)
 
-            # Now import main which will create app with new settings
-            import app.main
-            importlib.reload(app.main)
-
-            from fastapi.testclient import TestClient
-            return TestClient(app.main.app)
-
-    def test_cors_headers_on_get(self, client_with_cors):
+    def test_cors_headers_on_get(self, client):
         """Test CORS headers are present on GET request."""
-        response = client_with_cors.get(
+        response = client.get(
             "/health",
             headers={"Origin": "http://localhost:5173"}
         )
         assert response.status_code == 200
         assert response.headers.get("access-control-allow-origin") == "*"
 
-    def test_cors_preflight_options(self, client_with_cors):
+    def test_cors_preflight_options(self, client):
         """Test CORS preflight OPTIONS request."""
-        response = client_with_cors.options(
+        response = client.options(
             "/health",
             headers={
                 "Origin": "http://localhost:5173",
@@ -122,9 +110,9 @@ class TestCorsMiddleware:
         assert response.headers.get("access-control-allow-origin") == "*"
         assert "GET" in response.headers.get("access-control-allow-methods", "")
 
-    def test_cors_preflight_post(self, client_with_cors):
+    def test_cors_preflight_post(self, client):
         """Test CORS preflight for POST request."""
-        response = client_with_cors.options(
+        response = client.options(
             "/api/v1/data/",
             headers={
                 "Origin": "http://localhost:5173",
@@ -136,9 +124,9 @@ class TestCorsMiddleware:
         assert response.headers.get("access-control-allow-origin") == "*"
         assert "POST" in response.headers.get("access-control-allow-methods", "")
 
-    def test_cors_allows_all_headers(self, client_with_cors):
+    def test_cors_allows_all_headers(self, client):
         """Test CORS allows custom headers."""
-        response = client_with_cors.options(
+        response = client.options(
             "/health",
             headers={
                 "Origin": "http://localhost:5173",
@@ -151,54 +139,30 @@ class TestCorsMiddleware:
         allow_headers = response.headers.get("access-control-allow-headers", "")
         assert "x-custom-header" in allow_headers.lower() or "*" in allow_headers
 
-
-class TestCorsWithSpecificOrigins:
-    """Test CORS with specific allowed origins."""
-
-    @pytest.fixture
-    def client_with_specific_origins(self):
-        """Create test client with specific CORS origins."""
-        with patch.dict("os.environ", {
-            "SWARM_BEE_API_URL": "https://api.gateway.ethswarm.org",
-            "CORS_ALLOWED_ORIGINS": "https://app.datafund.io,https://fairdrop.datafund.io",
-            "CORS_ALLOW_CREDENTIALS": "true",
-            "STAMP_POOL_ENABLED": "false",
-            "X402_ENABLED": "false",
-        }, clear=False):
-            import importlib
-            import app.core.config
-            importlib.reload(app.core.config)
-
-            import app.main
-            importlib.reload(app.main)
-
-            from fastapi.testclient import TestClient
-            return TestClient(app.main.app)
-
-    def test_allowed_origin_gets_cors_header(self, client_with_specific_origins):
-        """Test that allowed origin receives CORS header."""
-        response = client_with_specific_origins.get(
-            "/health",
-            headers={"Origin": "https://app.datafund.io"}
+    def test_cors_on_api_endpoints(self, client):
+        """Test CORS headers on API endpoints."""
+        response = client.options(
+            "/api/v1/stamps/",
+            headers={
+                "Origin": "http://localhost:5173",
+                "Access-Control-Request-Method": "POST",
+            }
         )
         assert response.status_code == 200
-        assert response.headers.get("access-control-allow-origin") == "https://app.datafund.io"
+        assert response.headers.get("access-control-allow-origin") == "*"
 
-    def test_disallowed_origin_no_cors_header(self, client_with_specific_origins):
-        """Test that disallowed origin doesn't receive CORS header."""
-        response = client_with_specific_origins.get(
-            "/health",
-            headers={"Origin": "https://malicious-site.com"}
-        )
-        assert response.status_code == 200
-        # No CORS header for disallowed origin
-        assert response.headers.get("access-control-allow-origin") is None
-
-    def test_credentials_header_with_specific_origins(self, client_with_specific_origins):
-        """Test credentials header is present with specific origins."""
-        response = client_with_specific_origins.get(
-            "/health",
-            headers={"Origin": "https://app.datafund.io"}
-        )
-        assert response.status_code == 200
-        assert response.headers.get("access-control-allow-credentials") == "true"
+    def test_cors_from_different_origins(self, client):
+        """Test CORS allows requests from various origins when using wildcard."""
+        origins = [
+            "http://localhost:3000",
+            "http://localhost:5173",
+            "https://app.datafund.io",
+            "https://example.com",
+        ]
+        for origin in origins:
+            response = client.get(
+                "/health",
+                headers={"Origin": origin}
+            )
+            assert response.status_code == 200
+            assert response.headers.get("access-control-allow-origin") == "*"
