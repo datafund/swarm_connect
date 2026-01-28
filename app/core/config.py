@@ -86,6 +86,20 @@ class Settings(BaseSettings):
     NOTARY_ENABLED: bool = False  # Master switch for notary signing feature
     NOTARY_PRIVATE_KEY: Optional[str] = None  # Hex-encoded private key for signing (without 0x prefix)
 
+    # === CORS Settings ===
+    # Enable CORS for browser-based SDK usage (e.g., React/Vite frontends)
+    CORS_ALLOWED_ORIGINS: str = "*"  # Comma-separated origins or "*" for all
+    CORS_ALLOW_CREDENTIALS: bool = False  # Must be False when using "*" origins
+
+    def get_cors_origins(self) -> List[str]:
+        """Parse CORS allowed origins from comma-separated string.
+
+        Returns ["*"] for wildcard, or list of specific origins.
+        """
+        if self.CORS_ALLOWED_ORIGINS == "*":
+            return ["*"]
+        return [origin.strip() for origin in self.CORS_ALLOWED_ORIGINS.split(",") if origin.strip()]
+
     @field_validator("X402_BLACKLIST_IPS", "X402_WHITELIST_IPS", mode="before")
     @classmethod
     def empty_str_to_empty(cls, v: str) -> str:

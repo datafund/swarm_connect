@@ -92,6 +92,10 @@ Notary signing (optional):
 - `NOTARY_ENABLED`: Enable notary signing feature (default: `false`)
 - `NOTARY_PRIVATE_KEY`: Hex-encoded Ethereum private key for signing (64 characters, no 0x prefix)
 
+CORS (browser access):
+- `CORS_ALLOWED_ORIGINS`: Allowed origins, `*` for all or comma-separated list (default: `*`)
+- `CORS_ALLOW_CREDENTIALS`: Allow credentials in CORS requests (default: `false`)
+
 ### API Endpoints
 
 #### Core Endpoints
@@ -132,7 +136,7 @@ Notary signing (optional):
 ### Development Notes
 
 - Tests are implemented using pytest with mocking (see `tests/` directory)
-- CORS middleware is commented out but ready to enable
+- CORS middleware enabled by default for browser-based SDK usage
 - Authentication/authorization placeholder code exists but not implemented
 - SSL/HTTPS support built into development server
 - Logging configured at INFO level with structured error handling

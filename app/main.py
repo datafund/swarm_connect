@@ -1,6 +1,7 @@
 # app/main.py
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from app.core.config import settings
 from app.core.version import VERSION
@@ -38,6 +39,18 @@ app = FastAPI(
     openapi_url=f"{settings.API_V1_STR}/openapi.json",  # Standard location for OpenAPI spec
     lifespan=lifespan
 )
+
+# Add CORS middleware for browser-based SDK usage
+# This must be added before other middleware
+cors_origins = settings.get_cors_origins()
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=cors_origins,
+    allow_credentials=settings.CORS_ALLOW_CREDENTIALS,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+logger.info(f"CORS enabled for origins: {cors_origins}")
 
 # Add x402 payment middleware if enabled
 if settings.X402_ENABLED:
@@ -128,21 +141,6 @@ def read_root():
     return response_data
 
 # --- Placeholder for Future Enhancements ---
-
-# TODO: Add CORS middleware if the API needs to be accessed from browser frontends on different domains
-# from fastapi.middleware.cors import CORSMiddleware
-# origins = [
-#     "http://localhost",
-#     "http://localhost:8080",
-#     # Add your frontend domains here
-# ]
-# app.add_middleware(
-#     CORSMiddleware,
-#     allow_origins=origins,
-#     allow_credentials=True,
-#     allow_methods=["*"],
-#     allow_headers=["*"],
-# )
 
 # TODO: Add Security Dependencies when implementing Auth
 # (e.g., app.include_router(..., dependencies=[Depends(verify_api_key)]))
