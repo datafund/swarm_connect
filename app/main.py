@@ -40,8 +40,15 @@ app = FastAPI(
     lifespan=lifespan
 )
 
+# Add x402 payment middleware if enabled (must be added before CORS)
+if settings.X402_ENABLED:
+    from app.x402.middleware import X402Middleware
+    app.add_middleware(X402Middleware)
+    logger.info("x402 middleware enabled")
+
 # Add CORS middleware for browser-based SDK usage
-# This must be added before other middleware
+# IMPORTANT: Add CORS last so it wraps all other middleware.
+# This ensures CORS headers are added to ALL responses, including 402s from x402.
 cors_origins = settings.get_cors_origins()
 app.add_middleware(
     CORSMiddleware,
@@ -51,12 +58,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 logger.info(f"CORS enabled for origins: {cors_origins}")
-
-# Add x402 payment middleware if enabled
-if settings.X402_ENABLED:
-    from app.x402.middleware import X402Middleware
-    app.add_middleware(X402Middleware)
-    logger.info("x402 middleware enabled")
 
 # Include the API router(s)
 # The prefix ensures all routes start with /api/v1
