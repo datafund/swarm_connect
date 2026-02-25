@@ -286,7 +286,9 @@ curl http://localhost:8000/health | jq .
       "ok": true,
       "is_critical": false
     },
-    "gnosis_wallet": {
+    "bee_gnosis_wallet": {
+      "wallet_address": "0xBeeNodeWallet...",
+      "chequebook_address": "0xChequebook...",
       "can_accept": true,
       "xbzz_ok": true,
       "xdai_ok": true,
@@ -369,7 +371,7 @@ Since there's no automatic bridging, you need to manually manage:
 Gateway wallet is below critical thresholds:
 
 1. Check health endpoint: `curl http://localhost:8000/health | jq .`
-2. Look at `x402.base_wallet.is_critical` and `x402.gnosis_wallet.can_accept`
+2. Look at `x402.base_wallet.is_critical` and `x402.bee_gnosis_wallet.can_accept`
 3. If Base ETH is critical: Top up ETH on Base Sepolia
 4. If Gnosis balances are low: Top up xBZZ or xDAI on Gnosis
 

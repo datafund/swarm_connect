@@ -748,6 +748,8 @@ class TestHealthEndpointWithX402:
 
         mock_preflight.return_value = {
             "can_accept": True,
+            "wallet_address": "0xBeeWallet123",
+            "chequebook_address": "0xCheque123",
             "xbzz_ok": True,
             "xdai_ok": True,
             "chequebook_ok": True,
@@ -763,7 +765,7 @@ class TestHealthEndpointWithX402:
         assert "x402" in response
         assert response["x402"]["enabled"] is True
         assert response["x402"]["base_wallet"]["ok"] is True
-        assert response["x402"]["gnosis_wallet"]["can_accept"] is True
+        assert response["x402"]["bee_gnosis_wallet"]["can_accept"] is True
         assert len(response["x402"]["warnings"]) == 0
         assert len(response["x402"]["errors"]) == 0
 
@@ -788,6 +790,8 @@ class TestHealthEndpointWithX402:
 
         mock_preflight.return_value = {
             "can_accept": True,
+            "wallet_address": "0xBeeWallet123",
+            "chequebook_address": "0xCheque123",
             "xbzz_ok": True,
             "xdai_ok": True,
             "chequebook_ok": True,
@@ -825,6 +829,8 @@ class TestHealthEndpointWithX402:
 
         mock_preflight.return_value = {
             "can_accept": True,
+            "wallet_address": "0xBeeWallet123",
+            "chequebook_address": "0xCheque123",
             "xbzz_ok": True,
             "xdai_ok": True,
             "chequebook_ok": True,
@@ -864,6 +870,8 @@ class TestHealthEndpointWithX402:
 
         mock_preflight.return_value = {
             "can_accept": True,
+            "wallet_address": "0xBeeWallet123",
+            "chequebook_address": "0xCheque123",
             "xbzz_ok": True,
             "xdai_ok": True,
             "chequebook_ok": True,
