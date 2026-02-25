@@ -167,12 +167,13 @@ class TestCheckXDAIBalance:
 class TestCheckChequebookBalance:
     """Test chequebook balance checks."""
 
-    @patch("app.x402.preflight.get_chequebook_balance")
+    @patch("app.x402.preflight.get_chequebook_info")
     @patch("app.x402.preflight.settings")
     def test_chequebook_above_threshold(self, mock_settings, mock_get_chequebook):
         """Chequebook balance above threshold returns ok=True."""
         mock_settings.X402_CHEQUEBOOK_WARN_THRESHOLD = 5.0
         mock_get_chequebook.return_value = {
+            "chequebookAddress": "0xcheque123",
             "availableBalance": str(10 * PLUR_PER_BZZ),  # 10 BZZ
             "totalBalance": str(15 * PLUR_PER_BZZ)  # 15 BZZ
         }
@@ -185,12 +186,13 @@ class TestCheckChequebookBalance:
         assert result["threshold_bzz"] == 5.0
         assert result["warning"] is None
 
-    @patch("app.x402.preflight.get_chequebook_balance")
+    @patch("app.x402.preflight.get_chequebook_info")
     @patch("app.x402.preflight.settings")
     def test_chequebook_below_threshold(self, mock_settings, mock_get_chequebook):
         """Chequebook balance below threshold returns ok=False with warning."""
         mock_settings.X402_CHEQUEBOOK_WARN_THRESHOLD = 5.0
         mock_get_chequebook.return_value = {
+            "chequebookAddress": "0xcheque123",
             "availableBalance": str(2 * PLUR_PER_BZZ),  # 2 BZZ
             "totalBalance": str(5 * PLUR_PER_BZZ)  # 5 BZZ
         }
@@ -202,7 +204,7 @@ class TestCheckChequebookBalance:
         assert "below threshold" in result["warning"]
         assert "bandwidth" in result["warning"].lower()
 
-    @patch("app.x402.preflight.get_chequebook_balance")
+    @patch("app.x402.preflight.get_chequebook_info")
     @patch("app.x402.preflight.settings")
     def test_chequebook_api_error(self, mock_settings, mock_get_chequebook):
         """API error returns ok=False with error message."""
@@ -229,6 +231,7 @@ class TestCheckPreflightBalances:
             "balance_plur": 20 * PLUR_PER_BZZ,
             "balance_bzz": 20.0,
             "threshold_bzz": 10.0,
+            "wallet_address": "0xwallet123",
             "warning": None
         }
         mock_xdai.return_value = {
@@ -236,6 +239,7 @@ class TestCheckPreflightBalances:
             "balance_wei": int(1.0 * WEI_PER_XDAI),
             "balance_xdai": 1.0,
             "threshold_xdai": 0.5,
+            "wallet_address": "0xwallet123",
             "warning": None
         }
         mock_chequebook.return_value = {
@@ -245,6 +249,7 @@ class TestCheckPreflightBalances:
             "total_balance_plur": 15 * PLUR_PER_BZZ,
             "total_balance_bzz": 15.0,
             "threshold_bzz": 5.0,
+            "chequebook_address": "0xcheque123",
             "warning": None
         }
 
@@ -267,6 +272,7 @@ class TestCheckPreflightBalances:
             "balance_plur": 5 * PLUR_PER_BZZ,
             "balance_bzz": 5.0,
             "threshold_bzz": 10.0,
+            "wallet_address": "0xwallet123",
             "warning": "xBZZ balance below threshold"
         }
         mock_xdai.return_value = {
@@ -274,6 +280,7 @@ class TestCheckPreflightBalances:
             "balance_wei": int(1.0 * WEI_PER_XDAI),
             "balance_xdai": 1.0,
             "threshold_xdai": 0.5,
+            "wallet_address": "0xwallet123",
             "warning": None
         }
         mock_chequebook.return_value = {
@@ -283,6 +290,7 @@ class TestCheckPreflightBalances:
             "total_balance_plur": 15 * PLUR_PER_BZZ,
             "total_balance_bzz": 15.0,
             "threshold_bzz": 5.0,
+            "chequebook_address": "0xcheque123",
             "warning": None
         }
 
@@ -304,6 +312,7 @@ class TestCheckPreflightBalances:
             "balance_plur": 0,
             "balance_bzz": 0.0,
             "threshold_bzz": 10.0,
+            "wallet_address": None,
             "warning": "Failed to fetch xBZZ balance: Connection refused"
         }
         mock_xdai.return_value = {
@@ -311,6 +320,7 @@ class TestCheckPreflightBalances:
             "balance_wei": int(1.0 * WEI_PER_XDAI),
             "balance_xdai": 1.0,
             "threshold_xdai": 0.5,
+            "wallet_address": "0xwallet123",
             "warning": None
         }
         mock_chequebook.return_value = {
@@ -320,6 +330,7 @@ class TestCheckPreflightBalances:
             "total_balance_plur": 15 * PLUR_PER_BZZ,
             "total_balance_bzz": 15.0,
             "threshold_bzz": 5.0,
+            "chequebook_address": "0xcheque123",
             "warning": None
         }
 
@@ -340,6 +351,7 @@ class TestCheckPreflightBalances:
             "balance_plur": 20 * PLUR_PER_BZZ,
             "balance_bzz": 20.0,
             "threshold_bzz": 10.0,
+            "wallet_address": "0xwallet123",
             "warning": None
         }
         mock_xdai.return_value = {
@@ -347,6 +359,7 @@ class TestCheckPreflightBalances:
             "balance_wei": int(1.0 * WEI_PER_XDAI),
             "balance_xdai": 1.0,
             "threshold_xdai": 0.5,
+            "wallet_address": "0xwallet123",
             "warning": None
         }
         mock_chequebook.return_value = {
@@ -356,6 +369,7 @@ class TestCheckPreflightBalances:
             "total_balance_plur": 15 * PLUR_PER_BZZ,
             "total_balance_bzz": 15.0,
             "threshold_bzz": 5.0,
+            "chequebook_address": "0xcheque123",
             "warning": None
         }
 
@@ -387,6 +401,7 @@ class TestCheckPreflightBalances:
             "balance_plur": 5 * PLUR_PER_BZZ,
             "balance_bzz": 5.0,
             "threshold_bzz": 10.0,
+            "wallet_address": "0xwallet123",
             "warning": "xBZZ below threshold"
         }
         mock_xdai.return_value = {
@@ -394,6 +409,7 @@ class TestCheckPreflightBalances:
             "balance_wei": int(0.1 * WEI_PER_XDAI),
             "balance_xdai": 0.1,
             "threshold_xdai": 0.5,
+            "wallet_address": "0xwallet123",
             "warning": "xDAI below threshold"
         }
         mock_chequebook.return_value = {
@@ -403,6 +419,7 @@ class TestCheckPreflightBalances:
             "total_balance_plur": 5 * PLUR_PER_BZZ,
             "total_balance_bzz": 5.0,
             "threshold_bzz": 5.0,
+            "chequebook_address": "0xcheque123",
             "warning": "Chequebook below threshold"
         }
 

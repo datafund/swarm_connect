@@ -124,7 +124,9 @@ def read_root():
                 "ok": base_eth.get("ok"),
                 "is_critical": base_eth.get("is_critical"),
             },
-            "gnosis_wallet": {
+            "bee_gnosis_wallet": {
+                "wallet_address": gnosis.get("wallet_address"),
+                "chequebook_address": gnosis.get("chequebook_address"),
                 "can_accept": gnosis.get("can_accept"),
                 "xbzz_ok": gnosis.get("xbzz_ok"),
                 "xdai_ok": gnosis.get("xdai_ok"),

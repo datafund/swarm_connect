@@ -14,7 +14,7 @@ import logging
 from typing import Dict, Any, List
 
 from app.core.config import settings
-from app.services.swarm_api import get_wallet_info, get_chequebook_balance
+from app.services.swarm_api import get_wallet_info, get_chequebook_info
 
 logger = logging.getLogger(__name__)
 
@@ -43,10 +43,12 @@ def check_xbzz_balance() -> Dict[str, Any]:
         - balance_plur: int - raw balance in PLUR
         - balance_bzz: float - balance in BZZ
         - threshold_bzz: float - warning threshold in BZZ
+        - wallet_address: str or None - Bee node wallet address on Gnosis
         - warning: str or None - warning message if below threshold
     """
     try:
         wallet_info = get_wallet_info()
+        wallet_address = wallet_info.get("walletAddress")
         balance_plur = int(wallet_info.get("bzzBalance", 0))
         balance_bzz = plur_to_bzz(balance_plur)
         threshold_bzz = settings.X402_XBZZ_WARN_THRESHOLD
@@ -57,7 +59,7 @@ def check_xbzz_balance() -> Dict[str, Any]:
         if not ok:
             warning = (
                 f"xBZZ balance ({balance_bzz:.4f} BZZ) is below threshold "
-                f"({threshold_bzz} BZZ). Top up your Gnosis wallet."
+                f"({threshold_bzz} BZZ). Top up Bee Gnosis wallet ({wallet_address})."
             )
             logger.warning(f"Pre-flight check: {warning}")
 
@@ -66,6 +68,7 @@ def check_xbzz_balance() -> Dict[str, Any]:
             "balance_plur": balance_plur,
             "balance_bzz": balance_bzz,
             "threshold_bzz": threshold_bzz,
+            "wallet_address": wallet_address,
             "warning": warning
         }
 
@@ -76,6 +79,7 @@ def check_xbzz_balance() -> Dict[str, Any]:
             "balance_plur": 0,
             "balance_bzz": 0.0,
             "threshold_bzz": settings.X402_XBZZ_WARN_THRESHOLD,
+            "wallet_address": None,
             "warning": f"Failed to fetch xBZZ balance: {str(e)}"
         }
 
@@ -92,10 +96,12 @@ def check_xdai_balance() -> Dict[str, Any]:
         - balance_wei: int - raw balance in wei
         - balance_xdai: float - balance in xDAI
         - threshold_xdai: float - warning threshold in xDAI
+        - wallet_address: str or None - Bee node wallet address on Gnosis
         - warning: str or None - warning message if below threshold
     """
     try:
         wallet_info = get_wallet_info()
+        wallet_address = wallet_info.get("walletAddress")
         balance_wei = int(wallet_info.get("nativeTokenBalance", 0))
         balance_xdai = wei_to_xdai(balance_wei)
         threshold_xdai = settings.X402_XDAI_WARN_THRESHOLD
@@ -106,7 +112,7 @@ def check_xdai_balance() -> Dict[str, Any]:
         if not ok:
             warning = (
                 f"xDAI balance ({balance_xdai:.4f} xDAI) is below threshold "
-                f"({threshold_xdai} xDAI). Top up your Gnosis wallet for gas."
+                f"({threshold_xdai} xDAI). Top up Bee Gnosis wallet ({wallet_address}) for gas."
             )
             logger.warning(f"Pre-flight check: {warning}")
 
@@ -115,6 +121,7 @@ def check_xdai_balance() -> Dict[str, Any]:
             "balance_wei": balance_wei,
             "balance_xdai": balance_xdai,
             "threshold_xdai": threshold_xdai,
+            "wallet_address": wallet_address,
             "warning": warning
         }
 
@@ -125,6 +132,7 @@ def check_xdai_balance() -> Dict[str, Any]:
             "balance_wei": 0,
             "balance_xdai": 0.0,
             "threshold_xdai": settings.X402_XDAI_WARN_THRESHOLD,
+            "wallet_address": None,
             "warning": f"Failed to fetch xDAI balance: {str(e)}"
         }
 
@@ -143,12 +151,14 @@ def check_chequebook_balance() -> Dict[str, Any]:
         - total_balance_plur: int - total balance in PLUR
         - total_balance_bzz: float - total balance in BZZ
         - threshold_bzz: float - warning threshold in BZZ
+        - chequebook_address: str or None - chequebook contract address
         - warning: str or None - warning message if below threshold
     """
     try:
-        chequebook_info = get_chequebook_balance()
-        available_plur = int(chequebook_info.get("availableBalance", 0))
-        total_plur = int(chequebook_info.get("totalBalance", 0))
+        chequebook_data = get_chequebook_info()
+        chequebook_address = chequebook_data.get("chequebookAddress")
+        available_plur = int(chequebook_data.get("availableBalance", 0))
+        total_plur = int(chequebook_data.get("totalBalance", 0))
         available_bzz = plur_to_bzz(available_plur)
         total_bzz = plur_to_bzz(total_plur)
         threshold_bzz = settings.X402_CHEQUEBOOK_WARN_THRESHOLD
@@ -159,7 +169,7 @@ def check_chequebook_balance() -> Dict[str, Any]:
         if not ok:
             warning = (
                 f"Chequebook available balance ({available_bzz:.4f} BZZ) is below threshold "
-                f"({threshold_bzz} BZZ). Top up your chequebook for bandwidth payments."
+                f"({threshold_bzz} BZZ). Top up chequebook ({chequebook_address}) for bandwidth payments."
             )
             logger.warning(f"Pre-flight check: {warning}")
 
@@ -170,6 +180,7 @@ def check_chequebook_balance() -> Dict[str, Any]:
             "total_balance_plur": total_plur,
             "total_balance_bzz": total_bzz,
             "threshold_bzz": threshold_bzz,
+            "chequebook_address": chequebook_address,
             "warning": warning
         }
 
@@ -182,6 +193,7 @@ def check_chequebook_balance() -> Dict[str, Any]:
             "total_balance_plur": 0,
             "total_balance_bzz": 0.0,
             "threshold_bzz": settings.X402_CHEQUEBOOK_WARN_THRESHOLD,
+            "chequebook_address": None,
             "warning": f"Failed to fetch chequebook balance: {str(e)}"
         }
 
@@ -248,6 +260,8 @@ def check_preflight_balances() -> Dict[str, Any]:
 
     return {
         "can_accept": can_accept,
+        "wallet_address": xbzz_result.get("wallet_address"),
+        "chequebook_address": chequebook_result.get("chequebook_address"),
         "xbzz_ok": xbzz_ok,
         "xdai_ok": xdai_ok,
         "chequebook_ok": chequebook_ok,
