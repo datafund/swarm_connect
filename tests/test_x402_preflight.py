@@ -307,8 +307,8 @@ class TestCheckPreflightBalances:
     @patch("app.x402.preflight.check_chequebook_balance")
     @patch("app.x402.preflight.check_xdai_balance")
     @patch("app.x402.preflight.check_xbzz_balance")
-    def test_api_error_blocks_acceptance(self, mock_xbzz, mock_xdai, mock_chequebook):
-        """API errors block payment acceptance."""
+    def test_api_error_generates_warning_not_error(self, mock_xbzz, mock_xdai, mock_chequebook):
+        """Bee node connectivity issues are warnings, not blocking errors."""
         mock_xbzz.return_value = {
             "ok": False,
             "balance_plur": 0,
@@ -338,10 +338,12 @@ class TestCheckPreflightBalances:
 
         result = check_preflight_balances()
 
-        # Cannot accept when API is unreachable
-        assert result["can_accept"] is False
-        assert len(result["errors"]) == 1
-        assert "unreachable" in result["errors"][0].lower()
+        # Gateway stays available; Bee node issues are warnings not errors
+        assert result["can_accept"] is True
+        assert len(result["errors"]) == 0
+        # Original "Failed to fetch" warning + "unreachable" warning
+        unreachable_warnings = [w for w in result["warnings"] if "unreachable" in w.lower()]
+        assert len(unreachable_warnings) == 1
 
     @patch("app.x402.preflight.check_chequebook_balance")
     @patch("app.x402.preflight.check_xdai_balance")

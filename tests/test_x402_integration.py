@@ -811,8 +811,8 @@ class TestHealthEndpointWithX402:
     @patch("app.x402.preflight.check_preflight_balances")
     @patch("app.x402.base_balance.check_base_eth_balance")
     @patch("app.main.settings")
-    def test_health_with_x402_critical_returns_503(self, mock_settings, mock_base_balance, mock_preflight):
-        """Health endpoint returns 503 when balance critically low."""
+    def test_health_with_x402_critical_still_returns_200(self, mock_settings, mock_base_balance, mock_preflight):
+        """Health endpoint returns 200 even when critical, so gateway stays reachable."""
         mock_settings.X402_ENABLED = True
         mock_settings.PROJECT_NAME = "Test Gateway"
 
@@ -842,11 +842,10 @@ class TestHealthEndpointWithX402:
         from app.main import read_root
         response = read_root()
 
-        # Should be JSONResponse with 503
-        assert response.status_code == 503
-        data = json.loads(response.body.decode())
-        assert data["status"] == "critical"
-        assert len(data["x402"]["errors"]) == 1
+        # Always returns 200 so Docker healthcheck passes and gateway stays up.
+        # Status field communicates the problem instead.
+        assert response["status"] == "critical"
+        assert len(response["x402"]["errors"]) == 1
 
     @patch("app.x402.preflight.check_preflight_balances")
     @patch("app.x402.base_balance.check_base_eth_balance")

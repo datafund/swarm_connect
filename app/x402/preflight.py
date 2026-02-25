@@ -248,16 +248,20 @@ def check_preflight_balances() -> Dict[str, Any]:
     xdai_ok = xdai_result["ok"]
     chequebook_ok = chequebook_result["ok"]
 
-    # Build error messages for complete failures (e.g., API errors)
+    # Bee node connectivity failures are warnings, not errors.
+    # The gateway should remain available (degraded) even when the Bee node
+    # is unreachable — returning 503 would cause Docker healthcheck failures
+    # and take down the entire gateway.
     if xbzz_result["balance_bzz"] == 0.0 and "Failed to fetch" in str(xbzz_result.get("warning", "")):
-        errors.append("Cannot verify xBZZ balance - Bee node may be unreachable")
+        warnings.append("Cannot verify xBZZ balance - Bee node may be unreachable")
     if xdai_result["balance_xdai"] == 0.0 and "Failed to fetch" in str(xdai_result.get("warning", "")):
-        errors.append("Cannot verify xDAI balance - Bee node may be unreachable")
+        warnings.append("Cannot verify xDAI balance - Bee node may be unreachable")
     if chequebook_result["available_balance_bzz"] == 0.0 and "Failed to fetch" in str(chequebook_result.get("warning", "")):
-        errors.append("Cannot verify chequebook balance - Bee node may be unreachable")
+        warnings.append("Cannot verify chequebook balance - Bee node may be unreachable")
 
-    # Can accept if all checks pass OR if they fail only due to low balance (not API errors)
-    # Low balance is a warning, not a blocking error for now
+    # Can accept payments unless there are blocking errors.
+    # Low balances and Bee node connectivity issues are warnings (degraded),
+    # not blocking errors.
     can_accept = len(errors) == 0
 
     logger.info(

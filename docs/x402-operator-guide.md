@@ -306,7 +306,7 @@ curl http://localhost:8000/health | jq .
 |--------|---------|-----------|
 | `ok` | All wallets healthy | 200 |
 | `degraded` | Low balance warnings, still operating | 200 |
-| `critical` | Cannot process payments | 503 |
+| `critical` | Cannot process payments | 200 |
 
 ### Pre-flight Checks
 
@@ -322,7 +322,7 @@ The gateway performs pre-flight checks before accepting payments:
 
 **Threshold Behavior:**
 - **Below warning threshold**: Log warning, accept payments, status = `degraded`
-- **Below critical threshold**: Block payments, return 503, status = `critical`
+- **Below critical threshold**: Block paid requests via middleware, status = `critical`
 
 ### Check Gateway Status
 
@@ -366,9 +366,10 @@ Since there's no automatic bridging, you need to manually manage:
 
 ## Troubleshooting
 
-### "Gateway temporarily unavailable" (503)
+### Health endpoint shows `critical` status
 
-Gateway wallet is below critical thresholds:
+Gateway wallet is below critical thresholds. The health endpoint always returns HTTP 200
+so the gateway stays reachable — check the `status` field in the JSON response.
 
 1. Check health endpoint: `curl http://localhost:8000/health | jq .`
 2. Look at `x402.base_wallet.is_critical` and `x402.bee_gnosis_wallet.can_accept`

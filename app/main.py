@@ -108,6 +108,10 @@ def read_root():
         errors.extend(gnosis.get("errors", []))
 
         # Determine overall status
+        # Never return 503 — the gateway should always be reachable so
+        # operators can see what's wrong. Docker healthcheck and reverse
+        # proxy rely on 200; returning 503 causes a cascading failure
+        # where the container is marked unhealthy and users see nothing.
         if base_eth.get("is_critical") or len(errors) > 0:
             response_data["status"] = "critical"
         elif not base_eth["ok"] or not gnosis["can_accept"]:
@@ -136,10 +140,6 @@ def read_root():
             "warnings": warnings,
             "errors": errors,
         }
-
-        # Return 503 if critical
-        if response_data["status"] == "critical":
-            return JSONResponse(status_code=503, content=response_data)
 
     return response_data
 
