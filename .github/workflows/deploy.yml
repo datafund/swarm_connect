@@ -59,4 +59,22 @@ jobs:
 
       - name: deploy
         run: >
-          cd /opt/ && rm -rf swarm_connect && git clone -b $GITHUB_REF_NAME https://github.com/datafund/swarm_connect.git && cd swarm_connect && docker compose up -d
+          cd /opt/ && rm -rf swarm_connect && git clone -b $GITHUB_REF_NAME https://github.com/datafund/swarm_connect.git && cd swarm_connect && docker compose up -d --force-recreate
+
+      - name: post-deploy diagnostics
+        if: github.ref == 'refs/heads/dev'
+        run: |
+          echo "=== Container status ==="
+          docker ps -a --filter "name=swarm_connect" --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
+          echo ""
+          echo "=== Waiting 10s for container startup ==="
+          sleep 10
+          echo ""
+          echo "=== Container logs (last 30 lines) ==="
+          docker logs swarm_connect-provenance_gateway_dev-1 --tail 30 2>&1 || echo "Container not found"
+          echo ""
+          echo "=== Health check from localhost ==="
+          curl -s http://localhost:8900/health 2>&1 || echo "Cannot reach container"
+          echo ""
+          echo "=== Env file (redacted) ==="
+          cat /opt/swarm_connect_dev.env 2>/dev/null | grep -v PRIVATE_KEY | head -20 || echo "Env file not found"
