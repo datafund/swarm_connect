@@ -256,7 +256,7 @@ class TestPoolAPIEndpoints:
         assert "total_stamps" in data
 
     def test_acquire_stamp_with_pool_enabled(self, client):
-        """Test acquiring stamp from empty pool when enabled."""
+        """Test acquiring stamp from empty pool when enabled returns 409."""
         with patch('app.api.endpoints.pool.settings') as mock_settings:
             mock_settings.STAMP_POOL_ENABLED = True
 
@@ -264,10 +264,48 @@ class TestPoolAPIEndpoints:
                 "/api/v1/pool/acquire",
                 json={"size": "small"}
             )
-            assert response.status_code == 200
+            assert response.status_code == 409
             data = response.json()
-            assert data["success"] is False
-            assert "No stamp available" in data["message"]
+            assert "No stamp available" in data["detail"]["message"]
+            assert "suggestion" in data["detail"]
+
+    def test_acquire_exhausted_includes_suggestion(self, client):
+        """Test that pool exhausted response includes a suggestion to buy directly."""
+        with patch('app.api.endpoints.pool.settings') as mock_settings:
+            mock_settings.STAMP_POOL_ENABLED = True
+
+            response = client.post(
+                "/api/v1/pool/acquire",
+                json={"size": "medium"}
+            )
+            assert response.status_code == 409
+            detail = response.json()["detail"]
+            assert "Pool is exhausted" in detail["message"]
+            assert "POST /api/v1/stamps/" in detail["suggestion"]
+
+    def test_acquire_race_condition_returns_409(self, client):
+        """Test that race condition during acquire returns 409 with suggestion."""
+        with patch('app.api.endpoints.pool.settings') as mock_settings:
+            mock_settings.STAMP_POOL_ENABLED = True
+
+            # Mock: stamp found but release fails (race condition)
+            mock_stamp = MagicMock()
+            mock_stamp.batch_id = "abc123"
+            mock_stamp.depth = 17
+
+            with patch('app.api.endpoints.pool.stamp_pool_manager') as mock_pool:
+                mock_pool.get_available_stamp.return_value = mock_stamp
+                mock_pool.get_available_stamp_any_size.return_value = None
+                mock_pool.release_stamp.return_value = None  # Race: already taken
+
+                response = client.post(
+                    "/api/v1/pool/acquire",
+                    json={"size": "small"}
+                )
+                assert response.status_code == 409
+                detail = response.json()["detail"]
+                assert "acquired by another request" in detail["message"]
+                assert "suggestion" in detail
 
     def test_list_available_stamps_with_pool_enabled(self, client):
         """Test listing stamps from empty pool when enabled."""
@@ -290,7 +328,7 @@ class TestPoolAPIDisabled:
         return TestClient(app)
 
     def test_acquire_stamp_disabled(self, client):
-        """Test acquire returns 503 when disabled."""
+        """Test acquire returns 404 when disabled."""
         with patch('app.api.endpoints.pool.settings') as mock_settings:
             mock_settings.STAMP_POOL_ENABLED = False
 
@@ -298,24 +336,24 @@ class TestPoolAPIDisabled:
                 "/api/v1/pool/acquire",
                 json={"size": "small"}
             )
-            assert response.status_code == 503
+            assert response.status_code == 404
             assert "not enabled" in response.json()["detail"]
 
     def test_list_stamps_disabled(self, client):
-        """Test list returns 503 when disabled."""
+        """Test list returns 404 when disabled."""
         with patch('app.api.endpoints.pool.settings') as mock_settings:
             mock_settings.STAMP_POOL_ENABLED = False
 
             response = client.get("/api/v1/pool/available")
-            assert response.status_code == 503
+            assert response.status_code == 404
 
     def test_trigger_check_disabled(self, client):
-        """Test manual check returns 503 when disabled."""
+        """Test manual check returns 404 when disabled."""
         with patch('app.api.endpoints.pool.settings') as mock_settings:
             mock_settings.STAMP_POOL_ENABLED = False
 
             response = client.post("/api/v1/pool/check")
-            assert response.status_code == 503
+            assert response.status_code == 404
 
 
 class TestImmediateReplenishment:
