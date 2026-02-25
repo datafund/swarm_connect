@@ -204,12 +204,14 @@ class TestCheckChequebookBalance:
         assert "below threshold" in result["warning"]
         assert "bandwidth" in result["warning"].lower()
 
+    @patch("app.x402.preflight.get_chequebook_balance")
     @patch("app.x402.preflight.get_chequebook_info")
     @patch("app.x402.preflight.settings")
-    def test_chequebook_api_error(self, mock_settings, mock_get_chequebook):
+    def test_chequebook_api_error(self, mock_settings, mock_get_chequebook_info, mock_get_chequebook_balance):
         """API error returns ok=False with error message."""
         mock_settings.X402_CHEQUEBOOK_WARN_THRESHOLD = 5.0
-        mock_get_chequebook.side_effect = Exception("Connection refused")
+        mock_get_chequebook_info.side_effect = Exception("Connection refused")
+        mock_get_chequebook_balance.side_effect = Exception("Connection refused")
 
         result = check_chequebook_balance()
 

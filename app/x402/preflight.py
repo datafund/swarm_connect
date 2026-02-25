@@ -14,7 +14,7 @@ import logging
 from typing import Dict, Any, List
 
 from app.core.config import settings
-from app.services.swarm_api import get_wallet_info, get_chequebook_info
+from app.services.swarm_api import get_wallet_info, get_chequebook_balance, get_chequebook_info
 
 logger = logging.getLogger(__name__)
 
@@ -155,8 +155,16 @@ def check_chequebook_balance() -> Dict[str, Any]:
         - warning: str or None - warning message if below threshold
     """
     try:
-        chequebook_data = get_chequebook_info()
-        chequebook_address = chequebook_data.get("chequebookAddress")
+        # Try to get both address and balance via get_chequebook_info.
+        # Falls back to balance-only if the /chequebook/address endpoint
+        # is unavailable, so we don't fail the health check over a missing address.
+        try:
+            chequebook_data = get_chequebook_info()
+            chequebook_address = chequebook_data.get("chequebookAddress")
+        except Exception:
+            logger.debug("Chequebook address unavailable, falling back to balance-only")
+            chequebook_data = get_chequebook_balance()
+            chequebook_address = None
         available_plur = int(chequebook_data.get("availableBalance", 0))
         total_plur = int(chequebook_data.get("totalBalance", 0))
         available_bzz = plur_to_bzz(available_plur)
