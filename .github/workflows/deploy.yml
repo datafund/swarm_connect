@@ -59,7 +59,7 @@ jobs:
 
       - name: deploy
         run: >
-          cd /opt/ && rm -rf swarm_connect && git clone -b $GITHUB_REF_NAME https://github.com/datafund/swarm_connect.git && cd swarm_connect && docker compose up -d --force-recreate
+          cd /opt/ && rm -rf swarm_connect && git clone -b $GITHUB_REF_NAME https://github.com/datafund/swarm_connect.git && cd swarm_connect && docker compose up -d
 
       - name: post-deploy diagnostics
         if: github.ref == 'refs/heads/dev'
