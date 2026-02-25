@@ -162,8 +162,8 @@ async def acquire_stamp(
     """Acquire a stamp from the pool."""
     if not settings.STAMP_POOL_ENABLED:
         raise HTTPException(
-            status_code=503,
-            detail="Stamp pool feature is not enabled"
+            status_code=404,
+            detail="Stamp pool feature is not enabled on this gateway. Use POST /api/v1/stamps/ to purchase stamps directly."
         )
 
     # Determine requested depth
@@ -185,13 +185,13 @@ async def acquire_stamp(
             fallback_used = True
 
     if not stamp:
-        return AcquireStampResponse(
-            success=False,
-            batch_id=None,
-            depth=None,
-            size_name=None,
-            message=f"No stamp available for depth {requested_depth} (size: {depth_to_size_name(requested_depth)}). Pool may be exhausted.",
-            fallback_used=False
+        size_name = depth_to_size_name(requested_depth)
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "message": f"No stamp available for depth {requested_depth} (size: {size_name}). Pool is exhausted.",
+                "suggestion": "Purchase a stamp directly via POST /api/v1/stamps/"
+            }
         )
 
     # Get client identifier for logging
@@ -202,13 +202,12 @@ async def acquire_stamp(
 
     if not released:
         # Race condition - stamp was taken between check and release
-        return AcquireStampResponse(
-            success=False,
-            batch_id=None,
-            depth=None,
-            size_name=None,
-            message="Stamp was acquired by another request. Please retry.",
-            fallback_used=False
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "message": "Stamp was acquired by another request.",
+                "suggestion": "Retry the request or purchase a stamp directly via POST /api/v1/stamps/"
+            }
         )
 
     # Trigger immediate replenishment if pool is below target
@@ -243,8 +242,8 @@ async def list_available_stamps():
     """List all available stamps in the pool."""
     if not settings.STAMP_POOL_ENABLED:
         raise HTTPException(
-            status_code=503,
-            detail="Stamp pool feature is not enabled"
+            status_code=404,
+            detail="Stamp pool feature is not enabled on this gateway. Use POST /api/v1/stamps/ to purchase stamps directly."
         )
 
     status = stamp_pool_manager.get_status()
@@ -280,8 +279,8 @@ async def trigger_pool_check():
     """Manually trigger pool maintenance check."""
     if not settings.STAMP_POOL_ENABLED:
         raise HTTPException(
-            status_code=503,
-            detail="Stamp pool feature is not enabled"
+            status_code=404,
+            detail="Stamp pool feature is not enabled on this gateway. Use POST /api/v1/stamps/ to purchase stamps directly."
         )
 
     result = await stamp_pool_manager.check_and_replenish()

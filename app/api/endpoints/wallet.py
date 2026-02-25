@@ -33,7 +33,7 @@ async def get_wallet() -> WalletResponse:
     except RequestException as e:
         logger.error(f"Failed to fetch wallet information: {e}")
         raise HTTPException(
-            status_code=500,
+            status_code=502,
             detail="Failed to fetch wallet information from Swarm API"
         )
     except ValueError as e:
@@ -73,7 +73,7 @@ async def get_chequebook() -> ChequebookResponse:
     except RequestException as e:
         logger.error(f"Failed to fetch chequebook information: {e}")
         raise HTTPException(
-            status_code=500,
+            status_code=502,
             detail="Failed to fetch chequebook information from Swarm API"
         )
     except ValueError as e:

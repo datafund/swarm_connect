@@ -396,7 +396,7 @@ async def download_data(
 
     except FileNotFoundError as e:
         logger.warning(f"Data not found for reference {reference}: {e}")
-        raise HTTPException(status_code=404, detail=f"Data not found: {e}")
+        raise HTTPException(status_code=404, detail=f"Data not found for reference {reference}")
     except RequestException as e:
         logger.error(f"Swarm API error during download: {e}")
         raise HTTPException(status_code=502, detail=f"Failed to download data from Swarm: {e}")
@@ -449,7 +449,7 @@ async def download_data_json(
 
     except FileNotFoundError as e:
         logger.warning(f"Data not found for reference {reference}: {e}")
-        raise HTTPException(status_code=404, detail=f"Data not found: {e}")
+        raise HTTPException(status_code=404, detail=f"Data not found for reference {reference}")
     except RequestException as e:
         logger.error(f"Swarm API error during download: {e}")
         raise HTTPException(status_code=502, detail=f"Failed to download data from Swarm: {e}")
