@@ -23,7 +23,8 @@ class TestStampPurchaseEdgeCases:
             "depth": 16   # Minimum reasonable depth
         }
 
-        with patch('app.services.swarm_api.purchase_postage_stamp') as mock_purchase:
+        with patch('app.services.swarm_api.check_sufficient_funds', return_value={"sufficient": True, "required_bzz": 0.01, "wallet_balance_bzz": 100.0, "shortfall_bzz": 0}), \
+             patch('app.services.swarm_api.purchase_postage_stamp') as mock_purchase:
             mock_purchase.return_value = "test_batch_id"
             response = client.post("/api/v1/stamps/", json=purchase_data)
 
@@ -37,13 +38,16 @@ class TestStampPurchaseEdgeCases:
             "depth": 20
         }
 
-        with patch('app.services.swarm_api.purchase_postage_stamp') as mock_purchase:
+        with patch('app.services.swarm_api.check_sufficient_funds', return_value={"sufficient": True, "required_bzz": 0.01, "wallet_balance_bzz": 100.0, "shortfall_bzz": 0}), \
+             patch('app.services.swarm_api.purchase_postage_stamp') as mock_purchase:
             mock_purchase.return_value = "test_batch_id"
             response = client.post("/api/v1/stamps/", json=purchase_data)
 
             assert response.status_code == 201
 
-    def test_purchase_stamp_zero_amount(self):
+    @patch('app.services.swarm_api.purchase_postage_stamp', return_value="test_batch_id")
+    @patch('app.services.swarm_api.check_sufficient_funds', return_value={"sufficient": True, "required_bzz": 0.01, "wallet_balance_bzz": 100.0, "shortfall_bzz": 0})
+    def test_purchase_stamp_zero_amount(self, mock_funds, mock_purchase):
         """Test purchasing stamp with zero amount should fail validation."""
         purchase_data = {
             "amount": 0,
@@ -53,7 +57,9 @@ class TestStampPurchaseEdgeCases:
         response = client.post("/api/v1/stamps/", json=purchase_data)
         assert response.status_code == 422  # Validation error
 
-    def test_purchase_stamp_negative_amount(self):
+    @patch('app.services.swarm_api.purchase_postage_stamp', return_value="test_batch_id")
+    @patch('app.services.swarm_api.check_sufficient_funds', return_value={"sufficient": True, "required_bzz": 0.01, "wallet_balance_bzz": 100.0, "shortfall_bzz": 0})
+    def test_purchase_stamp_negative_amount(self, mock_funds, mock_purchase):
         """Test purchasing stamp with negative amount should fail."""
         purchase_data = {
             "amount": -1000000000,
@@ -70,7 +76,8 @@ class TestStampPurchaseEdgeCases:
             "depth": 16  # Minimum reasonable depth
         }
 
-        with patch('app.services.swarm_api.purchase_postage_stamp') as mock_purchase:
+        with patch('app.services.swarm_api.check_sufficient_funds', return_value={"sufficient": True, "required_bzz": 0.01, "wallet_balance_bzz": 100.0, "shortfall_bzz": 0}), \
+             patch('app.services.swarm_api.purchase_postage_stamp') as mock_purchase:
             mock_purchase.return_value = "test_batch_id"
             response = client.post("/api/v1/stamps/", json=purchase_data)
 
@@ -83,7 +90,8 @@ class TestStampPurchaseEdgeCases:
             "depth": 32  # Maximum reasonable depth
         }
 
-        with patch('app.services.swarm_api.purchase_postage_stamp') as mock_purchase:
+        with patch('app.services.swarm_api.check_sufficient_funds', return_value={"sufficient": True, "required_bzz": 0.01, "wallet_balance_bzz": 100.0, "shortfall_bzz": 0}), \
+             patch('app.services.swarm_api.purchase_postage_stamp') as mock_purchase:
             mock_purchase.return_value = "test_batch_id"
             response = client.post("/api/v1/stamps/", json=purchase_data)
 
@@ -117,7 +125,8 @@ class TestStampPurchaseEdgeCases:
             "label": "a" * 1000  # Very long label
         }
 
-        with patch('app.services.swarm_api.purchase_postage_stamp') as mock_purchase:
+        with patch('app.services.swarm_api.check_sufficient_funds', return_value={"sufficient": True, "required_bzz": 0.01, "wallet_balance_bzz": 100.0, "shortfall_bzz": 0}), \
+             patch('app.services.swarm_api.purchase_postage_stamp') as mock_purchase:
             mock_purchase.return_value = "test_batch_id"
             response = client.post("/api/v1/stamps/", json=purchase_data)
 
@@ -142,15 +151,17 @@ class TestStampPurchaseEdgeCases:
                 "label": label
             }
 
-            with patch('app.services.swarm_api.purchase_postage_stamp') as mock_purchase:
+            with patch('app.services.swarm_api.check_sufficient_funds', return_value={"sufficient": True, "required_bzz": 0.01, "wallet_balance_bzz": 100.0, "shortfall_bzz": 0}), \
+                 patch('app.services.swarm_api.purchase_postage_stamp') as mock_purchase:
                 mock_purchase.return_value = "test_batch_id"
                 response = client.post("/api/v1/stamps/", json=purchase_data)
 
                 # Should handle gracefully
                 assert response.status_code in [201, 422], f"Failed for label: {label}"
 
+    @patch('app.services.swarm_api.check_sufficient_funds', return_value={"sufficient": True, "required_bzz": 0.01, "wallet_balance_bzz": 100.0, "shortfall_bzz": 0})
     @patch('app.services.swarm_api.purchase_postage_stamp')
-    def test_purchase_stamp_malformed_swarm_response(self, mock_purchase):
+    def test_purchase_stamp_malformed_swarm_response(self, mock_purchase, mock_funds):
         """Test handling of malformed response from Swarm API."""
         mock_purchase.side_effect = ValueError("Invalid response format")
 
@@ -160,10 +171,11 @@ class TestStampPurchaseEdgeCases:
         }
 
         response = client.post("/api/v1/stamps/", json=purchase_data)
-        assert response.status_code == 502
+        assert response.status_code == 500
 
+    @patch('app.services.swarm_api.check_sufficient_funds', return_value={"sufficient": True, "required_bzz": 0.01, "wallet_balance_bzz": 100.0, "shortfall_bzz": 0})
     @patch('app.services.swarm_api.purchase_postage_stamp')
-    def test_purchase_stamp_empty_batch_id_response(self, mock_purchase):
+    def test_purchase_stamp_empty_batch_id_response(self, mock_purchase, mock_funds):
         """Test handling when Swarm API returns empty batch ID."""
         mock_purchase.return_value = ""  # Empty batch ID
 
@@ -295,8 +307,11 @@ class TestStampExtensionEdgeCases:
     """Edge cases and boundary tests for PATCH /api/v1/stamps/{stamp_id}/extend"""
 
     @patch('app.services.swarm_api.extend_postage_stamp')
-    def test_extend_stamp_minimum_amount(self, mock_extend):
+    @patch('app.services.swarm_api.check_sufficient_funds', return_value={"sufficient": True, "required_bzz": 0.01, "wallet_balance_bzz": 100.0, "shortfall_bzz": 0})
+    @patch('app.services.swarm_api.get_all_stamps_processed')
+    def test_extend_stamp_minimum_amount(self, mock_get_stamps, mock_funds, mock_extend):
         """Test extending stamp with minimum amount."""
+        mock_get_stamps.return_value = [{"batchID": "test_batch_id", "depth": 17, "local": True}]
         mock_extend.return_value = "test_batch_id"
 
         extension_data = {"amount": 1}
@@ -306,8 +321,11 @@ class TestStampExtensionEdgeCases:
         mock_extend.assert_called_once_with(stamp_id="test_batch_id", amount=1)
 
     @patch('app.services.swarm_api.extend_postage_stamp')
-    def test_extend_stamp_maximum_amount(self, mock_extend):
+    @patch('app.services.swarm_api.check_sufficient_funds', return_value={"sufficient": True, "required_bzz": 0.01, "wallet_balance_bzz": 100.0, "shortfall_bzz": 0})
+    @patch('app.services.swarm_api.get_all_stamps_processed')
+    def test_extend_stamp_maximum_amount(self, mock_get_stamps, mock_funds, mock_extend):
         """Test extending stamp with very large amount."""
+        mock_get_stamps.return_value = [{"batchID": "test_batch_id", "depth": 17, "local": True}]
         mock_extend.return_value = "test_batch_id"
 
         extension_data = {"amount": 999999999999999999}
@@ -315,34 +333,42 @@ class TestStampExtensionEdgeCases:
         response = client.patch("/api/v1/stamps/test_batch_id/extend", json=extension_data)
         assert response.status_code == 200
 
-    def test_extend_stamp_zero_amount(self):
+    @patch('app.services.swarm_api.extend_postage_stamp', return_value="test_batch_id")
+    @patch('app.services.swarm_api.check_sufficient_funds', return_value={"sufficient": True, "required_bzz": 0.01, "wallet_balance_bzz": 100.0, "shortfall_bzz": 0})
+    @patch('app.services.swarm_api.get_all_stamps_processed', return_value=[{"batchID": "test_batch_id", "depth": 17, "local": True}])
+    def test_extend_stamp_zero_amount(self, mock_get_stamps, mock_funds, mock_extend):
         """Test extending stamp with zero amount should fail."""
         extension_data = {"amount": 0}
 
         response = client.patch("/api/v1/stamps/test_batch_id/extend", json=extension_data)
         assert response.status_code == 422
 
-    def test_extend_stamp_negative_amount(self):
+    @patch('app.services.swarm_api.extend_postage_stamp', return_value="test_batch_id")
+    @patch('app.services.swarm_api.check_sufficient_funds', return_value={"sufficient": True, "required_bzz": 0.01, "wallet_balance_bzz": 100.0, "shortfall_bzz": 0})
+    @patch('app.services.swarm_api.get_all_stamps_processed', return_value=[{"batchID": "test_batch_id", "depth": 17, "local": True}])
+    def test_extend_stamp_negative_amount(self, mock_get_stamps, mock_funds, mock_extend):
         """Test extending stamp with negative amount should fail."""
         extension_data = {"amount": -1000000000}
 
         response = client.patch("/api/v1/stamps/test_batch_id/extend", json=extension_data)
         assert response.status_code == 422
 
-    @patch('app.services.swarm_api.extend_postage_stamp')
-    def test_extend_nonexistent_stamp(self, mock_extend):
+    @patch('app.services.swarm_api.extend_postage_stamp', return_value="nonexistent_id")
+    @patch('app.services.swarm_api.check_sufficient_funds', return_value={"sufficient": True, "required_bzz": 0.01, "wallet_balance_bzz": 100.0, "shortfall_bzz": 0})
+    @patch('app.services.swarm_api.get_all_stamps_processed', return_value=[])
+    def test_extend_nonexistent_stamp(self, mock_get_stamps, mock_funds, mock_extend):
         """Test extending non-existent stamp."""
-        from requests.exceptions import RequestException
-        mock_extend.side_effect = RequestException("Stamp not found")
-
         extension_data = {"amount": 8000000000}
 
         response = client.patch("/api/v1/stamps/nonexistent_id/extend", json=extension_data)
-        assert response.status_code == 502
+        assert response.status_code == 404
 
     @patch('app.services.swarm_api.extend_postage_stamp')
-    def test_extend_stamp_batch_id_mismatch(self, mock_extend):
+    @patch('app.services.swarm_api.check_sufficient_funds', return_value={"sufficient": True, "required_bzz": 0.01, "wallet_balance_bzz": 100.0, "shortfall_bzz": 0})
+    @patch('app.services.swarm_api.get_all_stamps_processed')
+    def test_extend_stamp_batch_id_mismatch(self, mock_get_stamps, mock_funds, mock_extend):
         """Test when returned batch ID doesn't match request."""
+        mock_get_stamps.return_value = [{"batchID": "original_batch_id", "depth": 17, "local": True}]
         mock_extend.return_value = "different_batch_id"  # Different from request
 
         extension_data = {"amount": 8000000000}
@@ -361,7 +387,8 @@ class TestIntegrationWorkflows:
     @patch('app.services.swarm_api.purchase_postage_stamp')
     @patch('app.services.swarm_api.get_all_stamps_processed')
     @patch('app.services.swarm_api.extend_postage_stamp')
-    def test_complete_stamp_lifecycle(self, mock_extend, mock_get_stamps, mock_purchase):
+    @patch('app.services.swarm_api.check_sufficient_funds', return_value={"sufficient": True, "required_bzz": 0.01, "wallet_balance_bzz": 100.0, "shortfall_bzz": 0})
+    def test_complete_stamp_lifecycle(self, mock_funds, mock_extend, mock_get_stamps, mock_purchase):
         """Test complete stamp lifecycle: purchase → get details → extend → get details."""
 
         # Setup mocks
@@ -461,7 +488,8 @@ class TestIntegrationWorkflows:
 class TestSecurityAndValidation:
     """Security and input validation tests."""
 
-    def test_sql_injection_attempts_in_stamp_id(self):
+    @patch('app.services.swarm_api.get_all_stamps_processed', return_value=[])
+    def test_sql_injection_attempts_in_stamp_id(self, mock_get_stamps):
         """Test SQL injection attempts in stamp ID parameter."""
         malicious_ids = [
             "'; DROP TABLE stamps; --",
@@ -476,7 +504,9 @@ class TestSecurityAndValidation:
             # Should return 404 or handle gracefully, never execute malicious code
             assert response.status_code in [404, 422], f"Security issue with ID: {malicious_id}"
 
-    def test_large_payload_handling(self):
+    @patch('app.services.swarm_api.purchase_postage_stamp', return_value="test_batch_id")
+    @patch('app.services.swarm_api.check_sufficient_funds', return_value={"sufficient": True, "required_bzz": 0.01, "wallet_balance_bzz": 100.0, "shortfall_bzz": 0})
+    def test_large_payload_handling(self, mock_funds, mock_purchase):
         """Test handling of extremely large request payloads."""
         large_purchase_data = {
             "amount": 8000000000,

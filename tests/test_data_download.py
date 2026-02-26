@@ -17,7 +17,7 @@ client = TestClient(app)
 class TestContentTypeDetection:
     """Test content type detection and filename generation."""
 
-    @patch('app.services.swarm_api.download_data_from_swarm')
+    @patch('app.api.endpoints.data.download_data_from_swarm')
     def test_json_content_detection(self, mock_download):
         """Test that JSON content is detected and gets provenance filename."""
         json_data = {"content_hash": "sha256:test", "data": {"test": "provenance"}}
@@ -31,7 +31,7 @@ class TestContentTypeDetection:
         assert response.headers["content-disposition"] == 'attachment; filename="provenance-abcd1234.json"'
         assert "X-Swarm-Reference" in response.headers
 
-    @patch('app.services.swarm_api.download_data_from_swarm')
+    @patch('app.api.endpoints.data.download_data_from_swarm')
     def test_png_image_detection(self, mock_download):
         """Test that PNG images are detected correctly."""
         png_bytes = b'\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00'  # PNG header
@@ -43,7 +43,7 @@ class TestContentTypeDetection:
         assert response.headers["content-type"] == "image/png"
         assert response.headers["content-disposition"] == 'attachment; filename="image-12345678.png"'
 
-    @patch('app.services.swarm_api.download_data_from_swarm')
+    @patch('app.api.endpoints.data.download_data_from_swarm')
     def test_jpeg_image_detection(self, mock_download):
         """Test that JPEG images are detected correctly."""
         jpeg_bytes = b'\xFF\xD8\xFF\xE0\x00\x10JFIF'  # JPEG header
@@ -55,7 +55,7 @@ class TestContentTypeDetection:
         assert response.headers["content-type"] == "image/jpeg"
         assert response.headers["content-disposition"] == 'attachment; filename="image-fedcba09.jpg"'
 
-    @patch('app.services.swarm_api.download_data_from_swarm')
+    @patch('app.api.endpoints.data.download_data_from_swarm')
     def test_pdf_document_detection(self, mock_download):
         """Test that PDF documents are detected correctly."""
         pdf_bytes = b'%PDF-1.4\n1 0 obj'  # PDF header
@@ -67,7 +67,7 @@ class TestContentTypeDetection:
         assert response.headers["content-type"] == "application/pdf"
         assert response.headers["content-disposition"] == 'attachment; filename="document-pdf12345.pdf"'
 
-    @patch('app.services.swarm_api.download_data_from_swarm')
+    @patch('app.api.endpoints.data.download_data_from_swarm')
     def test_text_content_detection(self, mock_download):
         """Test that plain text is detected correctly."""
         text_bytes = "This is plain text content with UTF-8 characters: äöü".encode('utf-8')
@@ -79,7 +79,7 @@ class TestContentTypeDetection:
         assert response.headers["content-type"] == "text/plain"
         assert response.headers["content-disposition"] == 'attachment; filename="text-text5678.txt"'
 
-    @patch('app.services.swarm_api.download_data_from_swarm')
+    @patch('app.api.endpoints.data.download_data_from_swarm')
     def test_binary_fallback_detection(self, mock_download):
         """Test that unknown binary content falls back to generic filename."""
         binary_bytes = b'\x00\x01\x02\x03\x04\x05\x06\x07\x08\x09'  # Random binary
@@ -95,7 +95,7 @@ class TestContentTypeDetection:
 class TestFilenameGeneration:
     """Test filename generation edge cases."""
 
-    @patch('app.services.swarm_api.download_data_from_swarm')
+    @patch('app.api.endpoints.data.download_data_from_swarm')
     def test_short_reference_hash(self, mock_download):
         """Test filename generation with short reference."""
         json_data = {"test": "data"}
@@ -106,7 +106,7 @@ class TestFilenameGeneration:
         assert response.status_code == 200
         assert response.headers["content-disposition"] == 'attachment; filename="provenance-abc123.json"'
 
-    @patch('app.services.swarm_api.download_data_from_swarm')
+    @patch('app.api.endpoints.data.download_data_from_swarm')
     def test_reference_with_special_chars(self, mock_download):
         """Test that reference hashes are sanitized for filenames."""
         json_data = {"test": "data"}
@@ -118,7 +118,7 @@ class TestFilenameGeneration:
         assert response.status_code == 200
         assert response.headers["content-disposition"] == 'attachment; filename="provenance-deadbeef.json"'
 
-    @patch('app.services.swarm_api.download_data_from_swarm')
+    @patch('app.api.endpoints.data.download_data_from_swarm')
     def test_empty_file_handling(self, mock_download):
         """Test handling of empty files."""
         mock_download.return_value = b""
@@ -134,7 +134,7 @@ class TestFilenameGeneration:
 class TestDownloadHeaders:
     """Test HTTP headers in download responses."""
 
-    @patch('app.services.swarm_api.download_data_from_swarm')
+    @patch('app.api.endpoints.data.download_data_from_swarm')
     def test_required_headers_present(self, mock_download):
         """Test that all required headers are present."""
         test_data = b"test content"
@@ -152,7 +152,7 @@ class TestDownloadHeaders:
         assert response.headers["content-length"] == str(len(test_data))
         assert response.headers["x-swarm-reference"] == "headers567890abcdef1234567890abcdef1234567890abcdef1234567890abcde"
 
-    @patch('app.services.swarm_api.download_data_from_swarm')
+    @patch('app.api.endpoints.data.download_data_from_swarm')
     def test_content_disposition_format(self, mock_download):
         """Test that Content-Disposition header is properly formatted."""
         json_data = {"test": "data"}
@@ -169,7 +169,7 @@ class TestDownloadHeaders:
 class TestDownloadErrorHandling:
     """Test error handling in download endpoints."""
 
-    @patch('app.services.swarm_api.download_data_from_swarm')
+    @patch('app.api.endpoints.data.download_data_from_swarm')
     def test_file_not_found_error(self, mock_download):
         """Test handling when file is not found in Swarm."""
         mock_download.side_effect = FileNotFoundError("File not found")
@@ -179,7 +179,7 @@ class TestDownloadErrorHandling:
         assert response.status_code == 404
         assert "Data not found" in response.json()["detail"]
 
-    @patch('app.services.swarm_api.download_data_from_swarm')
+    @patch('app.api.endpoints.data.download_data_from_swarm')
     def test_swarm_api_error(self, mock_download):
         """Test handling of Swarm API errors."""
         from requests.exceptions import RequestException
@@ -190,7 +190,7 @@ class TestDownloadErrorHandling:
         assert response.status_code == 502
         assert "Failed to download data from Swarm" in response.json()["detail"]
 
-    @patch('app.services.swarm_api.download_data_from_swarm')
+    @patch('app.api.endpoints.data.download_data_from_swarm')
     def test_unexpected_error(self, mock_download):
         """Test handling of unexpected errors."""
         mock_download.side_effect = Exception("Unexpected error")
@@ -219,7 +219,7 @@ class TestDownloadErrorHandling:
 class TestJSONDownloadEndpoint:
     """Test the /data/{reference}/json endpoint specifically."""
 
-    @patch('app.services.swarm_api.download_data_from_swarm')
+    @patch('app.api.endpoints.data.download_data_from_swarm')
     def test_json_endpoint_response_format(self, mock_download):
         """Test that JSON endpoint returns proper response format."""
         test_data = {"test": "provenance", "data": {"nested": "structure"}}
@@ -246,7 +246,7 @@ class TestJSONDownloadEndpoint:
         decoded_data = base64.b64decode(json_response["data"]).decode('utf-8')
         assert json.loads(decoded_data) == test_data
 
-    @patch('app.services.swarm_api.download_data_from_swarm')
+    @patch('app.api.endpoints.data.download_data_from_swarm')
     def test_json_endpoint_with_binary_data(self, mock_download):
         """Test JSON endpoint with binary data (should detect as binary)."""
         binary_data = b'\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00'
@@ -264,7 +264,7 @@ class TestJSONDownloadEndpoint:
         decoded_data = base64.b64decode(json_response["data"])
         assert decoded_data == binary_data
 
-    @patch('app.services.swarm_api.download_data_from_swarm')
+    @patch('app.api.endpoints.data.download_data_from_swarm')
     def test_json_endpoint_response_structure_validation(self, mock_download):
         """Test that all response fields have correct types and are present."""
         test_data = b"test content"
@@ -286,7 +286,7 @@ class TestJSONDownloadEndpoint:
         assert json_response["size"] > 0, "size should be positive"
         assert json_response["content_type"] in ["text/plain", "application/octet-stream"], "should detect as text or binary"
 
-    @patch('app.services.swarm_api.download_data_from_swarm')
+    @patch('app.api.endpoints.data.download_data_from_swarm')
     def test_base64_encoding_integrity(self, mock_download):
         """Test that base64 encoding preserves data integrity perfectly."""
         # Test various data types to ensure no corruption
@@ -312,7 +312,7 @@ class TestJSONDownloadEndpoint:
             assert decoded_data == original_data, f"Data corruption in {test_name}"
             assert json_response["size"] == len(original_data), f"Size mismatch in {test_name}"
 
-    @patch('app.services.swarm_api.download_data_from_swarm')
+    @patch('app.api.endpoints.data.download_data_from_swarm')
     def test_json_endpoint_error_responses(self, mock_download):
         """Test that JSON endpoint returns proper JSON error responses."""
         # Test 404 error
@@ -338,7 +338,7 @@ class TestJSONDownloadEndpoint:
         assert "detail" in error_json
         assert "Failed to download data from Swarm" in error_json["detail"]
 
-    @patch('app.services.swarm_api.download_data_from_swarm')
+    @patch('app.api.endpoints.data.download_data_from_swarm')
     def test_json_vs_raw_endpoint_consistency(self, mock_download):
         """Test that JSON and raw endpoints detect content types consistently."""
         test_cases = [
@@ -367,7 +367,7 @@ class TestJSONDownloadEndpoint:
             assert raw_content_type == json_content_type, f"Content type mismatch for {test_name}: raw={raw_content_type}, json={json_content_type}"
             assert raw_content_type == expected_type, f"Wrong content type for {test_name}: expected={expected_type}, got={raw_content_type}"
 
-    @patch('app.services.swarm_api.download_data_from_swarm')
+    @patch('app.api.endpoints.data.download_data_from_swarm')
     def test_json_endpoint_empty_file_handling(self, mock_download):
         """Test JSON endpoint with empty files."""
         mock_download.return_value = b""
@@ -382,7 +382,7 @@ class TestJSONDownloadEndpoint:
         assert json_response["content_type"] == "application/octet-stream"  # Should default to binary
         assert json_response["reference"] == "empty567890abcdef1234567890abcdef1234567890abcdef1234567890ab"
 
-    @patch('app.services.swarm_api.download_data_from_swarm')
+    @patch('app.api.endpoints.data.download_data_from_swarm')
     def test_json_endpoint_large_file_handling(self, mock_download):
         """Test JSON endpoint with large files (base64 overhead)."""
         # 1MB of data
@@ -406,7 +406,7 @@ class TestJSONDownloadEndpoint:
         expected_base64_size = (len(large_data) + 2) // 3 * 4  # Base64 encoding formula
         assert base64_size == expected_base64_size
 
-    @patch('app.services.swarm_api.download_data_from_swarm')
+    @patch('app.api.endpoints.data.download_data_from_swarm')
     def test_json_endpoint_unicode_handling(self, mock_download):
         """Test JSON endpoint with Unicode content."""
         unicode_data = {
@@ -430,7 +430,7 @@ class TestJSONDownloadEndpoint:
         decoded_json = json.loads(decoded_data)
         assert decoded_json == unicode_data
 
-    @patch('app.services.swarm_api.download_data_from_swarm')
+    @patch('app.api.endpoints.data.download_data_from_swarm')
     def test_json_endpoint_content_type_accuracy(self, mock_download):
         """Test that JSON endpoint content type detection is accurate."""
         test_cases = [
@@ -458,7 +458,7 @@ class TestJSONDownloadEndpoint:
 class TestMalformedContentHandling:
     """Test handling of malformed or edge case content."""
 
-    @patch('app.services.swarm_api.download_data_from_swarm')
+    @patch('app.api.endpoints.data.download_data_from_swarm')
     def test_malformed_json_handling(self, mock_download):
         """Test that malformed JSON is treated as binary."""
         malformed_json = b'{"test": "data", invalid}'
@@ -471,7 +471,7 @@ class TestMalformedContentHandling:
         assert response.headers["content-type"] == "application/octet-stream"
         assert response.headers["content-disposition"] == 'attachment; filename="data-malformed.bin"'
 
-    @patch('app.services.swarm_api.download_data_from_swarm')
+    @patch('app.api.endpoints.data.download_data_from_swarm')
     def test_invalid_utf8_handling(self, mock_download):
         """Test handling of invalid UTF-8 sequences."""
         invalid_utf8 = b'\x80\x81\x82\x83'  # Invalid UTF-8
@@ -483,7 +483,7 @@ class TestMalformedContentHandling:
         assert response.headers["content-type"] == "application/octet-stream"
         assert response.headers["content-disposition"] == 'attachment; filename="data-utf8test.bin"'
 
-    @patch('app.services.swarm_api.download_data_from_swarm')
+    @patch('app.api.endpoints.data.download_data_from_swarm')
     def test_very_large_content_headers(self, mock_download):
         """Test headers with very large content."""
         large_data = b'x' * (10 * 1024 * 1024)  # 10MB
@@ -500,7 +500,7 @@ class TestMalformedContentHandling:
 class TestReferenceHashEdgeCases:
     """Test edge cases with reference hash handling."""
 
-    @patch('app.services.swarm_api.download_data_from_swarm')
+    @patch('app.api.endpoints.data.download_data_from_swarm')
     def test_various_reference_lengths(self, mock_download):
         """Test various reference hash lengths."""
         json_data = {"test": "data"}

@@ -204,8 +204,9 @@ class TestManifestUploadValidation:
 class TestManifestUploadErrors:
     """Test error handling for manifest uploads."""
 
+    @patch('app.api.endpoints.data.check_upload_failure_reason', return_value=None)
     @patch('app.api.endpoints.data.upload_collection_to_swarm')
-    def test_swarm_api_error(self, mock_upload):
+    def test_swarm_api_error(self, mock_upload, mock_check):
         """Test handling of Swarm API errors."""
         from requests.exceptions import RequestException
         mock_upload.side_effect = RequestException("Swarm API unavailable")
