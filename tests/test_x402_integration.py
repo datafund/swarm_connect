@@ -17,7 +17,7 @@ import json
 import os
 import pytest
 import tempfile
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch, MagicMock, AsyncMock
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -440,18 +440,18 @@ class TestFullPaymentFlow:
             "description": "Test stamp"
         }
 
-        # Create app with mocked facilitator
+        # Create app with mocked facilitator (verify/settle are async)
         mock_facilitator = MagicMock()
-        mock_facilitator.verify.return_value = VerifyResponse(
+        mock_facilitator.verify = AsyncMock(return_value=VerifyResponse(
             is_valid=True,
             invalid_reason=None,
             payer="0x1234567890abcdef1234567890abcdef12345678"
-        )
-        mock_facilitator.settle.return_value = SettleResponse(
+        ))
+        mock_facilitator.settle = AsyncMock(return_value=SettleResponse(
             success=True,
             transaction="0x" + "ab" * 32,
             network="base-sepolia"
-        )
+        ))
 
         app = FastAPI()
 
@@ -498,13 +498,13 @@ class TestFullPaymentFlow:
             "description": "Test stamp"
         }
 
-        # Create app with mocked facilitator that rejects payment
+        # Create app with mocked facilitator that rejects payment (verify is async)
         mock_facilitator = MagicMock()
-        mock_facilitator.verify.return_value = VerifyResponse(
+        mock_facilitator.verify = AsyncMock(return_value=VerifyResponse(
             is_valid=False,
             invalid_reason="Insufficient balance",
             payer=None
-        )
+        ))
 
         app = FastAPI()
 
@@ -639,18 +639,18 @@ class TestEndToEndScenarios:
         mock_settings.X402_FREE_TIER_ENABLED = False  # Disable free tier to test 402
         mock_price_quote.return_value = {"price_usd": 0.05, "description": "Test"}
 
-        # Need to recreate app to pick up new setting
+        # Need to recreate app to pick up new setting (verify/settle are async)
         mock_facilitator = MagicMock()
-        mock_facilitator.verify.return_value = VerifyResponse(
+        mock_facilitator.verify = AsyncMock(return_value=VerifyResponse(
             is_valid=True,
             invalid_reason=None,
             payer="0x1234567890abcdef1234567890abcdef12345678"
-        )
-        mock_facilitator.settle.return_value = SettleResponse(
+        ))
+        mock_facilitator.settle = AsyncMock(return_value=SettleResponse(
             success=True,
             transaction="0x" + "ab" * 32,
             network="base-sepolia"
-        )
+        ))
 
         app2 = FastAPI()
 
