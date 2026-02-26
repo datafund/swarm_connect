@@ -86,6 +86,14 @@ class Settings(BaseSettings):
     NOTARY_ENABLED: bool = False  # Master switch for notary signing feature
     NOTARY_PRIVATE_KEY: Optional[str] = None  # Hex-encoded private key for signing (without 0x prefix)
 
+    # === Upload Limits ===
+    MAX_UPLOAD_SIZE_MB: int = 10  # Maximum file upload size in megabytes
+
+    # === Global Rate Limiting ===
+    RATE_LIMIT_ENABLED: bool = True  # Enable global rate limiting
+    RATE_LIMIT_PER_MINUTE: int = 60  # Requests per minute per IP
+    RATE_LIMIT_BURST: int = 10  # Extra burst capacity above per-minute limit
+
     # === CORS Settings ===
     # Enable CORS for browser-based SDK usage (e.g., React/Vite frontends)
     CORS_ALLOWED_ORIGINS: str = "*"  # Comma-separated origins or "*" for all

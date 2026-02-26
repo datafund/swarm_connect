@@ -8,6 +8,8 @@ from fastapi.testclient import TestClient
 
 from app.main import app
 
+VALID_STAMP_ID = "a" * 64
+
 
 class TestDataUploadTiming:
     """Tests for timing in data upload endpoint."""
@@ -19,7 +21,7 @@ class TestDataUploadTiming:
 
         client = TestClient(app)
         response = client.post(
-            "/api/v1/data/?stamp_id=teststamp",
+            f"/api/v1/data/?stamp_id={VALID_STAMP_ID}",
             files={"file": ("test.json", io.BytesIO(b'{"test": true}'), "application/json")}
         )
 
@@ -34,7 +36,7 @@ class TestDataUploadTiming:
 
         client = TestClient(app)
         response = client.post(
-            "/api/v1/data/?stamp_id=teststamp&include_timing=true",
+            f"/api/v1/data/?stamp_id={VALID_STAMP_ID}&include_timing=true",
             files={"file": ("test.json", io.BytesIO(b'{"test": true}'), "application/json")}
         )
 
@@ -56,7 +58,7 @@ class TestDataUploadTiming:
 
         client = TestClient(app)
         response = client.post(
-            "/api/v1/data/?stamp_id=teststamp&include_timing=true&validate_stamp=true",
+            f"/api/v1/data/?stamp_id={VALID_STAMP_ID}&include_timing=true&validate_stamp=true",
             files={"file": ("test.json", io.BytesIO(b'{"test": true}'), "application/json")}
         )
 
@@ -73,7 +75,7 @@ class TestDataUploadTiming:
 
         client = TestClient(app)
         response = client.post(
-            "/api/v1/data/?stamp_id=teststamp",
+            f"/api/v1/data/?stamp_id={VALID_STAMP_ID}",
             files={"file": ("test.json", io.BytesIO(b'{"test": true}'), "application/json")}
         )
 
@@ -91,7 +93,7 @@ class TestDataUploadTiming:
 
         client = TestClient(app)
         response = client.post(
-            "/api/v1/data/?stamp_id=teststamp&include_timing=true",
+            f"/api/v1/data/?stamp_id={VALID_STAMP_ID}&include_timing=true",
             files={"file": ("test.json", io.BytesIO(b'{"test": true}'), "application/json")}
         )
 
@@ -131,7 +133,7 @@ class TestManifestUploadTiming:
 
         client = TestClient(app)
         response = client.post(
-            "/api/v1/data/manifest?stamp_id=teststamp",
+            f"/api/v1/data/manifest?stamp_id={VALID_STAMP_ID}",
             files={"file": ("test.tar", io.BytesIO(tar_bytes), "application/x-tar")}
         )
 
@@ -152,7 +154,7 @@ class TestManifestUploadTiming:
 
         client = TestClient(app)
         response = client.post(
-            "/api/v1/data/manifest?stamp_id=teststamp&include_timing=true",
+            f"/api/v1/data/manifest?stamp_id={VALID_STAMP_ID}&include_timing=true",
             files={"file": ("test.tar", io.BytesIO(tar_bytes), "application/x-tar")}
         )
 
@@ -184,7 +186,7 @@ class TestManifestUploadTiming:
 
         client = TestClient(app)
         response = client.post(
-            "/api/v1/data/manifest?stamp_id=teststamp&include_timing=true",
+            f"/api/v1/data/manifest?stamp_id={VALID_STAMP_ID}&include_timing=true",
             files={"file": ("test.tar", io.BytesIO(tar_bytes), "application/x-tar")}
         )
 
@@ -212,7 +214,7 @@ class TestManifestUploadTiming:
 
         client = TestClient(app)
         response = client.post(
-            "/api/v1/data/manifest?stamp_id=teststamp",
+            f"/api/v1/data/manifest?stamp_id={VALID_STAMP_ID}",
             files={"file": ("test.tar", io.BytesIO(tar_bytes), "application/x-tar")}
         )
 
@@ -242,7 +244,7 @@ class TestManifestUploadTiming:
 
         client = TestClient(app)
         response = client.post(
-            "/api/v1/data/manifest?stamp_id=teststamp&include_timing=true&validate_stamp=true",
+            f"/api/v1/data/manifest?stamp_id={VALID_STAMP_ID}&include_timing=true&validate_stamp=true",
             files={"file": ("test.tar", io.BytesIO(tar_bytes), "application/x-tar")}
         )
 
@@ -262,7 +264,7 @@ class TestServerTimingHeaderFormat:
 
         client = TestClient(app)
         response = client.post(
-            "/api/v1/data/?stamp_id=teststamp",
+            f"/api/v1/data/?stamp_id={VALID_STAMP_ID}",
             files={"file": ("test.json", io.BytesIO(b'{"test": true}'), "application/json")}
         )
 
@@ -285,7 +287,7 @@ class TestServerTimingHeaderFormat:
 
         client = TestClient(app)
         response = client.post(
-            "/api/v1/data/?stamp_id=teststamp",
+            f"/api/v1/data/?stamp_id={VALID_STAMP_ID}",
             files={"file": ("test.json", io.BytesIO(b'{"test": true}'), "application/json")}
         )
 

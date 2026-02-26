@@ -10,6 +10,8 @@ from unittest.mock import patch, MagicMock
 from app.main import app
 from app.services.provenance import ProvenanceService, SignedDocument
 
+VALID_STAMP_ID = "a" * 64
+
 
 class TestNotaryInfoEndpoint:
     """Tests for GET /api/v1/notary/info endpoint."""
@@ -110,7 +112,7 @@ class TestDataUploadWithSigning:
         with patch('app.api.endpoints.data.get_provenance_service') as mock:
             mock.return_value = MagicMock(is_available=True)
             response = client.post(
-                "/api/v1/data/?stamp_id=test_stamp&sign=invalid",
+                f"/api/v1/data/?stamp_id={VALID_STAMP_ID}&sign=invalid",
                 files={"file": ("test.json", json.dumps({"data": "test"}).encode('utf-8'), "application/json")}
             )
 
@@ -128,7 +130,7 @@ class TestDataUploadWithSigning:
 
         with patch('app.api.endpoints.data.get_provenance_service', return_value=mock_service):
             response = client.post(
-                "/api/v1/data/?stamp_id=test_stamp&sign=notary",
+                f"/api/v1/data/?stamp_id={VALID_STAMP_ID}&sign=notary",
                 files={"file": ("test.json", json.dumps({"data": "test"}).encode('utf-8'), "application/json")}
             )
 
@@ -145,7 +147,7 @@ class TestDataUploadWithSigning:
 
         with patch('app.api.endpoints.data.get_provenance_service', return_value=mock_service):
             response = client.post(
-                "/api/v1/data/?stamp_id=test_stamp&sign=notary",
+                f"/api/v1/data/?stamp_id={VALID_STAMP_ID}&sign=notary",
                 files={"file": ("test.json", json.dumps({"data": "test"}).encode('utf-8'), "application/json")}
             )
 
@@ -162,7 +164,7 @@ class TestDataUploadWithSigning:
 
         with patch('app.api.endpoints.data.get_provenance_service', return_value=mock_service):
             response = client.post(
-                "/api/v1/data/?stamp_id=test_stamp&sign=notary",
+                f"/api/v1/data/?stamp_id={VALID_STAMP_ID}&sign=notary",
                 files={"file": ("test.json", json.dumps({"invalid": "doc"}).encode('utf-8'), "application/json")}
             )
 
@@ -175,7 +177,7 @@ class TestDataUploadWithSigning:
         # This test just verifies the endpoint doesn't error with no sign param
         # The actual upload would need a real Swarm connection, so we just check parsing
         response = client.post(
-            "/api/v1/data/?stamp_id=test_stamp",
+            f"/api/v1/data/?stamp_id={VALID_STAMP_ID}",
             files={"file": ("test.json", b'{"test": "data"}', "application/json")}
         )
 
@@ -197,7 +199,7 @@ class TestErrorResponseFormat:
         with patch('app.api.endpoints.data.get_provenance_service') as mock:
             mock.return_value = MagicMock(is_available=True)
             response = client.post(
-                "/api/v1/data/?stamp_id=test_stamp&sign=wrong",
+                f"/api/v1/data/?stamp_id={VALID_STAMP_ID}&sign=wrong",
                 files={"file": ("test.json", b'{"data": "test"}', "application/json")}
             )
 
@@ -217,7 +219,7 @@ class TestErrorResponseFormat:
 
         with patch('app.api.endpoints.data.get_provenance_service', return_value=mock_service):
             response = client.post(
-                "/api/v1/data/?stamp_id=test_stamp&sign=notary",
+                f"/api/v1/data/?stamp_id={VALID_STAMP_ID}&sign=notary",
                 files={"file": ("test.json", json.dumps({"data": "test"}).encode('utf-8'), "application/json")}
             )
 
@@ -234,7 +236,7 @@ class TestErrorResponseFormat:
 
         with patch('app.api.endpoints.data.get_provenance_service', return_value=mock_service):
             response = client.post(
-                "/api/v1/data/?stamp_id=test_stamp&sign=notary",
+                f"/api/v1/data/?stamp_id={VALID_STAMP_ID}&sign=notary",
                 files={"file": ("test.json", json.dumps({"data": "test"}).encode('utf-8'), "application/json")}
             )
 
@@ -251,7 +253,7 @@ class TestErrorResponseFormat:
 
         with patch('app.api.endpoints.data.get_provenance_service', return_value=mock_service):
             response = client.post(
-                "/api/v1/data/?stamp_id=test_stamp&sign=notary",
+                f"/api/v1/data/?stamp_id={VALID_STAMP_ID}&sign=notary",
                 files={"file": ("test.json", json.dumps({"no_data": "here"}).encode('utf-8'), "application/json")}
             )
 

@@ -91,7 +91,8 @@ class StampPurchaseRequest(BaseModel):
     )
     amount: Optional[int] = Field(
         default=None,
-        description="The amount of the postage stamp in PLUR (legacy). If provided, overrides duration_hours."
+        description="The amount of the postage stamp in PLUR (legacy). If provided, overrides duration_hours.",
+        gt=0
     )
     size: Optional[Literal["small", "medium", "large"]] = Field(
         default=None,
@@ -152,7 +153,8 @@ class StampExtensionRequest(BaseModel):
     )
     amount: Optional[int] = Field(
         default=None,
-        description="Additional amount to add to the stamp in PLUR (legacy). If provided, overrides duration_hours."
+        description="Additional amount to add to the stamp in PLUR (legacy). If provided, overrides duration_hours.",
+        gt=0
     )
 
     model_config = {

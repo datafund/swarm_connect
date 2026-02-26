@@ -8,6 +8,12 @@ from app.main import app
 
 client = TestClient(app)
 
+# Valid 64-char hex stamp IDs for use in URL paths
+VALID_STAMP_ID = "a" * 64       # target/existing stamp
+VALID_STAMP_ID_B = "b" * 64     # secondary stamp (batch123)
+VALID_STAMP_ID_C = "c" * 64     # another stamp (other/secondary in lists)
+NONEXISTENT_STAMP_ID = "d" * 64 # nonexistent stamp
+
 
 class TestStampsAPI:
     """Test suite for Stamps API endpoints."""
@@ -89,7 +95,7 @@ class TestStampsAPI:
         """Test successful retrieval of specific stamp by ID."""
         mock_get_stamps.return_value = [
             {
-                "batchID": "target123",
+                "batchID": VALID_STAMP_ID,
                 "amount": "1000000000",
                 "blockNumber": 12345,
                 "owner": "0x1234567890abcdef",
@@ -104,18 +110,18 @@ class TestStampsAPI:
                 "local": True
             },
             {
-                "batchID": "other456",
+                "batchID": VALID_STAMP_ID_C,
                 "amount": "8000000000",
                 "local": False
             }
         ]
 
-        response = client.get("/api/v1/stamps/target123")
+        response = client.get(f"/api/v1/stamps/{VALID_STAMP_ID}")
 
         assert response.status_code == 200
         data = response.json()
 
-        assert data["batchID"] == "target123"
+        assert data["batchID"] == VALID_STAMP_ID
         assert data["local"] is True
         assert data["utilization"] == 75
         assert data["label"] == "my-stamp"
@@ -126,13 +132,13 @@ class TestStampsAPI:
         """Test retrieval of non-existent stamp."""
         mock_get_stamps.return_value = [
             {
-                "batchID": "other123",
+                "batchID": VALID_STAMP_ID_C,
                 "amount": "1000000000",
                 "local": False
             }
         ]
 
-        response = client.get("/api/v1/stamps/nonexistent")
+        response = client.get(f"/api/v1/stamps/{NONEXISTENT_STAMP_ID}")
 
         assert response.status_code == 404
         assert "not found" in response.json()["detail"].lower()
@@ -146,7 +152,7 @@ class TestStampsAPI:
         response = client.get("/api/v1/stamps/")
 
         assert response.status_code == 502
-        assert "swarm bee node" in response.json()["detail"].lower()
+        assert "bee node" in response.json()["detail"].lower()
 
     @patch('app.services.swarm_api.check_sufficient_funds')
     @patch('app.services.swarm_api.purchase_postage_stamp')
@@ -366,9 +372,9 @@ class TestStampsAPI:
     @patch('app.services.swarm_api.extend_postage_stamp')
     def test_extend_stamp_success_with_amount(self, mock_extend, mock_get_stamps, mock_calc_cost, mock_funds):
         """Test successful stamp extension with legacy amount."""
-        mock_extend.return_value = "existing_batch_id"
+        mock_extend.return_value = VALID_STAMP_ID
         mock_get_stamps.return_value = [
-            {"batchID": "existing_batch_id", "depth": 17, "amount": "1000000000", "batchTTL": 3600,
+            {"batchID": VALID_STAMP_ID, "depth": 17, "amount": "1000000000", "batchTTL": 3600,
              "bucketDepth": 16, "expectedExpiration": "2024-12-01-15-30", "local": True, "immutableFlag": False}
         ]
         mock_calc_cost.return_value = 1048576000000000
@@ -378,15 +384,15 @@ class TestStampsAPI:
             "amount": 8000000000
         }
 
-        response = client.patch("/api/v1/stamps/existing_batch_id/extend", json=extension_data)
+        response = client.patch(f"/api/v1/stamps/{VALID_STAMP_ID}/extend", json=extension_data)
 
         assert response.status_code == 200
         data = response.json()
-        assert data["batchID"] == "existing_batch_id"
+        assert data["batchID"] == VALID_STAMP_ID
         assert "successfully" in data["message"].lower()
 
         # Verify the service was called with correct parameters
-        mock_extend.assert_called_once_with(stamp_id="existing_batch_id", amount=8000000000)
+        mock_extend.assert_called_once_with(stamp_id=VALID_STAMP_ID, amount=8000000000)
 
     @patch('app.services.swarm_api.check_sufficient_funds')
     @patch('app.services.swarm_api.calculate_stamp_total_cost')
@@ -396,9 +402,9 @@ class TestStampsAPI:
     @patch('app.services.swarm_api.extend_postage_stamp')
     def test_extend_stamp_with_duration(self, mock_extend, mock_get_stamps, mock_chainstate, mock_calc_amount, mock_calc_cost, mock_funds):
         """Test stamp extension with duration_hours."""
-        mock_extend.return_value = "existing_batch_id"
+        mock_extend.return_value = VALID_STAMP_ID
         mock_get_stamps.return_value = [
-            {"batchID": "existing_batch_id", "depth": 17, "amount": "1000000000", "batchTTL": 3600,
+            {"batchID": VALID_STAMP_ID, "depth": 17, "amount": "1000000000", "batchTTL": 3600,
              "bucketDepth": 16, "expectedExpiration": "2024-12-01-15-30", "local": True, "immutableFlag": False}
         ]
         mock_chainstate.return_value = {"currentPrice": "100000"}
@@ -410,11 +416,11 @@ class TestStampsAPI:
             "duration_hours": 25
         }
 
-        response = client.patch("/api/v1/stamps/existing_batch_id/extend", json=extension_data)
+        response = client.patch(f"/api/v1/stamps/{VALID_STAMP_ID}/extend", json=extension_data)
 
         assert response.status_code == 200
         data = response.json()
-        assert data["batchID"] == "existing_batch_id"
+        assert data["batchID"] == VALID_STAMP_ID
 
         # Verify amount was calculated from duration
         mock_calc_amount.assert_called_once_with(25, 100000)
@@ -427,9 +433,9 @@ class TestStampsAPI:
     @patch('app.services.swarm_api.extend_postage_stamp')
     def test_extend_stamp_with_defaults(self, mock_extend, mock_get_stamps, mock_chainstate, mock_calc_amount, mock_calc_cost, mock_funds):
         """Test stamp extension with empty body uses default 25 hours."""
-        mock_extend.return_value = "existing_batch_id"
+        mock_extend.return_value = VALID_STAMP_ID
         mock_get_stamps.return_value = [
-            {"batchID": "existing_batch_id", "depth": 17, "amount": "1000000000", "batchTTL": 3600,
+            {"batchID": VALID_STAMP_ID, "depth": 17, "amount": "1000000000", "batchTTL": 3600,
              "bucketDepth": 16, "expectedExpiration": "2024-12-01-15-30", "local": True, "immutableFlag": False}
         ]
         mock_chainstate.return_value = {"currentPrice": "100000"}
@@ -437,7 +443,7 @@ class TestStampsAPI:
         mock_calc_cost.return_value = 235929600000000
         mock_funds.return_value = {"sufficient": True, "wallet_balance_bzz": 10.0, "required_bzz": 0.024, "shortfall_bzz": 0.0}
 
-        response = client.patch("/api/v1/stamps/existing_batch_id/extend", json={})
+        response = client.patch(f"/api/v1/stamps/{VALID_STAMP_ID}/extend", json={})
 
         assert response.status_code == 200
 
@@ -448,11 +454,11 @@ class TestStampsAPI:
     def test_extend_stamp_not_found(self, mock_get_stamps):
         """Test stamp extension fails when stamp not found."""
         mock_get_stamps.return_value = [
-            {"batchID": "other_batch", "depth": 17, "amount": "1000000000", "batchTTL": 3600,
+            {"batchID": VALID_STAMP_ID_C, "depth": 17, "amount": "1000000000", "batchTTL": 3600,
              "bucketDepth": 16, "expectedExpiration": "2024-12-01-15-30", "local": True, "immutableFlag": False}
         ]
 
-        response = client.patch("/api/v1/stamps/nonexistent_batch/extend", json={})
+        response = client.patch(f"/api/v1/stamps/{NONEXISTENT_STAMP_ID}/extend", json={})
 
         assert response.status_code == 404
         assert "not found" in response.json()["detail"].lower()
@@ -465,7 +471,7 @@ class TestStampsAPI:
         """Test stamp extension when API call fails."""
         from requests.exceptions import RequestException
         mock_get_stamps.return_value = [
-            {"batchID": "batch123", "depth": 17, "amount": "1000000000", "batchTTL": 3600,
+            {"batchID": VALID_STAMP_ID_B, "depth": 17, "amount": "1000000000", "batchTTL": 3600,
              "bucketDepth": 16, "expectedExpiration": "2024-12-01-15-30", "local": True, "immutableFlag": False}
         ]
         mock_calc_cost.return_value = 1048576000000000
@@ -476,7 +482,7 @@ class TestStampsAPI:
             "amount": 8000000000
         }
 
-        response = client.patch("/api/v1/stamps/batch123/extend", json=extension_data)
+        response = client.patch(f"/api/v1/stamps/{VALID_STAMP_ID_B}/extend", json=extension_data)
 
         assert response.status_code == 502
         assert "could not extend" in response.json()["detail"].lower()
@@ -485,7 +491,7 @@ class TestStampsAPI:
     def test_extend_stamp_invalid_data(self, mock_get_stamps):
         """Test stamp extension with invalid request data."""
         mock_get_stamps.return_value = [
-            {"batchID": "batch123", "depth": 17, "amount": "1000000000", "batchTTL": 3600,
+            {"batchID": VALID_STAMP_ID_B, "depth": 17, "amount": "1000000000", "batchTTL": 3600,
              "bucketDepth": 16, "expectedExpiration": "2024-12-01-15-30", "local": True, "immutableFlag": False}
         ]
 
@@ -493,7 +499,7 @@ class TestStampsAPI:
             "amount": -1000000000  # Negative amount should be invalid
         }
 
-        response = client.patch("/api/v1/stamps/batch123/extend", json=invalid_data)
+        response = client.patch(f"/api/v1/stamps/{VALID_STAMP_ID_B}/extend", json=invalid_data)
 
         # This should either be a validation error (422) or be caught by business logic
         assert response.status_code in [422, 400, 502]

@@ -31,5 +31,6 @@ if __name__ == "__main__":
         port=port,
         reload=reload,      # Automatically reload server on code changes
         log_level="info",   # Set logging level
+        server_header=False, # Don't expose server version in headers
         **ssl_options       # Pass SSL options if available
     )
