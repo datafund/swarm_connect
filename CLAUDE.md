@@ -51,6 +51,7 @@ python -m pytest tests/test_manifest_upload.py -v
 - **API Layer**: Organized under `app/api/` with separate endpoints and models
 - **Service Layer**: External API integration handled in `app/services/`
 - **Models**: Pydantic models for request/response validation in `app/api/models/`
+- **Middleware**: Rate limiting in `app/middleware/rate_limit.py` (sliding window per-IP)
 - **x402 Module**: Optional payment gateway in `app/x402/` (see x402 section below)
 
 ### Key Components
@@ -87,6 +88,12 @@ Optional environment variables:
 - `PORT`: Server port (default: `8000`)
 - `RELOAD`: Enable auto-reload (default: `true`)
 - `SSL_KEYFILE`/`SSL_CERTFILE`: For HTTPS development
+
+Security settings:
+- `MAX_UPLOAD_SIZE_MB`: Maximum file upload size in megabytes (default: `10`)
+- `RATE_LIMIT_ENABLED`: Enable per-IP rate limiting (default: `true`)
+- `RATE_LIMIT_PER_MINUTE`: Requests per minute per IP (default: `60`)
+- `RATE_LIMIT_BURST`: Extra burst capacity above per-minute limit (default: `10`)
 
 Notary signing (optional):
 - `NOTARY_ENABLED`: Enable notary signing feature (default: `false`)

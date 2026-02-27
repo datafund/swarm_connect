@@ -202,6 +202,14 @@ Swarm Connect is a FastAPI-based API gateway that provides comprehensive access 
 - **Binary Data Support**: Direct binary upload/download with optional JSON wrapping
 - **Modular Design**: Separate endpoints for stamps and data operations
 
+#### 🛡️ Security & Rate Limiting
+- **Upload Size Limits**: Configurable maximum upload size (default: 10 MB) with clear 413 errors
+- **Global Rate Limiting**: Per-IP sliding window rate limiter with burst capacity (default: 60 req/min + 10 burst)
+- **Input Validation**: Strict regex validation on stamp IDs (64-char hex) and references (64-128 char hex)
+- **Error Sanitization**: Internal details (IPs, ports, file paths) are never exposed in error responses
+- **Server Header Suppression**: `Server` header removed to prevent version fingerprinting
+- **Rate Limit Headers**: `X-RateLimit-Limit` and `X-RateLimit-Remaining` on every response
+
 #### 🛡️ Reliability Features
 - **Request Timeouts**: 10-second timeout for external API calls
 - **Error Recovery**: Multiple layers of exception handling
@@ -470,6 +478,7 @@ Extend an existing stamp by adding more time.
 Upload data to Swarm (JSON or binary).
 - **Request Body**: JSON data (default) or raw binary data
 - **Content-Type**: `application/json` (default) or `application/octet-stream` for binary
+- **Size Limit**: Maximum upload size is configurable (default: 10 MB). Returns 413 if exceeded.
 - **validate_stamp**: Optional (default: false) - Pre-validate stamp before upload
 - **deferred**: Optional (default: false) - Use deferred upload mode
 - **include_timing**: Optional (default: false) - Include timing breakdown in response
@@ -520,7 +529,16 @@ curl -X POST "http://localhost:8000/api/v1/data/?stamp_id=YOUR_STAMP_ID&redundan
 curl -X POST "http://localhost:8000/api/v1/data/?stamp_id=YOUR_STAMP_ID&redundancy=0" \
      -F "file=@data.json"
 ```
-Returns 400 if stamp is full (100% utilized), not usable, or invalid redundancy level. Returns 404 if stamp not found.
+Returns 400 if stamp is full (100% utilized), not usable, or invalid redundancy level. Returns 404 if stamp not found. Returns 413 if file exceeds the upload size limit.
+
+**Upload Size Limit Error (413):**
+```json
+{
+  "code": "FILE_TOO_LARGE",
+  "message": "Upload exceeds maximum size of 10 MB.",
+  "max_size_mb": 10
+}
+```
 
 **Performance Timing Response** (when `include_timing=true`):
 ```json
@@ -691,6 +709,71 @@ Perform a comprehensive health check on a stamp to determine if it can be used f
 | `LOW_TTL` | Stamp expires in less than 1 hour |
 | `NEARLY_FULL` | Stamp is 95%+ utilized |
 | `HIGH_UTILIZATION` | Stamp is 80%+ utilized |
+
+## Security
+
+### Upload Size Limits
+
+File uploads are limited to **10 MB** by default. This applies to both `/api/v1/data/` and `/api/v1/data/manifest` endpoints.
+
+```bash
+# Configure in .env (value in megabytes)
+MAX_UPLOAD_SIZE_MB=10
+```
+
+Uploads exceeding the limit receive a **413** response:
+```json
+{"code": "FILE_TOO_LARGE", "message": "Upload exceeds maximum size of 10 MB.", "max_size_mb": 10}
+```
+
+### Rate Limiting
+
+Global per-IP rate limiting protects against abuse. Uses a sliding window algorithm with burst capacity.
+
+```bash
+# Configure in .env
+RATE_LIMIT_ENABLED=true       # Master switch (default: true)
+RATE_LIMIT_PER_MINUTE=60      # Requests per minute per IP (default: 60)
+RATE_LIMIT_BURST=10           # Extra burst capacity (default: 10)
+```
+
+Every response includes rate limit headers:
+```
+X-RateLimit-Limit: 70
+X-RateLimit-Remaining: 65
+```
+
+When the limit is exceeded, the gateway returns **429**:
+```json
+{"error": "Rate limit exceeded", "detail": "Too many requests. Try again in 42 seconds.", "retry_after": 42}
+```
+
+**Exempt paths** (never rate-limited): `/`, `/health`, `/docs`, `/redoc`, `/openapi.json`
+
+**Note**: Rate limiting is automatically disabled when x402 payment is enabled (x402 has its own rate limiting).
+
+### Input Validation
+
+All path and query parameters are validated with strict patterns:
+
+| Parameter | Pattern | Example |
+|-----------|---------|---------|
+| `stamp_id` | 64-character hex | `a1b2c3...` (64 chars) |
+| `reference` | 64-128 character hex | `d4e5f6...` (64-128 chars) |
+
+Invalid inputs receive a **422** response before any processing occurs.
+
+### Error Sanitization
+
+Error messages never expose internal infrastructure details:
+- No internal IP addresses or hostnames
+- No port numbers or file paths
+- No stack traces or library versions
+- Generic messages like "The Bee node may be unavailable" instead of connection strings
+
+### Server Header
+
+The `Server` header is suppressed in all responses to prevent version fingerprinting.
 
 ## Troubleshooting
 
