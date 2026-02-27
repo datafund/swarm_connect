@@ -4,6 +4,8 @@ import pytest
 from unittest.mock import patch, MagicMock
 import io
 
+VALID_STAMP_ID = "a" * 64
+
 
 class TestUploadDataDeferredHeader:
     """Tests for deferred header in upload_data_to_swarm."""
@@ -133,7 +135,7 @@ class TestDataEndpointDeferredParameter:
 
         client = TestClient(app)
         response = client.post(
-            "/api/v1/data/?stamp_id=teststamp",
+            f"/api/v1/data/?stamp_id={VALID_STAMP_ID}",
             files={"file": ("test.json", io.BytesIO(b'{"test": true}'), "application/json")}
         )
 
@@ -153,7 +155,7 @@ class TestDataEndpointDeferredParameter:
 
         client = TestClient(app)
         response = client.post(
-            "/api/v1/data/?stamp_id=teststamp&deferred=true",
+            f"/api/v1/data/?stamp_id={VALID_STAMP_ID}&deferred=true",
             files={"file": ("test.json", io.BytesIO(b'{"test": true}'), "application/json")}
         )
 
@@ -173,7 +175,7 @@ class TestDataEndpointDeferredParameter:
 
         client = TestClient(app)
         response = client.post(
-            "/api/v1/data/?stamp_id=teststamp&deferred=false",
+            f"/api/v1/data/?stamp_id={VALID_STAMP_ID}&deferred=false",
             files={"file": ("test.json", io.BytesIO(b'{"test": true}'), "application/json")}
         )
 
@@ -211,7 +213,7 @@ class TestManifestEndpointDeferredParameter:
 
         client = TestClient(app)
         response = client.post(
-            "/api/v1/data/manifest?stamp_id=teststamp",
+            f"/api/v1/data/manifest?stamp_id={VALID_STAMP_ID}",
             files={"file": ("test.tar", io.BytesIO(tar_bytes), "application/x-tar")}
         )
 
@@ -245,7 +247,7 @@ class TestManifestEndpointDeferredParameter:
 
         client = TestClient(app)
         response = client.post(
-            "/api/v1/data/manifest?stamp_id=teststamp&deferred=true",
+            f"/api/v1/data/manifest?stamp_id={VALID_STAMP_ID}&deferred=true",
             files={"file": ("test.tar", io.BytesIO(tar_bytes), "application/x-tar")}
         )
 

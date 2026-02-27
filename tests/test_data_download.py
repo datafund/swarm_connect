@@ -13,6 +13,9 @@ from app.main import app
 
 client = TestClient(app)
 
+# Valid 64-char hex reference for reuse in tests
+VALID_REF = "a" * 64
+
 
 class TestContentTypeDetection:
     """Test content type detection and filename generation."""
@@ -24,7 +27,7 @@ class TestContentTypeDetection:
         json_bytes = json.dumps(json_data, indent=2).encode('utf-8')
         mock_download.return_value = json_bytes
 
-        response = client.get("/api/v1/data/abcd1234567890abcdef1234567890abcdef1234567890abcdef1234567890ab")
+        response = client.get("/api/v1/data/abcd1234567890abcdef1234567890abcdef1234567890abcdef12345678abcd")
 
         assert response.status_code == 200
         assert response.headers["content-type"] == "application/json"
@@ -61,11 +64,11 @@ class TestContentTypeDetection:
         pdf_bytes = b'%PDF-1.4\n1 0 obj'  # PDF header
         mock_download.return_value = pdf_bytes
 
-        response = client.get("/api/v1/data/pdf12345678901234567890123456789012345678901234567890123456789012")
+        response = client.get("/api/v1/data/ddf1234567890abcdef1234567890abcdef1234567890abcdef1234567890abc")
 
         assert response.status_code == 200
         assert response.headers["content-type"] == "application/pdf"
-        assert response.headers["content-disposition"] == 'attachment; filename="document-pdf12345.pdf"'
+        assert response.headers["content-disposition"] == 'attachment; filename="document-ddf12345.pdf"'
 
     @patch('app.api.endpoints.data.download_data_from_swarm')
     def test_text_content_detection(self, mock_download):
@@ -73,11 +76,11 @@ class TestContentTypeDetection:
         text_bytes = "This is plain text content with UTF-8 characters: äöü".encode('utf-8')
         mock_download.return_value = text_bytes
 
-        response = client.get("/api/v1/data/text567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef12")
+        response = client.get("/api/v1/data/eee1567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef")
 
         assert response.status_code == 200
         assert response.headers["content-type"].startswith("text/plain")
-        assert response.headers["content-disposition"] == 'attachment; filename="text-text5678.txt"'
+        assert response.headers["content-disposition"] == 'attachment; filename="text-eee15678.txt"'
 
     @patch('app.api.endpoints.data.download_data_from_swarm')
     def test_binary_fallback_detection(self, mock_download):
@@ -85,11 +88,11 @@ class TestContentTypeDetection:
         binary_bytes = b'\x80\x81\x82\x83\x84\x85\x86\x87\x88\x89'  # Invalid UTF-8
         mock_download.return_value = binary_bytes
 
-        response = client.get("/api/v1/data/binary567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef")
+        response = client.get("/api/v1/data/fff0567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef")
 
         assert response.status_code == 200
         assert response.headers["content-type"] == "application/octet-stream"
-        assert response.headers["content-disposition"] == 'attachment; filename="data-binary56.bin"'
+        assert response.headers["content-disposition"] == 'attachment; filename="data-fff05678.bin"'
 
 
 class TestFilenameGeneration:
@@ -97,14 +100,14 @@ class TestFilenameGeneration:
 
     @patch('app.api.endpoints.data.download_data_from_swarm')
     def test_short_reference_hash(self, mock_download):
-        """Test filename generation with short reference."""
+        """Test that short references are rejected by regex validation."""
         json_data = {"test": "data"}
         mock_download.return_value = json.dumps(json_data).encode('utf-8')
 
         response = client.get("/api/v1/data/abc123")
 
-        assert response.status_code == 200
-        assert response.headers["content-disposition"] == 'attachment; filename="provenance-abc123.json"'
+        # Short references fail the 64-128 hex char regex validation
+        assert response.status_code == 422
 
     @patch('app.api.endpoints.data.download_data_from_swarm')
     def test_reference_with_special_chars(self, mock_download):
@@ -123,12 +126,12 @@ class TestFilenameGeneration:
         """Test handling of empty files."""
         mock_download.return_value = b""
 
-        response = client.get("/api/v1/data/empty1234567890abcdef1234567890abcdef1234567890abcdef1234567890ab")
+        response = client.get("/api/v1/data/e0001234567890abcdef1234567890abcdef1234567890abcdef1234567890ab")
 
         assert response.status_code == 200
         # Empty bytes decode as valid UTF-8, so detected as text/plain
         assert response.headers["content-type"].startswith("text/plain")
-        assert response.headers["content-disposition"] == 'attachment; filename="text-empty123.txt"'
+        assert response.headers["content-disposition"] == 'attachment; filename="text-e0001234.txt"'
         assert response.headers["content-length"] == "0"
 
 
@@ -141,7 +144,7 @@ class TestDownloadHeaders:
         test_data = b"test content"
         mock_download.return_value = test_data
 
-        response = client.get("/api/v1/data/headers567890abcdef1234567890abcdef1234567890abcdef1234567890abcde")
+        response = client.get("/api/v1/data/aaa1567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef")
 
         # Required headers
         assert "content-type" in response.headers
@@ -151,7 +154,7 @@ class TestDownloadHeaders:
 
         # Verify header values
         assert response.headers["content-length"] == str(len(test_data))
-        assert response.headers["x-swarm-reference"] == "headers567890abcdef1234567890abcdef1234567890abcdef1234567890abcde"
+        assert response.headers["x-swarm-reference"] == "aaa1567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
 
     @patch('app.api.endpoints.data.download_data_from_swarm')
     def test_content_disposition_format(self, mock_download):
@@ -159,7 +162,7 @@ class TestDownloadHeaders:
         json_data = {"test": "data"}
         mock_download.return_value = json.dumps(json_data).encode('utf-8')
 
-        response = client.get("/api/v1/data/disposition567890abcdef1234567890abcdef1234567890abcdef1234567890")
+        response = client.get("/api/v1/data/bbb1567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef")
 
         disposition = response.headers["content-disposition"]
         assert disposition.startswith('attachment; filename="')
@@ -175,7 +178,7 @@ class TestDownloadErrorHandling:
         """Test handling when file is not found in Swarm."""
         mock_download.side_effect = FileNotFoundError("File not found")
 
-        response = client.get("/api/v1/data/notfound567890abcdef1234567890abcdef1234567890abcdef1234567890")
+        response = client.get("/api/v1/data/ccc1567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef")
 
         assert response.status_code == 404
         assert "Data not found" in response.json()["detail"]
@@ -186,7 +189,7 @@ class TestDownloadErrorHandling:
         from requests.exceptions import RequestException
         mock_download.side_effect = RequestException("Swarm API error")
 
-        response = client.get("/api/v1/data/apitest567890abcdef1234567890abcdef1234567890abcdef1234567890")
+        response = client.get("/api/v1/data/ddd1567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef")
 
         assert response.status_code == 502
         assert "Failed to download data from Swarm" in response.json()["detail"]
@@ -196,29 +199,43 @@ class TestDownloadErrorHandling:
         """Test handling of unexpected errors."""
         mock_download.side_effect = Exception("Unexpected error")
 
-        response = client.get("/api/v1/data/unexpected567890abcdef1234567890abcdef1234567890abcdef1234567890")
+        response = client.get("/api/v1/data/eee0567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef")
 
         assert response.status_code == 500
         assert "Internal server error" in response.json()["detail"]
 
     @patch('app.api.endpoints.data.download_data_from_swarm')
     def test_invalid_reference_format(self, mock_download):
-        """Test handling of invalid reference format."""
+        """Test handling of invalid reference format - rejected by regex validation."""
         from requests.exceptions import RequestException
         mock_download.side_effect = RequestException("Bad request")
 
+        # These refs are rejected by the 64-128 hex char regex with 422
         invalid_refs = [
-            "",  # Empty
-            "too_short",  # Too short
-            "invalid-chars!@#",  # Invalid characters
-            "../../../etc/passwd",  # Path traversal
-            "<script>alert('xss')</script>",  # XSS attempt
+            "too_short",  # Too short and non-hex
+            "abc123",  # Too short (< 64 chars)
+            "zzzz" * 16,  # 64 chars but non-hex
+            "invalid" + "a" * 57,  # 64 chars but contains non-hex prefix
         ]
 
         for ref in invalid_refs:
             response = client.get(f"/api/v1/data/{ref}")
-            # Empty string routes to 405, others return 502 (Swarm rejects invalid refs)
-            assert response.status_code in [404, 405, 422, 500, 502]
+            assert response.status_code == 422, f"Expected 422 for ref '{ref}', got {response.status_code}"
+
+        # Refs with special chars that break URL routing get 404 (path resolution)
+        special_refs = [
+            "../../../etc/passwd",  # Path traversal
+            "<script>alert('xss')</script>",  # XSS attempt
+            "invalid-chars!@#",  # Invalid characters with special URL chars
+        ]
+
+        for ref in special_refs:
+            response = client.get(f"/api/v1/data/{ref}")
+            assert response.status_code in [404, 422], f"Expected 404 or 422 for ref '{ref}', got {response.status_code}"
+
+        # Empty string routes to a different URL pattern (405 Method Not Allowed)
+        response = client.get("/api/v1/data/")
+        assert response.status_code == 405
 
 
 class TestJSONDownloadEndpoint:
@@ -231,7 +248,7 @@ class TestJSONDownloadEndpoint:
         test_bytes = json.dumps(test_data).encode('utf-8')
         mock_download.return_value = test_bytes
 
-        response = client.get("/api/v1/data/jsontest567890abcdef1234567890abcdef1234567890abcdef1234567890/json")
+        response = client.get("/api/v1/data/fff1567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef/json")
 
         assert response.status_code == 200
         json_response = response.json()
@@ -244,7 +261,7 @@ class TestJSONDownloadEndpoint:
 
         # Check values
         assert json_response["size"] == len(test_bytes)
-        assert json_response["reference"] == "jsontest567890abcdef1234567890abcdef1234567890abcdef1234567890"
+        assert json_response["reference"] == "fff1567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
         assert json_response["content_type"] == "application/json"
 
         # Check that data is base64 encoded
@@ -257,7 +274,7 @@ class TestJSONDownloadEndpoint:
         binary_data = b'\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00'
         mock_download.return_value = binary_data
 
-        response = client.get("/api/v1/data/pngdata567890abcdef1234567890abcdef1234567890abcdef1234567890ab/json")
+        response = client.get("/api/v1/data/aab1567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef/json")
 
         assert response.status_code == 200
         json_response = response.json()
@@ -275,7 +292,7 @@ class TestJSONDownloadEndpoint:
         test_data = b"test content"
         mock_download.return_value = test_data
 
-        response = client.get("/api/v1/data/structure567890abcdef1234567890abcdef1234567890abcdef1234567890/json")
+        response = client.get("/api/v1/data/aac1567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef/json")
 
         assert response.status_code == 200
         json_response = response.json()
@@ -304,10 +321,11 @@ class TestJSONDownloadEndpoint:
             ("Mixed binary", bytes(range(256))),  # All possible byte values
         ]
 
-        for test_name, original_data in test_cases:
+        for idx, (test_name, original_data) in enumerate(test_cases):
             mock_download.return_value = original_data
+            ref = f"{idx:04d}" + "aad1567890abcdef1234567890abcdef1234567890abcdef12345678abcd"
 
-            response = client.get(f"/api/v1/data/integrity{hash(test_name):x}567890abcdef1234567890abcdef1234567890/json")
+            response = client.get(f"/api/v1/data/{ref}/json")
 
             assert response.status_code == 200, f"Failed for {test_name}"
             json_response = response.json()
@@ -323,7 +341,7 @@ class TestJSONDownloadEndpoint:
         # Test 404 error
         mock_download.side_effect = FileNotFoundError("File not found")
 
-        response = client.get("/api/v1/data/missing567890abcdef1234567890abcdef1234567890abcdef1234567890/json")
+        response = client.get("/api/v1/data/aae1567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef/json")
 
         assert response.status_code == 404
         assert response.headers["content-type"] == "application/json"
@@ -335,7 +353,7 @@ class TestJSONDownloadEndpoint:
         from requests.exceptions import RequestException
         mock_download.side_effect = RequestException("Swarm error")
 
-        response = client.get("/api/v1/data/swarmfail567890abcdef1234567890abcdef1234567890abcdef1234567890/json")
+        response = client.get("/api/v1/data/aaf1567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef/json")
 
         assert response.status_code == 502
         assert response.headers["content-type"] == "application/json"
@@ -353,7 +371,7 @@ class TestJSONDownloadEndpoint:
             ("Binary data", b'\x80\x81\x82\x83', "application/octet-stream"),
         ]
 
-        reference_base = "consistency567890abcdef1234567890abcdef1234567890abcdef1234567890"
+        reference_base = "aab0567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
 
         for test_name, test_data, expected_type in test_cases:
             mock_download.return_value = test_data
@@ -378,7 +396,7 @@ class TestJSONDownloadEndpoint:
         """Test JSON endpoint with empty files."""
         mock_download.return_value = b""
 
-        response = client.get("/api/v1/data/empty567890abcdef1234567890abcdef1234567890abcdef1234567890ab/json")
+        response = client.get("/api/v1/data/aac0567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef/json")
 
         assert response.status_code == 200
         json_response = response.json()
@@ -386,7 +404,7 @@ class TestJSONDownloadEndpoint:
         assert json_response["size"] == 0
         assert json_response["data"] == ""  # Empty base64
         assert json_response["content_type"] == "text/plain"  # Empty bytes decode as valid UTF-8
-        assert json_response["reference"] == "empty567890abcdef1234567890abcdef1234567890abcdef1234567890ab"
+        assert json_response["reference"] == "aac0567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
 
     @patch('app.api.endpoints.data.download_data_from_swarm')
     def test_json_endpoint_large_file_handling(self, mock_download):
@@ -395,7 +413,7 @@ class TestJSONDownloadEndpoint:
         large_data = b'A' * (1024 * 1024)
         mock_download.return_value = large_data
 
-        response = client.get("/api/v1/data/large567890abcdef1234567890abcdef1234567890abcdef1234567890ab/json")
+        response = client.get("/api/v1/data/aad0567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef/json")
 
         assert response.status_code == 200
         json_response = response.json()
@@ -423,7 +441,7 @@ class TestJSONDownloadEndpoint:
         unicode_bytes = json.dumps(unicode_data, ensure_ascii=False).encode('utf-8')
         mock_download.return_value = unicode_bytes
 
-        response = client.get("/api/v1/data/unicode567890abcdef1234567890abcdef1234567890abcdef1234567890/json")
+        response = client.get("/api/v1/data/aae0567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef/json")
 
         assert response.status_code == 200
         json_response = response.json()
@@ -451,10 +469,11 @@ class TestJSONDownloadEndpoint:
             (b'\x80\x81\x82', "application/octet-stream", "Invalid UTF-8 should be binary"),
         ]
 
-        for test_data, expected_type, description in test_cases:
+        for idx, (test_data, expected_type, description) in enumerate(test_cases):
             mock_download.return_value = test_data
+            ref = f"{idx:04d}" + "aaf0567890abcdef1234567890abcdef1234567890abcdef12345678abcd"
 
-            response = client.get(f"/api/v1/data/typetest{hash(description):x}567890abcdef1234567890abcdef/json")
+            response = client.get(f"/api/v1/data/{ref}/json")
 
             assert response.status_code == 200, f"Failed for: {description}"
             json_response = response.json()
@@ -470,12 +489,12 @@ class TestMalformedContentHandling:
         malformed_json = b'{"test": "data", invalid}'
         mock_download.return_value = malformed_json
 
-        response = client.get("/api/v1/data/malformed567890abcdef1234567890abcdef1234567890abcdef1234567890")
+        response = client.get("/api/v1/data/aab2567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef")
 
         assert response.status_code == 200
         # Malformed JSON is still valid UTF-8, so detected as text/plain
         assert response.headers["content-type"].startswith("text/plain")
-        assert response.headers["content-disposition"] == 'attachment; filename="text-malforme.txt"'
+        assert response.headers["content-disposition"] == 'attachment; filename="text-aab25678.txt"'
 
     @patch('app.api.endpoints.data.download_data_from_swarm')
     def test_invalid_utf8_handling(self, mock_download):
@@ -483,11 +502,11 @@ class TestMalformedContentHandling:
         invalid_utf8 = b'\x80\x81\x82\x83'  # Invalid UTF-8
         mock_download.return_value = invalid_utf8
 
-        response = client.get("/api/v1/data/utf8test567890abcdef1234567890abcdef1234567890abcdef1234567890")
+        response = client.get("/api/v1/data/aac2567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef")
 
         assert response.status_code == 200
         assert response.headers["content-type"] == "application/octet-stream"
-        assert response.headers["content-disposition"] == 'attachment; filename="data-utf8test.bin"'
+        assert response.headers["content-disposition"] == 'attachment; filename="data-aac25678.bin"'
 
     @patch('app.api.endpoints.data.download_data_from_swarm')
     def test_very_large_content_headers(self, mock_download):
@@ -495,37 +514,51 @@ class TestMalformedContentHandling:
         large_data = b'x' * (10 * 1024 * 1024)  # 10MB
         mock_download.return_value = large_data
 
-        response = client.get("/api/v1/data/largetest567890abcdef1234567890abcdef1234567890abcdef1234567890")
+        response = client.get("/api/v1/data/aad2567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef")
 
         assert response.status_code == 200
         assert response.headers["content-length"] == str(len(large_data))
         assert response.headers["content-type"].startswith("text/plain")  # Should detect as text
-        assert response.headers["content-disposition"] == 'attachment; filename="text-largetes.txt"'
+        assert response.headers["content-disposition"] == 'attachment; filename="text-aad25678.txt"'
 
 
 class TestReferenceHashEdgeCases:
     """Test edge cases with reference hash handling."""
 
     @patch('app.api.endpoints.data.download_data_from_swarm')
-    def test_various_reference_lengths(self, mock_download):
-        """Test various reference hash lengths."""
+    def test_short_references_rejected(self, mock_download):
+        """Test that references shorter than 64 hex chars are rejected."""
         json_data = {"test": "data"}
         mock_download.return_value = json.dumps(json_data).encode('utf-8')
 
-        test_refs = [
+        short_refs = [
             "a",  # Very short
             "abc123",  # Short
-            "1234567890123456",  # Medium
-            "1234567890abcdef" * 4,  # Standard 64 chars
+            "1234567890123456",  # Medium (16 chars)
+            "abcdef" * 10,  # 60 chars - still too short
         ]
 
-        for ref in test_refs:
+        for ref in short_refs:
             response = client.get(f"/api/v1/data/{ref}")
-            if response.status_code == 200:  # Some may be rejected by validation
-                # Should use first 8 chars or entire ref if shorter
-                expected_prefix = ref[:8] if len(ref) >= 8 else ref
-                expected_filename = f'provenance-{expected_prefix}.json'
-                assert response.headers["content-disposition"] == f'attachment; filename="{expected_filename}"'
+            assert response.status_code == 422, f"Expected 422 for short ref of length {len(ref)}"
+
+    @patch('app.api.endpoints.data.download_data_from_swarm')
+    def test_valid_reference_lengths(self, mock_download):
+        """Test that valid 64 and 128 char hex references are accepted."""
+        json_data = {"test": "data"}
+        mock_download.return_value = json.dumps(json_data).encode('utf-8')
+
+        valid_refs = [
+            "1234567890abcdef" * 4,  # Standard 64 chars
+            "abcdef1234567890" * 8,  # 128 chars (also valid)
+        ]
+
+        for ref in valid_refs:
+            response = client.get(f"/api/v1/data/{ref}")
+            assert response.status_code == 200, f"Expected 200 for valid ref of length {len(ref)}"
+            expected_prefix = ref[:8]
+            expected_filename = f'provenance-{expected_prefix}.json'
+            assert response.headers["content-disposition"] == f'attachment; filename="{expected_filename}"'
 
 
 # TODO: Add performance tests for large downloads when needed:

@@ -13,6 +13,8 @@ from app.main import app
 
 client = TestClient(app)
 
+VALID_STAMP_ID = "a" * 64
+
 
 def create_tar_archive(files: dict[str, bytes]) -> bytes:
     """
@@ -52,7 +54,7 @@ class TestManifestUploadBasics:
         tar_bytes = create_tar_archive(files)
 
         response = client.post(
-            "/api/v1/data/manifest?stamp_id=test_stamp",
+            f"/api/v1/data/manifest?stamp_id={VALID_STAMP_ID}",
             files={"file": ("files.tar", io.BytesIO(tar_bytes), "application/x-tar")}
         )
 
@@ -72,7 +74,7 @@ class TestManifestUploadBasics:
         tar_bytes = create_tar_archive(files)
 
         response = client.post(
-            "/api/v1/data/manifest?stamp_id=test_stamp",
+            f"/api/v1/data/manifest?stamp_id={VALID_STAMP_ID}",
             files={"file": ("single.tar", io.BytesIO(tar_bytes), "application/x-tar")}
         )
 
@@ -92,7 +94,7 @@ class TestManifestUploadBasics:
         tar_bytes = create_tar_archive(files)
 
         response = client.post(
-            "/api/v1/data/manifest?stamp_id=test_stamp",
+            f"/api/v1/data/manifest?stamp_id={VALID_STAMP_ID}",
             files={"file": ("nested.tar", io.BytesIO(tar_bytes), "application/x-tar")}
         )
 
@@ -109,7 +111,7 @@ class TestManifestUploadBasics:
         tar_bytes = create_tar_archive(files)
 
         response = client.post(
-            "/api/v1/data/manifest?stamp_id=test_stamp",
+            f"/api/v1/data/manifest?stamp_id={VALID_STAMP_ID}",
             files={"file": ("many.tar", io.BytesIO(tar_bytes), "application/x-tar")}
         )
 
@@ -130,7 +132,7 @@ class TestManifestUploadValidation:
         tar_bytes = tar_buffer.read()
 
         response = client.post(
-            "/api/v1/data/manifest?stamp_id=test_stamp",
+            f"/api/v1/data/manifest?stamp_id={VALID_STAMP_ID}",
             files={"file": ("empty.tar", io.BytesIO(tar_bytes), "application/x-tar")}
         )
 
@@ -142,7 +144,7 @@ class TestManifestUploadValidation:
         invalid_data = b"This is not a valid TAR archive"
 
         response = client.post(
-            "/api/v1/data/manifest?stamp_id=test_stamp",
+            f"/api/v1/data/manifest?stamp_id={VALID_STAMP_ID}",
             files={"file": ("invalid.tar", io.BytesIO(invalid_data), "application/x-tar")}
         )
 
@@ -157,7 +159,7 @@ class TestManifestUploadValidation:
         corrupted = tar_bytes[:50]  # Truncate
 
         response = client.post(
-            "/api/v1/data/manifest?stamp_id=test_stamp",
+            f"/api/v1/data/manifest?stamp_id={VALID_STAMP_ID}",
             files={"file": ("corrupted.tar", io.BytesIO(corrupted), "application/x-tar")}
         )
 
@@ -177,7 +179,7 @@ class TestManifestUploadValidation:
 
     def test_missing_file(self):
         """Test upload without file."""
-        response = client.post("/api/v1/data/manifest?stamp_id=test_stamp")
+        response = client.post(f"/api/v1/data/manifest?stamp_id={VALID_STAMP_ID}")
 
         assert response.status_code == 422  # Validation error
 
@@ -193,7 +195,7 @@ class TestManifestUploadValidation:
         tar_bytes = tar_buffer.read()
 
         response = client.post(
-            "/api/v1/data/manifest?stamp_id=test_stamp",
+            f"/api/v1/data/manifest?stamp_id={VALID_STAMP_ID}",
             files={"file": ("dirs_only.tar", io.BytesIO(tar_bytes), "application/x-tar")}
         )
 
@@ -215,7 +217,7 @@ class TestManifestUploadErrors:
         tar_bytes = create_tar_archive(files)
 
         response = client.post(
-            "/api/v1/data/manifest?stamp_id=test_stamp",
+            f"/api/v1/data/manifest?stamp_id={VALID_STAMP_ID}",
             files={"file": ("files.tar", io.BytesIO(tar_bytes), "application/x-tar")}
         )
 
@@ -231,7 +233,7 @@ class TestManifestUploadErrors:
         tar_bytes = create_tar_archive(files)
 
         response = client.post(
-            "/api/v1/data/manifest?stamp_id=test_stamp",
+            f"/api/v1/data/manifest?stamp_id={VALID_STAMP_ID}",
             files={"file": ("files.tar", io.BytesIO(tar_bytes), "application/x-tar")}
         )
 
@@ -325,7 +327,7 @@ class TestEdgeCases:
         tar_bytes = create_tar_archive(files)
 
         response = client.post(
-            "/api/v1/data/manifest?stamp_id=test_stamp",
+            f"/api/v1/data/manifest?stamp_id={VALID_STAMP_ID}",
             files={"file": ("special.tar", io.BytesIO(tar_bytes), "application/x-tar")}
         )
 
@@ -344,7 +346,7 @@ class TestEdgeCases:
         tar_bytes = create_tar_archive(files)
 
         response = client.post(
-            "/api/v1/data/manifest?stamp_id=test_stamp",
+            f"/api/v1/data/manifest?stamp_id={VALID_STAMP_ID}",
             files={"file": ("unicode.tar", io.BytesIO(tar_bytes), "application/x-tar")}
         )
 
@@ -365,7 +367,7 @@ class TestEdgeCases:
         tar_bytes = create_tar_archive(files)
 
         response = client.post(
-            "/api/v1/data/manifest?stamp_id=test_stamp",
+            f"/api/v1/data/manifest?stamp_id={VALID_STAMP_ID}",
             files={"file": ("binary.tar", io.BytesIO(tar_bytes), "application/x-tar")}
         )
 
@@ -395,7 +397,7 @@ class TestCompressedTar:
         tar_bytes = tar_buffer.read()
 
         response = client.post(
-            "/api/v1/data/manifest?stamp_id=test_stamp",
+            f"/api/v1/data/manifest?stamp_id={VALID_STAMP_ID}",
             files={"file": ("files.tar.gz", io.BytesIO(tar_bytes), "application/gzip")}
         )
 
@@ -420,7 +422,7 @@ class TestCompressedTar:
         tar_bytes = tar_buffer.read()
 
         response = client.post(
-            "/api/v1/data/manifest?stamp_id=test_stamp",
+            f"/api/v1/data/manifest?stamp_id={VALID_STAMP_ID}",
             files={"file": ("files.tar.bz2", io.BytesIO(tar_bytes), "application/x-bzip2")}
         )
 

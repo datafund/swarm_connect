@@ -19,6 +19,8 @@ from app.services.swarm_api import (
 
 client = TestClient(app)
 
+VALID_STAMP_ID = "a" * 64
+
 
 def create_tar_archive(files: dict[str, bytes]) -> bytes:
     """Create a TAR archive from a dictionary of filename -> content."""
@@ -96,7 +98,7 @@ class TestDataUploadRedundancy:
 
         files = {"file": ("test.json", io.BytesIO(json_content), "application/json")}
         response = client.post(
-            "/api/v1/data/?stamp_id=test_stamp",
+            f"/api/v1/data/?stamp_id={VALID_STAMP_ID}",
             files=files
         )
 
@@ -116,7 +118,7 @@ class TestDataUploadRedundancy:
 
         files = {"file": ("test.json", io.BytesIO(json_content), "application/json")}
         response = client.post(
-            "/api/v1/data/?stamp_id=test_stamp&redundancy=0",
+            f"/api/v1/data/?stamp_id={VALID_STAMP_ID}&redundancy=0",
             files=files
         )
 
@@ -134,7 +136,7 @@ class TestDataUploadRedundancy:
 
         files = {"file": ("test.json", io.BytesIO(json_content), "application/json")}
         response = client.post(
-            "/api/v1/data/?stamp_id=test_stamp&redundancy=4",
+            f"/api/v1/data/?stamp_id={VALID_STAMP_ID}&redundancy=4",
             files=files
         )
 
@@ -154,7 +156,7 @@ class TestDataUploadRedundancy:
             mock_upload.reset_mock()
             files = {"file": ("test.json", io.BytesIO(json_content), "application/json")}
             response = client.post(
-                f"/api/v1/data/?stamp_id=test_stamp&redundancy={level}",
+                f"/api/v1/data/?stamp_id={VALID_STAMP_ID}&redundancy={level}",
                 files=files
             )
 
@@ -169,7 +171,7 @@ class TestDataUploadRedundancy:
 
         files = {"file": ("test.json", io.BytesIO(json_content), "application/json")}
         response = client.post(
-            "/api/v1/data/?stamp_id=test_stamp&redundancy=5",
+            f"/api/v1/data/?stamp_id={VALID_STAMP_ID}&redundancy=5",
             files=files
         )
 
@@ -184,7 +186,7 @@ class TestDataUploadRedundancy:
 
         files = {"file": ("test.json", io.BytesIO(json_content), "application/json")}
         response = client.post(
-            "/api/v1/data/?stamp_id=test_stamp&redundancy=-1",
+            f"/api/v1/data/?stamp_id={VALID_STAMP_ID}&redundancy=-1",
             files=files
         )
 
@@ -198,7 +200,7 @@ class TestDataUploadRedundancy:
 
         files = {"file": ("test.json", io.BytesIO(json_content), "application/json")}
         response = client.post(
-            "/api/v1/data/?stamp_id=test_stamp&redundancy=100",
+            f"/api/v1/data/?stamp_id={VALID_STAMP_ID}&redundancy=100",
             files=files
         )
 
@@ -218,7 +220,7 @@ class TestManifestUploadRedundancy:
         tar_bytes = create_tar_archive(files)
 
         response = client.post(
-            "/api/v1/data/manifest?stamp_id=test_stamp",
+            f"/api/v1/data/manifest?stamp_id={VALID_STAMP_ID}",
             files={"file": ("files.tar", io.BytesIO(tar_bytes), "application/x-tar")}
         )
 
@@ -235,7 +237,7 @@ class TestManifestUploadRedundancy:
         tar_bytes = create_tar_archive(files)
 
         response = client.post(
-            "/api/v1/data/manifest?stamp_id=test_stamp&redundancy=0",
+            f"/api/v1/data/manifest?stamp_id={VALID_STAMP_ID}&redundancy=0",
             files={"file": ("files.tar", io.BytesIO(tar_bytes), "application/x-tar")}
         )
 
@@ -252,7 +254,7 @@ class TestManifestUploadRedundancy:
         tar_bytes = create_tar_archive(files)
 
         response = client.post(
-            "/api/v1/data/manifest?stamp_id=test_stamp&redundancy=4",
+            f"/api/v1/data/manifest?stamp_id={VALID_STAMP_ID}&redundancy=4",
             files={"file": ("files.tar", io.BytesIO(tar_bytes), "application/x-tar")}
         )
 
@@ -271,7 +273,7 @@ class TestManifestUploadRedundancy:
             tar_bytes = create_tar_archive(files)
 
             response = client.post(
-                f"/api/v1/data/manifest?stamp_id=test_stamp&redundancy={level}",
+                f"/api/v1/data/manifest?stamp_id={VALID_STAMP_ID}&redundancy={level}",
                 files={"file": ("files.tar", io.BytesIO(tar_bytes), "application/x-tar")}
             )
 
@@ -285,7 +287,7 @@ class TestManifestUploadRedundancy:
         tar_bytes = create_tar_archive(files)
 
         response = client.post(
-            "/api/v1/data/manifest?stamp_id=test_stamp&redundancy=5",
+            f"/api/v1/data/manifest?stamp_id={VALID_STAMP_ID}&redundancy=5",
             files={"file": ("files.tar", io.BytesIO(tar_bytes), "application/x-tar")}
         )
 
@@ -298,7 +300,7 @@ class TestManifestUploadRedundancy:
         tar_bytes = create_tar_archive(files)
 
         response = client.post(
-            "/api/v1/data/manifest?stamp_id=test_stamp&redundancy=-1",
+            f"/api/v1/data/manifest?stamp_id={VALID_STAMP_ID}&redundancy=-1",
             files={"file": ("files.tar", io.BytesIO(tar_bytes), "application/x-tar")}
         )
 
@@ -319,7 +321,7 @@ class TestRedundancyWithOtherParameters:
 
         files = {"file": ("test.json", io.BytesIO(json_content), "application/json")}
         response = client.post(
-            "/api/v1/data/?stamp_id=test_stamp&deferred=true&redundancy=3",
+            f"/api/v1/data/?stamp_id={VALID_STAMP_ID}&deferred=true&redundancy=3",
             files=files
         )
 
@@ -338,7 +340,7 @@ class TestRedundancyWithOtherParameters:
 
         files = {"file": ("test.json", io.BytesIO(json_content), "application/json")}
         response = client.post(
-            "/api/v1/data/?stamp_id=test_stamp&include_timing=true&redundancy=1",
+            f"/api/v1/data/?stamp_id={VALID_STAMP_ID}&include_timing=true&redundancy=1",
             files=files
         )
 
@@ -357,7 +359,7 @@ class TestRedundancyWithOtherParameters:
 
         files = {"file": ("test.png", io.BytesIO(binary_content), "image/png")}
         response = client.post(
-            "/api/v1/data/?stamp_id=test_stamp&content_type=image/png&redundancy=2",
+            f"/api/v1/data/?stamp_id={VALID_STAMP_ID}&content_type=image/png&redundancy=2",
             files=files
         )
 
@@ -375,7 +377,7 @@ class TestRedundancyWithOtherParameters:
         tar_bytes = create_tar_archive(files)
 
         response = client.post(
-            "/api/v1/data/manifest?stamp_id=test_stamp&deferred=true&redundancy=3",
+            f"/api/v1/data/manifest?stamp_id={VALID_STAMP_ID}&deferred=true&redundancy=3",
             files={"file": ("files.tar", io.BytesIO(tar_bytes), "application/x-tar")}
         )
 
@@ -399,7 +401,7 @@ class TestServiceLayerRedundancy:
 
         upload_data_to_swarm(
             data=b"test data",
-            stamp_id="test_stamp",
+            stamp_id=VALID_STAMP_ID,
             content_type="text/plain"
         )
 
@@ -418,7 +420,7 @@ class TestServiceLayerRedundancy:
 
         upload_data_to_swarm(
             data=b"test data",
-            stamp_id="test_stamp",
+            stamp_id=VALID_STAMP_ID,
             content_type="text/plain",
             redundancy_level=4
         )
@@ -438,7 +440,7 @@ class TestServiceLayerRedundancy:
 
         upload_data_to_swarm(
             data=b"test data",
-            stamp_id="test_stamp",
+            stamp_id=VALID_STAMP_ID,
             content_type="text/plain",
             redundancy_level=0
         )
@@ -461,7 +463,7 @@ class TestServiceLayerRedundancy:
 
         upload_collection_to_swarm(
             tar_data=tar_bytes,
-            stamp_id="test_stamp",
+            stamp_id=VALID_STAMP_ID,
             redundancy_level=3
         )
 
@@ -476,7 +478,7 @@ class TestServiceLayerRedundancy:
         with pytest.raises(ValueError, match="Invalid redundancy level"):
             upload_data_to_swarm(
                 data=b"test data",
-                stamp_id="test_stamp",
+                stamp_id=VALID_STAMP_ID,
                 content_type="text/plain",
                 redundancy_level=99
             )
@@ -491,6 +493,6 @@ class TestServiceLayerRedundancy:
         with pytest.raises(ValueError, match="Invalid redundancy level"):
             upload_collection_to_swarm(
                 tar_data=tar_bytes,
-                stamp_id="test_stamp",
+                stamp_id=VALID_STAMP_ID,
                 redundancy_level=-5
             )

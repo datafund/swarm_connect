@@ -40,6 +40,12 @@ app = FastAPI(
     lifespan=lifespan
 )
 
+# Add global rate limiting if enabled and x402 is disabled (x402 has its own limiter)
+if settings.RATE_LIMIT_ENABLED and not settings.X402_ENABLED:
+    from app.middleware.rate_limit import RateLimitMiddleware
+    app.add_middleware(RateLimitMiddleware)
+    logger.info(f"Global rate limiting enabled: {settings.RATE_LIMIT_PER_MINUTE}/min + {settings.RATE_LIMIT_BURST} burst")
+
 # Add x402 payment middleware if enabled (must be added before CORS)
 if settings.X402_ENABLED:
     from app.x402.middleware import X402Middleware

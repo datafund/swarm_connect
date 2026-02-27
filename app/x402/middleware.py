@@ -304,7 +304,7 @@ class X402Middleware(BaseHTTPMiddleware):
             logger.error(f"x402: Failed to calculate price: {e}")
             return JSONResponse(
                 status_code=503,
-                content={"error": "Service temporarily unavailable", "detail": str(e)}
+                content={"error": "Service temporarily unavailable", "detail": "Failed to calculate price for this operation."}
             )
 
         # Create payment requirements
@@ -405,9 +405,7 @@ class X402Middleware(BaseHTTPMiddleware):
                 status_code=502,
                 content={
                     "error": "Payment verification failed",
-                    "detail": str(e),
-                    "error_type": type(e).__name__,
-                    "facilitator_url": settings.X402_FACILITATOR_URL,
+                    "detail": "Could not verify payment with facilitator. Please try again.",
                 }
             )
 
@@ -466,7 +464,7 @@ class X402Middleware(BaseHTTPMiddleware):
                     status_code=500,
                     content={
                         "error": "Payment settlement failed",
-                        "detail": f"Your request was processed but payment settlement failed: {str(e)}",
+                        "detail": "Your request was processed but payment settlement failed. Please retry.",
                         "x402_status": "settlement_failed",
                         "message": "Please retry with a new payment or use X-Payment-Mode: free for free tier access"
                     },

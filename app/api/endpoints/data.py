@@ -3,7 +3,7 @@ import base64
 import json
 import logging
 import time
-from fastapi import APIRouter, HTTPException, Path, Request, Body, File, UploadFile
+from fastapi import APIRouter, HTTPException, Path, Query, Request, Body, File, UploadFile
 from fastapi.responses import Response
 from requests.exceptions import RequestException
 
@@ -99,7 +99,8 @@ def _detect_content_type_and_filename(data_bytes: bytes, reference: str) -> tupl
 
 @router.post("/", response_model=DataUploadResponse)
 async def upload_data(
-    stamp_id: str,
+    request: Request,
+    stamp_id: str = Query(..., pattern=r"^[a-fA-F0-9]{64}$"),
     content_type: str = "application/json",
     validate_stamp: bool = False,
     deferred: bool = False,
@@ -242,10 +243,33 @@ async def upload_data(
                     raise HTTPException(status_code=400, detail=detail)
             stamp_validate_ms = (time.perf_counter() - stamp_start) * 1000
 
+        # Check upload size limit
+        max_size = settings.MAX_UPLOAD_SIZE_MB * 1024 * 1024
+        content_length = request.headers.get("content-length")
+        if content_length and int(content_length) > max_size:
+            raise HTTPException(
+                status_code=413,
+                detail={
+                    "code": "FILE_TOO_LARGE",
+                    "message": f"Upload exceeds maximum size of {settings.MAX_UPLOAD_SIZE_MB} MB.",
+                    "max_size_mb": settings.MAX_UPLOAD_SIZE_MB
+                }
+            )
+
         # Read file content as bytes
         file_start = time.perf_counter()
         data_bytes = await file.read()
         file_read_ms = (time.perf_counter() - file_start) * 1000
+
+        if len(data_bytes) > max_size:
+            raise HTTPException(
+                status_code=413,
+                detail={
+                    "code": "FILE_TOO_LARGE",
+                    "message": f"Upload exceeds maximum size of {settings.MAX_UPLOAD_SIZE_MB} MB.",
+                    "max_size_mb": settings.MAX_UPLOAD_SIZE_MB
+                }
+            )
 
         # Optional notary signing
         if sign == "notary":
@@ -352,10 +376,10 @@ async def upload_data(
                 "stamp_status": failure_info.get("stamp_status")
             }
             raise HTTPException(status_code=400, detail=detail)
-        raise HTTPException(status_code=502, detail=f"Failed to upload data to Swarm: {e}")
+        raise HTTPException(status_code=502, detail="Failed to upload data to Swarm. The Bee node may be unavailable.")
     except ValueError as e:
         logger.error(f"Data processing error during upload: {e}")
-        raise HTTPException(status_code=400, detail=f"Data upload error: {e}")
+        raise HTTPException(status_code=400, detail="Data upload error. Please check your request and try again.")
     except Exception as e:
         logger.error(f"Unexpected error during upload: {e}")
         raise HTTPException(status_code=500, detail="Internal server error during upload")
@@ -363,7 +387,7 @@ async def upload_data(
 
 @router.get("/{reference}")
 async def download_data(
-    reference: str = Path(..., description="Swarm reference hash of the data to download")
+    reference: str = Path(..., description="Swarm reference hash of the data to download", pattern=r"^[a-fA-F0-9]{64,128}$")
 ):
     """
     Download data from the Swarm network as a file (triggers browser download).
@@ -399,7 +423,7 @@ async def download_data(
         raise HTTPException(status_code=404, detail=f"Data not found for reference {reference}")
     except RequestException as e:
         logger.error(f"Swarm API error during download: {e}")
-        raise HTTPException(status_code=502, detail=f"Failed to download data from Swarm: {e}")
+        raise HTTPException(status_code=502, detail="Failed to download data from Swarm. The Bee node may be unavailable.")
     except Exception as e:
         logger.error(f"Unexpected error during download: {e}")
         raise HTTPException(status_code=500, detail="Internal server error during download")
@@ -408,7 +432,7 @@ async def download_data(
 
 @router.get("/{reference}/json", response_model=DataDownloadResponse)
 async def download_data_json(
-    reference: str = Path(..., description="Swarm reference hash of the data to download")
+    reference: str = Path(..., description="Swarm reference hash of the data to download", pattern=r"^[a-fA-F0-9]{64,128}$")
 ):
     """
     Download data from the Swarm network as JSON with metadata (for API clients).
@@ -452,7 +476,7 @@ async def download_data_json(
         raise HTTPException(status_code=404, detail=f"Data not found for reference {reference}")
     except RequestException as e:
         logger.error(f"Swarm API error during download: {e}")
-        raise HTTPException(status_code=502, detail=f"Failed to download data from Swarm: {e}")
+        raise HTTPException(status_code=502, detail="Failed to download data from Swarm. The Bee node may be unavailable.")
     except Exception as e:
         logger.error(f"Unexpected error during download: {e}")
         raise HTTPException(status_code=500, detail="Internal server error during download")
@@ -460,7 +484,8 @@ async def download_data_json(
 
 @router.post("/manifest", response_model=ManifestUploadResponse)
 async def upload_manifest(
-    stamp_id: str,
+    request: Request,
+    stamp_id: str = Query(..., pattern=r"^[a-fA-F0-9]{64}$"),
     validate_stamp: bool = False,
     deferred: bool = False,
     include_timing: bool = False,
@@ -602,10 +627,33 @@ async def upload_manifest(
                     raise HTTPException(status_code=400, detail=detail)
             stamp_validate_ms = (time.perf_counter() - stamp_start) * 1000
 
+        # Check upload size limit
+        max_size = settings.MAX_UPLOAD_SIZE_MB * 1024 * 1024
+        content_length = request.headers.get("content-length")
+        if content_length and int(content_length) > max_size:
+            raise HTTPException(
+                status_code=413,
+                detail={
+                    "code": "FILE_TOO_LARGE",
+                    "message": f"Upload exceeds maximum size of {settings.MAX_UPLOAD_SIZE_MB} MB.",
+                    "max_size_mb": settings.MAX_UPLOAD_SIZE_MB
+                }
+            )
+
         # Read TAR file content
         file_start = time.perf_counter()
         tar_bytes = await file.read()
         file_read_ms = (time.perf_counter() - file_start) * 1000
+
+        if len(tar_bytes) > max_size:
+            raise HTTPException(
+                status_code=413,
+                detail={
+                    "code": "FILE_TOO_LARGE",
+                    "message": f"Upload exceeds maximum size of {settings.MAX_UPLOAD_SIZE_MB} MB.",
+                    "max_size_mb": settings.MAX_UPLOAD_SIZE_MB
+                }
+            )
 
         # Validate TAR archive
         tar_validate_start = time.perf_counter()
@@ -691,10 +739,10 @@ async def upload_manifest(
                 "stamp_status": failure_info.get("stamp_status")
             }
             raise HTTPException(status_code=400, detail=detail)
-        raise HTTPException(status_code=502, detail=f"Failed to upload collection to Swarm: {e}")
+        raise HTTPException(status_code=502, detail="Failed to upload collection to Swarm. The Bee node may be unavailable.")
     except ValueError as e:
         logger.error(f"Data processing error during manifest upload: {e}")
-        raise HTTPException(status_code=400, detail=f"Manifest upload error: {e}")
+        raise HTTPException(status_code=400, detail="Manifest upload error. Please check your request and try again.")
     except Exception as e:
         logger.error(f"Unexpected error during manifest upload: {e}")
         raise HTTPException(status_code=500, detail="Internal server error during manifest upload")

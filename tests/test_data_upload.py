@@ -11,6 +11,8 @@ from fastapi.testclient import TestClient
 
 from app.main import app
 
+VALID_STAMP_ID = "a" * 64
+
 client = TestClient(app)
 
 
@@ -28,7 +30,7 @@ class TestFileUploadBasics:
 
         files = {"file": ("test.json", io.BytesIO(json_content), "application/json")}
         response = client.post(
-            "/api/v1/data/?stamp_id=test_stamp&content_type=application/json",
+            f"/api/v1/data/?stamp_id={VALID_STAMP_ID}&content_type=application/json",
             files=files
         )
 
@@ -47,7 +49,7 @@ class TestFileUploadBasics:
 
         files = {"file": ("test.png", io.BytesIO(binary_content), "image/png")}
         response = client.post(
-            "/api/v1/data/?stamp_id=test_stamp&content_type=image/png",
+            f"/api/v1/data/?stamp_id={VALID_STAMP_ID}&content_type=image/png",
             files=files
         )
 
@@ -80,7 +82,7 @@ class TestFileUploadBasics:
 
         files = {"file": ("example_upload.json", io.BytesIO(json_content), "application/json")}
         response = client.post(
-            "/api/v1/data/?stamp_id=test_stamp&content_type=application/json",
+            f"/api/v1/data/?stamp_id={VALID_STAMP_ID}&content_type=application/json",
             files=files
         )
 
@@ -103,7 +105,7 @@ class TestErrorHandling:
 
     def test_missing_file(self):
         """Test upload without file."""
-        response = client.post("/api/v1/data/?stamp_id=test_stamp")
+        response = client.post(f"/api/v1/data/?stamp_id={VALID_STAMP_ID}")
 
         assert response.status_code == 422  # Validation error
 
@@ -112,7 +114,7 @@ class TestErrorHandling:
         """Test upload with empty file."""
         files = {"file": ("empty.json", io.BytesIO(b""), "application/json")}
         response = client.post(
-            "/api/v1/data/?stamp_id=test_stamp&content_type=application/json",
+            f"/api/v1/data/?stamp_id={VALID_STAMP_ID}&content_type=application/json",
             files=files
         )
 
@@ -126,7 +128,7 @@ class TestErrorHandling:
 
         files = {"file": ("bad.json", io.BytesIO(malformed_json), "application/json")}
         response = client.post(
-            "/api/v1/data/?stamp_id=test_stamp&content_type=application/json",
+            f"/api/v1/data/?stamp_id={VALID_STAMP_ID}&content_type=application/json",
             files=files
         )
 
@@ -145,7 +147,7 @@ class TestErrorHandling:
 
         files = {"file": ("test.json", io.BytesIO(json_content), "application/json")}
         response = client.post(
-            "/api/v1/data/?stamp_id=test_stamp&content_type=application/json",
+            f"/api/v1/data/?stamp_id={VALID_STAMP_ID}&content_type=application/json",
             files=files
         )
 
@@ -162,7 +164,7 @@ class TestErrorHandling:
 
         files = {"file": ("test.json", io.BytesIO(json_content), "application/json")}
         response = client.post(
-            "/api/v1/data/?stamp_id=test_stamp&content_type=application/json",
+            f"/api/v1/data/?stamp_id={VALID_STAMP_ID}&content_type=application/json",
             files=files
         )
 
@@ -192,7 +194,7 @@ class TestFileNameHandling:
         for filename in special_names:
             files = {"file": (filename, io.BytesIO(json_content), "application/json")}
             response = client.post(
-                "/api/v1/data/?stamp_id=test_stamp&content_type=application/json",
+                f"/api/v1/data/?stamp_id={VALID_STAMP_ID}&content_type=application/json",
                 files=files
             )
 
@@ -209,7 +211,7 @@ class TestFileNameHandling:
 
         files = {"file": ("datafile", io.BytesIO(json_content), "application/json")}
         response = client.post(
-            "/api/v1/data/?stamp_id=test_stamp&content_type=application/json",
+            f"/api/v1/data/?stamp_id={VALID_STAMP_ID}&content_type=application/json",
             files=files
         )
 
@@ -220,31 +222,46 @@ class TestStampIdValidation:
     """Test stamp ID validation and edge cases."""
 
     @patch('app.api.endpoints.data.upload_data_to_swarm')
-    def test_various_stamp_id_formats(self, mock_upload):
-        """Test various stamp ID formats."""
+    def test_valid_stamp_id_formats(self, mock_upload):
+        """Test valid 64-char hex stamp ID formats are accepted."""
         mock_upload.return_value = "stamp_test_ref"
 
         test_data = {"test": "data"}
         json_content = json.dumps(test_data).encode('utf-8')
 
-        stamp_ids = [
-            "simple_stamp",
-            "000de42079daebd58347bb38ce05bdc477701d93651d3bba318a9aee3fbd786a",  # 64 char hex
-            "0x1234567890abcdef",  # Hex with prefix
-            "stamp-with-dashes",
-            "stamp_with_underscores",
-            "UPPERCASE_STAMP",
-            "123456789"  # Numeric
+        valid_stamp_ids = [
+            "000de42079daebd58347bb38ce05bdc477701d93651d3bba318a9aee3fbd786a",  # 64 char hex lowercase
+            "ABCDEF1234567890ABCDEF1234567890ABCDEF1234567890ABCDEF1234567890",  # 64 char hex uppercase
+            "aAbBcCdDeEfF00112233445566778899aAbBcCdDeEfF00112233445566778899",  # Mixed case
         ]
 
-        for stamp_id in stamp_ids:
+        for stamp_id in valid_stamp_ids:
             files = {"file": ("test.json", io.BytesIO(json_content), "application/json")}
             response = client.post(
                 f"/api/v1/data/?stamp_id={stamp_id}&content_type=application/json",
                 files=files
             )
-
             assert response.status_code == 200, f"Failed for stamp_id: {stamp_id}"
+
+    def test_invalid_stamp_id_formats_rejected(self):
+        """Test invalid stamp ID formats are rejected with 422."""
+        test_data = {"test": "data"}
+        json_content = json.dumps(test_data).encode('utf-8')
+
+        invalid_stamp_ids = [
+            "simple_stamp",           # Not hex, too short
+            "0x1234567890abcdef",      # Hex prefix, wrong length
+            "stamp-with-dashes",       # Non-hex chars
+            "123456789",               # Too short
+        ]
+
+        for stamp_id in invalid_stamp_ids:
+            files = {"file": ("test.json", io.BytesIO(json_content), "application/json")}
+            response = client.post(
+                f"/api/v1/data/?stamp_id={stamp_id}&content_type=application/json",
+                files=files
+            )
+            assert response.status_code == 422, f"Should reject stamp_id: {stamp_id}"
 
     @patch('app.api.endpoints.data.upload_data_to_swarm', return_value="empty_stamp_ref")
     def test_empty_stamp_id(self, mock_upload):
@@ -285,7 +302,7 @@ class TestContentTypeHandling:
         for content_type in content_types:
             files = {"file": ("test.json", io.BytesIO(json_content), "application/json")}
             response = client.post(
-                f"/api/v1/data/?stamp_id=test_stamp&content_type={content_type}",
+                f"/api/v1/data/?stamp_id={VALID_STAMP_ID}&content_type={content_type}",
                 files=files
             )
 
@@ -299,7 +316,7 @@ class TestContentTypeHandling:
 
         files = {"file": ("test.json", io.BytesIO(json_content), "application/json")}
         response = client.post(
-            "/api/v1/data/?stamp_id=test_stamp&content_type=invalid-content-type",
+            f"/api/v1/data/?stamp_id={VALID_STAMP_ID}&content_type=invalid-content-type",
             files=files
         )
 

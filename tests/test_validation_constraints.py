@@ -15,6 +15,9 @@ MOCK_CHAINSTATE = {"currentPrice": "24000", "block": 1, "chainTip": 1, "totalAmo
 
 client = TestClient(app)
 
+# Valid 64-char hex stamp ID for path parameter validation
+VALID_STAMP_ID = "a" * 64
+
 
 class TestAmountValidation:
     """Tests for amount field validation in stamp operations."""
@@ -40,22 +43,18 @@ class TestAmountValidation:
             response = client.post("/api/v1/stamps/", json=purchase_data)
             assert response.status_code == 422, f"Should reject amount: {amount}"
 
-    @patch('app.services.swarm_api.purchase_postage_stamp', return_value="mock_batch")
-    @patch('app.services.swarm_api.check_sufficient_funds', return_value=MOCK_FUNDS_OK)
-    @patch('app.services.swarm_api.extend_postage_stamp', return_value="mock_batch")
-    @patch('app.services.swarm_api.get_all_stamps_processed', return_value=[{"batchID": "test_id", "depth": 17, "local": True}])
-    def test_amount_zero_and_negative_accepted(self, mock_stamps, mock_extend, mock_funds, mock_purchase):
-        """Test that zero and negative amounts are accepted (no gt=0 constraint)."""
-        accepted_amounts = [0, -1, -1000000000]
+    def test_amount_zero_and_negative_rejected(self):
+        """Test that zero and negative amounts are rejected (gt=0 constraint)."""
+        rejected_amounts = [0, -1, -1000000000]
 
-        for amount in accepted_amounts:
+        for amount in rejected_amounts:
             purchase_data = {"amount": amount, "depth": 17}
             response = client.post("/api/v1/stamps/", json=purchase_data)
-            assert response.status_code == 201, f"Amount {amount} should be accepted"
+            assert response.status_code == 422, f"Amount {amount} should be rejected"
 
             extend_data = {"amount": amount}
-            response = client.patch("/api/v1/stamps/test_id/extend", json=extend_data)
-            assert response.status_code == 200, f"Extend amount {amount} should be accepted"
+            response = client.patch(f"/api/v1/stamps/{VALID_STAMP_ID}/extend", json=extend_data)
+            assert response.status_code == 422, f"Extend amount {amount} should be rejected"
 
     @patch('app.services.swarm_api.purchase_postage_stamp', return_value="mock_batch")
     @patch('app.services.swarm_api.check_sufficient_funds', return_value=MOCK_FUNDS_OK)
@@ -289,11 +288,9 @@ class TestStampIdValidation:
             # Should pass validation (returns 404 since mock returns empty list)
             assert response.status_code == 404, f"Valid ID '{stamp_id}' should pass validation"
 
-    @patch('app.services.swarm_api.get_all_stamps_processed', return_value=[])
-    def test_invalid_stamp_id_formats(self, mock_stamps):
-        """Test that invalid stamp ID formats are rejected."""
+    def test_invalid_stamp_id_formats(self):
+        """Test that invalid stamp ID formats are rejected by regex validation."""
         invalid_ids = [
-            "",                    # Empty string (routes to list endpoint, returns 200)
             "too_short",          # Too short
             "a" * 100,            # Too long
             "invalid-chars!@#",   # Invalid characters
@@ -305,8 +302,12 @@ class TestStampIdValidation:
 
         for stamp_id in invalid_ids:
             response = client.get(f"/api/v1/stamps/{stamp_id}")
-            # Empty string routes to list endpoint (200), others return 404
-            assert response.status_code in [200, 404, 422], f"Invalid ID '{stamp_id}' should be handled"
+            # 422 from regex validation, or 404 if '/' chars cause URL path mismatch
+            assert response.status_code in [404, 422], f"Invalid ID '{stamp_id}' should be rejected"
+
+        # Empty string routes to list endpoint (200)
+        response = client.get("/api/v1/stamps/")
+        assert response.status_code in [200, 502]
 
     @patch('app.services.swarm_api.extend_postage_stamp', return_value="mock_batch")
     @patch('app.services.swarm_api.check_sufficient_funds', return_value=MOCK_FUNDS_OK)
@@ -320,10 +321,10 @@ class TestStampIdValidation:
         response = client.patch(f"/api/v1/stamps/{valid_id}/extend", json=extend_data)
         assert response.status_code == 404, "Valid ID should pass validation (stamp not found)"
 
-        # Invalid ID format
+        # Invalid ID format — now returns 422 from regex validation
         invalid_id = "invalid_id_format"
         response = client.patch(f"/api/v1/stamps/{invalid_id}/extend", json=extend_data)
-        assert response.status_code == 404, "Invalid ID should return 404"
+        assert response.status_code == 422, "Invalid ID should return 422 from regex validation"
 
 
 class TestContentTypeValidation:
@@ -392,17 +393,17 @@ class TestBusinessRuleValidation:
 
     @patch('app.services.swarm_api.extend_postage_stamp', return_value="mock_batch")
     @patch('app.services.swarm_api.check_sufficient_funds', return_value=MOCK_FUNDS_OK)
-    @patch('app.services.swarm_api.get_all_stamps_processed', return_value=[{"batchID": "valid_id", "depth": 17, "local": True}])
+    @patch('app.services.swarm_api.get_all_stamps_processed', return_value=[{"batchID": "a" * 64, "depth": 17, "local": True}])
     def test_stamp_extension_business_rules(self, mock_stamps, mock_funds, mock_extend):
         """Test business rules for stamp extension."""
         # Extension amount should follow same rules as purchase amount
         extend_data = {"amount": 1}  # Minimum extension
-        response = client.patch("/api/v1/stamps/valid_id/extend", json=extend_data)
+        response = client.patch(f"/api/v1/stamps/{VALID_STAMP_ID}/extend", json=extend_data)
         assert response.status_code in [200, 404], "Minimum extension should be valid"
 
         # Very large extension
         extend_data = {"amount": 999999999999}
-        response = client.patch("/api/v1/stamps/valid_id/extend", json=extend_data)
+        response = client.patch(f"/api/v1/stamps/{VALID_STAMP_ID}/extend", json=extend_data)
         assert response.status_code in [200, 404, 422], "Large extension should be handled"
 
     @patch('app.services.swarm_api.purchase_postage_stamp', return_value="mock_batch")

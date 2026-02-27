@@ -21,13 +21,16 @@ from app.services.swarm_api import (
 
 client = TestClient(app)
 
+VALID_STAMP_ID = "a" * 64
+NONEXISTENT_STAMP_ID = "d" * 64
+
 
 # =============================================================================
 # Test Data Fixtures
 # =============================================================================
 
 def make_stamp(
-    batch_id="abc123",
+    batch_id=None,
     local=True,
     usable=True,
     utilization_percent=50.0,
@@ -36,6 +39,8 @@ def make_stamp(
     expected_expiration="2026-01-12-17-30"
 ):
     """Helper to create stamp test data."""
+    if batch_id is None:
+        batch_id = VALID_STAMP_ID
     return {
         "batchID": batch_id,
         "local": local,
@@ -64,7 +69,7 @@ class TestValidateStampForUpload:
         mock_get_stamps.return_value = []
 
         with pytest.raises(StampValidationError) as exc_info:
-            validate_stamp_for_upload("nonexistent_stamp")
+            validate_stamp_for_upload(NONEXISTENT_STAMP_ID)
 
         assert exc_info.value.code == "NOT_FOUND"
         assert exc_info.value.status == "not_found"
@@ -74,10 +79,10 @@ class TestValidateStampForUpload:
     @patch("app.services.swarm_api.get_all_stamps_processed")
     def test_stamp_not_local(self, mock_get_stamps):
         """Should raise StampValidationError with NOT_LOCAL code when stamp isn't owned by node."""
-        mock_get_stamps.return_value = [make_stamp(batch_id="abc123", local=False)]
+        mock_get_stamps.return_value = [make_stamp(batch_id=VALID_STAMP_ID, local=False)]
 
         with pytest.raises(StampValidationError) as exc_info:
-            validate_stamp_for_upload("abc123")
+            validate_stamp_for_upload(VALID_STAMP_ID)
 
         assert exc_info.value.code == "NOT_LOCAL"
         assert exc_info.value.status == "not_local"
@@ -88,10 +93,10 @@ class TestValidateStampForUpload:
     @patch("app.services.swarm_api.get_all_stamps_processed")
     def test_stamp_expired(self, mock_get_stamps):
         """Should raise StampValidationError with EXPIRED code when TTL is 0."""
-        mock_get_stamps.return_value = [make_stamp(batch_id="abc123", batch_ttl=0)]
+        mock_get_stamps.return_value = [make_stamp(batch_id=VALID_STAMP_ID, batch_ttl=0)]
 
         with pytest.raises(StampValidationError) as exc_info:
-            validate_stamp_for_upload("abc123")
+            validate_stamp_for_upload(VALID_STAMP_ID)
 
         assert exc_info.value.code == "EXPIRED"
         assert exc_info.value.status == "expired"
@@ -101,20 +106,20 @@ class TestValidateStampForUpload:
     @patch("app.services.swarm_api.get_all_stamps_processed")
     def test_stamp_negative_ttl(self, mock_get_stamps):
         """Should treat negative TTL as expired."""
-        mock_get_stamps.return_value = [make_stamp(batch_id="abc123", batch_ttl=-100)]
+        mock_get_stamps.return_value = [make_stamp(batch_id=VALID_STAMP_ID, batch_ttl=-100)]
 
         with pytest.raises(StampValidationError) as exc_info:
-            validate_stamp_for_upload("abc123")
+            validate_stamp_for_upload(VALID_STAMP_ID)
 
         assert exc_info.value.code == "EXPIRED"
 
     @patch("app.services.swarm_api.get_all_stamps_processed")
     def test_stamp_not_usable(self, mock_get_stamps):
         """Should raise StampValidationError with NOT_USABLE code when stamp isn't usable yet."""
-        mock_get_stamps.return_value = [make_stamp(batch_id="abc123", usable=False)]
+        mock_get_stamps.return_value = [make_stamp(batch_id=VALID_STAMP_ID, usable=False)]
 
         with pytest.raises(StampValidationError) as exc_info:
-            validate_stamp_for_upload("abc123")
+            validate_stamp_for_upload(VALID_STAMP_ID)
 
         assert exc_info.value.code == "NOT_USABLE"
         assert exc_info.value.status == "not_usable"
@@ -124,10 +129,10 @@ class TestValidateStampForUpload:
     @patch("app.services.swarm_api.get_all_stamps_processed")
     def test_stamp_full(self, mock_get_stamps):
         """Should raise StampValidationError with FULL code when stamp is at 100% utilization."""
-        mock_get_stamps.return_value = [make_stamp(batch_id="abc123", utilization_percent=100.0)]
+        mock_get_stamps.return_value = [make_stamp(batch_id=VALID_STAMP_ID, utilization_percent=100.0)]
 
         with pytest.raises(StampValidationError) as exc_info:
-            validate_stamp_for_upload("abc123")
+            validate_stamp_for_upload(VALID_STAMP_ID)
 
         assert exc_info.value.code == "FULL"
         assert exc_info.value.status == "full"
@@ -136,11 +141,11 @@ class TestValidateStampForUpload:
     @patch("app.services.swarm_api.get_all_stamps_processed")
     def test_valid_stamp_returns_info(self, mock_get_stamps):
         """Should return stamp info when stamp is valid."""
-        mock_get_stamps.return_value = [make_stamp(batch_id="abc123")]
+        mock_get_stamps.return_value = [make_stamp(batch_id=VALID_STAMP_ID)]
 
-        result = validate_stamp_for_upload("abc123")
+        result = validate_stamp_for_upload(VALID_STAMP_ID)
 
-        assert result["batchID"] == "abc123"
+        assert result["batchID"] == VALID_STAMP_ID
         assert result["usable"] is True
         assert result["local"] is True
         assert "warnings" in result
@@ -149,36 +154,36 @@ class TestValidateStampForUpload:
     @patch("app.services.swarm_api.get_all_stamps_processed")
     def test_valid_stamp_case_insensitive(self, mock_get_stamps):
         """Should match stamp ID case-insensitively."""
-        mock_get_stamps.return_value = [make_stamp(batch_id="ABC123")]
+        mock_get_stamps.return_value = [make_stamp(batch_id=VALID_STAMP_ID.upper())]
 
-        result = validate_stamp_for_upload("abc123")
+        result = validate_stamp_for_upload(VALID_STAMP_ID)
 
-        assert result["batchID"] == "ABC123"
+        assert result["batchID"] == VALID_STAMP_ID.upper()
 
     @patch("app.services.swarm_api.get_all_stamps_processed")
     def test_low_ttl_warning(self, mock_get_stamps):
         """Should return LOW_TTL warning when TTL is below threshold."""
-        mock_get_stamps.return_value = [make_stamp(batch_id="abc123", batch_ttl=1800)]  # 30 minutes
+        mock_get_stamps.return_value = [make_stamp(batch_id=VALID_STAMP_ID, batch_ttl=1800)]  # 30 minutes
 
-        result = validate_stamp_for_upload("abc123")
+        result = validate_stamp_for_upload(VALID_STAMP_ID)
 
         assert any(w["code"] == "LOW_TTL" for w in result["warnings"])
 
     @patch("app.services.swarm_api.get_all_stamps_processed")
     def test_nearly_full_warning(self, mock_get_stamps):
         """Should return NEARLY_FULL warning when utilization is 95%+."""
-        mock_get_stamps.return_value = [make_stamp(batch_id="abc123", utilization_percent=97.0)]
+        mock_get_stamps.return_value = [make_stamp(batch_id=VALID_STAMP_ID, utilization_percent=97.0)]
 
-        result = validate_stamp_for_upload("abc123")
+        result = validate_stamp_for_upload(VALID_STAMP_ID)
 
         assert any(w["code"] == "NEARLY_FULL" for w in result["warnings"])
 
     @patch("app.services.swarm_api.get_all_stamps_processed")
     def test_high_utilization_warning(self, mock_get_stamps):
         """Should return HIGH_UTILIZATION warning when utilization is 80%+."""
-        mock_get_stamps.return_value = [make_stamp(batch_id="abc123", utilization_percent=85.0)]
+        mock_get_stamps.return_value = [make_stamp(batch_id=VALID_STAMP_ID, utilization_percent=85.0)]
 
-        result = validate_stamp_for_upload("abc123")
+        result = validate_stamp_for_upload(VALID_STAMP_ID)
 
         assert any(w["code"] == "HIGH_UTILIZATION" for w in result["warnings"])
 
@@ -195,7 +200,7 @@ class TestCheckUploadFailureReason:
         """Should return structured error when stamp not found."""
         mock_get_stamps.return_value = []
 
-        result = check_upload_failure_reason("nonexistent", "Some error")
+        result = check_upload_failure_reason(NONEXISTENT_STAMP_ID, "Some error")
 
         assert result is not None
         assert result["code"] == "NOT_FOUND"
@@ -205,9 +210,9 @@ class TestCheckUploadFailureReason:
     @patch("app.services.swarm_api.get_all_stamps_processed")
     def test_not_local_returns_structured_error(self, mock_get_stamps):
         """Should return structured error when stamp is not local."""
-        mock_get_stamps.return_value = [make_stamp(batch_id="abc123", local=False)]
+        mock_get_stamps.return_value = [make_stamp(batch_id=VALID_STAMP_ID, local=False)]
 
-        result = check_upload_failure_reason("abc123", "Some error")
+        result = check_upload_failure_reason(VALID_STAMP_ID, "Some error")
 
         assert result is not None
         assert result["code"] == "NOT_LOCAL"
@@ -217,9 +222,9 @@ class TestCheckUploadFailureReason:
     @patch("app.services.swarm_api.get_all_stamps_processed")
     def test_expired_returns_structured_error(self, mock_get_stamps):
         """Should return structured error when stamp is expired."""
-        mock_get_stamps.return_value = [make_stamp(batch_id="abc123", batch_ttl=0)]
+        mock_get_stamps.return_value = [make_stamp(batch_id=VALID_STAMP_ID, batch_ttl=0)]
 
-        result = check_upload_failure_reason("abc123", "Some error")
+        result = check_upload_failure_reason(VALID_STAMP_ID, "Some error")
 
         assert result is not None
         assert result["code"] == "EXPIRED"
@@ -227,9 +232,9 @@ class TestCheckUploadFailureReason:
     @patch("app.services.swarm_api.get_all_stamps_processed")
     def test_not_usable_returns_structured_error(self, mock_get_stamps):
         """Should return structured error when stamp is not usable."""
-        mock_get_stamps.return_value = [make_stamp(batch_id="abc123", usable=False)]
+        mock_get_stamps.return_value = [make_stamp(batch_id=VALID_STAMP_ID, usable=False)]
 
-        result = check_upload_failure_reason("abc123", "Some error")
+        result = check_upload_failure_reason(VALID_STAMP_ID, "Some error")
 
         assert result is not None
         assert result["code"] == "NOT_USABLE"
@@ -238,9 +243,9 @@ class TestCheckUploadFailureReason:
     @patch("app.services.swarm_api.get_all_stamps_processed")
     def test_full_returns_structured_error(self, mock_get_stamps):
         """Should return structured error when stamp is full."""
-        mock_get_stamps.return_value = [make_stamp(batch_id="abc123", utilization_percent=100.0)]
+        mock_get_stamps.return_value = [make_stamp(batch_id=VALID_STAMP_ID, utilization_percent=100.0)]
 
-        result = check_upload_failure_reason("abc123", "Some error")
+        result = check_upload_failure_reason(VALID_STAMP_ID, "Some error")
 
         assert result is not None
         assert result["code"] == "FULL"
@@ -248,9 +253,9 @@ class TestCheckUploadFailureReason:
     @patch("app.services.swarm_api.get_all_stamps_processed")
     def test_nearly_full_returns_structured_error(self, mock_get_stamps):
         """Should return structured error when stamp is nearly full."""
-        mock_get_stamps.return_value = [make_stamp(batch_id="abc123", utilization_percent=97.0, utilization_status="critical")]
+        mock_get_stamps.return_value = [make_stamp(batch_id=VALID_STAMP_ID, utilization_percent=97.0, utilization_status="critical")]
 
-        result = check_upload_failure_reason("abc123", "Original error message")
+        result = check_upload_failure_reason(VALID_STAMP_ID, "Original error message")
 
         assert result is not None
         assert result["code"] == "NEARLY_FULL"
@@ -260,9 +265,9 @@ class TestCheckUploadFailureReason:
     @patch("app.services.swarm_api.get_all_stamps_processed")
     def test_valid_stamp_returns_none(self, mock_get_stamps):
         """Should return None when stamp is valid (cause unknown)."""
-        mock_get_stamps.return_value = [make_stamp(batch_id="abc123")]
+        mock_get_stamps.return_value = [make_stamp(batch_id=VALID_STAMP_ID)]
 
-        result = check_upload_failure_reason("abc123", "Some error")
+        result = check_upload_failure_reason(VALID_STAMP_ID, "Some error")
 
         assert result is None
 
@@ -277,11 +282,11 @@ class TestGetStampHealthCheck:
     @patch("app.services.swarm_api.get_all_stamps_processed")
     def test_healthy_stamp(self, mock_get_stamps):
         """Should return can_upload=True with no errors for healthy stamp."""
-        mock_get_stamps.return_value = [make_stamp(batch_id="abc123")]
+        mock_get_stamps.return_value = [make_stamp(batch_id=VALID_STAMP_ID)]
 
-        result = get_stamp_health_check("abc123")
+        result = get_stamp_health_check(VALID_STAMP_ID)
 
-        assert result["stamp_id"] == "abc123"
+        assert result["stamp_id"] == VALID_STAMP_ID
         assert result["can_upload"] is True
         assert len(result["errors"]) == 0
         assert result["status"]["exists"] is True
@@ -293,7 +298,7 @@ class TestGetStampHealthCheck:
         """Should return can_upload=False with NOT_FOUND error."""
         mock_get_stamps.return_value = []
 
-        result = get_stamp_health_check("nonexistent")
+        result = get_stamp_health_check(NONEXISTENT_STAMP_ID)
 
         assert result["can_upload"] is False
         assert len(result["errors"]) == 1
@@ -303,9 +308,9 @@ class TestGetStampHealthCheck:
     @patch("app.services.swarm_api.get_all_stamps_processed")
     def test_not_local_stamp(self, mock_get_stamps):
         """Should return can_upload=False with NOT_LOCAL error."""
-        mock_get_stamps.return_value = [make_stamp(batch_id="abc123", local=False)]
+        mock_get_stamps.return_value = [make_stamp(batch_id=VALID_STAMP_ID, local=False)]
 
-        result = get_stamp_health_check("abc123")
+        result = get_stamp_health_check(VALID_STAMP_ID)
 
         assert result["can_upload"] is False
         assert any(e["code"] == "NOT_LOCAL" for e in result["errors"])
@@ -313,9 +318,9 @@ class TestGetStampHealthCheck:
     @patch("app.services.swarm_api.get_all_stamps_processed")
     def test_expired_stamp(self, mock_get_stamps):
         """Should return can_upload=False with EXPIRED error."""
-        mock_get_stamps.return_value = [make_stamp(batch_id="abc123", batch_ttl=0)]
+        mock_get_stamps.return_value = [make_stamp(batch_id=VALID_STAMP_ID, batch_ttl=0)]
 
-        result = get_stamp_health_check("abc123")
+        result = get_stamp_health_check(VALID_STAMP_ID)
 
         assert result["can_upload"] is False
         assert any(e["code"] == "EXPIRED" for e in result["errors"])
@@ -323,9 +328,9 @@ class TestGetStampHealthCheck:
     @patch("app.services.swarm_api.get_all_stamps_processed")
     def test_not_usable_stamp(self, mock_get_stamps):
         """Should return can_upload=False with NOT_USABLE error."""
-        mock_get_stamps.return_value = [make_stamp(batch_id="abc123", usable=False)]
+        mock_get_stamps.return_value = [make_stamp(batch_id=VALID_STAMP_ID, usable=False)]
 
-        result = get_stamp_health_check("abc123")
+        result = get_stamp_health_check(VALID_STAMP_ID)
 
         assert result["can_upload"] is False
         assert any(e["code"] == "NOT_USABLE" for e in result["errors"])
@@ -333,9 +338,9 @@ class TestGetStampHealthCheck:
     @patch("app.services.swarm_api.get_all_stamps_processed")
     def test_full_stamp(self, mock_get_stamps):
         """Should return can_upload=False with FULL error."""
-        mock_get_stamps.return_value = [make_stamp(batch_id="abc123", utilization_percent=100.0)]
+        mock_get_stamps.return_value = [make_stamp(batch_id=VALID_STAMP_ID, utilization_percent=100.0)]
 
-        result = get_stamp_health_check("abc123")
+        result = get_stamp_health_check(VALID_STAMP_ID)
 
         assert result["can_upload"] is False
         assert any(e["code"] == "FULL" for e in result["errors"])
@@ -343,9 +348,9 @@ class TestGetStampHealthCheck:
     @patch("app.services.swarm_api.get_all_stamps_processed")
     def test_low_ttl_warning(self, mock_get_stamps):
         """Should return warning for low TTL."""
-        mock_get_stamps.return_value = [make_stamp(batch_id="abc123", batch_ttl=1800)]
+        mock_get_stamps.return_value = [make_stamp(batch_id=VALID_STAMP_ID, batch_ttl=1800)]
 
-        result = get_stamp_health_check("abc123")
+        result = get_stamp_health_check(VALID_STAMP_ID)
 
         assert result["can_upload"] is True  # Still usable
         assert any(w["code"] == "LOW_TTL" for w in result["warnings"])
@@ -353,9 +358,9 @@ class TestGetStampHealthCheck:
     @patch("app.services.swarm_api.get_all_stamps_processed")
     def test_nearly_full_warning(self, mock_get_stamps):
         """Should return warning for nearly full stamp."""
-        mock_get_stamps.return_value = [make_stamp(batch_id="abc123", utilization_percent=97.0)]
+        mock_get_stamps.return_value = [make_stamp(batch_id=VALID_STAMP_ID, utilization_percent=97.0)]
 
-        result = get_stamp_health_check("abc123")
+        result = get_stamp_health_check(VALID_STAMP_ID)
 
         assert result["can_upload"] is True  # Still usable
         assert any(w["code"] == "NEARLY_FULL" for w in result["warnings"])
@@ -363,9 +368,9 @@ class TestGetStampHealthCheck:
     @patch("app.services.swarm_api.get_all_stamps_processed")
     def test_high_utilization_warning(self, mock_get_stamps):
         """Should return warning for high utilization."""
-        mock_get_stamps.return_value = [make_stamp(batch_id="abc123", utilization_percent=85.0)]
+        mock_get_stamps.return_value = [make_stamp(batch_id=VALID_STAMP_ID, utilization_percent=85.0)]
 
-        result = get_stamp_health_check("abc123")
+        result = get_stamp_health_check(VALID_STAMP_ID)
 
         assert result["can_upload"] is True
         assert any(w["code"] == "HIGH_UTILIZATION" for w in result["warnings"])
@@ -374,9 +379,9 @@ class TestGetStampHealthCheck:
     def test_multiple_errors(self, mock_get_stamps):
         """Should return multiple errors when multiple issues exist."""
         # Stamp that is not local AND not usable
-        mock_get_stamps.return_value = [make_stamp(batch_id="abc123", local=False, usable=False)]
+        mock_get_stamps.return_value = [make_stamp(batch_id=VALID_STAMP_ID, local=False, usable=False)]
 
-        result = get_stamp_health_check("abc123")
+        result = get_stamp_health_check(VALID_STAMP_ID)
 
         assert result["can_upload"] is False
         assert len(result["errors"]) >= 1  # At least NOT_LOCAL
@@ -392,13 +397,13 @@ class TestStampCheckEndpoint:
     @patch("app.services.swarm_api.get_all_stamps_processed")
     def test_check_healthy_stamp(self, mock_get_stamps):
         """Should return 200 with can_upload=True for healthy stamp."""
-        mock_get_stamps.return_value = [make_stamp(batch_id="abc123")]
+        mock_get_stamps.return_value = [make_stamp(batch_id=VALID_STAMP_ID)]
 
-        response = client.get("/api/v1/stamps/abc123/check")
+        response = client.get(f"/api/v1/stamps/{VALID_STAMP_ID}/check")
 
         assert response.status_code == 200
         data = response.json()
-        assert data["stamp_id"] == "abc123"
+        assert data["stamp_id"] == VALID_STAMP_ID
         assert data["can_upload"] is True
         assert len(data["errors"]) == 0
 
@@ -407,7 +412,7 @@ class TestStampCheckEndpoint:
         """Should return 200 with can_upload=False for not found stamp."""
         mock_get_stamps.return_value = []
 
-        response = client.get("/api/v1/stamps/nonexistent/check")
+        response = client.get(f"/api/v1/stamps/{NONEXISTENT_STAMP_ID}/check")
 
         assert response.status_code == 200
         data = response.json()
@@ -417,9 +422,9 @@ class TestStampCheckEndpoint:
     @patch("app.services.swarm_api.get_all_stamps_processed")
     def test_check_stamp_with_warnings(self, mock_get_stamps):
         """Should return warnings in response."""
-        mock_get_stamps.return_value = [make_stamp(batch_id="abc123", utilization_percent=85.0)]
+        mock_get_stamps.return_value = [make_stamp(batch_id=VALID_STAMP_ID, utilization_percent=85.0)]
 
-        response = client.get("/api/v1/stamps/abc123/check")
+        response = client.get(f"/api/v1/stamps/{VALID_STAMP_ID}/check")
 
         assert response.status_code == 200
         data = response.json()
@@ -431,9 +436,9 @@ class TestStampCheckEndpoint:
     @patch("app.services.swarm_api.get_all_stamps_processed")
     def test_check_stamp_not_usable(self, mock_get_stamps):
         """Should show NOT_USABLE error with propagation suggestion."""
-        mock_get_stamps.return_value = [make_stamp(batch_id="abc123", usable=False)]
+        mock_get_stamps.return_value = [make_stamp(batch_id=VALID_STAMP_ID, usable=False)]
 
-        response = client.get("/api/v1/stamps/abc123/check")
+        response = client.get(f"/api/v1/stamps/{VALID_STAMP_ID}/check")
 
         assert response.status_code == 200
         data = response.json()
@@ -452,10 +457,10 @@ class TestUploadWithValidation:
     @patch("app.services.swarm_api.get_all_stamps_processed")
     def test_upload_with_not_local_stamp(self, mock_get_stamps):
         """Should return 400 with structured error for non-local stamp."""
-        mock_get_stamps.return_value = [make_stamp(batch_id="abc123", local=False)]
+        mock_get_stamps.return_value = [make_stamp(batch_id=VALID_STAMP_ID, local=False)]
 
         response = client.post(
-            "/api/v1/data/?stamp_id=abc123&validate_stamp=true",
+            f"/api/v1/data/?stamp_id={VALID_STAMP_ID}&validate_stamp=true",
             files={"file": ("test.json", b'{"test": "data"}', "application/json")}
         )
 
@@ -466,15 +471,15 @@ class TestUploadWithValidation:
         assert detail["code"] == "NOT_LOCAL"
         assert "message" in detail
         assert "suggestion" in detail
-        assert detail["stamp_id"] == "abc123"
+        assert detail["stamp_id"] == VALID_STAMP_ID
 
     @patch("app.services.swarm_api.get_all_stamps_processed")
     def test_upload_with_not_usable_stamp(self, mock_get_stamps):
         """Should return 400 with propagation delay message."""
-        mock_get_stamps.return_value = [make_stamp(batch_id="abc123", usable=False)]
+        mock_get_stamps.return_value = [make_stamp(batch_id=VALID_STAMP_ID, usable=False)]
 
         response = client.post(
-            "/api/v1/data/?stamp_id=abc123&validate_stamp=true",
+            f"/api/v1/data/?stamp_id={VALID_STAMP_ID}&validate_stamp=true",
             files={"file": ("test.json", b'{"test": "data"}', "application/json")}
         )
 
@@ -491,7 +496,7 @@ class TestUploadWithValidation:
         mock_get_stamps.return_value = []
 
         response = client.post(
-            "/api/v1/data/?stamp_id=nonexistent&validate_stamp=true",
+            f"/api/v1/data/?stamp_id={NONEXISTENT_STAMP_ID}&validate_stamp=true",
             files={"file": ("test.json", b'{"test": "data"}', "application/json")}
         )
 
@@ -503,10 +508,10 @@ class TestUploadWithValidation:
     @patch("app.services.swarm_api.get_all_stamps_processed")
     def test_upload_with_expired_stamp(self, mock_get_stamps):
         """Should return 400 with expired message."""
-        mock_get_stamps.return_value = [make_stamp(batch_id="abc123", batch_ttl=0)]
+        mock_get_stamps.return_value = [make_stamp(batch_id=VALID_STAMP_ID, batch_ttl=0)]
 
         response = client.post(
-            "/api/v1/data/?stamp_id=abc123&validate_stamp=true",
+            f"/api/v1/data/?stamp_id={VALID_STAMP_ID}&validate_stamp=true",
             files={"file": ("test.json", b'{"test": "data"}', "application/json")}
         )
 
@@ -518,10 +523,10 @@ class TestUploadWithValidation:
     @patch("app.services.swarm_api.get_all_stamps_processed")
     def test_upload_with_full_stamp(self, mock_get_stamps):
         """Should return 400 with full stamp message."""
-        mock_get_stamps.return_value = [make_stamp(batch_id="abc123", utilization_percent=100.0)]
+        mock_get_stamps.return_value = [make_stamp(batch_id=VALID_STAMP_ID, utilization_percent=100.0)]
 
         response = client.post(
-            "/api/v1/data/?stamp_id=abc123&validate_stamp=true",
+            f"/api/v1/data/?stamp_id={VALID_STAMP_ID}&validate_stamp=true",
             files={"file": ("test.json", b'{"test": "data"}', "application/json")}
         )
 
