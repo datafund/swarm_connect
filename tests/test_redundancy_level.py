@@ -165,7 +165,7 @@ class TestDataUploadRedundancy:
             assert call_kwargs.get('redundancy_level') == level
 
     def test_upload_with_invalid_redundancy_level_5(self):
-        """Test upload with invalid redundancy level 5 returns 400."""
+        """Test upload with invalid redundancy level 5 returns 422 (FastAPI query validation)."""
         test_data = {"test": "data"}
         json_content = json.dumps(test_data).encode('utf-8')
 
@@ -175,12 +175,10 @@ class TestDataUploadRedundancy:
             files=files
         )
 
-        assert response.status_code == 400
-        assert "Invalid redundancy level 5" in response.json()["detail"]
-        assert "Must be 0-4" in response.json()["detail"]
+        assert response.status_code == 422
 
     def test_upload_with_invalid_redundancy_level_negative(self):
-        """Test upload with negative redundancy level returns 400."""
+        """Test upload with negative redundancy level returns 422 (FastAPI query validation)."""
         test_data = {"test": "data"}
         json_content = json.dumps(test_data).encode('utf-8')
 
@@ -190,11 +188,10 @@ class TestDataUploadRedundancy:
             files=files
         )
 
-        assert response.status_code == 400
-        assert "Invalid redundancy level -1" in response.json()["detail"]
+        assert response.status_code == 422
 
     def test_upload_with_invalid_redundancy_level_large(self):
-        """Test upload with very large redundancy level returns 400."""
+        """Test upload with very large redundancy level returns 422 (FastAPI query validation)."""
         test_data = {"test": "data"}
         json_content = json.dumps(test_data).encode('utf-8')
 
@@ -204,8 +201,20 @@ class TestDataUploadRedundancy:
             files=files
         )
 
-        assert response.status_code == 400
-        assert "Invalid redundancy level 100" in response.json()["detail"]
+        assert response.status_code == 422
+
+    def test_upload_with_string_redundancy_returns_422(self):
+        """Test upload with string redundancy value returns 422 (fixes #106)."""
+        test_data = {"test": "data"}
+        json_content = json.dumps(test_data).encode('utf-8')
+
+        files = {"file": ("test.json", io.BytesIO(json_content), "application/json")}
+        response = client.post(
+            f"/api/v1/data/?stamp_id={VALID_STAMP_ID}&redundancy=high",
+            files=files
+        )
+
+        assert response.status_code == 422
 
 
 class TestManifestUploadRedundancy:
@@ -282,7 +291,7 @@ class TestManifestUploadRedundancy:
             assert call_kwargs.get('redundancy_level') == level
 
     def test_manifest_with_invalid_redundancy_level_5(self):
-        """Test manifest upload with invalid redundancy level 5 returns 400."""
+        """Test manifest upload with invalid redundancy level 5 returns 422 (FastAPI query validation)."""
         files = {"file.txt": b"content"}
         tar_bytes = create_tar_archive(files)
 
@@ -291,11 +300,10 @@ class TestManifestUploadRedundancy:
             files={"file": ("files.tar", io.BytesIO(tar_bytes), "application/x-tar")}
         )
 
-        assert response.status_code == 400
-        assert "Invalid redundancy level 5" in response.json()["detail"]
+        assert response.status_code == 422
 
     def test_manifest_with_invalid_redundancy_level_negative(self):
-        """Test manifest upload with negative redundancy level returns 400."""
+        """Test manifest upload with negative redundancy level returns 422 (FastAPI query validation)."""
         files = {"file.txt": b"content"}
         tar_bytes = create_tar_archive(files)
 
@@ -304,8 +312,19 @@ class TestManifestUploadRedundancy:
             files={"file": ("files.tar", io.BytesIO(tar_bytes), "application/x-tar")}
         )
 
-        assert response.status_code == 400
-        assert "Invalid redundancy level -1" in response.json()["detail"]
+        assert response.status_code == 422
+
+    def test_manifest_with_string_redundancy_returns_422(self):
+        """Test manifest upload with string redundancy value returns 422 (fixes #106)."""
+        files = {"file.txt": b"content"}
+        tar_bytes = create_tar_archive(files)
+
+        response = client.post(
+            f"/api/v1/data/manifest?stamp_id={VALID_STAMP_ID}&redundancy=high",
+            files={"file": ("files.tar", io.BytesIO(tar_bytes), "application/x-tar")}
+        )
+
+        assert response.status_code == 422
 
 
 class TestRedundancyWithOtherParameters:

@@ -441,3 +441,78 @@ class TestBusinessRuleValidation:
             first_error = validation_errors[0]
             for error in validation_errors[1:]:
                 assert error == first_error, "Validation should be consistent across concurrent requests"
+
+
+class TestDurationAmountExclusivity:
+    """Tests for mutual exclusivity of duration_hours and amount (fixes #107)."""
+
+    def test_purchase_with_both_duration_and_amount_rejected(self):
+        """Stamp purchase with both duration_hours and amount returns 422."""
+        response = client.post(
+            "/api/v1/stamps/",
+            json={"depth": 17, "duration_hours": 48, "amount": 10000000}
+        )
+        assert response.status_code == 422
+
+    def test_purchase_with_only_duration_accepted(self):
+        """Stamp purchase with only duration_hours is accepted."""
+        with patch('app.services.swarm_api.get_chainstate', return_value=MOCK_CHAINSTATE), \
+             patch('app.services.swarm_api.check_sufficient_funds', return_value=MOCK_FUNDS_OK), \
+             patch('app.services.swarm_api.purchase_postage_stamp', return_value="mock_batch"):
+            response = client.post(
+                "/api/v1/stamps/",
+                json={"depth": 17, "duration_hours": 48}
+            )
+            assert response.status_code == 201
+
+    def test_purchase_with_only_amount_accepted(self):
+        """Stamp purchase with only amount is accepted."""
+        with patch('app.services.swarm_api.check_sufficient_funds', return_value=MOCK_FUNDS_OK), \
+             patch('app.services.swarm_api.purchase_postage_stamp', return_value="mock_batch"):
+            response = client.post(
+                "/api/v1/stamps/",
+                json={"depth": 17, "amount": 10000000}
+            )
+            assert response.status_code == 201
+
+    def test_purchase_with_neither_uses_defaults(self):
+        """Stamp purchase with neither duration_hours nor amount uses default 25 hours."""
+        with patch('app.services.swarm_api.get_chainstate', return_value=MOCK_CHAINSTATE), \
+             patch('app.services.swarm_api.check_sufficient_funds', return_value=MOCK_FUNDS_OK), \
+             patch('app.services.swarm_api.purchase_postage_stamp', return_value="mock_batch"):
+            response = client.post(
+                "/api/v1/stamps/",
+                json={"depth": 17}
+            )
+            assert response.status_code == 201
+
+    def test_extension_with_both_duration_and_amount_rejected(self):
+        """Stamp extension with both duration_hours and amount returns 422."""
+        response = client.patch(
+            f"/api/v1/stamps/{VALID_STAMP_ID}/extend",
+            json={"duration_hours": 48, "amount": 10000000}
+        )
+        assert response.status_code == 422
+
+    def test_extension_with_only_duration_accepted(self):
+        """Stamp extension with only duration_hours is accepted."""
+        with patch('app.services.swarm_api.get_all_stamps_processed', return_value=[{"batchID": VALID_STAMP_ID, "depth": 17}]), \
+             patch('app.services.swarm_api.get_chainstate', return_value=MOCK_CHAINSTATE), \
+             patch('app.services.swarm_api.check_sufficient_funds', return_value=MOCK_FUNDS_OK), \
+             patch('app.services.swarm_api.extend_postage_stamp', return_value=VALID_STAMP_ID):
+            response = client.patch(
+                f"/api/v1/stamps/{VALID_STAMP_ID}/extend",
+                json={"duration_hours": 48}
+            )
+            assert response.status_code == 200
+
+    def test_extension_with_only_amount_accepted(self):
+        """Stamp extension with only amount is accepted."""
+        with patch('app.services.swarm_api.get_all_stamps_processed', return_value=[{"batchID": VALID_STAMP_ID, "depth": 17}]), \
+             patch('app.services.swarm_api.check_sufficient_funds', return_value=MOCK_FUNDS_OK), \
+             patch('app.services.swarm_api.extend_postage_stamp', return_value=VALID_STAMP_ID):
+            response = client.patch(
+                f"/api/v1/stamps/{VALID_STAMP_ID}/extend",
+                json={"amount": 10000000}
+            )
+            assert response.status_code == 200
