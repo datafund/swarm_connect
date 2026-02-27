@@ -11,7 +11,7 @@ load_dotenv()
 
 
 class Settings(BaseSettings):
-    PROJECT_NAME: str = "Swarm API Aggregator"
+    PROJECT_NAME: str = "Provenance Gateway"
     API_V1_STR: str = "/api/v1"
     SWARM_BEE_API_URL: AnyHttpUrl  # validates that it's a URL
 

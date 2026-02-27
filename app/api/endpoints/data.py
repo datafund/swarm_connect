@@ -3,7 +3,7 @@ import base64
 import json
 import logging
 import time
-from fastapi import APIRouter, HTTPException, Path, Query, Request, Body, File, UploadFile
+from fastapi import APIRouter, HTTPException, Path, Query, Request, File, UploadFile
 from fastapi.responses import Response
 from requests.exceptions import RequestException
 
@@ -105,7 +105,7 @@ async def upload_data(
     validate_stamp: bool = False,
     deferred: bool = False,
     include_timing: bool = False,
-    redundancy: Optional[int] = None,
+    redundancy: Optional[int] = Query(default=None, ge=0, le=4),
     sign: Optional[str] = None,
     file: UploadFile = File(...)
 ):
@@ -489,7 +489,7 @@ async def upload_manifest(
     validate_stamp: bool = False,
     deferred: bool = False,
     include_timing: bool = False,
-    redundancy: Optional[int] = None,
+    redundancy: Optional[int] = Query(default=None, ge=0, le=4),
     file: UploadFile = File(...)
 ):
     """
