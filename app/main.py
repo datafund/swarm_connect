@@ -1,6 +1,6 @@
 # app/main.py
 from contextlib import asynccontextmanager
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from app.core.config import settings
@@ -65,10 +65,18 @@ app.add_middleware(
 )
 logger.info(f"CORS enabled for origins: {cors_origins}")
 
+# Build x402 dependency list for protected routers (stamps, data)
+if settings.X402_ENABLED:
+    from app.x402.dependency import require_x402_payment
+    x402_deps = [Depends(require_x402_payment)]
+else:
+    x402_deps = []
+
 # Include the API router(s)
 # The prefix ensures all routes start with /api/v1
-app.include_router(stamps.router, prefix=f"{settings.API_V1_STR}/stamps", tags=["stamps"])
-app.include_router(data.router, prefix=f"{settings.API_V1_STR}/data", tags=["data"])
+# Stamps and data routers get the x402 dependency (checks POST methods only)
+app.include_router(stamps.router, prefix=f"{settings.API_V1_STR}/stamps", tags=["stamps"], dependencies=x402_deps)
+app.include_router(data.router, prefix=f"{settings.API_V1_STR}/data", tags=["data"], dependencies=x402_deps)
 app.include_router(wallet.router, prefix=f"{settings.API_V1_STR}", tags=["wallet"])
 app.include_router(pool.router, prefix=f"{settings.API_V1_STR}/pool", tags=["pool"])
 app.include_router(notary.router, prefix=f"{settings.API_V1_STR}/notary", tags=["notary"])
