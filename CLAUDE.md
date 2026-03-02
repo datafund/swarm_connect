@@ -97,7 +97,7 @@ Security settings:
 
 Notary signing (optional):
 - `NOTARY_ENABLED`: Enable notary signing feature (default: `false`)
-- `NOTARY_PRIVATE_KEY`: Hex-encoded Ethereum private key for signing (64 characters, no 0x prefix)
+- `NOTARY_PRIVATE_KEY`: Hex-encoded Ethereum private key for signing (64 characters, no 0x prefix). Generate with `python scripts/generate_notary_key.py`
 
 CORS (browser access):
 - `CORS_ALLOWED_ORIGINS`: Allowed origins, `*` for all or comma-separated list (default: `*`)

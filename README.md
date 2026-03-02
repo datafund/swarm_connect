@@ -1,5 +1,5 @@
-# swarm_connect
-A simpler server for accessing some Swarm features.
+# Provenance Gateway
+A FastAPI service for Swarm network access with x402 payments, notary signing, and stamp pool management.
 
 > ⚠️ **ALPHA SOFTWARE - PROOF OF CONCEPT**
 > This software is in **Alpha stage** and should be considered a **Proof of Concept**. Use for testing and experimentation only. Not recommended for production use.
@@ -13,36 +13,43 @@ A simpler server for accessing some Swarm features.
 ```
 swarm_connect/
 ├── app/                    # Main application package
-│   ├── __init__.py
 │   ├── main.py             # FastAPI app instantiation and router inclusion
-│   ├── api/                # API specific modules
-│   │   ├── __init__.py
+│   ├── api/
 │   │   ├── endpoints/      # API route definitions
-│   │   │   ├── __init__.py
-│   │   │   ├── stamps.py   # Endpoints for Swarm stamp management
-│   │   │   ├── data.py     # Endpoints for data upload/download
-│   │   │   └── wallet.py   # Endpoints for wallet information
-│   │   └── models/         # Pydantic models for request/response validation
-│   │       ├── __init__.py
-│   │       ├── stamp.py    # Pydantic models for stamp data
-│   │       ├── data.py     # Pydantic models for data operations
-│   │       └── wallet.py   # Pydantic models for wallet information
-│   ├── core/               # Core application logic/configuration
-│   │   ├── __init__.py
-│   │   └── config.py       # Configuration management (e.g., loading .env)
-│   └── services/           # Logic for interacting with external services
-│       ├── __init__.py
-│       └── swarm_api.py    # Functions to call the EthSwarm Bee API
+│   │   │   ├── stamps.py   # Stamp management (purchase, extend, list, health check)
+│   │   │   ├── data.py     # Data upload/download (single + manifest)
+│   │   │   ├── wallet.py   # Wallet and chequebook info
+│   │   │   ├── pool.py     # Stamp pool (low-latency provisioning)
+│   │   │   └── notary.py   # Notary signing status
+│   │   └── models/         # Pydantic request/response models
+│   ├── core/
+│   │   ├── config.py       # Configuration (environment variables)
+│   │   └── version.py      # Version from build
+│   ├── middleware/
+│   │   └── rate_limit.py   # Per-IP sliding window rate limiter
+│   ├── services/
+│   │   ├── swarm_api.py    # Swarm Bee API client
+│   │   ├── stamp_pool.py   # Stamp pool background manager
+│   │   ├── provenance.py   # Document processing for signing
+│   │   └── signing.py      # Ethereum signing infrastructure
+│   └── x402/               # x402 payment protocol (optional)
+│       ├── dependency.py   # FastAPI dependency for payment checks
+│       ├── middleware.py    # Post-response settlement + headers
+│       ├── pricing.py      # BZZ → USD price calculation
+│       ├── access.py       # IP whitelist/blacklist
+│       ├── audit.py        # Transaction audit logging
+│       └── ratelimit.py    # Per-IP rate limiting for x402
 │
-├── tests/                  # Unit and integration tests (Recommended)
-│   └── ...
+├── scripts/                # Operator utility scripts
+│   └── generate_notary_key.py  # Generate Ethereum keypair for notary signing
+├── docs/                   # Feature documentation
+├── tests/                  # Unit and integration tests (700+)
 │
-├── .env                    # Environment variables (API keys, URLs - NOT committed to Git)
-├── .env.example            # Example environment file (Committed to Git)
-├── .gitignore              # Files/directories to ignore in Git
-├── requirements.txt        # Python package dependencies
-├── README.md               # Project description, setup, and usage instructions
-└── run.py                  # Script to easily run the development server
+├── .env.example            # Example environment file
+├── docker-compose.yml      # Docker deployment (production + staging)
+├── Dockerfile              # Container image (Python 3.10)
+├── requirements.txt        # Python dependencies
+└── run.py                  # Development server
 ``` 
 
 ## Running

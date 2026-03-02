@@ -331,16 +331,25 @@ NOTARY_PRIVATE_KEY=1234567890abcdef1234567890abcdef1234567890abcdef1234567890abc
 
 ### Generating a Notary Key
 
-Generate a new Ethereum key pair:
+Use the provided script to generate a new Ethereum key pair:
 
 ```bash
-python -c "from eth_account import Account; a = Account.create(); print(f'Private: {a.key.hex()[2:]}\nAddress: {a.address}')"
+python scripts/generate_notary_key.py
 ```
 
 **Output:**
 ```
-Private: 1a2b3c...
-Address: 0x1234...
+Address:     0x1234...abcd
+Private key: 1a2b3c...
+
+Set in .env:
+  NOTARY_PRIVATE_KEY=1a2b3c...
+```
+
+To also see the command for setting it as a GitHub Actions secret:
+
+```bash
+python scripts/generate_notary_key.py --gh-secret production
 ```
 
 Use the private key (without `0x` prefix) as `NOTARY_PRIVATE_KEY`.
