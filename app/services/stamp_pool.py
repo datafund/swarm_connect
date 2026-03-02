@@ -26,6 +26,7 @@ from threading import Lock
 
 from app.core.config import settings
 from app.services import swarm_api
+from app.services.stamp_ownership import stamp_ownership_manager
 
 logger = logging.getLogger(__name__)
 
@@ -620,6 +621,7 @@ class StampPoolManager:
 
                 for batch_id in to_remove:
                     del self._pool[batch_id]
+                    stamp_ownership_manager.remove_stamp(batch_id)
 
                 if to_remove:
                     self._save_state()

@@ -1,11 +1,12 @@
 # app/api/endpoints/stamps.py
-from fastapi import APIRouter, HTTPException, Path, status, Body
+from fastapi import APIRouter, HTTPException, Path, Request, status, Body
 from typing import Any, Union
 import datetime
 from requests.exceptions import RequestException
 import logging
 
 from app.services import swarm_api
+from app.services.stamp_ownership import stamp_ownership_manager
 from app.api.models.stamp import (
     StampDetails,
     StampPurchaseRequest,
@@ -259,6 +260,7 @@ async def get_stamp_details(
     summary="Purchase a New Swarm Postage Stamp"
 )
 async def purchase_stamp(
+    request: Request,
     stamp_request: StampPurchaseRequest
 ) -> Any:
     """
@@ -316,6 +318,24 @@ async def purchase_stamp(
             depth=effective_depth,
             label=stamp_request.label
         )
+
+        # Register stamp ownership
+        x402_mode = getattr(request.state, 'x402_mode', None)
+        x402_payer = getattr(request.state, 'x402_payer', None)
+        if x402_mode == "paid" and x402_payer:
+            stamp_ownership_manager.register_stamp(
+                batch_id=batch_id,
+                owner=x402_payer,
+                mode="paid",
+                source="direct_purchase"
+            )
+        else:
+            stamp_ownership_manager.register_stamp(
+                batch_id=batch_id,
+                owner="shared",
+                mode="free",
+                source="direct_purchase"
+            )
 
         return StampPurchaseResponse(
             batchID=batch_id,
