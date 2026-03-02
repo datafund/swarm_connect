@@ -1,5 +1,6 @@
 # Use an official Python runtime as a parent image
-FROM python:3.9-slim
+# Python 3.10+ required for x402 SDK
+FROM python:3.10-slim
 
 # Set the working directory in the container
 WORKDIR /app
@@ -17,4 +18,4 @@ ARG VERSION=0.0.0-unknown
 RUN echo "${VERSION}" > VERSION
 
 # Command to run the application
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--no-server-header"]

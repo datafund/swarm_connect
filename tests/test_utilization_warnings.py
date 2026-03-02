@@ -13,6 +13,8 @@ from app.services.swarm_api import (
     UTILIZATION_THRESHOLD_FULL
 )
 
+VALID_STAMP_ID = "a" * 64
+
 
 class TestCalculateUtilizationStatus:
     """Unit tests for the calculate_utilization_status function."""
@@ -89,17 +91,19 @@ class TestValidateStampForUpload:
         """Test validation passes for a valid stamp."""
         mock_processed.return_value = [
             {
-                "batchID": "abc123",
+                "batchID": VALID_STAMP_ID,
                 "utilizationPercent": 50.0,
                 "utilizationStatus": "ok",
                 "utilizationWarning": None,
-                "usable": True
+                "usable": True,
+                "local": True,
+                "batchTTL": 86400
             }
         ]
 
-        result = validate_stamp_for_upload("abc123")
+        result = validate_stamp_for_upload(VALID_STAMP_ID)
 
-        assert result["batchID"] == "abc123"
+        assert result["batchID"] == VALID_STAMP_ID
         assert result["utilizationPercent"] == 50.0
         assert result["usable"] is True
 
@@ -108,8 +112,9 @@ class TestValidateStampForUpload:
         """Test validation fails for non-existent stamp."""
         mock_processed.return_value = []
 
+        not_found_id = "b" * 64
         with pytest.raises(StampValidationError) as exc_info:
-            validate_stamp_for_upload("nonexistent")
+            validate_stamp_for_upload(not_found_id)
 
         assert exc_info.value.status == "not_found"
         assert "not found" in exc_info.value.message
@@ -119,16 +124,18 @@ class TestValidateStampForUpload:
         """Test validation fails for 100% utilized stamp."""
         mock_processed.return_value = [
             {
-                "batchID": "abc123",
+                "batchID": VALID_STAMP_ID,
                 "utilizationPercent": 100.0,
                 "utilizationStatus": "full",
                 "utilizationWarning": "Stamp is full",
-                "usable": False
+                "usable": True,
+                "local": True,
+                "batchTTL": 86400
             }
         ]
 
         with pytest.raises(StampValidationError) as exc_info:
-            validate_stamp_for_upload("abc123")
+            validate_stamp_for_upload(VALID_STAMP_ID)
 
         assert exc_info.value.status == "full"
         assert "100%" in exc_info.value.message
@@ -139,34 +146,39 @@ class TestValidateStampForUpload:
         """Test validation fails for non-usable stamp."""
         mock_processed.return_value = [
             {
-                "batchID": "abc123",
+                "batchID": VALID_STAMP_ID,
                 "utilizationPercent": 50.0,
                 "utilizationStatus": "ok",
                 "utilizationWarning": None,
-                "usable": False
+                "usable": False,
+                "local": True,
+                "batchTTL": 86400
             }
         ]
 
         with pytest.raises(StampValidationError) as exc_info:
-            validate_stamp_for_upload("abc123")
+            validate_stamp_for_upload(VALID_STAMP_ID)
 
         assert exc_info.value.status == "not_usable"
-        assert "not usable" in exc_info.value.message
+        assert "not yet usable" in exc_info.value.message
 
     @patch('app.services.swarm_api.get_all_stamps_processed')
     def test_case_insensitive_stamp_id(self, mock_processed):
         """Test stamp ID matching is case-insensitive."""
+        upper_stamp_id = "A" * 64
         mock_processed.return_value = [
             {
-                "batchID": "ABC123",
+                "batchID": upper_stamp_id,
                 "utilizationPercent": 50.0,
                 "utilizationStatus": "ok",
-                "usable": True
+                "usable": True,
+                "local": True,
+                "batchTTL": 86400
             }
         ]
 
-        result = validate_stamp_for_upload("abc123")
-        assert result["batchID"] == "ABC123"
+        result = validate_stamp_for_upload(VALID_STAMP_ID)
+        assert result["batchID"] == upper_stamp_id
 
 
 class TestCheckUploadFailureReason:
@@ -177,57 +189,68 @@ class TestCheckUploadFailureReason:
         """Test that full stamp returns enhanced error message."""
         mock_processed.return_value = [
             {
-                "batchID": "abc123",
+                "batchID": VALID_STAMP_ID,
                 "utilizationPercent": 100.0,
-                "utilizationStatus": "full"
+                "utilizationStatus": "full",
+                "local": True,
+                "batchTTL": 86400,
+                "usable": True
             }
         ]
 
-        result = check_upload_failure_reason("abc123", "Original error")
+        result = check_upload_failure_reason(VALID_STAMP_ID, "Original error")
 
         assert result is not None
-        assert "100%" in result
-        assert "full" in result.lower()
-        assert "purchase a new stamp" in result.lower()
+        assert "100%" in result["message"]
+        assert "full" in result["message"].lower()
+        assert "purchase a new stamp" in result["suggestion"].lower()
 
     @patch('app.services.swarm_api.get_all_stamps_processed')
     def test_critical_stamp_returns_enhanced_message(self, mock_processed):
         """Test that critical utilization returns enhanced error message."""
         mock_processed.return_value = [
             {
-                "batchID": "abc123",
+                "batchID": VALID_STAMP_ID,
                 "utilizationPercent": 97.5,
-                "utilizationStatus": "critical"
+                "utilizationStatus": "critical",
+                "local": True,
+                "batchTTL": 86400,
+                "usable": True
             }
         ]
 
-        result = check_upload_failure_reason("abc123", "Original error")
+        result = check_upload_failure_reason(VALID_STAMP_ID, "Original error")
 
         assert result is not None
-        assert "97.5%" in result
-        assert "Original error" in result
+        assert "97.5%" in result["message"]
+        assert "Original error" in result.get("original_error", "")
 
     @patch('app.services.swarm_api.get_all_stamps_processed')
     def test_ok_stamp_returns_none(self, mock_processed):
         """Test that ok stamp returns None (no enhanced message)."""
         mock_processed.return_value = [
             {
-                "batchID": "abc123",
+                "batchID": VALID_STAMP_ID,
                 "utilizationPercent": 50.0,
-                "utilizationStatus": "ok"
+                "utilizationStatus": "ok",
+                "local": True,
+                "batchTTL": 86400,
+                "usable": True
             }
         ]
 
-        result = check_upload_failure_reason("abc123", "Original error")
+        result = check_upload_failure_reason(VALID_STAMP_ID, "Original error")
         assert result is None
 
     @patch('app.services.swarm_api.get_all_stamps_processed')
-    def test_stamp_not_found_returns_none(self, mock_processed):
-        """Test that non-existent stamp returns None."""
+    def test_stamp_not_found_returns_not_found(self, mock_processed):
+        """Test that non-existent stamp returns NOT_FOUND dict."""
         mock_processed.return_value = []
 
-        result = check_upload_failure_reason("nonexistent", "Original error")
-        assert result is None
+        not_found_id = "b" * 64
+        result = check_upload_failure_reason(not_found_id, "Original error")
+        assert result is not None
+        assert result["code"] == "NOT_FOUND"
 
 
 class TestUsableStatusWith100Percent:
@@ -306,7 +329,7 @@ class TestUtilizationStatusInAPI:
 
         mock_processed.return_value = [
             {
-                "batchID": "abc123",
+                "batchID": VALID_STAMP_ID,
                 "amount": "1000000",
                 "depth": 20,
                 "bucketDepth": 16,
@@ -342,7 +365,7 @@ class TestUtilizationStatusInAPI:
 
         mock_processed.return_value = [
             {
-                "batchID": "abc123",
+                "batchID": VALID_STAMP_ID,
                 "amount": "1000000",
                 "depth": 20,
                 "bucketDepth": 16,
@@ -362,7 +385,7 @@ class TestUtilizationStatusInAPI:
         ]
 
         client = TestClient(app)
-        response = client.get("/api/v1/stamps/abc123")
+        response = client.get(f"/api/v1/stamps/{VALID_STAMP_ID}")
 
         assert response.status_code == 200
         data = response.json()
@@ -378,7 +401,7 @@ class TestUtilizationStatusInAPI:
 
         mock_processed.return_value = [
             {
-                "batchID": "abc123",
+                "batchID": VALID_STAMP_ID,
                 "amount": "1000000",
                 "depth": 20,
                 "bucketDepth": 16,
@@ -398,7 +421,7 @@ class TestUtilizationStatusInAPI:
         ]
 
         client = TestClient(app)
-        response = client.get("/api/v1/stamps/abc123")
+        response = client.get(f"/api/v1/stamps/{VALID_STAMP_ID}")
 
         assert response.status_code == 200
         data = response.json()
@@ -418,23 +441,27 @@ class TestPreUploadValidationInEndpoints:
         from app.main import app
         import io
 
+        full_stamp_id = "c" * 64
         mock_processed.return_value = [
             {
-                "batchID": "fullstamp",
+                "batchID": full_stamp_id,
                 "utilizationPercent": 100.0,
                 "utilizationStatus": "full",
-                "usable": False
+                "usable": True,
+                "local": True,
+                "batchTTL": 86400
             }
         ]
 
         client = TestClient(app)
         response = client.post(
-            "/api/v1/data/?stamp_id=fullstamp&validate_stamp=true",
+            f"/api/v1/data/?stamp_id={full_stamp_id}&validate_stamp=true",
             files={"file": ("test.json", io.BytesIO(b'{"test": true}'), "application/json")}
         )
 
         assert response.status_code == 400
-        assert "100%" in response.json()["detail"]
+        detail = response.json()["detail"]
+        assert "100%" in detail["message"]
 
     @patch('app.services.swarm_api.get_all_stamps_processed')
     def test_upload_with_validation_and_not_found_stamp(self, mock_processed):
@@ -443,16 +470,18 @@ class TestPreUploadValidationInEndpoints:
         from app.main import app
         import io
 
+        not_found_stamp_id = "d" * 64
         mock_processed.return_value = []
 
         client = TestClient(app)
         response = client.post(
-            "/api/v1/data/?stamp_id=nonexistent&validate_stamp=true",
+            f"/api/v1/data/?stamp_id={not_found_stamp_id}&validate_stamp=true",
             files={"file": ("test.json", io.BytesIO(b'{"test": true}'), "application/json")}
         )
 
         assert response.status_code == 404
-        assert "not found" in response.json()["detail"].lower()
+        detail = response.json()["detail"]
+        assert "not found" in detail["message"].lower()
 
     @patch('app.api.endpoints.data.upload_data_to_swarm')
     def test_upload_without_validation_skips_check(self, mock_upload):
@@ -463,9 +492,10 @@ class TestPreUploadValidationInEndpoints:
 
         mock_upload.return_value = "abc123reference"
 
+        any_stamp_id = "e" * 64
         client = TestClient(app)
         response = client.post(
-            "/api/v1/data/?stamp_id=anystamp",  # No validate_stamp parameter
+            f"/api/v1/data/?stamp_id={any_stamp_id}",  # No validate_stamp parameter
             files={"file": ("test.json", io.BytesIO(b'{"test": true}'), "application/json")}
         )
 

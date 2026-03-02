@@ -5,6 +5,8 @@ from unittest.mock import patch, MagicMock
 
 from app.services.swarm_api import calculate_utilization_percent
 
+VALID_STAMP_ID = "a" * 64
+
 
 class TestCalculateUtilizationPercent:
     """Unit tests for the calculate_utilization_percent function."""
@@ -159,7 +161,7 @@ class TestUtilizationPercentInAPI:
 
         mock_processed.return_value = [
             {
-                "batchID": "abc123",
+                "batchID": VALID_STAMP_ID,
                 "amount": "1000000",
                 "depth": 20,
                 "bucketDepth": 16,
@@ -192,7 +194,7 @@ class TestUtilizationPercentInAPI:
 
         mock_processed.return_value = [
             {
-                "batchID": "abc123",
+                "batchID": VALID_STAMP_ID,
                 "amount": "1000000",
                 "depth": 20,
                 "bucketDepth": 16,
@@ -210,7 +212,7 @@ class TestUtilizationPercentInAPI:
         ]
 
         client = TestClient(app)
-        response = client.get("/api/v1/stamps/abc123")
+        response = client.get(f"/api/v1/stamps/{VALID_STAMP_ID}")
 
         assert response.status_code == 200
         data = response.json()
@@ -225,7 +227,7 @@ class TestUtilizationPercentInAPI:
 
         mock_processed.return_value = [
             {
-                "batchID": "abc123",
+                "batchID": VALID_STAMP_ID,
                 "amount": "1000000",
                 "depth": 20,
                 "bucketDepth": 16,
@@ -243,7 +245,7 @@ class TestUtilizationPercentInAPI:
         ]
 
         client = TestClient(app)
-        response = client.get("/api/v1/stamps/abc123")
+        response = client.get(f"/api/v1/stamps/{VALID_STAMP_ID}")
 
         assert response.status_code == 200
         data = response.json()

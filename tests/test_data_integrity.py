@@ -261,7 +261,7 @@ class TestFieldConsistency:
     def test_field_types_consistency(self, mock_get_stamps):
         """Test that field types are consistent across responses."""
         stamp_data = {
-            "batchID": "type_test_123",
+            "batchID": "a" * 64,
             "amount": "1500000000",  # Should be string
             "blockNumber": 12345,    # Should be int or None
             "owner": "0x1234567890abcdef",  # Should be string or None

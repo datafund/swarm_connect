@@ -61,7 +61,7 @@ async def list_stamps() -> Any:
         logger.error(f"Failed to retrieve stamps from Swarm API: {e}")
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"Could not fetch stamp data from the Swarm Bee node: {e}"
+            detail="Could not fetch stamp data. The Bee node may be unavailable."
         )
     except Exception as e:
         logger.error(f"Unexpected error fetching stamps: {e}", exc_info=True)
@@ -77,7 +77,7 @@ async def list_stamps() -> Any:
     summary="Check Stamp Health for Uploads"
 )
 async def check_stamp_health(
-    stamp_id: str = Path(..., description="The Batch ID of the Swarm stamp to check.", example="a1b2c3d4e5f6...")
+    stamp_id: str = Path(..., description="The Batch ID of the Swarm stamp to check.", example="a1b2c3d4e5f6...", pattern=r"^[a-fA-F0-9]{64}$")
 ) -> Any:
     """
     Performs a comprehensive health check on a stamp to determine if it can be used for uploads.
@@ -156,7 +156,7 @@ async def check_stamp_health(
         logger.error(f"Failed to check stamp health from Swarm API: {e}")
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"Could not fetch stamp data from the Swarm Bee node: {e}"
+            detail="Could not fetch stamp data. The Bee node may be unavailable."
         )
     except Exception as e:
         logger.error(f"Unexpected error during stamp health check: {e}", exc_info=True)
@@ -172,7 +172,7 @@ async def check_stamp_health(
     summary="Get Specific Swarm Stamp Batch Details"
 )
 async def get_stamp_details(
-    stamp_id: str = Path(..., description="The Batch ID of the Swarm stamp to retrieve.", example="a1b2c3d4e5f6...")
+    stamp_id: str = Path(..., description="The Batch ID of the Swarm stamp to retrieve.", example="a1b2c3d4e5f6...", pattern=r"^[a-fA-F0-9]{64}$")
 ) -> Any:
     """
     Retrieves details for a specific Swarm postage stamp batch by its ID.
@@ -187,7 +187,7 @@ async def get_stamp_details(
         logger.error(f"Failed to retrieve data from upstream Swarm API: {e}")
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"Could not fetch data from the Swarm Bee node: {e}"
+            detail="Could not fetch data from the Bee node. The Bee node may be unavailable."
         )
     except Exception as e:
          logger.error(f"Unexpected error fetching stamps: {e}", exc_info=True)
@@ -236,13 +236,13 @@ async def get_stamp_details(
         logger.error(f"Missing expected key '{e}' in Swarm API response for stamp {stamp_id}", exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Incomplete data received from Swarm API for stamp {stamp_id}. Missing key: {e}."
+            detail="Incomplete data received from Swarm API. Please try again."
         )
     except (ValueError, TypeError) as e:
         logger.error(f"Data type error processing Swarm API response for stamp {stamp_id}: {e}", exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Invalid data format received from Swarm API for stamp {stamp_id}."
+            detail="Invalid data format received from Swarm API. Please try again."
         )
     except Exception as e:
          logger.error(f"Unexpected error processing stamp {stamp_id}: {e}", exc_info=True)
@@ -328,13 +328,13 @@ async def purchase_stamp(
         logger.error(f"Failed to purchase stamp from Swarm API: {e}")
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"Could not purchase stamp from the Swarm Bee node: {e}"
+            detail="Could not purchase stamp. The Bee node may be unavailable."
         )
     except ValueError as e:
         logger.error(f"Invalid response from Swarm API during stamp purchase: {e}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Invalid response from Swarm API: {e}"
+            detail="Invalid response from Swarm API. Please try again."
         )
     except Exception as e:
         logger.error(f"Unexpected error during stamp purchase: {e}", exc_info=True)
@@ -350,7 +350,7 @@ async def purchase_stamp(
     summary="Extend an Existing Swarm Postage Stamp"
 )
 async def extend_stamp(
-    stamp_id: str = Path(..., description="The Batch ID of the stamp to extend.", example="a1b2c3d4e5f6..."),
+    stamp_id: str = Path(..., description="The Batch ID of the stamp to extend.", example="a1b2c3d4e5f6...", pattern=r"^[a-fA-F0-9]{64}$"),
     extension_request: StampExtensionRequest = ...
 ) -> Any:
     """
@@ -434,13 +434,13 @@ async def extend_stamp(
         logger.error(f"Failed to extend stamp {stamp_id} from Swarm API: {e}")
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"Could not extend stamp from the Swarm Bee node: {e}"
+            detail="Could not extend stamp. The Bee node may be unavailable."
         )
     except ValueError as e:
         logger.error(f"Invalid response from Swarm API during stamp extension: {e}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Invalid response from Swarm API: {e}"
+            detail="Invalid response from Swarm API. Please try again."
         )
     except Exception as e:
         logger.error(f"Unexpected error during stamp extension for {stamp_id}: {e}", exc_info=True)

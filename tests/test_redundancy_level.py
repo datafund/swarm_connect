@@ -19,6 +19,8 @@ from app.services.swarm_api import (
 
 client = TestClient(app)
 
+VALID_STAMP_ID = "a" * 64
+
 
 def create_tar_archive(files: dict[str, bytes]) -> bytes:
     """Create a TAR archive from a dictionary of filename -> content."""
@@ -96,7 +98,7 @@ class TestDataUploadRedundancy:
 
         files = {"file": ("test.json", io.BytesIO(json_content), "application/json")}
         response = client.post(
-            "/api/v1/data/?stamp_id=test_stamp",
+            f"/api/v1/data/?stamp_id={VALID_STAMP_ID}",
             files=files
         )
 
@@ -116,7 +118,7 @@ class TestDataUploadRedundancy:
 
         files = {"file": ("test.json", io.BytesIO(json_content), "application/json")}
         response = client.post(
-            "/api/v1/data/?stamp_id=test_stamp&redundancy=0",
+            f"/api/v1/data/?stamp_id={VALID_STAMP_ID}&redundancy=0",
             files=files
         )
 
@@ -134,7 +136,7 @@ class TestDataUploadRedundancy:
 
         files = {"file": ("test.json", io.BytesIO(json_content), "application/json")}
         response = client.post(
-            "/api/v1/data/?stamp_id=test_stamp&redundancy=4",
+            f"/api/v1/data/?stamp_id={VALID_STAMP_ID}&redundancy=4",
             files=files
         )
 
@@ -154,7 +156,7 @@ class TestDataUploadRedundancy:
             mock_upload.reset_mock()
             files = {"file": ("test.json", io.BytesIO(json_content), "application/json")}
             response = client.post(
-                f"/api/v1/data/?stamp_id=test_stamp&redundancy={level}",
+                f"/api/v1/data/?stamp_id={VALID_STAMP_ID}&redundancy={level}",
                 files=files
             )
 
@@ -163,47 +165,56 @@ class TestDataUploadRedundancy:
             assert call_kwargs.get('redundancy_level') == level
 
     def test_upload_with_invalid_redundancy_level_5(self):
-        """Test upload with invalid redundancy level 5 returns 400."""
+        """Test upload with invalid redundancy level 5 returns 422 (FastAPI query validation)."""
         test_data = {"test": "data"}
         json_content = json.dumps(test_data).encode('utf-8')
 
         files = {"file": ("test.json", io.BytesIO(json_content), "application/json")}
         response = client.post(
-            "/api/v1/data/?stamp_id=test_stamp&redundancy=5",
+            f"/api/v1/data/?stamp_id={VALID_STAMP_ID}&redundancy=5",
             files=files
         )
 
-        assert response.status_code == 400
-        assert "Invalid redundancy level 5" in response.json()["detail"]
-        assert "Must be 0-4" in response.json()["detail"]
+        assert response.status_code == 422
 
     def test_upload_with_invalid_redundancy_level_negative(self):
-        """Test upload with negative redundancy level returns 400."""
+        """Test upload with negative redundancy level returns 422 (FastAPI query validation)."""
         test_data = {"test": "data"}
         json_content = json.dumps(test_data).encode('utf-8')
 
         files = {"file": ("test.json", io.BytesIO(json_content), "application/json")}
         response = client.post(
-            "/api/v1/data/?stamp_id=test_stamp&redundancy=-1",
+            f"/api/v1/data/?stamp_id={VALID_STAMP_ID}&redundancy=-1",
             files=files
         )
 
-        assert response.status_code == 400
-        assert "Invalid redundancy level -1" in response.json()["detail"]
+        assert response.status_code == 422
 
     def test_upload_with_invalid_redundancy_level_large(self):
-        """Test upload with very large redundancy level returns 400."""
+        """Test upload with very large redundancy level returns 422 (FastAPI query validation)."""
         test_data = {"test": "data"}
         json_content = json.dumps(test_data).encode('utf-8')
 
         files = {"file": ("test.json", io.BytesIO(json_content), "application/json")}
         response = client.post(
-            "/api/v1/data/?stamp_id=test_stamp&redundancy=100",
+            f"/api/v1/data/?stamp_id={VALID_STAMP_ID}&redundancy=100",
             files=files
         )
 
-        assert response.status_code == 400
-        assert "Invalid redundancy level 100" in response.json()["detail"]
+        assert response.status_code == 422
+
+    def test_upload_with_string_redundancy_returns_422(self):
+        """Test upload with string redundancy value returns 422 (fixes #106)."""
+        test_data = {"test": "data"}
+        json_content = json.dumps(test_data).encode('utf-8')
+
+        files = {"file": ("test.json", io.BytesIO(json_content), "application/json")}
+        response = client.post(
+            f"/api/v1/data/?stamp_id={VALID_STAMP_ID}&redundancy=high",
+            files=files
+        )
+
+        assert response.status_code == 422
 
 
 class TestManifestUploadRedundancy:
@@ -218,7 +229,7 @@ class TestManifestUploadRedundancy:
         tar_bytes = create_tar_archive(files)
 
         response = client.post(
-            "/api/v1/data/manifest?stamp_id=test_stamp",
+            f"/api/v1/data/manifest?stamp_id={VALID_STAMP_ID}",
             files={"file": ("files.tar", io.BytesIO(tar_bytes), "application/x-tar")}
         )
 
@@ -235,7 +246,7 @@ class TestManifestUploadRedundancy:
         tar_bytes = create_tar_archive(files)
 
         response = client.post(
-            "/api/v1/data/manifest?stamp_id=test_stamp&redundancy=0",
+            f"/api/v1/data/manifest?stamp_id={VALID_STAMP_ID}&redundancy=0",
             files={"file": ("files.tar", io.BytesIO(tar_bytes), "application/x-tar")}
         )
 
@@ -252,7 +263,7 @@ class TestManifestUploadRedundancy:
         tar_bytes = create_tar_archive(files)
 
         response = client.post(
-            "/api/v1/data/manifest?stamp_id=test_stamp&redundancy=4",
+            f"/api/v1/data/manifest?stamp_id={VALID_STAMP_ID}&redundancy=4",
             files={"file": ("files.tar", io.BytesIO(tar_bytes), "application/x-tar")}
         )
 
@@ -271,7 +282,7 @@ class TestManifestUploadRedundancy:
             tar_bytes = create_tar_archive(files)
 
             response = client.post(
-                f"/api/v1/data/manifest?stamp_id=test_stamp&redundancy={level}",
+                f"/api/v1/data/manifest?stamp_id={VALID_STAMP_ID}&redundancy={level}",
                 files={"file": ("files.tar", io.BytesIO(tar_bytes), "application/x-tar")}
             )
 
@@ -280,30 +291,40 @@ class TestManifestUploadRedundancy:
             assert call_kwargs.get('redundancy_level') == level
 
     def test_manifest_with_invalid_redundancy_level_5(self):
-        """Test manifest upload with invalid redundancy level 5 returns 400."""
+        """Test manifest upload with invalid redundancy level 5 returns 422 (FastAPI query validation)."""
         files = {"file.txt": b"content"}
         tar_bytes = create_tar_archive(files)
 
         response = client.post(
-            "/api/v1/data/manifest?stamp_id=test_stamp&redundancy=5",
+            f"/api/v1/data/manifest?stamp_id={VALID_STAMP_ID}&redundancy=5",
             files={"file": ("files.tar", io.BytesIO(tar_bytes), "application/x-tar")}
         )
 
-        assert response.status_code == 400
-        assert "Invalid redundancy level 5" in response.json()["detail"]
+        assert response.status_code == 422
 
     def test_manifest_with_invalid_redundancy_level_negative(self):
-        """Test manifest upload with negative redundancy level returns 400."""
+        """Test manifest upload with negative redundancy level returns 422 (FastAPI query validation)."""
         files = {"file.txt": b"content"}
         tar_bytes = create_tar_archive(files)
 
         response = client.post(
-            "/api/v1/data/manifest?stamp_id=test_stamp&redundancy=-1",
+            f"/api/v1/data/manifest?stamp_id={VALID_STAMP_ID}&redundancy=-1",
             files={"file": ("files.tar", io.BytesIO(tar_bytes), "application/x-tar")}
         )
 
-        assert response.status_code == 400
-        assert "Invalid redundancy level -1" in response.json()["detail"]
+        assert response.status_code == 422
+
+    def test_manifest_with_string_redundancy_returns_422(self):
+        """Test manifest upload with string redundancy value returns 422 (fixes #106)."""
+        files = {"file.txt": b"content"}
+        tar_bytes = create_tar_archive(files)
+
+        response = client.post(
+            f"/api/v1/data/manifest?stamp_id={VALID_STAMP_ID}&redundancy=high",
+            files={"file": ("files.tar", io.BytesIO(tar_bytes), "application/x-tar")}
+        )
+
+        assert response.status_code == 422
 
 
 class TestRedundancyWithOtherParameters:
@@ -319,7 +340,7 @@ class TestRedundancyWithOtherParameters:
 
         files = {"file": ("test.json", io.BytesIO(json_content), "application/json")}
         response = client.post(
-            "/api/v1/data/?stamp_id=test_stamp&deferred=true&redundancy=3",
+            f"/api/v1/data/?stamp_id={VALID_STAMP_ID}&deferred=true&redundancy=3",
             files=files
         )
 
@@ -338,7 +359,7 @@ class TestRedundancyWithOtherParameters:
 
         files = {"file": ("test.json", io.BytesIO(json_content), "application/json")}
         response = client.post(
-            "/api/v1/data/?stamp_id=test_stamp&include_timing=true&redundancy=1",
+            f"/api/v1/data/?stamp_id={VALID_STAMP_ID}&include_timing=true&redundancy=1",
             files=files
         )
 
@@ -357,7 +378,7 @@ class TestRedundancyWithOtherParameters:
 
         files = {"file": ("test.png", io.BytesIO(binary_content), "image/png")}
         response = client.post(
-            "/api/v1/data/?stamp_id=test_stamp&content_type=image/png&redundancy=2",
+            f"/api/v1/data/?stamp_id={VALID_STAMP_ID}&content_type=image/png&redundancy=2",
             files=files
         )
 
@@ -375,7 +396,7 @@ class TestRedundancyWithOtherParameters:
         tar_bytes = create_tar_archive(files)
 
         response = client.post(
-            "/api/v1/data/manifest?stamp_id=test_stamp&deferred=true&redundancy=3",
+            f"/api/v1/data/manifest?stamp_id={VALID_STAMP_ID}&deferred=true&redundancy=3",
             files={"file": ("files.tar", io.BytesIO(tar_bytes), "application/x-tar")}
         )
 
@@ -399,7 +420,7 @@ class TestServiceLayerRedundancy:
 
         upload_data_to_swarm(
             data=b"test data",
-            stamp_id="test_stamp",
+            stamp_id=VALID_STAMP_ID,
             content_type="text/plain"
         )
 
@@ -418,7 +439,7 @@ class TestServiceLayerRedundancy:
 
         upload_data_to_swarm(
             data=b"test data",
-            stamp_id="test_stamp",
+            stamp_id=VALID_STAMP_ID,
             content_type="text/plain",
             redundancy_level=4
         )
@@ -438,7 +459,7 @@ class TestServiceLayerRedundancy:
 
         upload_data_to_swarm(
             data=b"test data",
-            stamp_id="test_stamp",
+            stamp_id=VALID_STAMP_ID,
             content_type="text/plain",
             redundancy_level=0
         )
@@ -461,7 +482,7 @@ class TestServiceLayerRedundancy:
 
         upload_collection_to_swarm(
             tar_data=tar_bytes,
-            stamp_id="test_stamp",
+            stamp_id=VALID_STAMP_ID,
             redundancy_level=3
         )
 
@@ -476,7 +497,7 @@ class TestServiceLayerRedundancy:
         with pytest.raises(ValueError, match="Invalid redundancy level"):
             upload_data_to_swarm(
                 data=b"test data",
-                stamp_id="test_stamp",
+                stamp_id=VALID_STAMP_ID,
                 content_type="text/plain",
                 redundancy_level=99
             )
@@ -491,6 +512,6 @@ class TestServiceLayerRedundancy:
         with pytest.raises(ValueError, match="Invalid redundancy level"):
             upload_collection_to_swarm(
                 tar_data=tar_bytes,
-                stamp_id="test_stamp",
+                stamp_id=VALID_STAMP_ID,
                 redundancy_level=-5
             )

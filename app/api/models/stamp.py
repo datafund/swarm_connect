@@ -1,5 +1,5 @@
 # app/api/models/stamp.py
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 from typing import Optional, List, Literal
 
 # Size presets mapping to depth values
@@ -91,7 +91,8 @@ class StampPurchaseRequest(BaseModel):
     )
     amount: Optional[int] = Field(
         default=None,
-        description="The amount of the postage stamp in PLUR (legacy). If provided, overrides duration_hours."
+        description="The amount of the postage stamp in PLUR (legacy). If provided, overrides duration_hours.",
+        gt=0
     )
     size: Optional[Literal["small", "medium", "large"]] = Field(
         default=None,
@@ -114,6 +115,12 @@ class StampPurchaseRequest(BaseModel):
             }
         }
     }
+
+    @model_validator(mode='after')
+    def check_duration_amount_exclusive(self):
+        if self.duration_hours is not None and self.amount is not None:
+            raise ValueError("Cannot specify both 'duration_hours' and 'amount'. Use one or the other.")
+        return self
 
     def get_effective_depth(self) -> int:
         """Returns the effective depth based on size preset or explicit depth."""
@@ -152,8 +159,15 @@ class StampExtensionRequest(BaseModel):
     )
     amount: Optional[int] = Field(
         default=None,
-        description="Additional amount to add to the stamp in PLUR (legacy). If provided, overrides duration_hours."
+        description="Additional amount to add to the stamp in PLUR (legacy). If provided, overrides duration_hours.",
+        gt=0
     )
+
+    @model_validator(mode='after')
+    def check_duration_amount_exclusive(self):
+        if self.duration_hours is not None and self.amount is not None:
+            raise ValueError("Cannot specify both 'duration_hours' and 'amount'. Use one or the other.")
+        return self
 
     model_config = {
         "json_schema_extra": {

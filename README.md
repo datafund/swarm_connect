@@ -1,5 +1,5 @@
-# swarm_connect
-Simpler server for accessing some Swarm features.
+# Provenance Gateway
+A FastAPI service for Swarm network access with x402 payments, notary signing, and stamp pool management.
 
 > ⚠️ **ALPHA SOFTWARE - PROOF OF CONCEPT**
 > This software is in **Alpha stage** and should be considered a **Proof of Concept**. Use for testing and experimentation only. Not recommended for production use.
@@ -13,36 +13,43 @@ Simpler server for accessing some Swarm features.
 ```
 swarm_connect/
 ├── app/                    # Main application package
-│   ├── __init__.py
 │   ├── main.py             # FastAPI app instantiation and router inclusion
-│   ├── api/                # API specific modules
-│   │   ├── __init__.py
+│   ├── api/
 │   │   ├── endpoints/      # API route definitions
-│   │   │   ├── __init__.py
-│   │   │   ├── stamps.py   # Endpoints for Swarm stamp management
-│   │   │   ├── data.py     # Endpoints for data upload/download
-│   │   │   └── wallet.py   # Endpoints for wallet information
-│   │   └── models/         # Pydantic models for request/response validation
-│   │       ├── __init__.py
-│   │       ├── stamp.py    # Pydantic models for stamp data
-│   │       ├── data.py     # Pydantic models for data operations
-│   │       └── wallet.py   # Pydantic models for wallet information
-│   ├── core/               # Core application logic/configuration
-│   │   ├── __init__.py
-│   │   └── config.py       # Configuration management (e.g., loading .env)
-│   └── services/           # Logic for interacting with external services
-│       ├── __init__.py
-│       └── swarm_api.py    # Functions to call the EthSwarm Bee API
+│   │   │   ├── stamps.py   # Stamp management (purchase, extend, list, health check)
+│   │   │   ├── data.py     # Data upload/download (single + manifest)
+│   │   │   ├── wallet.py   # Wallet and chequebook info
+│   │   │   ├── pool.py     # Stamp pool (low-latency provisioning)
+│   │   │   └── notary.py   # Notary signing status
+│   │   └── models/         # Pydantic request/response models
+│   ├── core/
+│   │   ├── config.py       # Configuration (environment variables)
+│   │   └── version.py      # Version from build
+│   ├── middleware/
+│   │   └── rate_limit.py   # Per-IP sliding window rate limiter
+│   ├── services/
+│   │   ├── swarm_api.py    # Swarm Bee API client
+│   │   ├── stamp_pool.py   # Stamp pool background manager
+│   │   ├── provenance.py   # Document processing for signing
+│   │   └── signing.py      # Ethereum signing infrastructure
+│   └── x402/               # x402 payment protocol (optional)
+│       ├── dependency.py   # FastAPI dependency for payment checks
+│       ├── middleware.py    # Post-response settlement + headers
+│       ├── pricing.py      # BZZ → USD price calculation
+│       ├── access.py       # IP whitelist/blacklist
+│       ├── audit.py        # Transaction audit logging
+│       └── ratelimit.py    # Per-IP rate limiting for x402
 │
-├── tests/                  # Unit and integration tests (Recommended)
-│   └── ...
+├── scripts/                # Operator utility scripts
+│   └── generate_notary_key.py  # Generate Ethereum keypair for notary signing
+├── docs/                   # Feature documentation
+├── tests/                  # Unit and integration tests (700+)
 │
-├── .env                    # Environment variables (API keys, URLs - NOT committed to Git)
-├── .env.example            # Example environment file (Committed to Git)
-├── .gitignore              # Files/directories to ignore in Git
-├── requirements.txt        # Python package dependencies
-├── README.md               # Project description, setup, and usage instructions
-└── run.py                  # Script to easily run the development server
+├── .env.example            # Example environment file
+├── docker-compose.yml      # Docker deployment (production + staging)
+├── Dockerfile              # Container image (Python 3.10)
+├── requirements.txt        # Python dependencies
+└── run.py                  # Development server
 ``` 
 
 ## Running
@@ -190,6 +197,7 @@ Swarm Connect is a FastAPI-based API gateway that provides comprehensive access 
 - **Raw Data Download**: Download data as binary stream or base64-encoded JSON
 - **Reference-Based Access**: Access data using Swarm reference hashes
 - **Provenance Support**: Built-in examples for data lineage and provenance tracking
+- **Notary Signing**: Optional cryptographic signatures proving data existed at upload time (see [Notary Guide](docs/notary-guide.md))
 
 #### 🔧 Technical Features
 - **FastAPI Framework**: Modern, fast web framework with automatic OpenAPI documentation
@@ -200,6 +208,14 @@ Swarm Connect is a FastAPI-based API gateway that provides comprehensive access 
 - **Development Server**: Hot-reload development server with SSL support
 - **Binary Data Support**: Direct binary upload/download with optional JSON wrapping
 - **Modular Design**: Separate endpoints for stamps and data operations
+
+#### 🛡️ Security & Rate Limiting
+- **Upload Size Limits**: Configurable maximum upload size (default: 10 MB) with clear 413 errors
+- **Global Rate Limiting**: Per-IP sliding window rate limiter with burst capacity (default: 60 req/min + 10 burst)
+- **Input Validation**: Strict regex validation on stamp IDs (64-char hex) and references (64-128 char hex)
+- **Error Sanitization**: Internal details (IPs, ports, file paths) are never exposed in error responses
+- **Server Header Suppression**: `Server` header removed to prevent version fingerprinting
+- **Rate Limit Headers**: `X-RateLimit-Limit` and `X-RateLimit-Remaining` on every response
 
 #### 🛡️ Reliability Features
 - **Request Timeouts**: 10-second timeout for external API calls
@@ -268,6 +284,11 @@ Swarm Connect is a FastAPI-based API gateway that provides comprehensive access 
 - `GET /api/v1/wallet`: Get the wallet address and BZZ balance of the Bee node
 - `GET /api/v1/chequebook`: Get the chequebook address and balance information of the Bee node
 
+#### Notary Signing
+- `GET /api/v1/notary/info`: Check notary availability and get public address for verification
+- `GET /api/v1/notary/status`: Simplified notary status for health checks
+- `POST /api/v1/data/?sign=notary`: Upload with notary signature (see [Notary Guide](docs/notary-guide.md))
+
 ### Key Value Propositions
 
 1. **Complete Gateway Solution**: Full stamp lifecycle and data operations in one service
@@ -277,6 +298,87 @@ Swarm Connect is a FastAPI-based API gateway that provides comprehensive access 
 5. **Developer Experience**: Auto-generated docs and type safety
 6. **Flexibility**: Configurable for different Swarm node endpoints
 7. **Binary Support**: Native handling of raw data with multiple access patterns
+8. **x402 Payment Support**: Optional pay-per-request monetization via USDC
+
+## x402 Payment Gateway (Optional)
+
+The gateway supports optional x402 payment integration, enabling pay-per-request access without user accounts.
+
+### Overview
+
+When `X402_ENABLED=true`, protected endpoints (`POST /stamps/`, `POST /data/`) require USDC payment on Base chain. The gateway uses received payments to fund Swarm operations.
+
+```
+┌──────────────┐     USDC      ┌──────────────┐     xBZZ      ┌──────────────┐
+│    Client    │ ────────────> │   Gateway    │ ────────────> │  Swarm Bee   │
+│  (Base chain)│               │  (2 wallets) │               │ (Gnosis chain)│
+└──────────────┘               └──────────────┘               └──────────────┘
+```
+
+### Quick Start
+
+1. **Enable x402** in `.env`:
+   ```bash
+   X402_ENABLED=true
+   X402_PAY_TO_ADDRESS=0xYourBaseWallet
+   ```
+
+2. **Without payment**, protected endpoints return HTTP 402:
+   ```bash
+   curl -X POST http://localhost:8000/api/v1/stamps/
+   # Returns 402 with payment requirements
+   ```
+
+3. **With payment** (using x402 client):
+   ```bash
+   curl -X POST http://localhost:8000/api/v1/stamps/ \
+        -H "X-PAYMENT: <base64-encoded-payment>"
+   # Returns 200 with stamp details
+   ```
+
+### Features
+
+- **Pay-per-request**: No accounts, no subscriptions
+- **Access control**: IP whitelist/blacklist with CIDR support
+- **Rate limiting**: Per-IP request throttling (default: 10/min)
+- **Audit logging**: JSON lines format for all transactions
+- **Pre-flight checks**: Validates gateway wallet balances before accepting payments
+
+### Protected Endpoints
+
+| Endpoint | Payment Required |
+|----------|-----------------|
+| `POST /api/v1/stamps/` | Yes |
+| `POST /api/v1/data/` | Yes |
+| `POST /api/v1/data/manifest` | Yes |
+| `GET /api/v1/data/{ref}` | No (free) |
+| `GET /api/v1/stamps/` | No (free) |
+
+### Configuration
+
+```bash
+# Core
+X402_ENABLED=true
+X402_PAY_TO_ADDRESS=0x...       # Your USDC receiving wallet
+X402_NETWORK=base-sepolia       # or "base" for mainnet
+
+# Pricing
+X402_BZZ_USD_RATE=0.50          # BZZ to USD rate
+X402_MARKUP_PERCENT=50          # Profit margin
+X402_MIN_PRICE_USD=0.01         # Minimum charge
+
+# Access Control
+X402_WHITELIST_IPS=127.0.0.1    # Free access
+X402_BLACKLIST_IPS=             # Blocked IPs
+X402_RATE_LIMIT_PER_IP=10       # Requests/min per IP
+
+# Audit
+X402_AUDIT_LOG_PATH=logs/x402_audit.jsonl
+```
+
+### Documentation
+
+See [x402 Operator Guide](docs/x402-operator-guide.md) for complete setup instructions.
 
 ## API Endpoints
 
@@ -383,6 +485,7 @@ Extend an existing stamp by adding more time.
 Upload data to Swarm (JSON or binary).
 - **Request Body**: JSON data (default) or raw binary data
 - **Content-Type**: `application/json` (default) or `application/octet-stream` for binary
+- **Size Limit**: Maximum upload size is configurable (default: 10 MB). Returns 413 if exceeded.
 - **validate_stamp**: Optional (default: false) - Pre-validate stamp before upload
 - **deferred**: Optional (default: false) - Use deferred upload mode
 - **include_timing**: Optional (default: false) - Include timing breakdown in response
@@ -433,7 +536,16 @@ curl -X POST "http://localhost:8000/api/v1/data/?stamp_id=YOUR_STAMP_ID&redundan
 curl -X POST "http://localhost:8000/api/v1/data/?stamp_id=YOUR_STAMP_ID&redundancy=0" \
      -F "file=@data.json"
 ```
-Returns 400 if stamp is full (100% utilized), not usable, or invalid redundancy level. Returns 404 if stamp not found.
+Returns 400 if stamp is full (100% utilized), not usable, or invalid redundancy level. Returns 404 if stamp not found. Returns 413 if file exceeds the upload size limit.
+
+**Upload Size Limit Error (413):**
+```json
+{
+  "code": "FILE_TOO_LARGE",
+  "message": "Upload exceeds maximum size of 10 MB.",
+  "max_size_mb": 10
+}
+```
 
 **Performance Timing Response** (when `include_timing=true`):
 ```json
@@ -604,6 +716,71 @@ Perform a comprehensive health check on a stamp to determine if it can be used f
 | `LOW_TTL` | Stamp expires in less than 1 hour |
 | `NEARLY_FULL` | Stamp is 95%+ utilized |
 | `HIGH_UTILIZATION` | Stamp is 80%+ utilized |
+
+## Security
+
+### Upload Size Limits
+
+File uploads are limited to **10 MB** by default. This applies to both `/api/v1/data/` and `/api/v1/data/manifest` endpoints.
+
+```bash
+# Configure in .env (value in megabytes)
+MAX_UPLOAD_SIZE_MB=10
+```
+
+Uploads exceeding the limit receive a **413** response:
+```json
+{"code": "FILE_TOO_LARGE", "message": "Upload exceeds maximum size of 10 MB.", "max_size_mb": 10}
+```
+
+### Rate Limiting
+
+Global per-IP rate limiting protects against abuse. Uses a sliding window algorithm with burst capacity.
+
+```bash
+# Configure in .env
+RATE_LIMIT_ENABLED=true       # Master switch (default: true)
+RATE_LIMIT_PER_MINUTE=60      # Requests per minute per IP (default: 60)
+RATE_LIMIT_BURST=10           # Extra burst capacity (default: 10)
+```
+
+Every response includes rate limit headers:
+```
+X-RateLimit-Limit: 70
+X-RateLimit-Remaining: 65
+```
+
+When the limit is exceeded, the gateway returns **429**:
+```json
+{"error": "Rate limit exceeded", "detail": "Too many requests. Try again in 42 seconds.", "retry_after": 42}
+```
+
+**Exempt paths** (never rate-limited): `/`, `/health`, `/docs`, `/redoc`, `/openapi.json`
+
+**Note**: Rate limiting is automatically disabled when x402 payment is enabled (x402 has its own rate limiting).
+
+### Input Validation
+
+All path and query parameters are validated with strict patterns:
+
+| Parameter | Pattern | Example |
+|-----------|---------|---------|
+| `stamp_id` | 64-character hex | `a1b2c3...` (64 chars) |
+| `reference` | 64-128 character hex | `d4e5f6...` (64-128 chars) |
+
+Invalid inputs receive a **422** response before any processing occurs.
+
+### Error Sanitization
+
+Error messages never expose internal infrastructure details:
+- No internal IP addresses or hostnames
+- No port numbers or file paths
+- No stack traces or library versions
+- Generic messages like "The Bee node may be unavailable" instead of connection strings
+
+### Server Header
+
+The `Server` header is suppressed in all responses to prevent version fingerprinting.
 
 ## Troubleshooting
 
