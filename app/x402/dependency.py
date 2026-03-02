@@ -186,6 +186,7 @@ async def require_x402_payment(request: Request) -> None:
         if is_allowed:
             logger.info(f"x402: Free tier access granted for {client_ip} ({stats['requests_made']}/{stats['limit']} requests)")
             request.state.x402_mode = "free-tier"
+            request.state.x402_payer = None
             request.state.x402_rate_limit_stats = stats
             return
         else:
@@ -250,5 +251,6 @@ async def require_x402_payment(request: Request) -> None:
 
     # Store payment info on request.state for middleware settlement
     request.state.x402_mode = "paid"
+    request.state.x402_payer = getattr(verify_response, 'payer', None)
     request.state.x402_payment = payment_payload
     request.state.x402_requirements = payment_requirements

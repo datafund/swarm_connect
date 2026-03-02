@@ -80,6 +80,12 @@ class Settings(BaseSettings):
     # immediately (async) when a stamp is released from the pool
     STAMP_POOL_IMMEDIATE_REPLENISH: bool = True
 
+    # State persistence: file path for persisting pool state across restarts
+    STAMP_POOL_STATE_FILE: str = "data/pool_state.json"
+
+    # Stamp ownership: file path for persisting stamp ownership records
+    STAMP_OWNERSHIP_FILE: str = "data/stamp_owners.json"
+
     # === Notary/Provenance Signing Settings ===
     # The notary feature allows the gateway to sign documents with an authoritative timestamp.
     # This provides proof that a document existed at a specific time, signed by the gateway.
