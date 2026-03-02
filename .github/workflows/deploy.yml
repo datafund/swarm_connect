@@ -12,8 +12,8 @@ jobs:
   build:
     name: build
     runs-on: [self-hosted, pljudfbee1]
-    # Use staging environment for dev branch (gets variables from GitHub)
-    environment: ${{ github.ref == 'refs/heads/dev' && 'staging' || '' }}
+    # Use staging environment for dev branch, production for main branch
+    environment: ${{ github.ref == 'refs/heads/dev' && 'staging' || (github.ref == 'refs/heads/main' && 'production' || '') }}
 
     steps:
       - name: checkout
@@ -61,12 +61,38 @@ jobs:
           RATE_LIMIT_BURST=${{ vars.RATE_LIMIT_BURST || '10' }}
           EOF
 
+      - name: write env file for main
+        if: github.ref == 'refs/heads/main'
+        run: |
+          cat > /opt/swarm_connect.env << 'EOF'
+          X402_ENABLED=${{ vars.X402_ENABLED || 'false' }}
+          X402_PAY_TO_ADDRESS=${{ vars.X402_PAY_TO_ADDRESS || '' }}
+          X402_NETWORK=${{ vars.X402_NETWORK || 'base' }}
+          X402_FACILITATOR_URL=${{ vars.X402_FACILITATOR_URL || 'https://x402.org/facilitator' }}
+          X402_FREE_TIER_ENABLED=${{ vars.X402_FREE_TIER_ENABLED || 'true' }}
+          STAMP_POOL_ENABLED=${{ vars.STAMP_POOL_ENABLED || 'false' }}
+          STAMP_POOL_RESERVE_SMALL=${{ vars.STAMP_POOL_RESERVE_SMALL || '1' }}
+          STAMP_POOL_RESERVE_MEDIUM=${{ vars.STAMP_POOL_RESERVE_MEDIUM || '1' }}
+          STAMP_POOL_RESERVE_LARGE=${{ vars.STAMP_POOL_RESERVE_LARGE || '0' }}
+          STAMP_POOL_CHECK_INTERVAL_SECONDS=${{ vars.STAMP_POOL_CHECK_INTERVAL_SECONDS || '900' }}
+          STAMP_POOL_MIN_TTL_HOURS=${{ vars.STAMP_POOL_MIN_TTL_HOURS || '24' }}
+          STAMP_POOL_TOPUP_HOURS=${{ vars.STAMP_POOL_TOPUP_HOURS || '168' }}
+          STAMP_POOL_DEFAULT_DURATION_HOURS=${{ vars.STAMP_POOL_DEFAULT_DURATION_HOURS || '168' }}
+          NOTARY_ENABLED=${{ vars.NOTARY_ENABLED || 'false' }}
+          NOTARY_PRIVATE_KEY=${{ secrets.NOTARY_PRIVATE_KEY || '' }}
+          CORS_ALLOWED_ORIGINS=${{ vars.CORS_ALLOWED_ORIGINS || '*' }}
+          CORS_ALLOW_CREDENTIALS=${{ vars.CORS_ALLOW_CREDENTIALS || 'false' }}
+          MAX_UPLOAD_SIZE_MB=${{ vars.MAX_UPLOAD_SIZE_MB || '10' }}
+          RATE_LIMIT_ENABLED=${{ vars.RATE_LIMIT_ENABLED || 'true' }}
+          RATE_LIMIT_PER_MINUTE=${{ vars.RATE_LIMIT_PER_MINUTE || '60' }}
+          RATE_LIMIT_BURST=${{ vars.RATE_LIMIT_BURST || '10' }}
+          EOF
+
       - name: deploy
         run: >
           cd /opt/ && rm -rf swarm_connect && git clone -b $GITHUB_REF_NAME https://github.com/datafund/swarm_connect.git && cd swarm_connect && docker compose up -d
 
       - name: post-deploy diagnostics
-        if: github.ref == 'refs/heads/dev'
         run: |
           echo "=== Container status ==="
           docker ps -a --filter "name=swarm_connect" --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
@@ -74,11 +100,20 @@ jobs:
           echo "=== Waiting 10s for container startup ==="
           sleep 10
           echo ""
+          if [ "$GITHUB_REF_NAME" = "dev" ]; then
+            CONTAINER="swarm_connect-provenance_gateway_dev-1"
+            PORT=8900
+            ENV_FILE="/opt/swarm_connect_dev.env"
+          else
+            CONTAINER="swarm_connect-provenance_gateway-1"
+            PORT=8899
+            ENV_FILE="/opt/swarm_connect.env"
+          fi
           echo "=== Container logs (last 30 lines) ==="
-          docker logs swarm_connect-provenance_gateway_dev-1 --tail 30 2>&1 || echo "Container not found"
+          docker logs "$CONTAINER" --tail 30 2>&1 || echo "Container not found"
           echo ""
           echo "=== Health check from localhost ==="
-          curl -s http://localhost:8900/health 2>&1 || echo "Cannot reach container"
+          curl -s "http://localhost:${PORT}/health" 2>&1 || echo "Cannot reach container"
           echo ""
           echo "=== Env file (redacted) ==="
-          cat /opt/swarm_connect_dev.env 2>/dev/null | grep -v PRIVATE_KEY | head -20 || echo "Env file not found"
+          cat "$ENV_FILE" 2>/dev/null | grep -v PRIVATE_KEY | head -20 || echo "Env file not found"
