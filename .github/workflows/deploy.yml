@@ -7,6 +7,7 @@ on:
       - master
       - main
       - dev
+  workflow_dispatch:
 
 jobs:
   build:
