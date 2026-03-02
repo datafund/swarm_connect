@@ -5,6 +5,8 @@ services:
     image: swarm_connect:main
     ports:
       - "8899:8000"
+    env_file:
+      - /opt/swarm_connect.env
     environment:
       - SWARM_BEE_API_URL=http://192.168.45.30:1633
     restart: unless-stopped
