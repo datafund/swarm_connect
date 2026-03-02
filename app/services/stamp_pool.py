@@ -15,11 +15,13 @@ Architecture:
 See GitHub Issue #63 for full specification.
 """
 import asyncio
+import json
 import logging
+import os
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Set
 from threading import Lock
 
 from app.core.config import settings
@@ -72,7 +74,7 @@ class StampPoolManager:
     approaching expiration.
     """
 
-    def __init__(self):
+    def __init__(self, state_file: Optional[str] = None):
         self._pool: Dict[str, PoolStamp] = {}  # batch_id -> PoolStamp
         self._lock = Lock()
         self._running = False
@@ -80,6 +82,7 @@ class StampPoolManager:
         self._last_check: Optional[datetime] = None
         self._errors: List[str] = []
         self._pending_replenishments: Dict[int, int] = {}  # depth -> count of pending purchases
+        self._state_file = state_file  # Allow override for testing
 
     @property
     def is_enabled(self) -> bool:
@@ -89,6 +92,51 @@ class StampPoolManager:
     def get_reserve_config(self) -> Dict[int, int]:
         """Get the configured reserve levels by depth."""
         return settings.get_stamp_pool_reserve_config()
+
+    def _get_state_file_path(self) -> str:
+        """Get the state file path, using override or settings."""
+        return self._state_file or settings.STAMP_POOL_STATE_FILE
+
+    def _save_state(self):
+        """Persist current pool batch IDs to state file."""
+        state_file = self._get_state_file_path()
+        try:
+            state_dir = os.path.dirname(state_file)
+            if state_dir:
+                os.makedirs(state_dir, exist_ok=True)
+            batch_ids = list(self._pool.keys())
+            with open(state_file, 'w') as f:
+                json.dump(batch_ids, f)
+            logger.debug(f"Saved pool state: {len(batch_ids)} stamps to {state_file}")
+        except Exception as e:
+            logger.error(f"Failed to save pool state to {state_file}: {e}")
+
+    def _load_state(self) -> Set[str]:
+        """Load pool batch IDs from state file.
+
+        Returns:
+            Set of batch IDs that were previously in the pool.
+            Returns empty set if file is missing or corrupt.
+        """
+        state_file = self._get_state_file_path()
+        try:
+            with open(state_file, 'r') as f:
+                batch_ids = json.load(f)
+            if isinstance(batch_ids, list):
+                logger.info(f"Loaded pool state: {len(batch_ids)} stamps from {state_file}")
+                return set(batch_ids)
+            else:
+                logger.warning(f"Invalid pool state format in {state_file}, treating as first run")
+                return set()
+        except FileNotFoundError:
+            logger.info(f"No pool state file at {state_file}, treating as first run")
+            return set()
+        except (json.JSONDecodeError, ValueError) as e:
+            logger.warning(f"Corrupt pool state file {state_file}: {e}, treating as first run")
+            return set()
+        except Exception as e:
+            logger.warning(f"Error loading pool state from {state_file}: {e}, treating as first run")
+            return set()
 
     def get_status(self) -> PoolStatus:
         """Get current pool status."""
@@ -200,6 +248,7 @@ class StampPoolManager:
             # Remove from pool (we no longer manage it)
             del self._pool[batch_id]
 
+            self._save_state()
             return stamp
 
     def trigger_replenishment_if_needed(self, depth: int) -> bool:
@@ -309,53 +358,57 @@ class StampPoolManager:
             )
             self._pool[batch_id] = stamp
             logger.info(f"Added stamp {batch_id[:16]}... to pool (depth={depth})")
+            self._save_state()
             return stamp
 
     async def sync_from_bee_node(self) -> int:
         """
-        Sync pool with stamps from the Bee node.
+        Sync pool with stamps from the Bee node using persisted state.
 
-        This finds existing stamps that match pool criteria and adds them.
-        Useful for initial population or recovery.
+        Only re-imports stamps whose batch IDs are in the state file.
+        On first run (no state file), imports nothing — the purchase logic
+        will fill the pool to the configured reserve target.
 
         Returns:
             Number of stamps synced
         """
         try:
+            known_ids = self._load_state()
+
+            # First run: no state file means empty pool, let purchase logic fill it
+            if not known_ids:
+                logger.info("No known stamps in state file, pool will be filled by purchase logic")
+                return 0
+
             all_stamps = swarm_api.get_all_stamps_processed()
+            stamp_map = {s.get("batchID"): s for s in all_stamps}
             synced_count = 0
-            reserve_config = self.get_reserve_config()
-            target_depths = set(reserve_config.keys())
+            valid_ids = set()
 
             with self._lock:
-                for stamp_data in all_stamps:
-                    batch_id = stamp_data.get("batchID")
-                    depth = stamp_data.get("depth")
-                    is_local = stamp_data.get("local", False)
+                for batch_id in known_ids:
+                    # Skip if already in pool
+                    if batch_id in self._pool:
+                        valid_ids.add(batch_id)
+                        continue
+
+                    stamp_data = stamp_map.get(batch_id)
+                    if not stamp_data:
+                        # Stamp no longer exists on Bee node (expired/removed)
+                        logger.info(f"Known stamp {batch_id[:16]}... no longer on Bee node, removing from state")
+                        continue
+
                     usable = stamp_data.get("usable", False)
                     ttl = stamp_data.get("batchTTL", 0)
 
-                    # Skip if already in pool
-                    if batch_id in self._pool:
+                    if not usable or ttl <= 0:
+                        logger.info(f"Known stamp {batch_id[:16]}... is expired/unusable, removing from state")
                         continue
 
-                    # Only add local, usable stamps with matching depth
-                    if not is_local or not usable:
-                        continue
-
-                    if depth not in target_depths:
-                        continue
-
-                    # Skip stamps with low TTL
-                    min_ttl_seconds = settings.STAMP_POOL_MIN_TTL_HOURS * 3600
-                    if ttl < min_ttl_seconds:
-                        continue
-
-                    # Check if pool label suggests it's a pool stamp
-                    label = stamp_data.get("label", "")
-
-                    # Add to pool
+                    # Re-import this known stamp
+                    depth = stamp_data.get("depth")
                     amount = int(stamp_data.get("amount", 0))
+                    label = stamp_data.get("label", "")
                     stamp = PoolStamp(
                         batch_id=batch_id,
                         depth=depth,
@@ -366,8 +419,13 @@ class StampPoolManager:
                         label=label or f"synced-{depth}"
                     )
                     self._pool[batch_id] = stamp
+                    valid_ids.add(batch_id)
                     synced_count += 1
-                    logger.info(f"Synced existing stamp {batch_id[:16]}... to pool (depth={depth}, ttl={ttl}s)")
+                    logger.info(f"Synced known stamp {batch_id[:16]}... to pool (depth={depth}, ttl={ttl}s)")
+
+            # Save cleaned state (only stamps that are still valid)
+            if valid_ids != known_ids:
+                self._save_state()
 
             return synced_count
 
@@ -562,6 +620,9 @@ class StampPoolManager:
 
                 for batch_id in to_remove:
                     del self._pool[batch_id]
+
+                if to_remove:
+                    self._save_state()
 
         except Exception as e:
             logger.warning(f"Error updating stamp TTLs: {e}")
