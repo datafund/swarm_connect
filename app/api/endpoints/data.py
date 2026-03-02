@@ -28,6 +28,7 @@ from app.services.swarm_api import (
     REDUNDANCY_LEVELS
 )
 from app.core.config import settings
+from app.services.stamp_ownership import stamp_ownership_manager
 from app.services.provenance import (
     get_provenance_service,
     DocumentValidationError,
@@ -206,6 +207,21 @@ async def upload_data(
     bee_upload_ms = None
 
     try:
+        # Check stamp ownership
+        if settings.X402_ENABLED:
+            x402_payer = getattr(request.state, 'x402_payer', None)
+            x402_mode = getattr(request.state, 'x402_mode', None)
+            allowed, reason = stamp_ownership_manager.check_access(stamp_id, x402_payer, x402_mode)
+            if not allowed:
+                raise HTTPException(
+                    status_code=403,
+                    detail={
+                        "code": "STAMP_OWNERSHIP_DENIED",
+                        "message": f"Access denied: {reason}",
+                        "stamp_id": stamp_id
+                    }
+                )
+
         # Validate redundancy level if provided
         if redundancy is not None and redundancy not in REDUNDANCY_LEVELS:
             valid_levels = ", ".join(f"{k}={v}" for k, v in REDUNDANCY_LEVELS.items())
@@ -590,6 +606,21 @@ async def upload_manifest(
     bee_upload_ms = None
 
     try:
+        # Check stamp ownership
+        if settings.X402_ENABLED:
+            x402_payer = getattr(request.state, 'x402_payer', None)
+            x402_mode = getattr(request.state, 'x402_mode', None)
+            allowed, reason = stamp_ownership_manager.check_access(stamp_id, x402_payer, x402_mode)
+            if not allowed:
+                raise HTTPException(
+                    status_code=403,
+                    detail={
+                        "code": "STAMP_OWNERSHIP_DENIED",
+                        "message": f"Access denied: {reason}",
+                        "stamp_id": stamp_id
+                    }
+                )
+
         # Validate redundancy level if provided
         if redundancy is not None and redundancy not in REDUNDANCY_LEVELS:
             valid_levels = ", ".join(f"{k}={v}" for k, v in REDUNDANCY_LEVELS.items())

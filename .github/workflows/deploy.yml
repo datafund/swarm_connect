@@ -53,6 +53,7 @@ jobs:
           STAMP_POOL_TOPUP_HOURS=${{ vars.STAMP_POOL_TOPUP_HOURS || '168' }}
           STAMP_POOL_DEFAULT_DURATION_HOURS=${{ vars.STAMP_POOL_DEFAULT_DURATION_HOURS || '168' }}
           STAMP_POOL_STATE_FILE=${{ vars.STAMP_POOL_STATE_FILE || 'data/pool_state.json' }}
+          STAMP_OWNERSHIP_FILE=${{ vars.STAMP_OWNERSHIP_FILE || 'data/stamp_owners.json' }}
           NOTARY_ENABLED=${{ vars.NOTARY_ENABLED || 'false' }}
           NOTARY_PRIVATE_KEY=${{ secrets.NOTARY_PRIVATE_KEY || '' }}
           CORS_ALLOWED_ORIGINS=${{ vars.CORS_ALLOWED_ORIGINS || '*' }}
@@ -82,6 +83,7 @@ jobs:
           STAMP_POOL_TOPUP_HOURS=${{ vars.STAMP_POOL_TOPUP_HOURS || '168' }}
           STAMP_POOL_DEFAULT_DURATION_HOURS=${{ vars.STAMP_POOL_DEFAULT_DURATION_HOURS || '168' }}
           STAMP_POOL_STATE_FILE=${{ vars.STAMP_POOL_STATE_FILE || 'data/pool_state.json' }}
+          STAMP_OWNERSHIP_FILE=${{ vars.STAMP_OWNERSHIP_FILE || 'data/stamp_owners.json' }}
           NOTARY_ENABLED=${{ vars.NOTARY_ENABLED || 'false' }}
           NOTARY_PRIVATE_KEY=${{ secrets.NOTARY_PRIVATE_KEY || '' }}
           CORS_ALLOWED_ORIGINS=${{ vars.CORS_ALLOWED_ORIGINS || '*' }}

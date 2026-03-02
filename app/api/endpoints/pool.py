@@ -15,6 +15,7 @@ import logging
 
 from app.core.config import settings
 from app.services.stamp_pool import stamp_pool_manager, PoolStampStatus
+from app.services.stamp_ownership import stamp_ownership_manager
 from app.api.models.stamp import SIZE_PRESETS
 
 router = APIRouter()
@@ -208,6 +209,24 @@ async def acquire_stamp(
                 "message": "Stamp was acquired by another request.",
                 "suggestion": "Retry the request or purchase a stamp directly via POST /api/v1/stamps/"
             }
+        )
+
+    # Register stamp ownership
+    x402_mode = getattr(http_request.state, 'x402_mode', None)
+    x402_payer = getattr(http_request.state, 'x402_payer', None)
+    if x402_mode == "paid" and x402_payer:
+        stamp_ownership_manager.register_stamp(
+            batch_id=released.batch_id,
+            owner=x402_payer,
+            mode="paid",
+            source="pool_acquire"
+        )
+    else:
+        stamp_ownership_manager.register_stamp(
+            batch_id=released.batch_id,
+            owner="shared",
+            mode="free",
+            source="pool_acquire"
         )
 
     # Trigger immediate replenishment if pool is below target
