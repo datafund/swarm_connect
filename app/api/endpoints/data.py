@@ -113,6 +113,13 @@ async def upload_data(
     """
     Upload data to the Swarm network via the configured Bee node.
 
+    **x402 Payment** (when gateway has x402 enabled):
+    This endpoint requires payment OR free tier access. Check `GET /health` for availability.
+    - **Free tier**: Add header `X-Payment-Mode: free` (rate limited)
+    - **Paid**: Include x402 payment header (higher rate limit)
+    - Without either header, returns **HTTP 402** with payment instructions and free tier info
+    - Downloads (`GET /api/v1/data/{reference}`) are always free — no headers needed
+
     **Requirements**:
     - Upload as **multipart/form-data** with a `file` field
     - Valid `stamp_id` query parameter required
@@ -163,6 +170,11 @@ async def upload_data(
 
     **Usage Examples**:
     ```bash
+    # Upload with free tier (when x402 is enabled)
+    curl -X POST "http://localhost:8000/api/v1/data/?stamp_id=ABC123" \\
+         -H "X-Payment-Mode: free" \\
+         -F "file=@data.json"
+
     # Upload JSON file (direct mode, default)
     curl -X POST "http://localhost:8000/api/v1/data/?stamp_id=ABC123&content_type=application/json" \\
          -F "file=@data.json"
@@ -408,6 +420,8 @@ async def download_data(
     """
     Download data from the Swarm network as a file (triggers browser download).
 
+    **Always free** — no payment or headers required, even when x402 is enabled.
+
     **Use case**: End users downloading files, browser integration
 
     **Features**:
@@ -452,6 +466,8 @@ async def download_data_json(
 ):
     """
     Download data from the Swarm network as JSON with metadata (for API clients).
+
+    **Always free** — no payment or headers required, even when x402 is enabled.
 
     **Use case**: Web apps, mobile apps, API integrations needing metadata
 
@@ -514,6 +530,12 @@ async def upload_manifest(
     This endpoint bundles multiple files in a single upload for improved performance.
     The TAR archive is uploaded with the `Swarm-Collection: true` header, creating
     a manifest that maps file paths to their individual Swarm references.
+
+    **x402 Payment** (when gateway has x402 enabled):
+    This endpoint requires payment OR free tier access. Check `GET /health` for availability.
+    - **Free tier**: Add header `X-Payment-Mode: free` (rate limited)
+    - **Paid**: Include x402 payment header (higher rate limit)
+    - Without either header, returns **HTTP 402** with payment instructions and free tier info
 
     **Performance benefit**: Uploading 50 files as a TAR manifest takes ~500ms vs
     ~14 seconds for sequential individual uploads (15x improvement).

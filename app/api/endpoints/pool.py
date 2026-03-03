@@ -160,7 +160,26 @@ async def acquire_stamp(
     request: AcquireStampRequest,
     http_request: Request
 ):
-    """Acquire a stamp from the pool."""
+    """
+    Acquire a stamp from the pool for immediate use (~5 seconds vs >1 minute).
+
+    **x402 Payment** (when gateway has x402 enabled):
+    This endpoint requires payment OR free tier access. Check `GET /health` for availability.
+    - **Free tier**: Add header `X-Payment-Mode: free` (rate limited)
+    - **Paid**: Include x402 payment header (higher rate limit)
+    - Without either header, returns **HTTP 402** with payment instructions and free tier info
+
+    **Quick start** (free tier):
+    ```bash
+    curl -X POST http://gateway/api/v1/pool/acquire \\
+         -H "Content-Type: application/json" \\
+         -H "X-Payment-Mode: free" \\
+         -d '{"size": "small"}'
+    ```
+
+    The stamp is released from the pool and becomes the caller's responsibility.
+    Use the returned `batch_id` as the `stamp_id` parameter for data uploads.
+    """
     if not settings.STAMP_POOL_ENABLED:
         raise HTTPException(
             status_code=404,

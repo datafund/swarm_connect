@@ -191,10 +191,11 @@ class TestManifestUploadIntegration:
         }
         tar_data = create_test_tar(test_files)
 
-        # Upload via manifest endpoint
+        # Upload via manifest endpoint (use free tier header for x402-enabled gateways)
         response = requests.post(
             f"{GATEWAY_URL}/api/v1/data/manifest",
             params={"stamp_id": usable_stamp},
+            headers={"X-Payment-Mode": "free"},
             files={"file": ("test.tar", tar_data, "application/x-tar")},
             timeout=120
         )
