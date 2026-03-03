@@ -266,6 +266,15 @@ async def purchase_stamp(
     """
     Purchases a new postage stamp from the Swarm network.
 
+    **x402 Payment** (when gateway has x402 enabled):
+    This endpoint requires payment OR free tier access. Check `GET /health` for availability.
+    - **Free tier**: Add header `X-Payment-Mode: free` (rate limited)
+    - **Paid**: Include x402 payment header (higher rate limit)
+    - Without either header, returns **HTTP 402** with payment instructions and free tier info
+
+    **Tip**: For faster stamp acquisition, use `POST /api/v1/pool/acquire` instead (instant
+    from pre-purchased pool vs ~1 minute for on-chain purchase).
+
     Creates a new postage stamp batch with the specified duration or amount and depth.
     If duration_hours is provided, amount is calculated based on current network price.
     If neither is provided, defaults to 25 hours duration.
@@ -280,7 +289,7 @@ async def purchase_stamp(
         StampPurchaseResponse: Contains the new batch ID and success message
 
     Raises:
-        HTTPException: 400 if insufficient funds, 502 if Swarm API is unreachable
+        HTTPException: 400 if insufficient funds, 402 if payment required, 502 if Swarm API is unreachable
     """
     try:
         # Get effective depth from size preset or explicit depth
