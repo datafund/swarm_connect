@@ -23,6 +23,47 @@ GATEWAY_URL = os.environ.get("GATEWAY_URL", "https://provenance-gateway.datafund
 # Minimum hours for stamp purchase (25h to avoid borderline 24h failures)
 MIN_STAMP_HOURS = 25
 
+# Free tier rate limit window (seconds)
+FREE_TIER_WINDOW = 60
+
+
+class FreeTierPacer:
+    """Tracks free tier POST requests and sleeps when approaching the rate limit."""
+
+    def __init__(self, limit: int = 3):
+        self.limit = limit
+        self.timestamps: list[float] = []
+
+    def wait_if_needed(self):
+        """Sleep if we'd exceed the rate limit with the next request."""
+        now = time.time()
+        # Remove timestamps outside the window
+        self.timestamps = [t for t in self.timestamps if now - t < FREE_TIER_WINDOW]
+        if len(self.timestamps) >= self.limit:
+            # Wait for the oldest request to fall out of the window
+            sleep_time = FREE_TIER_WINDOW - (now - self.timestamps[0]) + 1
+            if sleep_time > 0:
+                print(f"\n  Rate limit pacer: sleeping {sleep_time:.0f}s for window reset...")
+                time.sleep(sleep_time)
+        self.timestamps.append(time.time())
+
+
+# Module-level pacer instance shared across all tests
+_pacer = FreeTierPacer()
+
+
+def _detect_free_tier_limit() -> int:
+    """Query the gateway health endpoint to discover the free tier rate limit."""
+    try:
+        resp = requests.get(f"{GATEWAY_URL}/health", timeout=10)
+        if resp.status_code == 200:
+            limit = resp.json().get("x402", {}).get("free_tier", {}).get("rate_limit_per_minute")
+            if limit:
+                return int(limit)
+    except Exception:
+        pass
+    return 3  # default
+
 
 def create_test_tar(files: dict) -> bytes:
     """Create a TAR archive from a dictionary of {filename: content}."""
@@ -41,12 +82,22 @@ def create_test_tar(files: dict) -> bytes:
 
 @pytest.fixture(scope="module")
 def gateway_available():
-    """Check if the gateway is available."""
+    """Check if the gateway is available. Also initializes the rate limit pacer."""
     try:
         response = requests.get(f"{GATEWAY_URL}/", timeout=10)
-        return response.status_code == 200
+        if response.status_code == 200:
+            _pacer.limit = _detect_free_tier_limit()
+            return True
+        return False
     except requests.RequestException:
         return False
+
+
+@pytest.fixture(autouse=True)
+def pace_free_tier():
+    """Auto-fixture that paces POST requests to stay within free tier rate limits."""
+    # Runs before each test; actual pacing happens when wait_if_needed() is called
+    return _pacer
 
 
 @pytest.fixture(scope="module")
@@ -108,6 +159,7 @@ def usable_stamp(gateway_available):
         print(f"Purchasing stamp: amount={amount}, depth={depth} (~{MIN_STAMP_HOURS}h)")
 
         # Purchase stamp via our gateway (use free tier header for x402-enabled gateways)
+        _pacer.wait_if_needed()
         purchase_response = requests.post(
             f"{GATEWAY_URL}/api/v1/stamps/",
             json={"amount": amount, "depth": depth},
@@ -193,6 +245,7 @@ class TestManifestUploadIntegration:
         tar_data = create_test_tar(test_files)
 
         # Upload via manifest endpoint (use free tier header for x402-enabled gateways)
+        _pacer.wait_if_needed()
         response = requests.post(
             f"{GATEWAY_URL}/api/v1/data/manifest",
             params={"stamp_id": usable_stamp},
@@ -239,6 +292,7 @@ class TestManifestUploadIntegration:
         tar_buffer.seek(0)
         empty_tar = tar_buffer.read()
 
+        _pacer.wait_if_needed()
         response = requests.post(
             f"{GATEWAY_URL}/api/v1/data/manifest",
             params={"stamp_id": usable_stamp},
@@ -257,6 +311,7 @@ class TestManifestUploadIntegration:
 
         invalid_data = b"This is not a TAR file"
 
+        _pacer.wait_if_needed()
         response = requests.post(
             f"{GATEWAY_URL}/api/v1/data/manifest",
             params={"stamp_id": usable_stamp},
@@ -275,6 +330,7 @@ class TestManifestUploadIntegration:
 
         tar_data = create_test_tar({"test.txt": "test"})
 
+        _pacer.wait_if_needed()
         response = requests.post(
             f"{GATEWAY_URL}/api/v1/data/manifest",
             headers={"X-Payment-Mode": "free"},
@@ -296,6 +352,7 @@ class TestDataUploadIntegration:
 
         test_data = b"Integration test data upload"
 
+        _pacer.wait_if_needed()
         response = requests.post(
             f"{GATEWAY_URL}/api/v1/data/",
             params={"stamp_id": usable_stamp},
