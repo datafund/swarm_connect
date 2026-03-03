@@ -107,10 +107,11 @@ def usable_stamp(gateway_available):
 
         print(f"Purchasing stamp: amount={amount}, depth={depth} (~{MIN_STAMP_HOURS}h)")
 
-        # Purchase stamp via our gateway
+        # Purchase stamp via our gateway (use free tier header for x402-enabled gateways)
         purchase_response = requests.post(
             f"{GATEWAY_URL}/api/v1/stamps/",
             json={"amount": amount, "depth": depth},
+            headers={"X-Payment-Mode": "free"},
             timeout=120
         )
 
@@ -241,6 +242,7 @@ class TestManifestUploadIntegration:
         response = requests.post(
             f"{GATEWAY_URL}/api/v1/data/manifest",
             params={"stamp_id": usable_stamp},
+            headers={"X-Payment-Mode": "free"},
             files={"file": ("empty.tar", empty_tar, "application/x-tar")},
             timeout=60
         )
@@ -258,6 +260,7 @@ class TestManifestUploadIntegration:
         response = requests.post(
             f"{GATEWAY_URL}/api/v1/data/manifest",
             params={"stamp_id": usable_stamp},
+            headers={"X-Payment-Mode": "free"},
             files={"file": ("invalid.tar", invalid_data, "application/x-tar")},
             timeout=60
         )
@@ -274,6 +277,7 @@ class TestManifestUploadIntegration:
 
         response = requests.post(
             f"{GATEWAY_URL}/api/v1/data/manifest",
+            headers={"X-Payment-Mode": "free"},
             files={"file": ("test.tar", tar_data, "application/x-tar")},
             timeout=60
         )
@@ -295,6 +299,7 @@ class TestDataUploadIntegration:
         response = requests.post(
             f"{GATEWAY_URL}/api/v1/data/",
             params={"stamp_id": usable_stamp},
+            headers={"X-Payment-Mode": "free"},
             files={"file": ("test.bin", test_data, "application/octet-stream")},
             timeout=60
         )
