@@ -85,13 +85,27 @@ app.include_router(notary.router, prefix=f"{settings.API_V1_STR}/notary", tags=[
 @app.get("/health", summary="Health Check", tags=["default"], include_in_schema=False)
 def read_root():
     """
-    Health check endpoint.
+    Health check endpoint. Use this to discover gateway capabilities before making requests.
 
-    When X402_ENABLED=true, includes x402 wallet status:
-    - status: "ok" | "degraded" | "critical"
-    - x402: detailed wallet balances and warnings
+    **Response fields**:
+    - `status`: "ok" | "degraded" | "critical"
+    - `message`: Gateway name
+    - `x402` (when payments enabled): wallet status, free tier availability, and warnings
 
-    Returns 503 when x402 is enabled and gateway wallet is critically low on ETH.
+    **When x402 payments are enabled**, the response includes:
+    - `x402.enabled`: true
+    - `x402.free_tier.enabled`: whether free tier access is available
+    - `x402.free_tier.rate_limit_per_minute`: requests allowed per minute on free tier
+    - `x402.free_tier.header`: the exact header to add for free tier access
+    - `x402.base_wallet`: USDC receiving wallet status
+    - `x402.bee_gnosis_wallet`: Bee node wallet balances
+
+    **Integrator quick start** (when x402 is enabled and free tier is available):
+    1. Call `GET /health` — check `x402.free_tier.enabled` is `true`
+    2. Add header `X-Payment-Mode: free` to all POST requests
+    3. Acquire a stamp: `POST /api/v1/pool/acquire`
+    4. Upload data: `POST /api/v1/data/?stamp_id=...`
+    5. Download data: `GET /api/v1/data/{reference}` (always free, no headers needed)
     """
     logger.info("Health check endpoint accessed.")
 
@@ -134,6 +148,11 @@ def read_root():
         # Add x402 details
         response_data["x402"] = {
             "enabled": True,
+            "free_tier": {
+                "enabled": settings.X402_FREE_TIER_ENABLED,
+                "rate_limit_per_minute": settings.X402_FREE_TIER_RATE_LIMIT,
+                "header": "X-Payment-Mode: free",
+            },
             "base_wallet": {
                 "address": base_eth.get("address"),
                 "balance_eth": base_eth.get("balance_eth"),
