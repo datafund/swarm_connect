@@ -65,11 +65,19 @@ python -m pytest tests/test_manifest_upload.py -v
 - Handles HTTP requests to Swarm Bee API (`/batches` endpoint)
 - Includes error handling for network issues and malformed responses
 - Supports both direct list responses and `{"batches": [...]}` wrapper formats
+- `calculate_propagation_signals()`: Computes propagation timing for stamps purchased through this gateway
+
+**Stamp Purchase Tracker (`app/services/stamp_tracker.py`)**:
+- In-memory tracker for stamps purchased through this gateway
+- Records purchase timestamps to calculate propagation timing signals
+- Auto-prunes entries older than 10 minutes to prevent unbounded growth
+- Functions: `record_purchase()`, `get_purchase_time()`, `clear_tracker()`
 
 **Stamps API (`app/api/endpoints/stamps.py`)**:
 - Provides `/api/v1/stamps/{stamp_id}` endpoint
 - Fetches all stamps from Swarm and filters by ID
 - Calculates expiration time: `current_time + batchTTL`
+- Records purchase timestamps for propagation tracking on `POST /stamps/`
 - Comprehensive error handling with appropriate HTTP status codes
 
 **Data Models (`app/api/models/stamp.py`)**:
@@ -77,6 +85,7 @@ python -m pytest tests/test_manifest_upload.py -v
 - Field aliases for API compatibility (`amount` aliased as `value`, etc.)
 - Calculated `expectedExpiration` field in `YYYY-MM-DD-HH-MM` UTC format
 - Calculated `utilizationPercent` field showing stamp usage as percentage (0-100%)
+- Propagation timing fields: `secondsSincePurchase`, `estimatedReadyAt`, `propagationStatus`
 
 ### Environment Configuration
 
@@ -88,6 +97,9 @@ Optional environment variables:
 - `PORT`: Server port (default: `8000`)
 - `RELOAD`: Enable auto-reload (default: `true`)
 - `SSL_KEYFILE`/`SSL_CERTFILE`: For HTTPS development
+
+Stamp propagation:
+- `STAMP_PROPAGATION_SECONDS`: Expected propagation delay after purchase in seconds (default: `120`)
 
 Security settings:
 - `MAX_UPLOAD_SIZE_MB`: Maximum file upload size in megabytes (default: `10`)
@@ -109,11 +121,16 @@ CORS (browser access):
 - `GET /`: Health check endpoint
 
 #### Stamp Management
-- `POST /api/v1/stamps/`: Purchase new postage stamps
-- `GET /api/v1/stamps/`: List all available stamps with expiration calculations
-- `GET /api/v1/stamps/{stamp_id}`: Retrieve specific stamp batch details
-- `GET /api/v1/stamps/{stamp_id}/check`: Check stamp health for uploads (errors, warnings, can_upload status)
+- `POST /api/v1/stamps/`: Purchase new postage stamps (records purchase time for propagation tracking)
+- `GET /api/v1/stamps/`: List all available stamps with expiration calculations and propagation status
+- `GET /api/v1/stamps/{stamp_id}`: Retrieve specific stamp batch details including propagation timing
+- `GET /api/v1/stamps/{stamp_id}/check`: Check stamp health for uploads (errors, warnings, can_upload status, propagation status)
 - `PATCH /api/v1/stamps/{stamp_id}/extend`: Extend existing stamps with additional funds
+
+**Propagation timing fields** (included in all stamp responses):
+- `secondsSincePurchase`: Seconds elapsed since purchase through this gateway (null for external stamps)
+- `estimatedReadyAt`: ISO 8601 timestamp when stamp should be usable (null for external stamps)
+- `propagationStatus`: `"ready"` / `"propagating"` / `"unknown"` (null if undetermined)
 
 #### Data Operations
 - `POST /api/v1/data/?stamp_id={id}&content_type={type}&redundancy={level}`: Upload raw data to Swarm (redundancy 0-4, default 2)

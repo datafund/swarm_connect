@@ -696,7 +696,10 @@ Perform a comprehensive health check on a stamp to determine if it can be used f
     "utilizationPercent": 82.5,
     "utilizationStatus": "warning",
     "batchTTL": 86400,
-    "expectedExpiration": "2026-01-12-17-30"
+    "expectedExpiration": "2026-01-12-17-30",
+    "secondsSincePurchase": null,
+    "estimatedReadyAt": null,
+    "propagationStatus": "ready"
   }
 }
 ```
@@ -803,12 +806,18 @@ The `Server` header is suppressed in all responses to prevent version fingerprin
 3. Purchase a new stamp through this node
 
 #### "Stamp is not yet usable" (NOT_USABLE)
-**Cause:** After purchasing a stamp, there's a 30-90 second propagation delay before it can be used.
+**Cause:** After purchasing a stamp, there's a ~2 minute propagation delay before it can be used.
 
 **Solutions:**
-1. Wait 30-90 seconds after purchase
-2. Check stamp status with `GET /api/v1/stamps/{stamp_id}/check`
-3. The `usable` field will change from `false` to `true` when ready
+1. Wait for the stamp to propagate (~2 minutes after purchase)
+2. Check stamp status with `GET /api/v1/stamps/{stamp_id}/check` — use the `propagationStatus` field
+3. The `propagationStatus` field transitions: `"propagating"` → `"ready"` when the stamp becomes usable
+4. Use `estimatedReadyAt` (ISO 8601) to know when to retry
+
+**Propagation timing fields** (available on all stamp responses):
+- `secondsSincePurchase`: How long since purchase through this gateway (null for external stamps)
+- `estimatedReadyAt`: ISO 8601 timestamp when stamp should be ready
+- `propagationStatus`: `"propagating"` (waiting), `"ready"` (usable), `"unknown"` (not tracked by this gateway)
 
 **Example workflow after purchase:**
 ```bash
@@ -818,11 +827,11 @@ curl -X POST "http://localhost:8000/api/v1/stamps/" \
      -d '{"duration_hours": 25, "size": "small"}'
 # Response: {"batchID": "abc123...", "message": "..."}
 
-# Check if ready (repeat until can_upload=true)
+# Check propagation status (repeat until propagationStatus="ready")
 curl "http://localhost:8000/api/v1/stamps/abc123.../check"
-# Wait for: {"can_upload": true, ...}
+# Response includes: "propagationStatus": "propagating", "estimatedReadyAt": "2026-03-16T12:02:00+00:00"
 
-# Now upload
+# Now upload (once propagationStatus="ready")
 curl -X POST "http://localhost:8000/api/v1/data/?stamp_id=abc123..." \
      -F "file=@data.json"
 ```
