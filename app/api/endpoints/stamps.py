@@ -1,10 +1,11 @@
 # app/api/endpoints/stamps.py
-from fastapi import APIRouter, HTTPException, Path, Request, status, Body
-from typing import Any, Union
+from fastapi import APIRouter, HTTPException, Path, Query, Request, status, Body
+from typing import Any, Optional, Union
 import datetime
 from requests.exceptions import RequestException
 import logging
 
+from app.core.config import settings
 from app.services import swarm_api
 from app.services.stamp_ownership import stamp_ownership_manager
 from app.services.stamp_tracker import record_purchase
@@ -23,20 +24,43 @@ from app.api.models.stamp import (
 router = APIRouter()
 logger = logging.getLogger(__name__)
 
+def _is_owned_by(batch_id: str, wallet: str) -> bool:
+    """Check if a stamp is owned by the given wallet address."""
+    info = stamp_ownership_manager.get_stamp_info(batch_id)
+    if not info:
+        return False
+    return info.get("mode") == "paid" and info.get("owner") == wallet
+
+
 @router.get(
     "/",
     response_model=StampListResponse,
-    summary="List All Swarm Stamp Batches"
+    summary="List Swarm Stamp Batches"
 )
-async def list_stamps() -> Any:
+async def list_stamps(
+    wallet: Optional[str] = Query(
+        default=None,
+        description="Filter to stamps accessible by this wallet address (owned + shared + untracked local). Requires x402 to be enabled."
+    ),
+    global_view: Optional[bool] = Query(
+        default=None,
+        alias="global",
+        description="If true, return all stamps including non-local (old behavior)."
+    ),
+) -> Any:
     """
-    Retrieves a list of all postage stamp batches from the Swarm network.
+    Retrieves a list of postage stamp batches from the Swarm network.
 
-    Fetches all available stamp batches, processes them to calculate expiration times,
-    and returns a comprehensive list with stamp details.
+    **Default behavior**: Returns only **local** stamps (stamps owned by this Bee node).
+    This is the practical default since only local stamps can be used for uploads.
+
+    **Filtering options**:
+    - `?global=true` — Return all stamps visible on the network (old behavior)
+    - `?wallet=0xABC...` — Return stamps accessible by this wallet (owned + shared + untracked local).
+      Only effective when x402 is enabled; ignored otherwise.
 
     Returns:
-        StampListResponse: Contains list of all stamps and total count
+        StampListResponse: Contains list of filtered stamps and total count
 
     Raises:
         HTTPException: 502 if Swarm API is unreachable, 500 for other errors
@@ -53,6 +77,22 @@ async def list_stamps() -> Any:
             except Exception as e:
                 logger.warning(f"Skipping invalid stamp data: {e}")
                 continue
+
+        # Apply filtering
+        if global_view:
+            # No filtering — return everything (old behavior)
+            pass
+        elif wallet and settings.X402_ENABLED:
+            # Show stamps accessible to this wallet
+            stamp_details = [
+                s for s in stamp_details
+                if s.accessMode == "shared"
+                or (s.accessMode is None and s.local)
+                or _is_owned_by(s.batchID, wallet)
+            ]
+        else:
+            # Default: local stamps only
+            stamp_details = [s for s in stamp_details if s.local]
 
         return StampListResponse(
             stamps=stamp_details,
@@ -235,6 +275,7 @@ async def get_stamp_details(
             secondsSincePurchase=found_stamp.get("secondsSincePurchase"),
             estimatedReadyAt=found_stamp.get("estimatedReadyAt"),
             propagationStatus=found_stamp.get("propagationStatus"),
+            accessMode=found_stamp.get("accessMode"),
             expectedExpiration=found_stamp.get("expectedExpiration"),
             local=found_stamp.get("local")
         )

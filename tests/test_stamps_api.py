@@ -20,7 +20,7 @@ class TestStampsAPI:
 
     @patch('app.services.swarm_api.get_all_stamps_processed')
     def test_list_stamps_success(self, mock_get_stamps):
-        """Test successful retrieval of stamps list."""
+        """Test successful retrieval of stamps list (default: local only)."""
         mock_get_stamps.return_value = [
             {
                 "batchID": "test123",
@@ -54,13 +54,14 @@ class TestStampsAPI:
             }
         ]
 
+        # Default: only local stamps returned
         response = client.get("/api/v1/stamps/")
 
         assert response.status_code == 200
         data = response.json()
 
-        assert data["total_count"] == 2
-        assert len(data["stamps"]) == 2
+        assert data["total_count"] == 1
+        assert len(data["stamps"]) == 1
 
         # Check first stamp (local)
         stamp1 = data["stamps"][0]
@@ -70,8 +71,12 @@ class TestStampsAPI:
         assert stamp1["label"] == "test-stamp"
         assert stamp1["immutableFlag"] is False
 
-        # Check second stamp (global only)
-        stamp2 = data["stamps"][1]
+        # Use ?global=true to get all stamps (old behavior)
+        response_global = client.get("/api/v1/stamps/?global=true")
+        data_global = response_global.json()
+        assert data_global["total_count"] == 2
+        assert len(data_global["stamps"]) == 2
+        stamp2 = data_global["stamps"][1]
         assert stamp2["batchID"] == "test456"
         assert stamp2["local"] is False
         assert stamp2["utilization"] is None
