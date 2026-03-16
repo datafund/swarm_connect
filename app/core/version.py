@@ -29,7 +29,7 @@ def get_version() -> str:
     # Try git commands (local development)
     try:
         commit_count = subprocess.run(
-            ["git", "rev-list", "--count", "HEAD"],
+            ["git", "rev-list", "--count", "--no-merges", "HEAD"],
             capture_output=True,
             text=True,
             check=True

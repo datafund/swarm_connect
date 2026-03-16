@@ -26,7 +26,7 @@ jobs:
       - name: generate version
         id: version
         run: |
-          COMMIT_COUNT=$(git rev-list --count HEAD)
+          COMMIT_COUNT=$(git rev-list --count --no-merges HEAD)
           SHORT_HASH=$(git rev-parse --short HEAD)
           VERSION="0.${COMMIT_COUNT}.${SHORT_HASH}"
           echo "version=${VERSION}" >> $GITHUB_OUTPUT
