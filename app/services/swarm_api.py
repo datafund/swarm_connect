@@ -7,6 +7,7 @@ from typing import List, Dict, Any, Optional
 from urllib.parse import urljoin
 
 from app.core.config import settings
+from app.services.stamp_ownership import stamp_ownership_manager
 
 logger = logging.getLogger(__name__)
 
@@ -495,6 +496,13 @@ def get_all_stamps_processed() -> List[Dict[str, Any]]:
             # Calculate propagation signals
             propagation = calculate_propagation_signals(batch_id, usable)
 
+            # Determine access mode from ownership registry
+            ownership_info = stamp_ownership_manager.get_stamp_info(batch_id)
+            if ownership_info:
+                access_mode = "owned" if ownership_info.get("mode") == "paid" else "shared"
+            else:
+                access_mode = None
+
             # Create processed stamp data
             processed_stamp = {
                 "batchID": batch_id,
@@ -515,6 +523,7 @@ def get_all_stamps_processed() -> List[Dict[str, Any]]:
                 "batchTTL": batch_ttl,
                 "exists": merged_stamp.get("exists", True),
                 "owner": merged_stamp.get("owner"),  # New field from local data
+                "accessMode": access_mode,
                 "expectedExpiration": expiration_str,
                 "local": local_stamp is not None  # True if stamp found in local data
             }

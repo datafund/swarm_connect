@@ -327,7 +327,7 @@ class TestFieldConsistency:
 
         mock_get_stamps.return_value = [minimal_stamp_data]
 
-        response = client.get("/api/v1/stamps/")
+        response = client.get("/api/v1/stamps/?global=true")
         assert response.status_code == 200
 
         stamp = response.json()["stamps"][0]
@@ -395,7 +395,7 @@ class TestExpirationCalculation:
 
             mock_get_stamps.return_value = [full_stamp]
 
-            response = client.get("/api/v1/stamps/")
+            response = client.get("/api/v1/stamps/?global=true")
             assert response.status_code == 200
 
             stamp = response.json()["stamps"][0]

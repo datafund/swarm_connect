@@ -50,6 +50,12 @@ class StampDetails(BaseModel):
         description="Propagation status: 'ready' (usable), 'propagating' (waiting for network), 'unknown' (not tracked by this gateway). Null if status cannot be determined."
     )
 
+    # --- Access Control Fields ---
+    accessMode: Optional[Literal["owned", "shared"]] = Field(
+        None,
+        description="Access mode: 'owned' (exclusive to a wallet via x402 payment), 'shared' (free tier, anyone can use), null (not in ownership registry)."
+    )
+
     # --- Calculated Fields ---
     expectedExpiration: str = Field(..., description="Calculated expiration timestamp (YYYY-MM-DD-HH-MM UTC).")
     local: bool = Field(..., description="Indicates if this stamp is owned/managed by the local node.")
@@ -75,6 +81,7 @@ class StampDetails(BaseModel):
                 "secondsSincePurchase": None,
                 "estimatedReadyAt": None,
                 "propagationStatus": "ready",
+                "accessMode": None,
                 "expectedExpiration": "2024-08-15-10-30",
                 "local": True
             }
@@ -229,6 +236,7 @@ class StampListResponse(BaseModel):
                         "secondsSincePurchase": None,
                         "estimatedReadyAt": None,
                         "propagationStatus": "ready",
+                        "accessMode": None,
                         "expectedExpiration": "2024-08-15-10-30",
                         "local": False
                     }

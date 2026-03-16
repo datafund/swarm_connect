@@ -269,7 +269,7 @@ Swarm Connect is a FastAPI-based API gateway that provides comprehensive access 
 
 #### Stamp Management
 - `POST /api/v1/stamps/`: Purchase new postage stamps with time-based or advanced parameters
-- `GET /api/v1/stamps/`: List all available stamps with expiration calculations
+- `GET /api/v1/stamps/`: List stamps (default: local only; `?global=true` for all; `?wallet=0x...` for wallet-filtered)
 - `GET /api/v1/stamps/{stamp_id}`: Retrieve specific stamp batch details
 - `GET /api/v1/stamps/{stamp_id}/check`: Check stamp health for uploads (errors and warnings)
 - `PATCH /api/v1/stamps/{stamp_id}/extend`: Extend existing stamps with additional funds
@@ -425,8 +425,16 @@ Purchase a new postage stamp with duration-based or legacy amount pricing.
 ```
 
 #### `GET /api/v1/stamps/`
-List all available postage stamps.
+List postage stamps. Default returns only local stamps (usable for uploads).
+
+**Query Parameters:**
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `global` | bool | `false` | If true, return all stamps including non-local |
+| `wallet` | string | - | Filter to stamps accessible by this wallet (requires x402 enabled) |
+
 - **Response**: `{"stamps": [...], "total_count": N}`
+- Each stamp includes `accessMode`: `"owned"` (exclusive), `"shared"` (free tier), or `null` (untracked)
 
 #### `GET /api/v1/stamps/{stamp_id}`
 Get detailed information about a specific stamp.
