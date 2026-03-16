@@ -47,6 +47,10 @@ async def list_stamps(
         alias="global",
         description="If true, return all stamps including non-local (old behavior)."
     ),
+    exclusive: Optional[bool] = Query(
+        default=None,
+        description="When used with wallet, return only stamps purchased by this wallet (excludes shared and untracked stamps)."
+    ),
 ) -> Any:
     """
     Retrieves a list of postage stamp batches from the Swarm network.
@@ -58,6 +62,7 @@ async def list_stamps(
     - `?global=true` — Return all stamps visible on the network (old behavior)
     - `?wallet=0xABC...` — Return stamps accessible by this wallet (owned + shared + untracked local).
       Only effective when x402 is enabled; ignored otherwise.
+    - `?wallet=0xABC...&exclusive=true` — Return only stamps purchased by this wallet (excludes shared/free and untracked stamps).
 
     Returns:
         StampListResponse: Contains list of filtered stamps and total count
@@ -83,13 +88,20 @@ async def list_stamps(
             # No filtering — return everything (old behavior)
             pass
         elif wallet and settings.X402_ENABLED:
-            # Show stamps accessible to this wallet
-            stamp_details = [
-                s for s in stamp_details
-                if s.accessMode == "shared"
-                or (s.accessMode is None and s.local)
-                or _is_owned_by(s.batchID, wallet)
-            ]
+            if exclusive:
+                # Only stamps purchased by this wallet
+                stamp_details = [
+                    s for s in stamp_details
+                    if _is_owned_by(s.batchID, wallet)
+                ]
+            else:
+                # Stamps accessible to this wallet (owned + shared + untracked local)
+                stamp_details = [
+                    s for s in stamp_details
+                    if s.accessMode == "shared"
+                    or (s.accessMode is None and s.local)
+                    or _is_owned_by(s.batchID, wallet)
+                ]
         else:
             # Default: local stamps only
             stamp_details = [s for s in stamp_details if s.local]

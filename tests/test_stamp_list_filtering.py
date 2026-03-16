@@ -155,6 +155,68 @@ class TestWalletFilteringX402Enabled:
         assert data["total_count"] == 0
 
 
+class TestExclusiveFiltering:
+    """?wallet=...&exclusive=true returns only stamps paid for by that wallet."""
+
+    WALLET = "0xABCDEF1234567890ABCDEF1234567890ABCDEF12"
+
+    @patch("app.api.endpoints.stamps.settings")
+    @patch("app.services.swarm_api.get_all_stamps_processed")
+    @patch("app.api.endpoints.stamps.stamp_ownership_manager")
+    def test_exclusive_returns_only_owned(self, mock_ownership, mock_get, mock_settings):
+        mock_settings.X402_ENABLED = True
+        mock_get.return_value = ALL_STAMPS
+
+        def get_info(batch_id):
+            if batch_id == "c" * 64:
+                return {"owner": self.WALLET, "mode": "paid"}
+            if batch_id == "d" * 64:
+                return {"owner": "shared", "mode": "free"}
+            return None
+        mock_ownership.get_stamp_info.side_effect = get_info
+
+        response = client.get(f"/api/v1/stamps/?wallet={self.WALLET}&exclusive=true")
+        assert response.status_code == 200
+        data = response.json()
+        batch_ids = {s["batchID"] for s in data["stamps"]}
+
+        # Only the stamp owned by this wallet
+        assert "c" * 64 in batch_ids
+        # Shared stamp excluded
+        assert "d" * 64 not in batch_ids
+        # Untracked local stamp excluded
+        assert "a" * 64 not in batch_ids
+        assert data["total_count"] == 1
+
+    @patch("app.api.endpoints.stamps.settings")
+    @patch("app.services.swarm_api.get_all_stamps_processed")
+    @patch("app.api.endpoints.stamps.stamp_ownership_manager")
+    def test_exclusive_empty_when_no_owned(self, mock_ownership, mock_get, mock_settings):
+        mock_settings.X402_ENABLED = True
+        mock_get.return_value = [LOCAL_STAMP, SHARED_STAMP]
+        mock_ownership.get_stamp_info.return_value = None
+
+        response = client.get(f"/api/v1/stamps/?wallet={self.WALLET}&exclusive=true")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["total_count"] == 0
+
+    @patch("app.api.endpoints.stamps.settings")
+    @patch("app.services.swarm_api.get_all_stamps_processed")
+    def test_exclusive_without_wallet_falls_to_default(self, mock_get, mock_settings):
+        """exclusive=true without wallet has no effect — falls to local-only default."""
+        mock_settings.X402_ENABLED = True
+        mock_get.return_value = ALL_STAMPS
+
+        response = client.get("/api/v1/stamps/?exclusive=true")
+        assert response.status_code == 200
+        data = response.json()
+        # No wallet provided, so falls to default local-only
+        batch_ids = {s["batchID"] for s in data["stamps"]}
+        assert "b" * 64 not in batch_ids  # remote excluded
+        assert "a" * 64 in batch_ids  # local included
+
+
 class TestWalletFilteringX402Disabled:
     """?wallet param is ignored when x402 is disabled — falls back to local-only."""
 

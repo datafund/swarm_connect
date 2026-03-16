@@ -432,6 +432,7 @@ List postage stamps. Default returns only local stamps (usable for uploads).
 |-----------|------|---------|-------------|
 | `global` | bool | `false` | If true, return all stamps including non-local |
 | `wallet` | string | - | Filter to stamps accessible by this wallet (requires x402 enabled) |
+| `exclusive` | bool | `false` | With `wallet`: only stamps purchased by this wallet (excludes shared/untracked) |
 
 - **Response**: `{"stamps": [...], "total_count": N}`
 - Each stamp includes `accessMode`: `"owned"` (exclusive), `"shared"` (free tier), or `null` (untracked)
