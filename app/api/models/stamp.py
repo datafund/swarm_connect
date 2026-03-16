@@ -54,18 +54,17 @@ class StampDetails(BaseModel):
     expectedExpiration: str = Field(..., description="Calculated expiration timestamp (YYYY-MM-DD-HH-MM UTC).")
     local: bool = Field(..., description="Indicates if this stamp is owned/managed by the local node.")
 
-    class Config:
-        populate_by_name = True
-        # Update example to show potential nulls
-        schema_extra = {
+    model_config = {
+        "populate_by_name": True,
+        "json_schema_extra": {
             "example": {
                 "batchID": "000de42079daebd58347bb38ce05bdc477701d93651d3bba318a9aee3fbd786a",
                 "amount": "303440675840",
-                "blockNumber": 36541095,      # Can be null
-                "owner": "1fb1f1d3620eab8e3b69dd2b2c40933a61c7f276", # Can be null
+                "blockNumber": 36541095,
+                "owner": "1fb1f1d3620eab8e3b69dd2b2c40933a61c7f276",
                 "depth": 20,
                 "bucketDepth": 16,
-                "immutableFlag": False,     # Can be null
+                "immutableFlag": False,
                 "batchTTL": 16971999,
                 "utilization": 8,
                 "utilizationPercent": 50.0,
@@ -73,13 +72,14 @@ class StampDetails(BaseModel):
                 "utilizationWarning": None,
                 "usable": True,
                 "label": None,
-                "secondsSincePurchase": 45,
-                "estimatedReadyAt": "2024-08-15T08:32:00+00:00",
-                "propagationStatus": "propagating",
+                "secondsSincePurchase": None,
+                "estimatedReadyAt": None,
+                "propagationStatus": "ready",
                 "expectedExpiration": "2024-08-15-10-30",
                 "local": True
             }
         }
+    }
 
 
 class StampPurchaseRequest(BaseModel):
@@ -147,13 +147,14 @@ class StampPurchaseResponse(BaseModel):
     batchID: str = Field(..., description="The unique identifier of the purchased stamp batch.")
     message: str = Field(..., description="Success message.")
 
-    class Config:
-        schema_extra = {
+    model_config = {
+        "json_schema_extra": {
             "example": {
                 "batchID": "000de42079daebd58347bb38ce05bdc477701d93651d3bba318a9aee3fbd786a",
                 "message": "Postage stamp purchased successfully"
             }
         }
+    }
 
 
 class StampExtensionRequest(BaseModel):
@@ -194,13 +195,14 @@ class StampExtensionResponse(BaseModel):
     batchID: str = Field(..., description="The unique identifier of the extended stamp batch.")
     message: str = Field(..., description="Success message.")
 
-    class Config:
-        schema_extra = {
+    model_config = {
+        "json_schema_extra": {
             "example": {
                 "batchID": "000de42079daebd58347bb38ce05bdc477701d93651d3bba318a9aee3fbd786a",
                 "message": "Postage stamp extended successfully"
             }
         }
+    }
 
 
 class StampListResponse(BaseModel):
@@ -208,8 +210,8 @@ class StampListResponse(BaseModel):
     stamps: List[StampDetails] = Field(..., description="List of all available stamp batches")
     total_count: int = Field(..., description="Total number of stamps")
 
-    class Config:
-        schema_extra = {
+    model_config = {
+        "json_schema_extra": {
             "example": {
                 "stamps": [
                     {
@@ -224,6 +226,9 @@ class StampListResponse(BaseModel):
                         "utilization": None,
                         "usable": None,
                         "label": None,
+                        "secondsSincePurchase": None,
+                        "estimatedReadyAt": None,
+                        "propagationStatus": "ready",
                         "expectedExpiration": "2024-08-15-10-30",
                         "local": False
                     }
@@ -231,6 +236,7 @@ class StampListResponse(BaseModel):
                 "total_count": 1
             }
         }
+    }
 
 
 class StampHealthIssue(BaseModel):
@@ -262,8 +268,8 @@ class StampHealthCheckResponse(BaseModel):
     warnings: List[StampHealthIssue] = Field(default_factory=list, description="Non-blocking issues to be aware of")
     status: StampHealthStatus = Field(..., description="Current stamp status details")
 
-    class Config:
-        schema_extra = {
+    model_config = {
+        "json_schema_extra": {
             "example": {
                 "stamp_id": "000de42079daebd58347bb38ce05bdc477701d93651d3bba318a9aee3fbd786a",
                 "can_upload": True,
@@ -289,6 +295,7 @@ class StampHealthCheckResponse(BaseModel):
                 }
             }
         }
+    }
 
 
 class StampValidationErrorDetail(BaseModel):
