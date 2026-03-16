@@ -86,6 +86,7 @@ python -m pytest tests/test_manifest_upload.py -v
 - Calculated `expectedExpiration` field in `YYYY-MM-DD-HH-MM` UTC format
 - Calculated `utilizationPercent` field showing stamp usage as percentage (0-100%)
 - Propagation timing fields: `secondsSincePurchase`, `estimatedReadyAt`, `propagationStatus`
+- Access control field: `accessMode` (`"owned"`, `"shared"`, or `null`)
 
 ### Environment Configuration
 
@@ -122,15 +123,23 @@ CORS (browser access):
 
 #### Stamp Management
 - `POST /api/v1/stamps/`: Purchase new postage stamps (records purchase time for propagation tracking)
-- `GET /api/v1/stamps/`: List all available stamps with expiration calculations and propagation status
+- `GET /api/v1/stamps/`: List stamps (default: local only). Supports `?global=true` for all stamps, `?wallet=0x...` for wallet-filtered view (x402)
 - `GET /api/v1/stamps/{stamp_id}`: Retrieve specific stamp batch details including propagation timing
 - `GET /api/v1/stamps/{stamp_id}/check`: Check stamp health for uploads (errors, warnings, can_upload status, propagation status)
 - `PATCH /api/v1/stamps/{stamp_id}/extend`: Extend existing stamps with additional funds
+
+**Stamp list query parameters**:
+- `global` (bool): If true, return all stamps including non-local (old behavior)
+- `wallet` (string): Filter to stamps accessible by this wallet address (requires x402 enabled)
+- `exclusive` (bool): When used with `wallet`, return only stamps purchased by this wallet (excludes shared/free and untracked)
 
 **Propagation timing fields** (included in all stamp responses):
 - `secondsSincePurchase`: Seconds elapsed since purchase through this gateway (null for external stamps)
 - `estimatedReadyAt`: ISO 8601 timestamp when stamp should be usable (null for external stamps)
 - `propagationStatus`: `"ready"` / `"propagating"` / `"unknown"` (null if undetermined)
+
+**Access mode field** (included in all stamp responses):
+- `accessMode`: `"owned"` (exclusive to a wallet via x402), `"shared"` (free tier), or `null` (not tracked)
 
 #### Data Operations
 - `POST /api/v1/data/?stamp_id={id}&content_type={type}&redundancy={level}`: Upload raw data to Swarm (redundancy 0-4, default 2)
