@@ -131,6 +131,7 @@ CORS (browser access):
 **Stamp list query parameters**:
 - `global` (bool): If true, return all stamps including non-local (old behavior)
 - `wallet` (string): Filter to stamps accessible by this wallet address (requires x402 enabled)
+- `exclusive` (bool): When used with `wallet`, return only stamps purchased by this wallet (excludes shared/free and untracked)
 
 **Propagation timing fields** (included in all stamp responses):
 - `secondsSincePurchase`: Seconds elapsed since purchase through this gateway (null for external stamps)
