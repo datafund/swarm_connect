@@ -7,6 +7,7 @@ import logging
 
 from app.services import swarm_api
 from app.services.stamp_ownership import stamp_ownership_manager
+from app.services.stamp_tracker import record_purchase
 from app.api.models.stamp import (
     StampDetails,
     StampPurchaseRequest,
@@ -149,7 +150,10 @@ async def check_stamp_health(
                 utilizationPercent=status_data.get("utilizationPercent"),
                 utilizationStatus=status_data.get("utilizationStatus"),
                 batchTTL=status_data.get("batchTTL"),
-                expectedExpiration=status_data.get("expectedExpiration")
+                expectedExpiration=status_data.get("expectedExpiration"),
+                secondsSincePurchase=status_data.get("secondsSincePurchase"),
+                estimatedReadyAt=status_data.get("estimatedReadyAt"),
+                propagationStatus=status_data.get("propagationStatus")
             )
         )
 
@@ -228,6 +232,9 @@ async def get_stamp_details(
             utilizationWarning=found_stamp.get("utilizationWarning"),
             usable=found_stamp.get("usable"),
             label=found_stamp.get("label"),
+            secondsSincePurchase=found_stamp.get("secondsSincePurchase"),
+            estimatedReadyAt=found_stamp.get("estimatedReadyAt"),
+            propagationStatus=found_stamp.get("propagationStatus"),
             expectedExpiration=found_stamp.get("expectedExpiration"),
             local=found_stamp.get("local")
         )
@@ -327,6 +334,9 @@ async def purchase_stamp(
             depth=effective_depth,
             label=stamp_request.label
         )
+
+        # Record purchase time for propagation tracking
+        record_purchase(batch_id)
 
         # Register stamp ownership
         x402_mode = getattr(request.state, 'x402_mode', None)

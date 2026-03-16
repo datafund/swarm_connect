@@ -92,6 +92,9 @@ class Settings(BaseSettings):
     NOTARY_ENABLED: bool = False  # Master switch for notary signing feature
     NOTARY_PRIVATE_KEY: Optional[str] = None  # Hex-encoded private key for signing (without 0x prefix)
 
+    # === Stamp Propagation Timing ===
+    STAMP_PROPAGATION_SECONDS: int = 120  # Expected propagation delay after purchase (~2 minutes)
+
     # === Upload Limits ===
     MAX_UPLOAD_SIZE_MB: int = 10  # Maximum file upload size in megabytes
 

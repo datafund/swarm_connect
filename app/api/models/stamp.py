@@ -42,6 +42,14 @@ class StampDetails(BaseModel):
     usable: Optional[bool] = Field(None, description="Stamp usability status. False when stamp is expired, invalid, or at 100% utilization.")
     label: Optional[str] = Field(None, description="User-defined label (from local /stamps endpoint when available).")
 
+    # --- Propagation Timing Fields ---
+    secondsSincePurchase: Optional[int] = Field(None, description="Seconds elapsed since purchase through this gateway. Null for stamps not purchased through this gateway.")
+    estimatedReadyAt: Optional[str] = Field(None, description="ISO 8601 timestamp when stamp should be usable after propagation. Null for stamps not purchased through this gateway.")
+    propagationStatus: Optional[Literal["ready", "propagating", "unknown"]] = Field(
+        None,
+        description="Propagation status: 'ready' (usable), 'propagating' (waiting for network), 'unknown' (not tracked by this gateway). Null if status cannot be determined."
+    )
+
     # --- Calculated Fields ---
     expectedExpiration: str = Field(..., description="Calculated expiration timestamp (YYYY-MM-DD-HH-MM UTC).")
     local: bool = Field(..., description="Indicates if this stamp is owned/managed by the local node.")
@@ -65,6 +73,9 @@ class StampDetails(BaseModel):
                 "utilizationWarning": None,
                 "usable": True,
                 "label": None,
+                "secondsSincePurchase": 45,
+                "estimatedReadyAt": "2024-08-15T08:32:00+00:00",
+                "propagationStatus": "propagating",
                 "expectedExpiration": "2024-08-15-10-30",
                 "local": True
             }
@@ -238,6 +249,9 @@ class StampHealthStatus(BaseModel):
     utilizationStatus: Optional[Literal["ok", "warning", "critical", "full"]] = Field(None, description="Utilization status category")
     batchTTL: Optional[int] = Field(None, description="Time-to-live in seconds")
     expectedExpiration: Optional[str] = Field(None, description="Expected expiration timestamp (YYYY-MM-DD-HH-MM UTC)")
+    secondsSincePurchase: Optional[int] = Field(None, description="Seconds elapsed since purchase through this gateway")
+    estimatedReadyAt: Optional[str] = Field(None, description="ISO 8601 timestamp when stamp should be usable")
+    propagationStatus: Optional[Literal["ready", "propagating", "unknown"]] = Field(None, description="Propagation status: 'ready', 'propagating', or 'unknown'")
 
 
 class StampHealthCheckResponse(BaseModel):
@@ -268,7 +282,10 @@ class StampHealthCheckResponse(BaseModel):
                     "utilizationPercent": 82.5,
                     "utilizationStatus": "warning",
                     "batchTTL": 86400,
-                    "expectedExpiration": "2026-01-12-17-30"
+                    "expectedExpiration": "2026-01-12-17-30",
+                    "secondsSincePurchase": None,
+                    "estimatedReadyAt": None,
+                    "propagationStatus": "ready"
                 }
             }
         }

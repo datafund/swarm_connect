@@ -1,4 +1,5 @@
 # app/services/swarm_api.py
+import datetime
 import requests
 from requests.exceptions import RequestException
 import logging
@@ -375,6 +376,61 @@ def calculate_utilization_status(
         return ("ok", None)
 
 
+def calculate_propagation_signals(batch_id: str, usable: Optional[bool]) -> Dict[str, Any]:
+    """
+    Calculates propagation timing signals for a stamp.
+
+    Logic:
+    - If usable is True → "ready" (regardless of tracker state)
+    - If tracked and within propagation window → "propagating" with timing fields
+    - If tracked and past window → "ready"
+    - If not tracked and usable is False → "unknown" (external stamp)
+    - If not tracked and usable is None → "unknown"
+
+    Returns:
+        Dict with keys: secondsSincePurchase, estimatedReadyAt, propagationStatus
+        (all may be None)
+    """
+    from app.services.stamp_tracker import get_purchase_time
+
+    result = {
+        "secondsSincePurchase": None,
+        "estimatedReadyAt": None,
+        "propagationStatus": None,
+    }
+
+    purchase_time = get_purchase_time(batch_id)
+    propagation_seconds = settings.STAMP_PROPAGATION_SECONDS
+
+    if usable is True:
+        # Stamp is usable — always "ready"
+        result["propagationStatus"] = "ready"
+        if purchase_time:
+            now = datetime.datetime.now(datetime.timezone.utc)
+            result["secondsSincePurchase"] = int((now - purchase_time).total_seconds())
+            estimated_ready = purchase_time + datetime.timedelta(seconds=propagation_seconds)
+            result["estimatedReadyAt"] = estimated_ready.isoformat()
+        return result
+
+    if purchase_time:
+        now = datetime.datetime.now(datetime.timezone.utc)
+        elapsed = int((now - purchase_time).total_seconds())
+        estimated_ready = purchase_time + datetime.timedelta(seconds=propagation_seconds)
+
+        result["secondsSincePurchase"] = elapsed
+        result["estimatedReadyAt"] = estimated_ready.isoformat()
+
+        if elapsed >= propagation_seconds:
+            result["propagationStatus"] = "ready"
+        else:
+            result["propagationStatus"] = "propagating"
+        return result
+
+    # Not tracked by this gateway
+    result["propagationStatus"] = "unknown"
+    return result
+
+
 def get_all_stamps_processed() -> List[Dict[str, Any]]:
     """
     Fetches all postage stamp batches and processes them with expiration calculations.
@@ -387,8 +443,6 @@ def get_all_stamps_processed() -> List[Dict[str, Any]]:
     Raises:
         RequestException: If the HTTP request to the Swarm API fails.
     """
-    import datetime
-
     # Get stamps data from both endpoints
     global_stamps = get_all_stamps()  # /batches endpoint
     local_stamps = get_local_stamps()  # /stamps endpoint
@@ -438,6 +492,9 @@ def get_all_stamps_processed() -> List[Dict[str, Any]]:
             if usable is None or (utilization_percent is not None and utilization_percent >= UTILIZATION_THRESHOLD_FULL):
                 usable = calculate_usable_status(merged_stamp, utilization_percent)
 
+            # Calculate propagation signals
+            propagation = calculate_propagation_signals(batch_id, usable)
+
             # Create processed stamp data
             processed_stamp = {
                 "batchID": batch_id,
@@ -447,6 +504,9 @@ def get_all_stamps_processed() -> List[Dict[str, Any]]:
                 "utilizationWarning": utilization_warning,
                 "usable": usable,
                 "label": merged_stamp.get("label"),
+                "secondsSincePurchase": propagation["secondsSincePurchase"],
+                "estimatedReadyAt": propagation["estimatedReadyAt"],
+                "propagationStatus": propagation["propagationStatus"],
                 "depth": merged_stamp.get("depth"),
                 "amount": str(merged_stamp.get("amount", "")),  # Ensure amount is string
                 "bucketDepth": merged_stamp.get("bucketDepth"),
@@ -1290,7 +1350,10 @@ def get_stamp_health_check(stamp_id: str) -> Dict[str, Any]:
                 "utilizationPercent": None,
                 "utilizationStatus": None,
                 "batchTTL": None,
-                "expectedExpiration": None
+                "expectedExpiration": None,
+                "secondsSincePurchase": None,
+                "estimatedReadyAt": None,
+                "propagationStatus": None
             }
         }
 
@@ -1319,7 +1382,10 @@ def get_stamp_health_check(stamp_id: str) -> Dict[str, Any]:
                 "utilizationPercent": None,
                 "utilizationStatus": None,
                 "batchTTL": None,
-                "expectedExpiration": None
+                "expectedExpiration": None,
+                "secondsSincePurchase": None,
+                "estimatedReadyAt": None,
+                "propagationStatus": None
             }
         }
 
@@ -1338,7 +1404,10 @@ def get_stamp_health_check(stamp_id: str) -> Dict[str, Any]:
         "utilizationPercent": utilization_percent,
         "utilizationStatus": utilization_status,
         "batchTTL": batch_ttl,
-        "expectedExpiration": expected_expiration
+        "expectedExpiration": expected_expiration,
+        "secondsSincePurchase": found_stamp.get("secondsSincePurchase"),
+        "estimatedReadyAt": found_stamp.get("estimatedReadyAt"),
+        "propagationStatus": found_stamp.get("propagationStatus")
     }
 
     # Check for errors (blocking issues)
