@@ -306,10 +306,11 @@ class TestIsOwnedByEdgeCases:
 class TestAccessModeServiceLayer:
     """Test accessMode population at the service layer."""
 
+    @pytest.mark.asyncio
     @patch("app.services.swarm_api.stamp_ownership_manager")
     @patch("app.services.swarm_api.get_local_stamps")
     @patch("app.services.swarm_api.get_all_stamps")
-    def test_access_mode_paid_becomes_owned(self, mock_global, mock_local, mock_ownership):
+    async def test_access_mode_paid_becomes_owned(self, mock_global, mock_local, mock_ownership):
         mock_global.return_value = [{
             "batchID": "a" * 64, "amount": "1000", "depth": 20,
             "bucketDepth": 16, "batchTTL": 86400,
@@ -318,13 +319,14 @@ class TestAccessModeServiceLayer:
         mock_ownership.get_stamp_info.return_value = {"mode": "paid", "owner": "0xABC"}
 
         from app.services.swarm_api import get_all_stamps_processed
-        result = get_all_stamps_processed()
+        result = await get_all_stamps_processed()
         assert result[0]["accessMode"] == "owned"
 
+    @pytest.mark.asyncio
     @patch("app.services.swarm_api.stamp_ownership_manager")
     @patch("app.services.swarm_api.get_local_stamps")
     @patch("app.services.swarm_api.get_all_stamps")
-    def test_access_mode_free_becomes_shared(self, mock_global, mock_local, mock_ownership):
+    async def test_access_mode_free_becomes_shared(self, mock_global, mock_local, mock_ownership):
         mock_global.return_value = [{
             "batchID": "b" * 64, "amount": "1000", "depth": 20,
             "bucketDepth": 16, "batchTTL": 86400,
@@ -333,13 +335,14 @@ class TestAccessModeServiceLayer:
         mock_ownership.get_stamp_info.return_value = {"mode": "free", "owner": "shared"}
 
         from app.services.swarm_api import get_all_stamps_processed
-        result = get_all_stamps_processed()
+        result = await get_all_stamps_processed()
         assert result[0]["accessMode"] == "shared"
 
+    @pytest.mark.asyncio
     @patch("app.services.swarm_api.stamp_ownership_manager")
     @patch("app.services.swarm_api.get_local_stamps")
     @patch("app.services.swarm_api.get_all_stamps")
-    def test_access_mode_untracked_is_none(self, mock_global, mock_local, mock_ownership):
+    async def test_access_mode_untracked_is_none(self, mock_global, mock_local, mock_ownership):
         mock_global.return_value = [{
             "batchID": "c" * 64, "amount": "1000", "depth": 20,
             "bucketDepth": 16, "batchTTL": 86400,
@@ -348,7 +351,7 @@ class TestAccessModeServiceLayer:
         mock_ownership.get_stamp_info.return_value = None
 
         from app.services.swarm_api import get_all_stamps_processed
-        result = get_all_stamps_processed()
+        result = await get_all_stamps_processed()
         assert result[0]["accessMode"] is None
 
 

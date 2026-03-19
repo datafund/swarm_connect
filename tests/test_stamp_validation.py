@@ -63,26 +63,28 @@ def make_stamp(
 class TestValidateStampForUpload:
     """Tests for the validate_stamp_for_upload function."""
 
+    @pytest.mark.asyncio
     @patch("app.services.swarm_api.get_all_stamps_processed")
-    def test_stamp_not_found(self, mock_get_stamps):
+    async def test_stamp_not_found(self, mock_get_stamps):
         """Should raise StampValidationError with NOT_FOUND code when stamp doesn't exist."""
         mock_get_stamps.return_value = []
 
         with pytest.raises(StampValidationError) as exc_info:
-            validate_stamp_for_upload(NONEXISTENT_STAMP_ID)
+            await validate_stamp_for_upload(NONEXISTENT_STAMP_ID)
 
         assert exc_info.value.code == "NOT_FOUND"
         assert exc_info.value.status == "not_found"
         assert "not found" in exc_info.value.message.lower()
         assert exc_info.value.suggestion  # Should have a suggestion
 
+    @pytest.mark.asyncio
     @patch("app.services.swarm_api.get_all_stamps_processed")
-    def test_stamp_not_local(self, mock_get_stamps):
+    async def test_stamp_not_local(self, mock_get_stamps):
         """Should raise StampValidationError with NOT_LOCAL code when stamp isn't owned by node."""
         mock_get_stamps.return_value = [make_stamp(batch_id=VALID_STAMP_ID, local=False)]
 
         with pytest.raises(StampValidationError) as exc_info:
-            validate_stamp_for_upload(VALID_STAMP_ID)
+            await validate_stamp_for_upload(VALID_STAMP_ID)
 
         assert exc_info.value.code == "NOT_LOCAL"
         assert exc_info.value.status == "not_local"
@@ -90,60 +92,65 @@ class TestValidateStampForUpload:
         assert exc_info.value.suggestion
         assert exc_info.value.stamp_data is not None
 
+    @pytest.mark.asyncio
     @patch("app.services.swarm_api.get_all_stamps_processed")
-    def test_stamp_expired(self, mock_get_stamps):
+    async def test_stamp_expired(self, mock_get_stamps):
         """Should raise StampValidationError with EXPIRED code when TTL is 0."""
         mock_get_stamps.return_value = [make_stamp(batch_id=VALID_STAMP_ID, batch_ttl=0)]
 
         with pytest.raises(StampValidationError) as exc_info:
-            validate_stamp_for_upload(VALID_STAMP_ID)
+            await validate_stamp_for_upload(VALID_STAMP_ID)
 
         assert exc_info.value.code == "EXPIRED"
         assert exc_info.value.status == "expired"
         assert "expired" in exc_info.value.message.lower()
         assert exc_info.value.suggestion
 
+    @pytest.mark.asyncio
     @patch("app.services.swarm_api.get_all_stamps_processed")
-    def test_stamp_negative_ttl(self, mock_get_stamps):
+    async def test_stamp_negative_ttl(self, mock_get_stamps):
         """Should treat negative TTL as expired."""
         mock_get_stamps.return_value = [make_stamp(batch_id=VALID_STAMP_ID, batch_ttl=-100)]
 
         with pytest.raises(StampValidationError) as exc_info:
-            validate_stamp_for_upload(VALID_STAMP_ID)
+            await validate_stamp_for_upload(VALID_STAMP_ID)
 
         assert exc_info.value.code == "EXPIRED"
 
+    @pytest.mark.asyncio
     @patch("app.services.swarm_api.get_all_stamps_processed")
-    def test_stamp_not_usable(self, mock_get_stamps):
+    async def test_stamp_not_usable(self, mock_get_stamps):
         """Should raise StampValidationError with NOT_USABLE code when stamp isn't usable yet."""
         mock_get_stamps.return_value = [make_stamp(batch_id=VALID_STAMP_ID, usable=False)]
 
         with pytest.raises(StampValidationError) as exc_info:
-            validate_stamp_for_upload(VALID_STAMP_ID)
+            await validate_stamp_for_upload(VALID_STAMP_ID)
 
         assert exc_info.value.code == "NOT_USABLE"
         assert exc_info.value.status == "not_usable"
         assert "30-90 seconds" in exc_info.value.message or "propagate" in exc_info.value.message.lower()
         assert exc_info.value.suggestion
 
+    @pytest.mark.asyncio
     @patch("app.services.swarm_api.get_all_stamps_processed")
-    def test_stamp_full(self, mock_get_stamps):
+    async def test_stamp_full(self, mock_get_stamps):
         """Should raise StampValidationError with FULL code when stamp is at 100% utilization."""
         mock_get_stamps.return_value = [make_stamp(batch_id=VALID_STAMP_ID, utilization_percent=100.0)]
 
         with pytest.raises(StampValidationError) as exc_info:
-            validate_stamp_for_upload(VALID_STAMP_ID)
+            await validate_stamp_for_upload(VALID_STAMP_ID)
 
         assert exc_info.value.code == "FULL"
         assert exc_info.value.status == "full"
         assert "100%" in exc_info.value.message or "full" in exc_info.value.message.lower()
 
+    @pytest.mark.asyncio
     @patch("app.services.swarm_api.get_all_stamps_processed")
-    def test_valid_stamp_returns_info(self, mock_get_stamps):
+    async def test_valid_stamp_returns_info(self, mock_get_stamps):
         """Should return stamp info when stamp is valid."""
         mock_get_stamps.return_value = [make_stamp(batch_id=VALID_STAMP_ID)]
 
-        result = validate_stamp_for_upload(VALID_STAMP_ID)
+        result = await validate_stamp_for_upload(VALID_STAMP_ID)
 
         assert result["batchID"] == VALID_STAMP_ID
         assert result["usable"] is True
@@ -151,39 +158,43 @@ class TestValidateStampForUpload:
         assert "warnings" in result
         assert isinstance(result["warnings"], list)
 
+    @pytest.mark.asyncio
     @patch("app.services.swarm_api.get_all_stamps_processed")
-    def test_valid_stamp_case_insensitive(self, mock_get_stamps):
+    async def test_valid_stamp_case_insensitive(self, mock_get_stamps):
         """Should match stamp ID case-insensitively."""
         mock_get_stamps.return_value = [make_stamp(batch_id=VALID_STAMP_ID.upper())]
 
-        result = validate_stamp_for_upload(VALID_STAMP_ID)
+        result = await validate_stamp_for_upload(VALID_STAMP_ID)
 
         assert result["batchID"] == VALID_STAMP_ID.upper()
 
+    @pytest.mark.asyncio
     @patch("app.services.swarm_api.get_all_stamps_processed")
-    def test_low_ttl_warning(self, mock_get_stamps):
+    async def test_low_ttl_warning(self, mock_get_stamps):
         """Should return LOW_TTL warning when TTL is below threshold."""
         mock_get_stamps.return_value = [make_stamp(batch_id=VALID_STAMP_ID, batch_ttl=1800)]  # 30 minutes
 
-        result = validate_stamp_for_upload(VALID_STAMP_ID)
+        result = await validate_stamp_for_upload(VALID_STAMP_ID)
 
         assert any(w["code"] == "LOW_TTL" for w in result["warnings"])
 
+    @pytest.mark.asyncio
     @patch("app.services.swarm_api.get_all_stamps_processed")
-    def test_nearly_full_warning(self, mock_get_stamps):
+    async def test_nearly_full_warning(self, mock_get_stamps):
         """Should return NEARLY_FULL warning when utilization is 95%+."""
         mock_get_stamps.return_value = [make_stamp(batch_id=VALID_STAMP_ID, utilization_percent=97.0)]
 
-        result = validate_stamp_for_upload(VALID_STAMP_ID)
+        result = await validate_stamp_for_upload(VALID_STAMP_ID)
 
         assert any(w["code"] == "NEARLY_FULL" for w in result["warnings"])
 
+    @pytest.mark.asyncio
     @patch("app.services.swarm_api.get_all_stamps_processed")
-    def test_high_utilization_warning(self, mock_get_stamps):
+    async def test_high_utilization_warning(self, mock_get_stamps):
         """Should return HIGH_UTILIZATION warning when utilization is 80%+."""
         mock_get_stamps.return_value = [make_stamp(batch_id=VALID_STAMP_ID, utilization_percent=85.0)]
 
-        result = validate_stamp_for_upload(VALID_STAMP_ID)
+        result = await validate_stamp_for_upload(VALID_STAMP_ID)
 
         assert any(w["code"] == "HIGH_UTILIZATION" for w in result["warnings"])
 
@@ -195,79 +206,86 @@ class TestValidateStampForUpload:
 class TestCheckUploadFailureReason:
     """Tests for the check_upload_failure_reason function."""
 
+    @pytest.mark.asyncio
     @patch("app.services.swarm_api.get_all_stamps_processed")
-    def test_not_found_returns_structured_error(self, mock_get_stamps):
+    async def test_not_found_returns_structured_error(self, mock_get_stamps):
         """Should return structured error when stamp not found."""
         mock_get_stamps.return_value = []
 
-        result = check_upload_failure_reason(NONEXISTENT_STAMP_ID, "Some error")
+        result = await check_upload_failure_reason(NONEXISTENT_STAMP_ID, "Some error")
 
         assert result is not None
         assert result["code"] == "NOT_FOUND"
         assert "message" in result
         assert "suggestion" in result
 
+    @pytest.mark.asyncio
     @patch("app.services.swarm_api.get_all_stamps_processed")
-    def test_not_local_returns_structured_error(self, mock_get_stamps):
+    async def test_not_local_returns_structured_error(self, mock_get_stamps):
         """Should return structured error when stamp is not local."""
         mock_get_stamps.return_value = [make_stamp(batch_id=VALID_STAMP_ID, local=False)]
 
-        result = check_upload_failure_reason(VALID_STAMP_ID, "Some error")
+        result = await check_upload_failure_reason(VALID_STAMP_ID, "Some error")
 
         assert result is not None
         assert result["code"] == "NOT_LOCAL"
         assert result["stamp_status"] is not None
         assert result["stamp_status"]["local"] is False
 
+    @pytest.mark.asyncio
     @patch("app.services.swarm_api.get_all_stamps_processed")
-    def test_expired_returns_structured_error(self, mock_get_stamps):
+    async def test_expired_returns_structured_error(self, mock_get_stamps):
         """Should return structured error when stamp is expired."""
         mock_get_stamps.return_value = [make_stamp(batch_id=VALID_STAMP_ID, batch_ttl=0)]
 
-        result = check_upload_failure_reason(VALID_STAMP_ID, "Some error")
+        result = await check_upload_failure_reason(VALID_STAMP_ID, "Some error")
 
         assert result is not None
         assert result["code"] == "EXPIRED"
 
+    @pytest.mark.asyncio
     @patch("app.services.swarm_api.get_all_stamps_processed")
-    def test_not_usable_returns_structured_error(self, mock_get_stamps):
+    async def test_not_usable_returns_structured_error(self, mock_get_stamps):
         """Should return structured error when stamp is not usable."""
         mock_get_stamps.return_value = [make_stamp(batch_id=VALID_STAMP_ID, usable=False)]
 
-        result = check_upload_failure_reason(VALID_STAMP_ID, "Some error")
+        result = await check_upload_failure_reason(VALID_STAMP_ID, "Some error")
 
         assert result is not None
         assert result["code"] == "NOT_USABLE"
         assert "30-90" in result["suggestion"] or "propagat" in result["suggestion"].lower()
 
+    @pytest.mark.asyncio
     @patch("app.services.swarm_api.get_all_stamps_processed")
-    def test_full_returns_structured_error(self, mock_get_stamps):
+    async def test_full_returns_structured_error(self, mock_get_stamps):
         """Should return structured error when stamp is full."""
         mock_get_stamps.return_value = [make_stamp(batch_id=VALID_STAMP_ID, utilization_percent=100.0)]
 
-        result = check_upload_failure_reason(VALID_STAMP_ID, "Some error")
+        result = await check_upload_failure_reason(VALID_STAMP_ID, "Some error")
 
         assert result is not None
         assert result["code"] == "FULL"
 
+    @pytest.mark.asyncio
     @patch("app.services.swarm_api.get_all_stamps_processed")
-    def test_nearly_full_returns_structured_error(self, mock_get_stamps):
+    async def test_nearly_full_returns_structured_error(self, mock_get_stamps):
         """Should return structured error when stamp is nearly full."""
         mock_get_stamps.return_value = [make_stamp(batch_id=VALID_STAMP_ID, utilization_percent=97.0, utilization_status="critical")]
 
-        result = check_upload_failure_reason(VALID_STAMP_ID, "Original error message")
+        result = await check_upload_failure_reason(VALID_STAMP_ID, "Original error message")
 
         assert result is not None
         assert result["code"] == "NEARLY_FULL"
         # Should include original error for context
         assert "original_error" in result or "Original error" in result.get("message", "")
 
+    @pytest.mark.asyncio
     @patch("app.services.swarm_api.get_all_stamps_processed")
-    def test_valid_stamp_returns_none(self, mock_get_stamps):
+    async def test_valid_stamp_returns_none(self, mock_get_stamps):
         """Should return None when stamp is valid (cause unknown)."""
         mock_get_stamps.return_value = [make_stamp(batch_id=VALID_STAMP_ID)]
 
-        result = check_upload_failure_reason(VALID_STAMP_ID, "Some error")
+        result = await check_upload_failure_reason(VALID_STAMP_ID, "Some error")
 
         assert result is None
 
@@ -279,12 +297,13 @@ class TestCheckUploadFailureReason:
 class TestGetStampHealthCheck:
     """Tests for the get_stamp_health_check function."""
 
+    @pytest.mark.asyncio
     @patch("app.services.swarm_api.get_all_stamps_processed")
-    def test_healthy_stamp(self, mock_get_stamps):
+    async def test_healthy_stamp(self, mock_get_stamps):
         """Should return can_upload=True with no errors for healthy stamp."""
         mock_get_stamps.return_value = [make_stamp(batch_id=VALID_STAMP_ID)]
 
-        result = get_stamp_health_check(VALID_STAMP_ID)
+        result = await get_stamp_health_check(VALID_STAMP_ID)
 
         assert result["stamp_id"] == VALID_STAMP_ID
         assert result["can_upload"] is True
@@ -293,95 +312,104 @@ class TestGetStampHealthCheck:
         assert result["status"]["local"] is True
         assert result["status"]["usable"] is True
 
+    @pytest.mark.asyncio
     @patch("app.services.swarm_api.get_all_stamps_processed")
-    def test_not_found_stamp(self, mock_get_stamps):
+    async def test_not_found_stamp(self, mock_get_stamps):
         """Should return can_upload=False with NOT_FOUND error."""
         mock_get_stamps.return_value = []
 
-        result = get_stamp_health_check(NONEXISTENT_STAMP_ID)
+        result = await get_stamp_health_check(NONEXISTENT_STAMP_ID)
 
         assert result["can_upload"] is False
         assert len(result["errors"]) == 1
         assert result["errors"][0]["code"] == "NOT_FOUND"
         assert result["status"]["exists"] is False
 
+    @pytest.mark.asyncio
     @patch("app.services.swarm_api.get_all_stamps_processed")
-    def test_not_local_stamp(self, mock_get_stamps):
+    async def test_not_local_stamp(self, mock_get_stamps):
         """Should return can_upload=False with NOT_LOCAL error."""
         mock_get_stamps.return_value = [make_stamp(batch_id=VALID_STAMP_ID, local=False)]
 
-        result = get_stamp_health_check(VALID_STAMP_ID)
+        result = await get_stamp_health_check(VALID_STAMP_ID)
 
         assert result["can_upload"] is False
         assert any(e["code"] == "NOT_LOCAL" for e in result["errors"])
 
+    @pytest.mark.asyncio
     @patch("app.services.swarm_api.get_all_stamps_processed")
-    def test_expired_stamp(self, mock_get_stamps):
+    async def test_expired_stamp(self, mock_get_stamps):
         """Should return can_upload=False with EXPIRED error."""
         mock_get_stamps.return_value = [make_stamp(batch_id=VALID_STAMP_ID, batch_ttl=0)]
 
-        result = get_stamp_health_check(VALID_STAMP_ID)
+        result = await get_stamp_health_check(VALID_STAMP_ID)
 
         assert result["can_upload"] is False
         assert any(e["code"] == "EXPIRED" for e in result["errors"])
 
+    @pytest.mark.asyncio
     @patch("app.services.swarm_api.get_all_stamps_processed")
-    def test_not_usable_stamp(self, mock_get_stamps):
+    async def test_not_usable_stamp(self, mock_get_stamps):
         """Should return can_upload=False with NOT_USABLE error."""
         mock_get_stamps.return_value = [make_stamp(batch_id=VALID_STAMP_ID, usable=False)]
 
-        result = get_stamp_health_check(VALID_STAMP_ID)
+        result = await get_stamp_health_check(VALID_STAMP_ID)
 
         assert result["can_upload"] is False
         assert any(e["code"] == "NOT_USABLE" for e in result["errors"])
 
+    @pytest.mark.asyncio
     @patch("app.services.swarm_api.get_all_stamps_processed")
-    def test_full_stamp(self, mock_get_stamps):
+    async def test_full_stamp(self, mock_get_stamps):
         """Should return can_upload=False with FULL error."""
         mock_get_stamps.return_value = [make_stamp(batch_id=VALID_STAMP_ID, utilization_percent=100.0)]
 
-        result = get_stamp_health_check(VALID_STAMP_ID)
+        result = await get_stamp_health_check(VALID_STAMP_ID)
 
         assert result["can_upload"] is False
         assert any(e["code"] == "FULL" for e in result["errors"])
 
+    @pytest.mark.asyncio
     @patch("app.services.swarm_api.get_all_stamps_processed")
-    def test_low_ttl_warning(self, mock_get_stamps):
+    async def test_low_ttl_warning(self, mock_get_stamps):
         """Should return warning for low TTL."""
         mock_get_stamps.return_value = [make_stamp(batch_id=VALID_STAMP_ID, batch_ttl=1800)]
 
-        result = get_stamp_health_check(VALID_STAMP_ID)
+        result = await get_stamp_health_check(VALID_STAMP_ID)
 
         assert result["can_upload"] is True  # Still usable
         assert any(w["code"] == "LOW_TTL" for w in result["warnings"])
 
+    @pytest.mark.asyncio
     @patch("app.services.swarm_api.get_all_stamps_processed")
-    def test_nearly_full_warning(self, mock_get_stamps):
+    async def test_nearly_full_warning(self, mock_get_stamps):
         """Should return warning for nearly full stamp."""
         mock_get_stamps.return_value = [make_stamp(batch_id=VALID_STAMP_ID, utilization_percent=97.0)]
 
-        result = get_stamp_health_check(VALID_STAMP_ID)
+        result = await get_stamp_health_check(VALID_STAMP_ID)
 
         assert result["can_upload"] is True  # Still usable
         assert any(w["code"] == "NEARLY_FULL" for w in result["warnings"])
 
+    @pytest.mark.asyncio
     @patch("app.services.swarm_api.get_all_stamps_processed")
-    def test_high_utilization_warning(self, mock_get_stamps):
+    async def test_high_utilization_warning(self, mock_get_stamps):
         """Should return warning for high utilization."""
         mock_get_stamps.return_value = [make_stamp(batch_id=VALID_STAMP_ID, utilization_percent=85.0)]
 
-        result = get_stamp_health_check(VALID_STAMP_ID)
+        result = await get_stamp_health_check(VALID_STAMP_ID)
 
         assert result["can_upload"] is True
         assert any(w["code"] == "HIGH_UTILIZATION" for w in result["warnings"])
 
+    @pytest.mark.asyncio
     @patch("app.services.swarm_api.get_all_stamps_processed")
-    def test_multiple_errors(self, mock_get_stamps):
+    async def test_multiple_errors(self, mock_get_stamps):
         """Should return multiple errors when multiple issues exist."""
         # Stamp that is not local AND not usable
         mock_get_stamps.return_value = [make_stamp(batch_id=VALID_STAMP_ID, local=False, usable=False)]
 
-        result = get_stamp_health_check(VALID_STAMP_ID)
+        result = await get_stamp_health_check(VALID_STAMP_ID)
 
         assert result["can_upload"] is False
         assert len(result["errors"]) >= 1  # At least NOT_LOCAL

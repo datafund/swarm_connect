@@ -7,7 +7,7 @@ import pytest
 import json
 import io
 import tarfile
-from unittest.mock import patch, call
+from unittest.mock import patch, MagicMock, AsyncMock
 from fastapi.testclient import TestClient
 
 from app.main import app
@@ -88,7 +88,7 @@ class TestRedundancyConstants:
 class TestDataUploadRedundancy:
     """Test redundancy parameter for /api/v1/data/ endpoint."""
 
-    @patch('app.api.endpoints.data.upload_data_to_swarm')
+    @patch('app.api.endpoints.data.upload_data_to_swarm', new_callable=AsyncMock)
     def test_upload_without_redundancy_uses_default(self, mock_upload):
         """Test that upload without redundancy parameter uses default level."""
         mock_upload.return_value = "test_reference"
@@ -108,7 +108,7 @@ class TestDataUploadRedundancy:
         call_kwargs = mock_upload.call_args[1]
         assert call_kwargs.get('redundancy_level') is None
 
-    @patch('app.api.endpoints.data.upload_data_to_swarm')
+    @patch('app.api.endpoints.data.upload_data_to_swarm', new_callable=AsyncMock)
     def test_upload_with_redundancy_level_0(self, mock_upload):
         """Test upload with redundancy level 0 (none)."""
         mock_upload.return_value = "test_reference"
@@ -126,7 +126,7 @@ class TestDataUploadRedundancy:
         call_kwargs = mock_upload.call_args[1]
         assert call_kwargs.get('redundancy_level') == 0
 
-    @patch('app.api.endpoints.data.upload_data_to_swarm')
+    @patch('app.api.endpoints.data.upload_data_to_swarm', new_callable=AsyncMock)
     def test_upload_with_redundancy_level_4(self, mock_upload):
         """Test upload with redundancy level 4 (paranoid)."""
         mock_upload.return_value = "test_reference"
@@ -144,7 +144,7 @@ class TestDataUploadRedundancy:
         call_kwargs = mock_upload.call_args[1]
         assert call_kwargs.get('redundancy_level') == 4
 
-    @patch('app.api.endpoints.data.upload_data_to_swarm')
+    @patch('app.api.endpoints.data.upload_data_to_swarm', new_callable=AsyncMock)
     def test_upload_with_all_valid_redundancy_levels(self, mock_upload):
         """Test upload with each valid redundancy level (0-4)."""
         mock_upload.return_value = "test_reference"
@@ -220,7 +220,7 @@ class TestDataUploadRedundancy:
 class TestManifestUploadRedundancy:
     """Test redundancy parameter for /api/v1/data/manifest endpoint."""
 
-    @patch('app.api.endpoints.data.upload_collection_to_swarm')
+    @patch('app.api.endpoints.data.upload_collection_to_swarm', new_callable=AsyncMock)
     def test_manifest_without_redundancy_uses_default(self, mock_upload):
         """Test that manifest upload without redundancy uses default level."""
         mock_upload.return_value = "manifest_reference"
@@ -237,7 +237,7 @@ class TestManifestUploadRedundancy:
         call_kwargs = mock_upload.call_args[1]
         assert call_kwargs.get('redundancy_level') is None
 
-    @patch('app.api.endpoints.data.upload_collection_to_swarm')
+    @patch('app.api.endpoints.data.upload_collection_to_swarm', new_callable=AsyncMock)
     def test_manifest_with_redundancy_level_0(self, mock_upload):
         """Test manifest upload with redundancy level 0 (none)."""
         mock_upload.return_value = "manifest_reference"
@@ -254,7 +254,7 @@ class TestManifestUploadRedundancy:
         call_kwargs = mock_upload.call_args[1]
         assert call_kwargs.get('redundancy_level') == 0
 
-    @patch('app.api.endpoints.data.upload_collection_to_swarm')
+    @patch('app.api.endpoints.data.upload_collection_to_swarm', new_callable=AsyncMock)
     def test_manifest_with_redundancy_level_4(self, mock_upload):
         """Test manifest upload with redundancy level 4 (paranoid)."""
         mock_upload.return_value = "manifest_reference"
@@ -271,7 +271,7 @@ class TestManifestUploadRedundancy:
         call_kwargs = mock_upload.call_args[1]
         assert call_kwargs.get('redundancy_level') == 4
 
-    @patch('app.api.endpoints.data.upload_collection_to_swarm')
+    @patch('app.api.endpoints.data.upload_collection_to_swarm', new_callable=AsyncMock)
     def test_manifest_with_all_valid_redundancy_levels(self, mock_upload):
         """Test manifest upload with each valid redundancy level (0-4)."""
         mock_upload.return_value = "manifest_reference"
@@ -330,7 +330,7 @@ class TestManifestUploadRedundancy:
 class TestRedundancyWithOtherParameters:
     """Test redundancy parameter combined with other upload parameters."""
 
-    @patch('app.api.endpoints.data.upload_data_to_swarm')
+    @patch('app.api.endpoints.data.upload_data_to_swarm', new_callable=AsyncMock)
     def test_redundancy_with_deferred(self, mock_upload):
         """Test redundancy parameter combined with deferred upload."""
         mock_upload.return_value = "test_reference"
@@ -349,7 +349,7 @@ class TestRedundancyWithOtherParameters:
         assert call_kwargs.get('deferred') is True
         assert call_kwargs.get('redundancy_level') == 3
 
-    @patch('app.api.endpoints.data.upload_data_to_swarm')
+    @patch('app.api.endpoints.data.upload_data_to_swarm', new_callable=AsyncMock)
     def test_redundancy_with_include_timing(self, mock_upload):
         """Test redundancy parameter combined with include_timing."""
         mock_upload.return_value = "test_reference"
@@ -369,7 +369,7 @@ class TestRedundancyWithOtherParameters:
         call_kwargs = mock_upload.call_args[1]
         assert call_kwargs.get('redundancy_level') == 1
 
-    @patch('app.api.endpoints.data.upload_data_to_swarm')
+    @patch('app.api.endpoints.data.upload_data_to_swarm', new_callable=AsyncMock)
     def test_redundancy_with_custom_content_type(self, mock_upload):
         """Test redundancy parameter combined with custom content type."""
         mock_upload.return_value = "test_reference"
@@ -387,7 +387,7 @@ class TestRedundancyWithOtherParameters:
         assert call_kwargs.get('content_type') == "image/png"
         assert call_kwargs.get('redundancy_level') == 2
 
-    @patch('app.api.endpoints.data.upload_collection_to_swarm')
+    @patch('app.api.endpoints.data.upload_collection_to_swarm', new_callable=AsyncMock)
     def test_manifest_redundancy_with_deferred(self, mock_upload):
         """Test manifest redundancy parameter combined with deferred upload."""
         mock_upload.return_value = "manifest_reference"
@@ -409,100 +409,122 @@ class TestRedundancyWithOtherParameters:
 class TestServiceLayerRedundancy:
     """Test redundancy handling in service layer functions."""
 
-    @patch('app.services.swarm_api.requests.post')
-    def test_upload_data_to_swarm_default_redundancy(self, mock_post):
+    @pytest.mark.asyncio
+    async def test_upload_data_to_swarm_default_redundancy(self):
         """Test that upload_data_to_swarm uses default redundancy when not specified."""
         from app.services.swarm_api import upload_data_to_swarm
 
-        mock_response = mock_post.return_value
+        mock_response = MagicMock()
         mock_response.status_code = 200
         mock_response.json.return_value = {"reference": "test_ref"}
+        mock_response.raise_for_status = MagicMock()
 
-        upload_data_to_swarm(
-            data=b"test data",
-            stamp_id=VALID_STAMP_ID,
-            content_type="text/plain"
-        )
+        mock_client = MagicMock()
+        mock_client.post = AsyncMock(return_value=mock_response)
+
+        with patch('app.services.swarm_api.get_client', return_value=mock_client):
+            await upload_data_to_swarm(
+                data=b"test data",
+                stamp_id=VALID_STAMP_ID,
+                content_type="text/plain"
+            )
 
         # Check that Swarm-Redundancy-Level header was set to default (2)
-        call_kwargs = mock_post.call_args[1]
+        call_kwargs = mock_client.post.call_args[1]
         assert call_kwargs["headers"]["Swarm-Redundancy-Level"] == "2"
 
-    @patch('app.services.swarm_api.requests.post')
-    def test_upload_data_to_swarm_custom_redundancy(self, mock_post):
+    @pytest.mark.asyncio
+    async def test_upload_data_to_swarm_custom_redundancy(self):
         """Test that upload_data_to_swarm passes custom redundancy level."""
         from app.services.swarm_api import upload_data_to_swarm
 
-        mock_response = mock_post.return_value
+        mock_response = MagicMock()
         mock_response.status_code = 200
         mock_response.json.return_value = {"reference": "test_ref"}
+        mock_response.raise_for_status = MagicMock()
 
-        upload_data_to_swarm(
-            data=b"test data",
-            stamp_id=VALID_STAMP_ID,
-            content_type="text/plain",
-            redundancy_level=4
-        )
+        mock_client = MagicMock()
+        mock_client.post = AsyncMock(return_value=mock_response)
+
+        with patch('app.services.swarm_api.get_client', return_value=mock_client):
+            await upload_data_to_swarm(
+                data=b"test data",
+                stamp_id=VALID_STAMP_ID,
+                content_type="text/plain",
+                redundancy_level=4
+            )
 
         # Check that Swarm-Redundancy-Level header was set to 4
-        call_kwargs = mock_post.call_args[1]
+        call_kwargs = mock_client.post.call_args[1]
         assert call_kwargs["headers"]["Swarm-Redundancy-Level"] == "4"
 
-    @patch('app.services.swarm_api.requests.post')
-    def test_upload_data_to_swarm_level_0(self, mock_post):
+    @pytest.mark.asyncio
+    async def test_upload_data_to_swarm_level_0(self):
         """Test that upload_data_to_swarm correctly handles level 0 (no erasure coding)."""
         from app.services.swarm_api import upload_data_to_swarm
 
-        mock_response = mock_post.return_value
+        mock_response = MagicMock()
         mock_response.status_code = 200
         mock_response.json.return_value = {"reference": "test_ref"}
+        mock_response.raise_for_status = MagicMock()
 
-        upload_data_to_swarm(
-            data=b"test data",
-            stamp_id=VALID_STAMP_ID,
-            content_type="text/plain",
-            redundancy_level=0
-        )
+        mock_client = MagicMock()
+        mock_client.post = AsyncMock(return_value=mock_response)
+
+        with patch('app.services.swarm_api.get_client', return_value=mock_client):
+            await upload_data_to_swarm(
+                data=b"test data",
+                stamp_id=VALID_STAMP_ID,
+                content_type="text/plain",
+                redundancy_level=0
+            )
 
         # Check that Swarm-Redundancy-Level header was set to 0
-        call_kwargs = mock_post.call_args[1]
+        call_kwargs = mock_client.post.call_args[1]
         assert call_kwargs["headers"]["Swarm-Redundancy-Level"] == "0"
 
-    @patch('app.services.swarm_api.requests.post')
-    def test_upload_collection_to_swarm_custom_redundancy(self, mock_post):
+    @pytest.mark.asyncio
+    async def test_upload_collection_to_swarm_custom_redundancy(self):
         """Test that upload_collection_to_swarm passes custom redundancy level."""
         from app.services.swarm_api import upload_collection_to_swarm
 
-        mock_response = mock_post.return_value
+        mock_response = MagicMock()
         mock_response.status_code = 200
         mock_response.json.return_value = {"reference": "test_ref"}
+        mock_response.raise_for_status = MagicMock()
+
+        mock_client = MagicMock()
+        mock_client.post = AsyncMock(return_value=mock_response)
 
         files = {"file.txt": b"content"}
         tar_bytes = create_tar_archive(files)
 
-        upload_collection_to_swarm(
-            tar_data=tar_bytes,
-            stamp_id=VALID_STAMP_ID,
-            redundancy_level=3
-        )
+        with patch('app.services.swarm_api.get_client', return_value=mock_client):
+            await upload_collection_to_swarm(
+                tar_data=tar_bytes,
+                stamp_id=VALID_STAMP_ID,
+                redundancy_level=3
+            )
 
         # Check that Swarm-Redundancy-Level header was set to 3
-        call_kwargs = mock_post.call_args[1]
+        call_kwargs = mock_client.post.call_args[1]
         assert call_kwargs["headers"]["Swarm-Redundancy-Level"] == "3"
 
-    def test_upload_data_to_swarm_invalid_redundancy(self):
+    @pytest.mark.asyncio
+    async def test_upload_data_to_swarm_invalid_redundancy(self):
         """Test that upload_data_to_swarm raises ValueError for invalid level."""
         from app.services.swarm_api import upload_data_to_swarm
 
         with pytest.raises(ValueError, match="Invalid redundancy level"):
-            upload_data_to_swarm(
+            await upload_data_to_swarm(
                 data=b"test data",
                 stamp_id=VALID_STAMP_ID,
                 content_type="text/plain",
                 redundancy_level=99
             )
 
-    def test_upload_collection_to_swarm_invalid_redundancy(self):
+    @pytest.mark.asyncio
+    async def test_upload_collection_to_swarm_invalid_redundancy(self):
         """Test that upload_collection_to_swarm raises ValueError for invalid level."""
         from app.services.swarm_api import upload_collection_to_swarm
 
@@ -510,7 +532,7 @@ class TestServiceLayerRedundancy:
         tar_bytes = create_tar_archive(files)
 
         with pytest.raises(ValueError, match="Invalid redundancy level"):
-            upload_collection_to_swarm(
+            await upload_collection_to_swarm(
                 tar_data=tar_bytes,
                 stamp_id=VALID_STAMP_ID,
                 redundancy_level=-5

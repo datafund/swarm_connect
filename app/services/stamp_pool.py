@@ -381,7 +381,7 @@ class StampPoolManager:
                 logger.info("No known stamps in state file, pool will be filled by purchase logic")
                 return 0
 
-            all_stamps = swarm_api.get_all_stamps_processed()
+            all_stamps = await swarm_api.get_all_stamps_processed()
             stamp_map = {s.get("batchID"): s for s in all_stamps}
             synced_count = 0
             valid_ids = set()
@@ -519,9 +519,9 @@ class StampPoolManager:
     async def _purchase_stamp(self, depth: int) -> Optional[str]:
         """Purchase a new stamp for the pool."""
         try:
-            # Get current price
-            chainstate = swarm_api.get_chainstate()
-            current_price = chainstate.get("currentPrice", 0)
+            # Get current price (Bee API returns currentPrice as a string)
+            chainstate = await swarm_api.get_chainstate()
+            current_price = int(chainstate.get("currentPrice", 0))
 
             # Calculate amount for configured duration + 1 hour buffer
             # The extra hour ensures the stamp meets minimum TTL requirements
@@ -534,14 +534,14 @@ class StampPoolManager:
             logger.info(f"Purchasing stamp for pool: depth={depth}, amount={amount}, duration={duration_hours}h")
 
             # Purchase the stamp
-            batch_id = swarm_api.purchase_postage_stamp(amount, depth, label)
+            batch_id = await swarm_api.purchase_postage_stamp(amount, depth, label)
 
             # Wait for stamp to become usable (up to 90 seconds)
             usable = await self._wait_for_stamp_usable(batch_id, timeout=90)
 
             if usable:
                 # Get stamp info and add to pool
-                stamps = swarm_api.get_all_stamps_processed()
+                stamps = await swarm_api.get_all_stamps_processed()
                 stamp_data = next((s for s in stamps if s.get("batchID") == batch_id), None)
                 if stamp_data:
                     self.add_stamp_to_pool(
@@ -573,7 +573,7 @@ class StampPoolManager:
         start = datetime.now(timezone.utc)
         while (datetime.now(timezone.utc) - start).total_seconds() < timeout:
             try:
-                stamps = swarm_api.get_all_stamps_processed()
+                stamps = await swarm_api.get_all_stamps_processed()
                 stamp = next((s for s in stamps if s.get("batchID") == batch_id), None)
                 if stamp and stamp.get("usable"):
                     return True
@@ -587,7 +587,7 @@ class StampPoolManager:
     async def _get_stamp_ttl(self, batch_id: str) -> Optional[int]:
         """Get current TTL for a stamp."""
         try:
-            stamps = swarm_api.get_all_stamps_processed()
+            stamps = await swarm_api.get_all_stamps_processed()
             stamp = next((s for s in stamps if s.get("batchID") == batch_id), None)
             if stamp:
                 return stamp.get("batchTTL", 0)
@@ -598,7 +598,7 @@ class StampPoolManager:
     async def _update_stamp_ttls(self):
         """Update TTL information for all pool stamps."""
         try:
-            stamps = swarm_api.get_all_stamps_processed()
+            stamps = await swarm_api.get_all_stamps_processed()
             stamp_map = {s.get("batchID"): s for s in stamps}
 
             with self._lock:
@@ -632,9 +632,9 @@ class StampPoolManager:
     async def _topup_stamp(self, batch_id: str):
         """Top up a stamp with additional TTL."""
         try:
-            # Get current price
-            chainstate = swarm_api.get_chainstate()
-            current_price = chainstate.get("currentPrice", 0)
+            # Get current price (Bee API returns currentPrice as a string)
+            chainstate = await swarm_api.get_chainstate()
+            current_price = int(chainstate.get("currentPrice", 0))
 
             # Calculate amount for configured top-up duration
             topup_hours = settings.STAMP_POOL_TOPUP_HOURS
@@ -642,7 +642,7 @@ class StampPoolManager:
 
             logger.info(f"Topping up stamp {batch_id[:16]}... with {topup_hours}h ({amount} PLUR)")
 
-            swarm_api.extend_postage_stamp(batch_id, amount)
+            await swarm_api.extend_postage_stamp(batch_id, amount)
 
         except Exception as e:
             logger.error(f"Failed to top up stamp {batch_id[:16]}...: {e}")

@@ -138,7 +138,7 @@ Swarm Connect is a FastAPI-based API gateway that provides comprehensive access 
 │  │                        SERVICE LAYER                               │   │
 │  │  ┌─────────────────┐  ┌─────────────────┐  ┌─────────────────────┐ │   │
 │  │  │  Swarm API      │  │  HTTP Client    │  │   Error Recovery &  │ │   │
-│  │  │  Integration    │  │  (Requests)     │  │   Retry Logic       │ │   │
+│  │  │  Integration    │  │  (httpx Async)  │  │   Retry Logic       │ │   │
 │  │  └─────────────────┘  └─────────────────┘  └─────────────────────┘ │   │
 │  └─────────────────────────────────────────────────────────────────────┘   │
 │                                    │                                       │
