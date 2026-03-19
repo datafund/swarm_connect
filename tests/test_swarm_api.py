@@ -457,9 +457,22 @@ class TestStampCostCalculations:
         assert result["shortfall_bzz"] == 0.0
 
     def test_calculate_stamp_amount_zero_price(self):
-        """Test amount calculation with zero price."""
-        result = calculate_stamp_amount(25, 0)
-        assert result == 0
+        """Zero price from chainstate indicates an error — should raise ValueError."""
+        with pytest.raises(ValueError, match="positive"):
+            calculate_stamp_amount(25, 0)
+
+    def test_calculate_stamp_amount_string_price(self):
+        """Bee API returns currentPrice as a string — must be handled correctly."""
+        # String "24000" should be converted to int, not string-multiplied
+        result = calculate_stamp_amount(25, "24000")
+        expected = 24000 * 25 * 720
+        assert result == expected
+        assert isinstance(result, int)
+
+    def test_calculate_stamp_amount_negative_price(self):
+        """Negative price should raise ValueError."""
+        with pytest.raises(ValueError, match="positive"):
+            calculate_stamp_amount(25, -100)
 
     def test_calculate_stamp_total_cost_zero_amount(self):
         """Test total cost with zero amount."""

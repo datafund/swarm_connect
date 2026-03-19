@@ -116,6 +116,11 @@ async def purchase_postage_stamp(amount: int, depth: int, label: Optional[str] =
         httpx.HTTPError: If the HTTP request to the Swarm API fails
         ValueError: If the response is malformed or missing expected fields
     """
+    # Ensure amount is an integer to prevent string multiplication in URL
+    amount = int(amount)
+    if amount <= 0:
+        raise ValueError(f"Stamp amount must be positive, got {amount}")
+
     api_url = urljoin(str(settings.SWARM_BEE_API_URL), f"stamps/{amount}/{depth}")
     headers = {"Content-Type": "application/json"}
 
@@ -164,6 +169,11 @@ async def extend_postage_stamp(stamp_id: str, amount: int) -> str:
         httpx.HTTPError: If the HTTP request to the Swarm API fails
         ValueError: If the response is malformed or missing expected fields
     """
+    # Ensure amount is an integer to prevent string multiplication in URL
+    amount = int(amount)
+    if amount <= 0:
+        raise ValueError(f"Extension amount must be positive, got {amount}")
+
     api_url = urljoin(str(settings.SWARM_BEE_API_URL), f"stamps/topup/{stamp_id}/{amount}")
     headers = {"Content-Type": "application/json"}
 
@@ -849,7 +859,7 @@ async def get_chainstate() -> Dict[str, Any]:
         raise ValueError(f"Could not parse chainstate response: {e}") from e
 
 
-def calculate_stamp_amount(duration_hours: int, current_price: int) -> int:
+def calculate_stamp_amount(duration_hours: int, current_price) -> int:
     """
     Calculates the amount needed for a stamp based on desired duration.
 
@@ -858,17 +868,22 @@ def calculate_stamp_amount(duration_hours: int, current_price: int) -> int:
 
     Args:
         duration_hours: Desired stamp duration in hours
-        current_price: Current price per chunk per block (from chainstate)
-                       Note: Bee API returns this as a string, so we convert to int
+        current_price: Current price per chunk per block (from chainstate).
+                       Accepts int or str since the Bee API returns this as a string.
 
     Returns:
         The amount in PLUR needed for the stamp
+
+    Raises:
+        ValueError: If current_price cannot be converted to a positive integer
     """
+    price = int(current_price)
+    if price <= 0:
+        raise ValueError(f"Current price must be positive, got {price}")
+
     blocks_per_hour = 720  # 3600 seconds / 5 seconds per block
     duration_blocks = duration_hours * blocks_per_hour
-    # Ensure current_price is an integer (Bee API returns it as a string)
-    amount = int(current_price) * duration_blocks
-    return amount
+    return price * duration_blocks
 
 
 def calculate_stamp_total_cost(amount: int, depth: int) -> int:
