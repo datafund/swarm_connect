@@ -98,6 +98,10 @@ class Settings(BaseSettings):
     # === Upload Limits ===
     MAX_UPLOAD_SIZE_MB: int = 10  # Maximum file upload size in megabytes
 
+    # === JSON Body Limits ===
+    MAX_JSON_BODY_BYTES: int = 1_048_576  # Maximum JSON body size (1 MB)
+    MAX_JSON_DEPTH: int = 20  # Maximum JSON nesting depth
+
     # === Global Rate Limiting ===
     RATE_LIMIT_ENABLED: bool = True  # Enable global rate limiting
     RATE_LIMIT_PER_MINUTE: int = 60  # Requests per minute per IP

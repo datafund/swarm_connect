@@ -47,6 +47,11 @@ app = FastAPI(
     lifespan=lifespan
 )
 
+# Add JSON body size and depth limiting (protects against nested-JSON DoS)
+from app.middleware.body_limit import BodyLimitMiddleware
+app.add_middleware(BodyLimitMiddleware)
+logger.info(f"JSON body limits enabled: max {settings.MAX_JSON_BODY_BYTES} bytes, max depth {settings.MAX_JSON_DEPTH}")
+
 # Add global rate limiting if enabled and x402 is disabled (x402 has its own limiter)
 if settings.RATE_LIMIT_ENABLED and not settings.X402_ENABLED:
     from app.middleware.rate_limit import RateLimitMiddleware
