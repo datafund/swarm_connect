@@ -162,7 +162,7 @@ CORS (browser access):
 
 - **FastAPI**: Web framework with automatic OpenAPI documentation
 - **Uvicorn**: ASGI server with performance extras
-- **Requests**: HTTP client for Swarm API integration
+- **httpx**: Async HTTP client for Swarm API integration (AsyncClient with connection pooling)
 - **Pydantic**: Data validation and settings management
 - **python-dotenv**: Environment file loading
 
