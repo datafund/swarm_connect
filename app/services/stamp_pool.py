@@ -519,9 +519,9 @@ class StampPoolManager:
     async def _purchase_stamp(self, depth: int) -> Optional[str]:
         """Purchase a new stamp for the pool."""
         try:
-            # Get current price
+            # Get current price (Bee API returns currentPrice as a string)
             chainstate = await swarm_api.get_chainstate()
-            current_price = chainstate.get("currentPrice", 0)
+            current_price = int(chainstate.get("currentPrice", 0))
 
             # Calculate amount for configured duration + 1 hour buffer
             # The extra hour ensures the stamp meets minimum TTL requirements
@@ -632,9 +632,9 @@ class StampPoolManager:
     async def _topup_stamp(self, batch_id: str):
         """Top up a stamp with additional TTL."""
         try:
-            # Get current price
+            # Get current price (Bee API returns currentPrice as a string)
             chainstate = await swarm_api.get_chainstate()
-            current_price = chainstate.get("currentPrice", 0)
+            current_price = int(chainstate.get("currentPrice", 0))
 
             # Calculate amount for configured top-up duration
             topup_hours = settings.STAMP_POOL_TOPUP_HOURS
