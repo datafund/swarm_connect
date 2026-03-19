@@ -47,7 +47,7 @@ def _get_facilitator_client() -> FacilitatorClient:
     return _facilitator_client
 
 
-def _calculate_price_for_request(request: Request) -> dict:
+async def _calculate_price_for_request(request: Request) -> dict:
     """
     Calculate price based on the request type.
 
@@ -57,7 +57,7 @@ def _calculate_price_for_request(request: Request) -> dict:
     path = request.url.path
 
     if "/stamps/" in path:
-        quote = get_price_quote(
+        quote = await get_price_quote(
             operation="stamp_purchase",
             duration_hours=24,
             depth=17
@@ -71,7 +71,7 @@ def _calculate_price_for_request(request: Request) -> dict:
         content_length = request.headers.get("Content-Length", "0")
         size_bytes = int(content_length) if content_length.isdigit() else 1024
 
-        quote = get_price_quote(
+        quote = await get_price_quote(
             operation="upload",
             size_bytes=size_bytes,
             duration_hours=24
@@ -108,7 +108,7 @@ async def require_x402_payment(request: Request) -> None:
         return
 
     # Check gateway ETH balance
-    base_balance = check_base_eth_balance()
+    base_balance = await check_base_eth_balance()
     if base_balance.get("is_critical"):
         logger.error(
             f"x402: Gateway ETH critically low ({base_balance.get('balance_eth', 0):.6f} ETH). "
@@ -129,7 +129,7 @@ async def require_x402_payment(request: Request) -> None:
 
     # Calculate price for this operation
     try:
-        price_quote = _calculate_price_for_request(request)
+        price_quote = await _calculate_price_for_request(request)
         price_usd = price_quote["price_usd"]
         description = price_quote.get("description", "Gateway operation")
     except Exception as e:
