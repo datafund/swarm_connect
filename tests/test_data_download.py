@@ -4,6 +4,7 @@ Comprehensive tests for data download functionality to prevent future regression
 Tests content type detection, filename generation, headers, and error handling.
 """
 import pytest
+import httpx
 import json
 import base64
 from unittest.mock import patch
@@ -186,8 +187,7 @@ class TestDownloadErrorHandling:
     @patch('app.api.endpoints.data.download_data_from_swarm')
     def test_swarm_api_error(self, mock_download):
         """Test handling of Swarm API errors."""
-        from requests.exceptions import RequestException
-        mock_download.side_effect = RequestException("Swarm API error")
+        mock_download.side_effect = httpx.HTTPError("Swarm API error")
 
         response = client.get("/api/v1/data/ddd1567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef")
 
@@ -207,8 +207,7 @@ class TestDownloadErrorHandling:
     @patch('app.api.endpoints.data.download_data_from_swarm')
     def test_invalid_reference_format(self, mock_download):
         """Test handling of invalid reference format - rejected by regex validation."""
-        from requests.exceptions import RequestException
-        mock_download.side_effect = RequestException("Bad request")
+        mock_download.side_effect = httpx.HTTPError("Bad request")
 
         # These refs are rejected by the 64-128 hex char regex with 422
         invalid_refs = [
@@ -350,8 +349,7 @@ class TestJSONDownloadEndpoint:
         assert "Data not found" in error_json["detail"]
 
         # Test 502 error
-        from requests.exceptions import RequestException
-        mock_download.side_effect = RequestException("Swarm error")
+        mock_download.side_effect = httpx.HTTPError("Swarm error")
 
         response = client.get("/api/v1/data/aaf1567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef/json")
 

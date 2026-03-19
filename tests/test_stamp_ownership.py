@@ -364,12 +364,13 @@ class TestOwnershipIntegration:
 
     def test_direct_purchase_registers_stamp(self, client):
         """Direct purchase via stamps endpoint registers ownership."""
+        from unittest.mock import AsyncMock
         with patch('app.api.endpoints.stamps.swarm_api') as mock_swarm:
-            mock_swarm.get_chainstate.return_value = {"currentPrice": 24000}
+            mock_swarm.get_chainstate = AsyncMock(return_value={"currentPrice": 24000})
             mock_swarm.calculate_stamp_amount.return_value = 100000
             mock_swarm.calculate_stamp_total_cost.return_value = 1000000
-            mock_swarm.check_sufficient_funds.return_value = {"sufficient": True}
-            mock_swarm.purchase_postage_stamp.return_value = "new_batch_id_123"
+            mock_swarm.check_sufficient_funds = AsyncMock(return_value={"sufficient": True})
+            mock_swarm.purchase_postage_stamp = AsyncMock(return_value="new_batch_id_123")
 
             with patch('app.api.endpoints.stamps.stamp_ownership_manager') as mock_ownership:
                 response = client.post(

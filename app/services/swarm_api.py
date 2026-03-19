@@ -1,17 +1,18 @@
 # app/services/swarm_api.py
+import asyncio
 import datetime
-import requests
-from requests.exceptions import RequestException
+import httpx
 import logging
 from typing import List, Dict, Any, Optional
 from urllib.parse import urljoin
 
 from app.core.config import settings
+from app.services.http_client import get_client
 from app.services.stamp_ownership import stamp_ownership_manager
 
 logger = logging.getLogger(__name__)
 
-def get_all_stamps() -> List[Dict[str, Any]]:
+async def get_all_stamps() -> List[Dict[str, Any]]:
     """
     Fetches all postage stamp batches from the configured Swarm Bee node.
 
@@ -20,12 +21,13 @@ def get_all_stamps() -> List[Dict[str, Any]]:
         Returns an empty list if the request fails or no stamps are found.
 
     Raises:
-        RequestException: If the HTTP request to the Swarm API fails.
+        httpx.HTTPError: If the HTTP request to the Swarm API fails.
     """
     api_url = urljoin(str(settings.SWARM_BEE_API_URL), "batches")
     try:
-        response = requests.get(api_url, timeout=10) # Add a timeout
-        response.raise_for_status() # Raise HTTPError for bad responses (4xx or 5xx)
+        client = get_client()
+        response = await client.get(api_url, timeout=10)
+        response.raise_for_status()
 
         data = response.json()
         if isinstance(data, dict) and "batches" in data:
@@ -44,20 +46,18 @@ def get_all_stamps() -> List[Dict[str, Any]]:
              return []
 
 
-    except RequestException as e:
+    except httpx.HTTPError as e:
         logger.error(f"Error fetching stamps from Swarm API ({api_url}): {e}")
-        # Re-raise the exception to be handled by the endpoint,
-        # or return empty list/None depending on desired behavior
-        raise # Let the endpoint handle it with a 50x error
+        raise
 
     except Exception as e:
         # Catch other potential errors like JSON decoding
         logger.error(f"An unexpected error occurred while processing Swarm API response: {e}")
-        raise # Propagate unexpected errors
+        raise
 
 
 
-def get_local_stamps() -> List[Dict[str, Any]]:
+async def get_local_stamps() -> List[Dict[str, Any]]:
     """
     Fetches local postage stamp data from the configured Swarm Bee node.
     This endpoint provides richer information including utilization, usable status,
@@ -68,11 +68,12 @@ def get_local_stamps() -> List[Dict[str, Any]]:
         Returns an empty list if the request fails or no stamps are found.
 
     Raises:
-        RequestException: If the HTTP request to the Swarm API fails.
+        httpx.HTTPError: If the HTTP request to the Swarm API fails.
     """
     api_url = urljoin(str(settings.SWARM_BEE_API_URL), "stamps")
     try:
-        response = requests.get(api_url, timeout=10)
+        client = get_client()
+        response = await client.get(api_url, timeout=10)
         response.raise_for_status()
 
         data = response.json()
@@ -90,7 +91,7 @@ def get_local_stamps() -> List[Dict[str, Any]]:
             logger.warning(f"Unexpected data structure from local stamps API: {type(data)}")
             return []
 
-    except RequestException as e:
+    except httpx.HTTPError as e:
         logger.warning(f"Error fetching local stamps from Swarm API ({api_url}): {e}")
         # Don't re-raise here - we want to continue even if local stamps fail
         return []
@@ -99,7 +100,7 @@ def get_local_stamps() -> List[Dict[str, Any]]:
         return []
 
 
-def purchase_postage_stamp(amount: int, depth: int, label: Optional[str] = None) -> str:
+async def purchase_postage_stamp(amount: int, depth: int, label: Optional[str] = None) -> str:
     """
     Purchases a new postage stamp from the configured Swarm Bee node.
 
@@ -112,7 +113,7 @@ def purchase_postage_stamp(amount: int, depth: int, label: Optional[str] = None)
         The batchID of the purchased stamp
 
     Raises:
-        RequestException: If the HTTP request to the Swarm API fails
+        httpx.HTTPError: If the HTTP request to the Swarm API fails
         ValueError: If the response is malformed or missing expected fields
     """
     api_url = urljoin(str(settings.SWARM_BEE_API_URL), f"stamps/{amount}/{depth}")
@@ -124,10 +125,11 @@ def purchase_postage_stamp(amount: int, depth: int, label: Optional[str] = None)
         request_body["label"] = label
 
     try:
+        client = get_client()
         if request_body:
-            response = requests.post(api_url, json=request_body, headers=headers, timeout=120)
+            response = await client.post(api_url, json=request_body, headers=headers, timeout=120)
         else:
-            response = requests.post(api_url, headers=headers, timeout=120)
+            response = await client.post(api_url, headers=headers, timeout=120)
 
         response.raise_for_status()
         response_json = response.json()
@@ -139,7 +141,7 @@ def purchase_postage_stamp(amount: int, depth: int, label: Optional[str] = None)
         logger.info(f"Successfully purchased stamp with batch ID: {batch_id}")
         return batch_id
 
-    except requests.exceptions.RequestException as e:
+    except httpx.HTTPError as e:
         logger.error(f"Error purchasing stamp from Swarm API ({api_url}): {e}")
         raise
     except (ValueError, KeyError) as e:
@@ -147,7 +149,7 @@ def purchase_postage_stamp(amount: int, depth: int, label: Optional[str] = None)
         raise ValueError(f"Could not parse stamp purchase response: {e}") from e
 
 
-def extend_postage_stamp(stamp_id: str, amount: int) -> str:
+async def extend_postage_stamp(stamp_id: str, amount: int) -> str:
     """
     Extends an existing postage stamp by adding more funds to it.
 
@@ -159,14 +161,15 @@ def extend_postage_stamp(stamp_id: str, amount: int) -> str:
         The batchID of the extended stamp (should be same as input stamp_id)
 
     Raises:
-        RequestException: If the HTTP request to the Swarm API fails
+        httpx.HTTPError: If the HTTP request to the Swarm API fails
         ValueError: If the response is malformed or missing expected fields
     """
     api_url = urljoin(str(settings.SWARM_BEE_API_URL), f"stamps/topup/{stamp_id}/{amount}")
     headers = {"Content-Type": "application/json"}
 
     try:
-        response = requests.patch(api_url, headers=headers, timeout=120)
+        client = get_client()
+        response = await client.patch(api_url, headers=headers, timeout=120)
         response.raise_for_status()
 
         # The topup endpoint typically returns the updated batch information
@@ -177,7 +180,7 @@ def extend_postage_stamp(stamp_id: str, amount: int) -> str:
         logger.info(f"Successfully extended stamp {stamp_id} with amount {amount}")
         return batch_id
 
-    except requests.exceptions.RequestException as e:
+    except httpx.HTTPError as e:
         logger.error(f"Error extending stamp {stamp_id} from Swarm API ({api_url}): {e}")
         raise
     except (ValueError, KeyError) as e:
@@ -432,7 +435,7 @@ def calculate_propagation_signals(batch_id: str, usable: Optional[bool]) -> Dict
     return result
 
 
-def get_all_stamps_processed() -> List[Dict[str, Any]]:
+async def get_all_stamps_processed() -> List[Dict[str, Any]]:
     """
     Fetches all postage stamp batches and processes them with expiration calculations.
     Merges global batch data with local stamp information for comprehensive results.
@@ -442,11 +445,13 @@ def get_all_stamps_processed() -> List[Dict[str, Any]]:
         calculated expiration times, and accurate usable status.
 
     Raises:
-        RequestException: If the HTTP request to the Swarm API fails.
+        httpx.HTTPError: If the HTTP request to the Swarm API fails.
     """
-    # Get stamps data from both endpoints
-    global_stamps = get_all_stamps()  # /batches endpoint
-    local_stamps = get_local_stamps()  # /stamps endpoint
+    # Get stamps data from both endpoints in parallel
+    global_stamps, local_stamps = await asyncio.gather(
+        get_all_stamps(),   # /batches endpoint
+        get_local_stamps()  # /stamps endpoint
+    )
 
     # Create a lookup dictionary for local stamps by batchID
     local_stamps_dict = {stamp.get("batchID"): stamp for stamp in local_stamps if stamp.get("batchID")}
@@ -567,7 +572,7 @@ def validate_redundancy_level(level: int) -> None:
         )
 
 
-def upload_data_to_swarm(
+async def upload_data_to_swarm(
     data: bytes,
     stamp_id: str,
     content_type: str = "application/json",
@@ -593,7 +598,7 @@ def upload_data_to_swarm(
         The Swarm reference hash of the uploaded data
 
     Raises:
-        RequestException: If the HTTP request to the Swarm API fails
+        httpx.HTTPError: If the HTTP request to the Swarm API fails
         ValueError: If the response is malformed, missing expected fields, or redundancy level invalid
     """
     # Determine and validate redundancy level
@@ -609,7 +614,8 @@ def upload_data_to_swarm(
     }
 
     try:
-        response = requests.post(api_url, data=data, headers=headers, timeout=60)
+        client = get_client()
+        response = await client.post(api_url, content=data, headers=headers, timeout=60)
         response.raise_for_status()
 
         response_json = response.json()
@@ -620,7 +626,7 @@ def upload_data_to_swarm(
         logger.info(f"Successfully uploaded data to Swarm with reference: {reference}")
         return reference
 
-    except requests.exceptions.RequestException as e:
+    except httpx.HTTPError as e:
         logger.error(f"Error uploading data to Swarm API ({api_url}): {e}")
         raise
     except (ValueError, KeyError) as e:
@@ -628,7 +634,7 @@ def upload_data_to_swarm(
         raise ValueError(f"Could not parse data upload response: {e}") from e
 
 
-def download_data_from_swarm(reference: str) -> bytes:
+async def download_data_from_swarm(reference: str) -> bytes:
     """
     Downloads data from the Swarm network using a reference hash.
 
@@ -639,13 +645,14 @@ def download_data_from_swarm(reference: str) -> bytes:
         The downloaded data as bytes
 
     Raises:
-        RequestException: If the HTTP request to the Swarm API fails
+        httpx.HTTPError: If the HTTP request to the Swarm API fails
         FileNotFoundError: If the data is not found (404)
     """
     api_url = urljoin(str(settings.SWARM_BEE_API_URL), f"bzz/{reference.lower()}")
 
     try:
-        response = requests.get(api_url, timeout=60)
+        client = get_client()
+        response = await client.get(api_url, timeout=60)
 
         if response.status_code == 404:
             raise FileNotFoundError(f"Data not found on Swarm at reference {reference}")
@@ -655,12 +662,12 @@ def download_data_from_swarm(reference: str) -> bytes:
         logger.info(f"Successfully downloaded {len(response.content)} bytes from Swarm reference: {reference}")
         return response.content
 
-    except requests.exceptions.RequestException as e:
+    except httpx.HTTPError as e:
         logger.error(f"Error downloading data from Swarm API ({api_url}): {e}")
         raise
 
 
-def get_wallet_info() -> Dict[str, Any]:
+async def get_wallet_info() -> Dict[str, Any]:
     """
     Fetches complete wallet information from the configured Swarm Bee node.
 
@@ -668,12 +675,13 @@ def get_wallet_info() -> Dict[str, Any]:
         Dictionary containing wallet address, BZZ balance, and other wallet data
 
     Raises:
-        RequestException: If the HTTP request to the Swarm API fails
+        httpx.HTTPError: If the HTTP request to the Swarm API fails
         ValueError: If the response is malformed or missing expected fields
     """
     api_url = urljoin(str(settings.SWARM_BEE_API_URL), "wallet")
     try:
-        response = requests.get(api_url, timeout=10)
+        client = get_client()
+        response = await client.get(api_url, timeout=10)
         response.raise_for_status()
 
         response_json = response.json()
@@ -686,7 +694,7 @@ def get_wallet_info() -> Dict[str, Any]:
         logger.info(f"Successfully retrieved wallet info: {wallet_address}, balance: {bzz_balance}")
         return response_json
 
-    except requests.exceptions.RequestException as e:
+    except httpx.HTTPError as e:
         logger.error(f"Error fetching wallet info from Swarm API ({api_url}): {e}")
         raise
     except (ValueError, KeyError) as e:
@@ -694,7 +702,7 @@ def get_wallet_info() -> Dict[str, Any]:
         raise ValueError(f"Could not parse wallet response: {e}") from e
 
 
-def get_wallet_address() -> str:
+async def get_wallet_address() -> str:
     """
     Fetches the wallet address from the configured Swarm Bee node.
 
@@ -704,14 +712,14 @@ def get_wallet_address() -> str:
         The wallet address of the Bee node
 
     Raises:
-        RequestException: If the HTTP request to the Swarm API fails
+        httpx.HTTPError: If the HTTP request to the Swarm API fails
         ValueError: If the response is malformed or missing expected fields
     """
-    wallet_info = get_wallet_info()
+    wallet_info = await get_wallet_info()
     return wallet_info["walletAddress"]
 
 
-def get_chequebook_balance() -> Dict[str, Any]:
+async def get_chequebook_balance() -> Dict[str, Any]:
     """
     Fetches the chequebook balance information from the configured Swarm Bee node.
 
@@ -719,12 +727,13 @@ def get_chequebook_balance() -> Dict[str, Any]:
         Dictionary containing totalBalance and availableBalance
 
     Raises:
-        RequestException: If the HTTP request to the Swarm API fails
+        httpx.HTTPError: If the HTTP request to the Swarm API fails
         ValueError: If the response is malformed or missing expected fields
     """
     api_url = urljoin(str(settings.SWARM_BEE_API_URL), "chequebook/balance")
     try:
-        response = requests.get(api_url, timeout=10)
+        client = get_client()
+        response = await client.get(api_url, timeout=10)
         response.raise_for_status()
 
         response_json = response.json()
@@ -736,7 +745,7 @@ def get_chequebook_balance() -> Dict[str, Any]:
         logger.info(f"Successfully retrieved chequebook balance: {available_balance}")
         return response_json
 
-    except requests.exceptions.RequestException as e:
+    except httpx.HTTPError as e:
         logger.error(f"Error fetching chequebook balance from Swarm API ({api_url}): {e}")
         raise
     except (ValueError, KeyError) as e:
@@ -744,7 +753,7 @@ def get_chequebook_balance() -> Dict[str, Any]:
         raise ValueError(f"Could not parse chequebook balance response: {e}") from e
 
 
-def get_chequebook_info() -> Dict[str, Any]:
+async def get_chequebook_info() -> Dict[str, Any]:
     """
     Fetches complete chequebook information including address and balance.
 
@@ -752,13 +761,14 @@ def get_chequebook_info() -> Dict[str, Any]:
         Dictionary containing chequebook address and balance information
 
     Raises:
-        RequestException: If the HTTP request to the Swarm API fails
+        httpx.HTTPError: If the HTTP request to the Swarm API fails
         ValueError: If the response is malformed or missing expected fields
     """
     try:
         # Get chequebook address
+        client = get_client()
         address_api_url = urljoin(str(settings.SWARM_BEE_API_URL), "chequebook/address")
-        address_response = requests.get(address_api_url, timeout=10)
+        address_response = await client.get(address_api_url, timeout=10)
         address_response.raise_for_status()
         address_json = address_response.json()
         chequebook_address = address_json.get("chequebookAddress")
@@ -767,7 +777,7 @@ def get_chequebook_info() -> Dict[str, Any]:
             raise ValueError("API Response missing 'chequebookAddress' field")
 
         # Get chequebook balance
-        balance_info = get_chequebook_balance()
+        balance_info = await get_chequebook_balance()
 
         # Combine the information
         chequebook_info = {
@@ -779,7 +789,7 @@ def get_chequebook_info() -> Dict[str, Any]:
         logger.info(f"Successfully retrieved chequebook info: {chequebook_address}, available: {balance_info.get('availableBalance')}")
         return chequebook_info
 
-    except requests.exceptions.RequestException as e:
+    except httpx.HTTPError as e:
         logger.error(f"Error fetching chequebook info from Swarm API: {e}")
         raise
     except (ValueError, KeyError) as e:
@@ -787,7 +797,7 @@ def get_chequebook_info() -> Dict[str, Any]:
         raise ValueError(f"Could not parse chequebook info: {e}") from e
 
 
-def get_chequebook_address() -> str:
+async def get_chequebook_address() -> str:
     """
     Fetches the chequebook address from the configured Swarm Bee node.
 
@@ -797,14 +807,14 @@ def get_chequebook_address() -> str:
         The chequebook address of the Bee node
 
     Raises:
-        RequestException: If the HTTP request to the Swarm API fails
+        httpx.HTTPError: If the HTTP request to the Swarm API fails
         ValueError: If the response is malformed or missing expected fields
     """
-    chequebook_info = get_chequebook_info()
+    chequebook_info = await get_chequebook_info()
     return chequebook_info["chequebookAddress"]
 
 
-def get_chainstate() -> Dict[str, Any]:
+async def get_chainstate() -> Dict[str, Any]:
     """
     Fetches chainstate information from the configured Swarm Bee node.
     This includes the current price per chunk per block.
@@ -813,12 +823,13 @@ def get_chainstate() -> Dict[str, Any]:
         Dictionary containing chainTip, block, totalAmount, and currentPrice
 
     Raises:
-        RequestException: If the HTTP request to the Swarm API fails
+        httpx.HTTPError: If the HTTP request to the Swarm API fails
         ValueError: If the response is malformed or missing expected fields
     """
     api_url = urljoin(str(settings.SWARM_BEE_API_URL), "chainstate")
     try:
-        response = requests.get(api_url, timeout=10)
+        client = get_client()
+        response = await client.get(api_url, timeout=10)
         response.raise_for_status()
 
         response_json = response.json()
@@ -830,7 +841,7 @@ def get_chainstate() -> Dict[str, Any]:
         logger.info(f"Successfully retrieved chainstate: currentPrice={current_price}")
         return response_json
 
-    except requests.exceptions.RequestException as e:
+    except httpx.HTTPError as e:
         logger.error(f"Error fetching chainstate from Swarm API ({api_url}): {e}")
         raise
     except (ValueError, KeyError) as e:
@@ -876,7 +887,7 @@ def calculate_stamp_total_cost(amount: int, depth: int) -> int:
     return amount * (2 ** depth)
 
 
-def check_sufficient_funds(required_plur: int) -> Dict[str, Any]:
+async def check_sufficient_funds(required_plur: int) -> Dict[str, Any]:
     """
     Checks if the wallet has sufficient BZZ funds for a stamp purchase.
 
@@ -893,9 +904,9 @@ def check_sufficient_funds(required_plur: int) -> Dict[str, Any]:
             - shortfall_bzz: amount missing (if insufficient)
 
     Raises:
-        RequestException: If the HTTP request to the Swarm API fails
+        httpx.HTTPError: If the HTTP request to the Swarm API fails
     """
-    wallet_info = get_wallet_info()
+    wallet_info = await get_wallet_info()
     wallet_balance_plur = int(wallet_info.get("bzzBalance", 0))
 
     plur_per_bzz = 10 ** 16
@@ -954,7 +965,7 @@ def count_tar_files(tar_bytes: bytes) -> int:
         return sum(1 for member in tar.getmembers() if member.isfile())
 
 
-def upload_collection_to_swarm(
+async def upload_collection_to_swarm(
     tar_data: bytes,
     stamp_id: str,
     deferred: bool = False,
@@ -979,7 +990,7 @@ def upload_collection_to_swarm(
         The Swarm manifest reference hash
 
     Raises:
-        RequestException: If the HTTP request to the Swarm API fails
+        httpx.HTTPError: If the HTTP request to the Swarm API fails
         ValueError: If the response is malformed, missing expected fields, or redundancy level invalid
     """
     # Determine and validate redundancy level
@@ -997,7 +1008,8 @@ def upload_collection_to_swarm(
 
     try:
         # Use longer timeout for collections (may contain many files)
-        response = requests.post(api_url, data=tar_data, headers=headers, timeout=120)
+        client = get_client()
+        response = await client.post(api_url, content=tar_data, headers=headers, timeout=120)
         response.raise_for_status()
 
         response_json = response.json()
@@ -1008,7 +1020,7 @@ def upload_collection_to_swarm(
         logger.info(f"Successfully uploaded collection to Swarm with manifest reference: {reference}")
         return reference
 
-    except requests.exceptions.RequestException as e:
+    except httpx.HTTPError as e:
         logger.error(f"Error uploading collection to Swarm API ({api_url}): {e}")
         raise
     except (ValueError, KeyError) as e:
@@ -1042,7 +1054,7 @@ TTL_THRESHOLD_EXPIRED = 0          # 0 seconds - stamp is expired
 TTL_THRESHOLD_LOW = 3600           # 1 hour - warn about low TTL
 
 
-def validate_stamp_for_upload(stamp_id: str) -> Dict[str, Any]:
+async def validate_stamp_for_upload(stamp_id: str) -> Dict[str, Any]:
     """
     Validates that a stamp is suitable for uploading data.
 
@@ -1061,10 +1073,10 @@ def validate_stamp_for_upload(stamp_id: str) -> Dict[str, Any]:
 
     Raises:
         StampValidationError: If stamp fails any blocking validation check
-        RequestException: If unable to reach Swarm API
+        httpx.HTTPError: If unable to reach Swarm API
     """
     # Get all processed stamps (includes utilization calculation)
-    all_stamps = get_all_stamps_processed()
+    all_stamps = await get_all_stamps_processed()
 
     # Find the requested stamp (case-insensitive)
     found_stamp = None
@@ -1187,7 +1199,7 @@ def validate_stamp_for_upload(stamp_id: str) -> Dict[str, Any]:
     }
 
 
-def check_upload_failure_reason(stamp_id: str, error_message: str) -> Optional[Dict[str, Any]]:
+async def check_upload_failure_reason(stamp_id: str, error_message: str) -> Optional[Dict[str, Any]]:
     """
     Checks if an upload failure was due to stamp issues and provides structured diagnostics.
 
@@ -1210,7 +1222,7 @@ def check_upload_failure_reason(stamp_id: str, error_message: str) -> Optional[D
     """
     try:
         # Get stamp information
-        all_stamps = get_all_stamps_processed()
+        all_stamps = await get_all_stamps_processed()
         found_stamp = None
         for stamp in all_stamps:
             if stamp.get("batchID") == stamp_id or stamp.get("batchID", "").lower() == stamp_id.lower():
@@ -1316,7 +1328,7 @@ def check_upload_failure_reason(stamp_id: str, error_message: str) -> Optional[D
         return None
 
 
-def get_stamp_health_check(stamp_id: str) -> Dict[str, Any]:
+async def get_stamp_health_check(stamp_id: str) -> Dict[str, Any]:
     """
     Performs a comprehensive health check on a stamp for the /check endpoint.
 
@@ -1340,7 +1352,7 @@ def get_stamp_health_check(stamp_id: str) -> Dict[str, Any]:
 
     # Get all processed stamps
     try:
-        all_stamps = get_all_stamps_processed()
+        all_stamps = await get_all_stamps_processed()
     except Exception as e:
         logger.error(f"Failed to fetch stamps for health check: {e}")
         return {

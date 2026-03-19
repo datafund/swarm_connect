@@ -345,9 +345,10 @@ class TestFieldConsistency:
 class TestExpirationCalculation:
     """Tests for expiration time calculation accuracy."""
 
+    @pytest.mark.asyncio
     @patch('app.services.swarm_api.get_local_stamps')
     @patch('app.services.swarm_api.get_all_stamps')
-    def test_expiration_calculation_accuracy(self, mock_global, mock_local):
+    async def test_expiration_calculation_accuracy(self, mock_global, mock_local):
         """Test that expiration calculations are accurate."""
         # Mock current time
         test_time = datetime.datetime(2024, 6, 15, 10, 30, 0, tzinfo=datetime.timezone.utc)
@@ -368,7 +369,7 @@ class TestExpirationCalculation:
             mock_datetime.timezone = datetime.timezone
 
             from app.services.swarm_api import get_all_stamps_processed
-            result = get_all_stamps_processed()
+            result = await get_all_stamps_processed()
 
             assert len(result) == 1
             # Should be 2 hours later: 2024-06-15-12-30

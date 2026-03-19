@@ -9,10 +9,10 @@ Balance thresholds are configured via environment variables in app/core/config.p
 """
 import logging
 import time
-import requests
 from typing import Dict, Any, Optional
 
 from app.core.config import settings
+from app.services.http_client import get_client
 
 logger = logging.getLogger(__name__)
 
@@ -32,7 +32,7 @@ def wei_to_eth(wei: int) -> float:
     return wei / WEI_PER_ETH
 
 
-def _get_eth_balance_from_rpc(address: str) -> int:
+async def _get_eth_balance_from_rpc(address: str) -> int:
     """
     Fetch ETH balance from Base Sepolia RPC.
 
@@ -45,7 +45,8 @@ def _get_eth_balance_from_rpc(address: str) -> int:
     Raises:
         Exception: If RPC call fails
     """
-    response = requests.post(
+    client = get_client()
+    response = await client.post(
         settings.BASE_RPC_URL,
         json={
             "jsonrpc": "2.0",
@@ -97,7 +98,7 @@ def clear_balance_cache() -> None:
     _balance_cache["timestamp"] = 0
 
 
-def check_base_eth_balance() -> Dict[str, Any]:
+async def check_base_eth_balance() -> Dict[str, Any]:
     """
     Check Base Sepolia ETH balance against configured thresholds.
 
@@ -138,7 +139,7 @@ def check_base_eth_balance() -> Dict[str, Any]:
         # Try to use cached balance first
         balance_wei = _get_cached_balance()
         if balance_wei is None:
-            balance_wei = _get_eth_balance_from_rpc(address)
+            balance_wei = await _get_eth_balance_from_rpc(address)
             _update_cache(balance_wei)
             logger.debug(f"Fetched Base ETH balance: {wei_to_eth(balance_wei):.6f} ETH")
 

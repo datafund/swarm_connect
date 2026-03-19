@@ -86,8 +86,9 @@ class TestCalculateUtilizationStatus:
 class TestValidateStampForUpload:
     """Tests for validate_stamp_for_upload function."""
 
+    @pytest.mark.asyncio
     @patch('app.services.swarm_api.get_all_stamps_processed')
-    def test_valid_stamp(self, mock_processed):
+    async def test_valid_stamp(self, mock_processed):
         """Test validation passes for a valid stamp."""
         mock_processed.return_value = [
             {
@@ -101,26 +102,28 @@ class TestValidateStampForUpload:
             }
         ]
 
-        result = validate_stamp_for_upload(VALID_STAMP_ID)
+        result = await validate_stamp_for_upload(VALID_STAMP_ID)
 
         assert result["batchID"] == VALID_STAMP_ID
         assert result["utilizationPercent"] == 50.0
         assert result["usable"] is True
 
+    @pytest.mark.asyncio
     @patch('app.services.swarm_api.get_all_stamps_processed')
-    def test_stamp_not_found(self, mock_processed):
+    async def test_stamp_not_found(self, mock_processed):
         """Test validation fails for non-existent stamp."""
         mock_processed.return_value = []
 
         not_found_id = "b" * 64
         with pytest.raises(StampValidationError) as exc_info:
-            validate_stamp_for_upload(not_found_id)
+            await validate_stamp_for_upload(not_found_id)
 
         assert exc_info.value.status == "not_found"
         assert "not found" in exc_info.value.message
 
+    @pytest.mark.asyncio
     @patch('app.services.swarm_api.get_all_stamps_processed')
-    def test_stamp_full_100_percent(self, mock_processed):
+    async def test_stamp_full_100_percent(self, mock_processed):
         """Test validation fails for 100% utilized stamp."""
         mock_processed.return_value = [
             {
@@ -135,14 +138,15 @@ class TestValidateStampForUpload:
         ]
 
         with pytest.raises(StampValidationError) as exc_info:
-            validate_stamp_for_upload(VALID_STAMP_ID)
+            await validate_stamp_for_upload(VALID_STAMP_ID)
 
         assert exc_info.value.status == "full"
         assert "100%" in exc_info.value.message
         assert exc_info.value.utilization_percent == 100.0
 
+    @pytest.mark.asyncio
     @patch('app.services.swarm_api.get_all_stamps_processed')
-    def test_stamp_not_usable(self, mock_processed):
+    async def test_stamp_not_usable(self, mock_processed):
         """Test validation fails for non-usable stamp."""
         mock_processed.return_value = [
             {
@@ -157,13 +161,14 @@ class TestValidateStampForUpload:
         ]
 
         with pytest.raises(StampValidationError) as exc_info:
-            validate_stamp_for_upload(VALID_STAMP_ID)
+            await validate_stamp_for_upload(VALID_STAMP_ID)
 
         assert exc_info.value.status == "not_usable"
         assert "not yet usable" in exc_info.value.message
 
+    @pytest.mark.asyncio
     @patch('app.services.swarm_api.get_all_stamps_processed')
-    def test_case_insensitive_stamp_id(self, mock_processed):
+    async def test_case_insensitive_stamp_id(self, mock_processed):
         """Test stamp ID matching is case-insensitive."""
         upper_stamp_id = "A" * 64
         mock_processed.return_value = [
@@ -177,15 +182,16 @@ class TestValidateStampForUpload:
             }
         ]
 
-        result = validate_stamp_for_upload(VALID_STAMP_ID)
+        result = await validate_stamp_for_upload(VALID_STAMP_ID)
         assert result["batchID"] == upper_stamp_id
 
 
 class TestCheckUploadFailureReason:
     """Tests for check_upload_failure_reason function."""
 
+    @pytest.mark.asyncio
     @patch('app.services.swarm_api.get_all_stamps_processed')
-    def test_full_stamp_returns_enhanced_message(self, mock_processed):
+    async def test_full_stamp_returns_enhanced_message(self, mock_processed):
         """Test that full stamp returns enhanced error message."""
         mock_processed.return_value = [
             {
@@ -198,15 +204,16 @@ class TestCheckUploadFailureReason:
             }
         ]
 
-        result = check_upload_failure_reason(VALID_STAMP_ID, "Original error")
+        result = await check_upload_failure_reason(VALID_STAMP_ID, "Original error")
 
         assert result is not None
         assert "100%" in result["message"]
         assert "full" in result["message"].lower()
         assert "purchase a new stamp" in result["suggestion"].lower()
 
+    @pytest.mark.asyncio
     @patch('app.services.swarm_api.get_all_stamps_processed')
-    def test_critical_stamp_returns_enhanced_message(self, mock_processed):
+    async def test_critical_stamp_returns_enhanced_message(self, mock_processed):
         """Test that critical utilization returns enhanced error message."""
         mock_processed.return_value = [
             {
@@ -219,14 +226,15 @@ class TestCheckUploadFailureReason:
             }
         ]
 
-        result = check_upload_failure_reason(VALID_STAMP_ID, "Original error")
+        result = await check_upload_failure_reason(VALID_STAMP_ID, "Original error")
 
         assert result is not None
         assert "97.5%" in result["message"]
         assert "Original error" in result.get("original_error", "")
 
+    @pytest.mark.asyncio
     @patch('app.services.swarm_api.get_all_stamps_processed')
-    def test_ok_stamp_returns_none(self, mock_processed):
+    async def test_ok_stamp_returns_none(self, mock_processed):
         """Test that ok stamp returns None (no enhanced message)."""
         mock_processed.return_value = [
             {
@@ -239,16 +247,17 @@ class TestCheckUploadFailureReason:
             }
         ]
 
-        result = check_upload_failure_reason(VALID_STAMP_ID, "Original error")
+        result = await check_upload_failure_reason(VALID_STAMP_ID, "Original error")
         assert result is None
 
+    @pytest.mark.asyncio
     @patch('app.services.swarm_api.get_all_stamps_processed')
-    def test_stamp_not_found_returns_not_found(self, mock_processed):
+    async def test_stamp_not_found_returns_not_found(self, mock_processed):
         """Test that non-existent stamp returns NOT_FOUND dict."""
         mock_processed.return_value = []
 
         not_found_id = "b" * 64
-        result = check_upload_failure_reason(not_found_id, "Original error")
+        result = await check_upload_failure_reason(not_found_id, "Original error")
         assert result is not None
         assert result["code"] == "NOT_FOUND"
 
@@ -256,9 +265,10 @@ class TestCheckUploadFailureReason:
 class TestUsableStatusWith100Percent:
     """Tests for usable status calculation with 100% utilization."""
 
+    @pytest.mark.asyncio
     @patch('app.services.swarm_api.get_all_stamps')
     @patch('app.services.swarm_api.get_local_stamps')
-    def test_usable_false_at_100_percent(self, mock_local, mock_global):
+    async def test_usable_false_at_100_percent(self, mock_local, mock_global):
         """Test that usable is false when utilization is 100%."""
         from app.services.swarm_api import get_all_stamps_processed
 
@@ -280,16 +290,17 @@ class TestUsableStatusWith100Percent:
             }
         ]
 
-        result = get_all_stamps_processed()
+        result = await get_all_stamps_processed()
 
         assert len(result) == 1
         assert result[0]["utilizationPercent"] == 100.0
         assert result[0]["utilizationStatus"] == "full"
         assert result[0]["usable"] is False  # Should be overridden to False
 
+    @pytest.mark.asyncio
     @patch('app.services.swarm_api.get_all_stamps')
     @patch('app.services.swarm_api.get_local_stamps')
-    def test_usable_preserved_below_100_percent(self, mock_local, mock_global):
+    async def test_usable_preserved_below_100_percent(self, mock_local, mock_global):
         """Test that local usable value is preserved below 100%."""
         from app.services.swarm_api import get_all_stamps_processed
 
@@ -311,7 +322,7 @@ class TestUsableStatusWith100Percent:
             }
         ]
 
-        result = get_all_stamps_processed()
+        result = await get_all_stamps_processed()
 
         assert len(result) == 1
         assert result[0]["utilizationPercent"] == 50.0

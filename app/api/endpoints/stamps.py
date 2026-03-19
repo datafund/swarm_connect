@@ -2,7 +2,7 @@
 from fastapi import APIRouter, HTTPException, Path, Query, Request, status, Body
 from typing import Any, Optional, Union
 import datetime
-from requests.exceptions import RequestException
+import httpx
 import logging
 
 from app.core.config import settings
@@ -71,7 +71,7 @@ async def list_stamps(
         HTTPException: 502 if Swarm API is unreachable, 500 for other errors
     """
     try:
-        processed_stamps = swarm_api.get_all_stamps_processed()
+        processed_stamps = await swarm_api.get_all_stamps_processed()
 
         # Convert to StampDetails objects for proper validation
         stamp_details = []
@@ -111,7 +111,7 @@ async def list_stamps(
             total_count=len(stamp_details)
         )
 
-    except RequestException as e:
+    except httpx.HTTPError as e:
         logger.error(f"Failed to retrieve stamps from Swarm API: {e}")
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
@@ -183,7 +183,7 @@ async def check_stamp_health(
     ```
     """
     try:
-        health_check = swarm_api.get_stamp_health_check(stamp_id)
+        health_check = await swarm_api.get_stamp_health_check(stamp_id)
 
         # Convert to response model
         errors = [StampHealthIssue(**e) for e in health_check.get("errors", [])]
@@ -209,7 +209,7 @@ async def check_stamp_health(
             )
         )
 
-    except RequestException as e:
+    except httpx.HTTPError as e:
         logger.error(f"Failed to check stamp health from Swarm API: {e}")
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
@@ -239,8 +239,8 @@ async def get_stamp_details(
     and returns the relevant information.
     """
     try:
-        all_stamps = swarm_api.get_all_stamps_processed()
-    except RequestException as e:
+        all_stamps = await swarm_api.get_all_stamps_processed()
+    except httpx.HTTPError as e:
         logger.error(f"Failed to retrieve data from upstream Swarm API: {e}")
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
@@ -362,14 +362,14 @@ async def purchase_stamp(
         else:
             # Calculate amount from duration (default 25 hours)
             duration_hours = stamp_request.duration_hours or 25
-            chainstate = swarm_api.get_chainstate()
+            chainstate = await swarm_api.get_chainstate()
             current_price = int(chainstate["currentPrice"])
             amount = swarm_api.calculate_stamp_amount(duration_hours, current_price)
             logger.info(f"Calculated amount {amount} for {duration_hours} hours at price {current_price}")
 
         # Calculate total cost and check funds
         total_cost = swarm_api.calculate_stamp_total_cost(amount, effective_depth)
-        funds_check = swarm_api.check_sufficient_funds(total_cost)
+        funds_check = await swarm_api.check_sufficient_funds(total_cost)
 
         if not funds_check["sufficient"]:
             raise HTTPException(
@@ -382,7 +382,7 @@ async def purchase_stamp(
                 )
             )
 
-        batch_id = swarm_api.purchase_postage_stamp(
+        batch_id = await swarm_api.purchase_postage_stamp(
             amount=amount,
             depth=effective_depth,
             label=stamp_request.label
@@ -416,7 +416,7 @@ async def purchase_stamp(
 
     except HTTPException:
         raise  # Re-raise HTTP exceptions as-is
-    except RequestException as e:
+    except httpx.HTTPError as e:
         logger.error(f"Failed to purchase stamp from Swarm API: {e}")
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
@@ -468,7 +468,7 @@ async def extend_stamp(
     """
     try:
         # First, get the stamp to verify it exists and get its depth
-        all_stamps = swarm_api.get_all_stamps_processed()
+        all_stamps = await swarm_api.get_all_stamps_processed()
         found_stamp = None
         for stamp in all_stamps:
             if stamp.get("batchID") == stamp_id:
@@ -490,14 +490,14 @@ async def extend_stamp(
         else:
             # Calculate amount from duration (default 25 hours)
             duration_hours = extension_request.duration_hours or 25
-            chainstate = swarm_api.get_chainstate()
+            chainstate = await swarm_api.get_chainstate()
             current_price = int(chainstate["currentPrice"])
             amount = swarm_api.calculate_stamp_amount(duration_hours, current_price)
             logger.info(f"Calculated extension amount {amount} for {duration_hours} hours at price {current_price}")
 
         # Calculate total cost and check funds
         total_cost = swarm_api.calculate_stamp_total_cost(amount, stamp_depth)
-        funds_check = swarm_api.check_sufficient_funds(total_cost)
+        funds_check = await swarm_api.check_sufficient_funds(total_cost)
 
         if not funds_check["sufficient"]:
             raise HTTPException(
@@ -510,7 +510,7 @@ async def extend_stamp(
                 )
             )
 
-        batch_id = swarm_api.extend_postage_stamp(
+        batch_id = await swarm_api.extend_postage_stamp(
             stamp_id=stamp_id,
             amount=amount
         )
@@ -522,7 +522,7 @@ async def extend_stamp(
 
     except HTTPException:
         raise  # Re-raise HTTP exceptions as-is
-    except RequestException as e:
+    except httpx.HTTPError as e:
         logger.error(f"Failed to extend stamp {stamp_id} from Swarm API: {e}")
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,

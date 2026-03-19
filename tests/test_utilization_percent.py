@@ -97,9 +97,10 @@ class TestCalculateUtilizationPercent:
 class TestUtilizationPercentInStampList:
     """Integration tests for utilizationPercent in stamp list endpoint."""
 
+    @pytest.mark.asyncio
     @patch('app.services.swarm_api.get_all_stamps')
     @patch('app.services.swarm_api.get_local_stamps')
-    def test_utilization_percent_in_processed_stamps(self, mock_local, mock_global):
+    async def test_utilization_percent_in_processed_stamps(self, mock_local, mock_global):
         """Test that get_all_stamps_processed includes utilizationPercent."""
         from app.services.swarm_api import get_all_stamps_processed
 
@@ -120,15 +121,16 @@ class TestUtilizationPercentInStampList:
             }
         ]
 
-        result = get_all_stamps_processed()
+        result = await get_all_stamps_processed()
 
         assert len(result) == 1
         assert result[0]["utilizationPercent"] == 50.0
         assert result[0]["utilization"] == 1
 
+    @pytest.mark.asyncio
     @patch('app.services.swarm_api.get_all_stamps')
     @patch('app.services.swarm_api.get_local_stamps')
-    def test_utilization_percent_null_when_no_utilization(self, mock_local, mock_global):
+    async def test_utilization_percent_null_when_no_utilization(self, mock_local, mock_global):
         """Test that utilizationPercent is None when utilization is not available."""
         from app.services.swarm_api import get_all_stamps_processed
 
@@ -143,7 +145,7 @@ class TestUtilizationPercentInStampList:
         ]
         mock_local.return_value = []  # No local data
 
-        result = get_all_stamps_processed()
+        result = await get_all_stamps_processed()
 
         assert len(result) == 1
         assert result[0]["utilizationPercent"] is None

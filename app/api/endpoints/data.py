@@ -5,7 +5,7 @@ import logging
 import time
 from fastapi import APIRouter, HTTPException, Path, Query, Request, File, UploadFile
 from fastapi.responses import Response
-from requests.exceptions import RequestException
+import httpx
 
 from app.api.models.data import (
     DataUploadRequest,
@@ -246,7 +246,7 @@ async def upload_data(
         if validate_stamp:
             stamp_start = time.perf_counter()
             try:
-                validate_stamp_for_upload(stamp_id)
+                await validate_stamp_for_upload(stamp_id)
             except StampValidationError as e:
                 # Build structured error response
                 detail = {
@@ -346,7 +346,7 @@ async def upload_data(
 
         # Upload to Swarm
         bee_start = time.perf_counter()
-        reference = upload_data_to_swarm(
+        reference = await upload_data_to_swarm(
             data=data_bytes,
             stamp_id=stamp_id,
             content_type=content_type,
@@ -390,10 +390,10 @@ async def upload_data(
 
     except HTTPException:
         raise  # Re-raise HTTP exceptions as-is
-    except RequestException as e:
+    except httpx.HTTPError as e:
         logger.error(f"Swarm API error during upload: {e}")
         # Check if the failure was due to stamp issues
-        failure_info = check_upload_failure_reason(stamp_id, str(e))
+        failure_info = await check_upload_failure_reason(stamp_id, str(e))
         if failure_info:
             # Return structured error response
             detail = {
@@ -432,7 +432,7 @@ async def download_data(
     """
     try:
         # Download from Swarm
-        data_bytes = download_data_from_swarm(reference)
+        data_bytes = await download_data_from_swarm(reference)
 
         # Detect content type and generate user-friendly filename
         content_type, filename = _detect_content_type_and_filename(data_bytes, reference)
@@ -451,7 +451,7 @@ async def download_data(
     except FileNotFoundError as e:
         logger.warning(f"Data not found for reference {reference}: {e}")
         raise HTTPException(status_code=404, detail=f"Data not found for reference {reference}")
-    except RequestException as e:
+    except httpx.HTTPError as e:
         logger.error(f"Swarm API error during download: {e}")
         raise HTTPException(status_code=502, detail="Failed to download data from Swarm. The Bee node may be unavailable.")
     except Exception as e:
@@ -488,7 +488,7 @@ async def download_data_json(
     """
     try:
         # Download from Swarm
-        data_bytes = download_data_from_swarm(reference)
+        data_bytes = await download_data_from_swarm(reference)
 
         # Detect content type and generate filename for metadata
         content_type, filename = _detect_content_type_and_filename(data_bytes, reference)
@@ -506,7 +506,7 @@ async def download_data_json(
     except FileNotFoundError as e:
         logger.warning(f"Data not found for reference {reference}: {e}")
         raise HTTPException(status_code=404, detail=f"Data not found for reference {reference}")
-    except RequestException as e:
+    except httpx.HTTPError as e:
         logger.error(f"Swarm API error during download: {e}")
         raise HTTPException(status_code=502, detail="Failed to download data from Swarm. The Bee node may be unavailable.")
     except Exception as e:
@@ -655,7 +655,7 @@ async def upload_manifest(
         if validate_stamp:
             stamp_start = time.perf_counter()
             try:
-                validate_stamp_for_upload(stamp_id)
+                await validate_stamp_for_upload(stamp_id)
             except StampValidationError as e:
                 # Build structured error response
                 detail = {
@@ -723,7 +723,7 @@ async def upload_manifest(
 
         # Upload to Swarm as collection
         bee_start = time.perf_counter()
-        reference = upload_collection_to_swarm(
+        reference = await upload_collection_to_swarm(
             tar_bytes, stamp_id, deferred=deferred, redundancy_level=redundancy
         )
         bee_upload_ms = (time.perf_counter() - bee_start) * 1000
@@ -778,10 +778,10 @@ async def upload_manifest(
     except HTTPException:
         # Re-raise HTTP exceptions as-is
         raise
-    except RequestException as e:
+    except httpx.HTTPError as e:
         logger.error(f"Swarm API error during manifest upload: {e}")
         # Check if the failure was due to stamp issues
-        failure_info = check_upload_failure_reason(stamp_id, str(e))
+        failure_info = await check_upload_failure_reason(stamp_id, str(e))
         if failure_info:
             # Return structured error response
             detail = {
