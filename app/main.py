@@ -17,6 +17,10 @@ logger = logging.getLogger(__name__)
 async def lifespan(app: FastAPI):
     """Application lifespan handler for startup/shutdown tasks."""
     # === Startup ===
+    # Initialize shared HTTP client (must be first — other services depend on it)
+    from app.services.http_client import init_client, close_client
+    await init_client()
+
     # Start stamp pool background task if enabled
     if settings.STAMP_POOL_ENABLED:
         from app.services.stamp_pool import stamp_pool_manager
@@ -31,6 +35,9 @@ async def lifespan(app: FastAPI):
         from app.services.stamp_pool import stamp_pool_manager
         logger.info("Stopping stamp pool background task")
         await stamp_pool_manager.stop_background_task()
+
+    # Close shared HTTP client (must be last)
+    await close_client()
 
 
 app = FastAPI(
@@ -83,7 +90,7 @@ app.include_router(notary.router, prefix=f"{settings.API_V1_STR}/notary", tags=[
 
 @app.get("/", summary="Health Check", tags=["default"])
 @app.get("/health", summary="Health Check", tags=["default"], include_in_schema=False)
-def read_root():
+async def read_root():
     """
     Health check endpoint. Use this to discover gateway capabilities before making requests.
 
@@ -119,8 +126,8 @@ def read_root():
         from app.x402.base_balance import check_base_eth_balance
         from app.x402.preflight import check_preflight_balances
 
-        base_eth = check_base_eth_balance()
-        gnosis = check_preflight_balances()
+        base_eth = await check_base_eth_balance()
+        gnosis = await check_preflight_balances()
 
         warnings = []
         errors = []

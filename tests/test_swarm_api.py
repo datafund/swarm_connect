@@ -1,6 +1,6 @@
 # tests/test_swarm_api.py
 import pytest
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch, MagicMock, AsyncMock
 import datetime
 from typing import Dict, Any, List
 
@@ -154,72 +154,84 @@ class TestSwarmAPIFunctions:
         result = calculate_usable_status(stamp)
         assert result is False
 
-    @patch('app.services.swarm_api.requests.get')
-    def test_get_all_stamps_success(self, mock_get):
+    @pytest.mark.asyncio
+    async def test_get_all_stamps_success(self):
         """Test successful retrieval of all stamps."""
         mock_response = MagicMock()
-        mock_response.raise_for_status.return_value = None
+        mock_response.raise_for_status = MagicMock()
         mock_response.json.return_value = {
             "batches": [
                 {"batchID": "test123", "amount": "1000000000", "depth": 18},
                 {"batchID": "test456", "amount": "8000000000", "depth": 20}
             ]
         }
-        mock_get.return_value = mock_response
 
-        result = get_all_stamps()
+        mock_client = MagicMock()
+        mock_client.get = AsyncMock(return_value=mock_response)
+
+        with patch('app.services.swarm_api.get_client', return_value=mock_client):
+            result = await get_all_stamps()
 
         assert len(result) == 2
         assert result[0]["batchID"] == "test123"
         assert result[1]["batchID"] == "test456"
 
-    @patch('app.services.swarm_api.requests.get')
-    def test_get_all_stamps_direct_list_response(self, mock_get):
+    @pytest.mark.asyncio
+    async def test_get_all_stamps_direct_list_response(self):
         """Test handling of direct list response from API."""
         mock_response = MagicMock()
-        mock_response.raise_for_status.return_value = None
+        mock_response.raise_for_status = MagicMock()
         mock_response.json.return_value = [
             {"batchID": "test123", "amount": "1000000000"},
             {"batchID": "test456", "amount": "8000000000"}
         ]
-        mock_get.return_value = mock_response
 
-        result = get_all_stamps()
+        mock_client = MagicMock()
+        mock_client.get = AsyncMock(return_value=mock_response)
+
+        with patch('app.services.swarm_api.get_client', return_value=mock_client):
+            result = await get_all_stamps()
 
         assert len(result) == 2
         assert isinstance(result, list)
 
-    @patch('app.services.swarm_api.requests.get')
-    def test_get_local_stamps_success(self, mock_get):
+    @pytest.mark.asyncio
+    async def test_get_local_stamps_success(self):
         """Test successful retrieval of local stamps."""
         mock_response = MagicMock()
-        mock_response.raise_for_status.return_value = None
+        mock_response.raise_for_status = MagicMock()
         mock_response.json.return_value = {
             "stamps": [
                 {"batchID": "test123", "utilization": 50, "usable": True},
                 {"batchID": "test456", "utilization": 30, "usable": True}
             ]
         }
-        mock_get.return_value = mock_response
 
-        result = get_local_stamps()
+        mock_client = MagicMock()
+        mock_client.get = AsyncMock(return_value=mock_response)
+
+        with patch('app.services.swarm_api.get_client', return_value=mock_client):
+            result = await get_local_stamps()
 
         assert len(result) == 2
         assert result[0]["utilization"] == 50
         assert result[1]["utilization"] == 30
 
-    @patch('app.services.swarm_api.requests.get')
-    def test_get_local_stamps_failure_returns_empty(self, mock_get):
+    @pytest.mark.asyncio
+    async def test_get_local_stamps_failure_returns_empty(self):
         """Test that local stamps failure returns empty list without raising."""
-        mock_get.side_effect = Exception("Network error")
+        mock_client = MagicMock()
+        mock_client.get = AsyncMock(side_effect=Exception("Network error"))
 
-        result = get_local_stamps()
+        with patch('app.services.swarm_api.get_client', return_value=mock_client):
+            result = await get_local_stamps()
 
         assert result == []
 
-    @patch('app.services.swarm_api.get_local_stamps')
-    @patch('app.services.swarm_api.get_all_stamps')
-    def test_get_all_stamps_processed_integration(self, mock_global, mock_local):
+    @pytest.mark.asyncio
+    @patch('app.services.swarm_api.get_local_stamps', new_callable=AsyncMock)
+    @patch('app.services.swarm_api.get_all_stamps', new_callable=AsyncMock)
+    async def test_get_all_stamps_processed_integration(self, mock_global, mock_local):
         """Test complete stamp processing with data merging."""
         # Mock global stamps data
         mock_global.return_value = [
@@ -252,7 +264,7 @@ class TestSwarmAPIFunctions:
             }
         ]
 
-        result = get_all_stamps_processed()
+        result = await get_all_stamps_processed()
 
         assert len(result) == 2
 
@@ -270,9 +282,10 @@ class TestSwarmAPIFunctions:
         assert global_stamp["label"] is None
         assert global_stamp["immutableFlag"] is False  # Mapped from 'immutable'
 
-    @patch('app.services.swarm_api.get_local_stamps')
-    @patch('app.services.swarm_api.get_all_stamps')
-    def test_get_all_stamps_processed_expiration_calculation(self, mock_global, mock_local):
+    @pytest.mark.asyncio
+    @patch('app.services.swarm_api.get_local_stamps', new_callable=AsyncMock)
+    @patch('app.services.swarm_api.get_all_stamps', new_callable=AsyncMock)
+    async def test_get_all_stamps_processed_expiration_calculation(self, mock_global, mock_local):
         """Test that expiration times are calculated correctly."""
         mock_global.return_value = [
             {
@@ -291,7 +304,7 @@ class TestSwarmAPIFunctions:
             mock_datetime_class.timedelta = datetime.timedelta
             mock_datetime_class.timezone = datetime.timezone
 
-            result = get_all_stamps_processed()
+            result = await get_all_stamps_processed()
 
             assert len(result) == 1
             # Should be 1 hour later: 2024-01-01-13-00
@@ -357,79 +370,88 @@ class TestStampCostCalculations:
         assert cost_18 == cost_17 * 2
         assert cost_19 == cost_18 * 2
 
-    @patch('app.services.swarm_api.requests.get')
-    def test_get_chainstate_success(self, mock_get):
+    @pytest.mark.asyncio
+    async def test_get_chainstate_success(self):
         """Test successful chainstate retrieval."""
         mock_response = MagicMock()
-        mock_response.raise_for_status.return_value = None
+        mock_response.raise_for_status = MagicMock()
         mock_response.json.return_value = {
             "chainTip": 43778502,
             "block": 43778495,
             "totalAmount": "464165918747",
             "currentPrice": "149324"
         }
-        mock_get.return_value = mock_response
 
-        result = get_chainstate()
+        mock_client = MagicMock()
+        mock_client.get = AsyncMock(return_value=mock_response)
+
+        with patch('app.services.swarm_api.get_client', return_value=mock_client):
+            result = await get_chainstate()
 
         assert result["currentPrice"] == "149324"
         assert result["block"] == 43778495
 
-    @patch('app.services.swarm_api.requests.get')
-    def test_get_chainstate_missing_price(self, mock_get):
+    @pytest.mark.asyncio
+    async def test_get_chainstate_missing_price(self):
         """Test chainstate retrieval fails when currentPrice is missing."""
         mock_response = MagicMock()
-        mock_response.raise_for_status.return_value = None
+        mock_response.raise_for_status = MagicMock()
         mock_response.json.return_value = {
             "block": 43778495
             # Missing currentPrice
         }
-        mock_get.return_value = mock_response
 
-        with pytest.raises(ValueError) as excinfo:
-            get_chainstate()
+        mock_client = MagicMock()
+        mock_client.get = AsyncMock(return_value=mock_response)
+
+        with patch('app.services.swarm_api.get_client', return_value=mock_client):
+            with pytest.raises(ValueError) as excinfo:
+                await get_chainstate()
 
         assert "currentPrice" in str(excinfo.value)
 
-    @patch('app.services.swarm_api.get_wallet_info')
-    def test_check_sufficient_funds_enough(self, mock_wallet):
+    @pytest.mark.asyncio
+    @patch('app.services.swarm_api.get_wallet_info', new_callable=AsyncMock)
+    async def test_check_sufficient_funds_enough(self, mock_wallet):
         """Test funds check when sufficient funds available."""
         mock_wallet.return_value = {
             "bzzBalance": "10000000000000000"  # 1 BZZ
         }
 
         # Request 0.5 BZZ worth
-        result = check_sufficient_funds(5000000000000000)
+        result = await check_sufficient_funds(5000000000000000)
 
         assert result["sufficient"] is True
         assert result["wallet_balance_bzz"] == 1.0
         assert result["required_bzz"] == 0.5
         assert result["shortfall_bzz"] == 0.0
 
-    @patch('app.services.swarm_api.get_wallet_info')
-    def test_check_sufficient_funds_not_enough(self, mock_wallet):
+    @pytest.mark.asyncio
+    @patch('app.services.swarm_api.get_wallet_info', new_callable=AsyncMock)
+    async def test_check_sufficient_funds_not_enough(self, mock_wallet):
         """Test funds check when insufficient funds available."""
         mock_wallet.return_value = {
             "bzzBalance": "5000000000000000"  # 0.5 BZZ
         }
 
         # Request 1 BZZ worth
-        result = check_sufficient_funds(10000000000000000)
+        result = await check_sufficient_funds(10000000000000000)
 
         assert result["sufficient"] is False
         assert result["wallet_balance_bzz"] == 0.5
         assert result["required_bzz"] == 1.0
         assert result["shortfall_bzz"] == 0.5
 
-    @patch('app.services.swarm_api.get_wallet_info')
-    def test_check_sufficient_funds_exact_amount(self, mock_wallet):
+    @pytest.mark.asyncio
+    @patch('app.services.swarm_api.get_wallet_info', new_callable=AsyncMock)
+    async def test_check_sufficient_funds_exact_amount(self, mock_wallet):
         """Test funds check when exactly enough funds available."""
         mock_wallet.return_value = {
             "bzzBalance": "10000000000000000"  # 1 BZZ
         }
 
         # Request exactly 1 BZZ
-        result = check_sufficient_funds(10000000000000000)
+        result = await check_sufficient_funds(10000000000000000)
 
         assert result["sufficient"] is True
         assert result["shortfall_bzz"] == 0.0

@@ -10,6 +10,7 @@ before accepting payment requests:
 
 Balance thresholds are configured via environment variables in app/core/config.py.
 """
+import asyncio
 import logging
 from typing import Dict, Any, List
 
@@ -33,7 +34,7 @@ def wei_to_xdai(wei: int) -> float:
     return wei / WEI_PER_XDAI
 
 
-def check_xbzz_balance() -> Dict[str, Any]:
+async def check_xbzz_balance() -> Dict[str, Any]:
     """
     Check xBZZ balance against configured threshold.
 
@@ -47,7 +48,7 @@ def check_xbzz_balance() -> Dict[str, Any]:
         - warning: str or None - warning message if below threshold
     """
     try:
-        wallet_info = get_wallet_info()
+        wallet_info = await get_wallet_info()
         wallet_address = wallet_info.get("walletAddress")
         balance_plur = int(wallet_info.get("bzzBalance", 0))
         balance_bzz = plur_to_bzz(balance_plur)
@@ -84,7 +85,7 @@ def check_xbzz_balance() -> Dict[str, Any]:
         }
 
 
-def check_xdai_balance() -> Dict[str, Any]:
+async def check_xdai_balance() -> Dict[str, Any]:
     """
     Check xDAI (native token) balance against configured threshold.
 
@@ -100,7 +101,7 @@ def check_xdai_balance() -> Dict[str, Any]:
         - warning: str or None - warning message if below threshold
     """
     try:
-        wallet_info = get_wallet_info()
+        wallet_info = await get_wallet_info()
         wallet_address = wallet_info.get("walletAddress")
         balance_wei = int(wallet_info.get("nativeTokenBalance", 0))
         balance_xdai = wei_to_xdai(balance_wei)
@@ -137,7 +138,7 @@ def check_xdai_balance() -> Dict[str, Any]:
         }
 
 
-def check_chequebook_balance() -> Dict[str, Any]:
+async def check_chequebook_balance() -> Dict[str, Any]:
     """
     Check chequebook balance against configured threshold.
 
@@ -159,11 +160,11 @@ def check_chequebook_balance() -> Dict[str, Any]:
         # Falls back to balance-only if the /chequebook/address endpoint
         # is unavailable, so we don't fail the health check over a missing address.
         try:
-            chequebook_data = get_chequebook_info()
+            chequebook_data = await get_chequebook_info()
             chequebook_address = chequebook_data.get("chequebookAddress")
         except Exception:
             logger.debug("Chequebook address unavailable, falling back to balance-only")
-            chequebook_data = get_chequebook_balance()
+            chequebook_data = await get_chequebook_balance()
             chequebook_address = None
         available_plur = int(chequebook_data.get("availableBalance", 0))
         total_plur = int(chequebook_data.get("totalBalance", 0))
@@ -206,7 +207,7 @@ def check_chequebook_balance() -> Dict[str, Any]:
         }
 
 
-def check_preflight_balances() -> Dict[str, Any]:
+async def check_preflight_balances() -> Dict[str, Any]:
     """
     Check all gateway balances and return pass/fail status.
 
@@ -229,10 +230,12 @@ def check_preflight_balances() -> Dict[str, Any]:
     warnings: List[str] = []
     errors: List[str] = []
 
-    # Check all balances
-    xbzz_result = check_xbzz_balance()
-    xdai_result = check_xdai_balance()
-    chequebook_result = check_chequebook_balance()
+    # Check all balances in parallel
+    xbzz_result, xdai_result, chequebook_result = await asyncio.gather(
+        check_xbzz_balance(),
+        check_xdai_balance(),
+        check_chequebook_balance()
+    )
 
     # Collect warnings from each check
     if xbzz_result.get("warning"):

@@ -1,6 +1,6 @@
 # app/api/endpoints/wallet.py
 from fastapi import APIRouter, HTTPException
-from requests.exceptions import RequestException
+import httpx
 import logging
 
 from app.services.swarm_api import get_wallet_info, get_chequebook_info
@@ -23,14 +23,14 @@ async def get_wallet() -> WalletResponse:
         HTTPException: 500 if unable to fetch wallet information from Swarm API
     """
     try:
-        wallet_info = get_wallet_info()
+        wallet_info = await get_wallet_info()
         logger.info(f"Wallet endpoint accessed, returning address: {wallet_info.get('walletAddress')}, balance: {wallet_info.get('bzzBalance')}")
         return WalletResponse(
             walletAddress=wallet_info["walletAddress"],
             bzzBalance=wallet_info.get("bzzBalance")
         )
 
-    except RequestException as e:
+    except httpx.HTTPError as e:
         logger.error(f"Failed to fetch wallet information: {e}")
         raise HTTPException(
             status_code=502,
@@ -62,7 +62,7 @@ async def get_chequebook() -> ChequebookResponse:
         HTTPException: 500 if unable to fetch chequebook information from Swarm API
     """
     try:
-        chequebook_info = get_chequebook_info()
+        chequebook_info = await get_chequebook_info()
         logger.info(f"Chequebook endpoint accessed, returning address: {chequebook_info.get('chequebookAddress')}, available: {chequebook_info.get('availableBalance')}")
         return ChequebookResponse(
             chequebookAddress=chequebook_info["chequebookAddress"],
@@ -70,7 +70,7 @@ async def get_chequebook() -> ChequebookResponse:
             totalBalance=chequebook_info.get("totalBalance")
         )
 
-    except RequestException as e:
+    except httpx.HTTPError as e:
         logger.error(f"Failed to fetch chequebook information: {e}")
         raise HTTPException(
             status_code=502,

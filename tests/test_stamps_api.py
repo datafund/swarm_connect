@@ -1,5 +1,6 @@
 # tests/test_stamps_api.py
 import pytest
+import httpx
 from unittest.mock import patch, MagicMock
 from fastapi.testclient import TestClient
 import json
@@ -151,8 +152,7 @@ class TestStampsAPI:
     @patch('app.services.swarm_api.get_all_stamps_processed')
     def test_list_stamps_api_error(self, mock_get_stamps):
         """Test stamps list endpoint when API call fails."""
-        from requests.exceptions import RequestException
-        mock_get_stamps.side_effect = RequestException("Network error")
+        mock_get_stamps.side_effect = httpx.HTTPError("Network error")
 
         response = client.get("/api/v1/stamps/")
 
@@ -345,10 +345,9 @@ class TestStampsAPI:
     @patch('app.services.swarm_api.purchase_postage_stamp')
     def test_purchase_stamp_api_error(self, mock_purchase, mock_calc_cost, mock_funds):
         """Test stamp purchase when API call fails."""
-        from requests.exceptions import RequestException
         mock_calc_cost.return_value = 131072000000000
         mock_funds.return_value = {"sufficient": True, "wallet_balance_bzz": 10.0, "required_bzz": 0.013, "shortfall_bzz": 0.0}
-        mock_purchase.side_effect = RequestException("Purchase failed")
+        mock_purchase.side_effect = httpx.HTTPError("Purchase failed")
 
         purchase_data = {
             "amount": 1000000000,
@@ -474,14 +473,13 @@ class TestStampsAPI:
     @patch('app.services.swarm_api.extend_postage_stamp')
     def test_extend_stamp_api_error(self, mock_extend, mock_get_stamps, mock_calc_cost, mock_funds):
         """Test stamp extension when API call fails."""
-        from requests.exceptions import RequestException
         mock_get_stamps.return_value = [
             {"batchID": VALID_STAMP_ID_B, "depth": 17, "amount": "1000000000", "batchTTL": 3600,
              "bucketDepth": 16, "expectedExpiration": "2024-12-01-15-30", "local": True, "immutableFlag": False}
         ]
         mock_calc_cost.return_value = 1048576000000000
         mock_funds.return_value = {"sufficient": True, "wallet_balance_bzz": 10.0, "required_bzz": 0.1, "shortfall_bzz": 0.0}
-        mock_extend.side_effect = RequestException("Extension failed")
+        mock_extend.side_effect = httpx.HTTPError("Extension failed")
 
         extension_data = {
             "amount": 8000000000
