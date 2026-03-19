@@ -17,7 +17,10 @@ _client: Optional[httpx.AsyncClient] = None
 async def init_client():
     """Initialize the shared HTTP client. Called during app startup."""
     global _client
-    _client = httpx.AsyncClient(timeout=httpx.Timeout(10.0, connect=5.0))
+    _client = httpx.AsyncClient(
+        timeout=httpx.Timeout(10.0, connect=5.0),
+        follow_redirects=True,
+    )
     logger.info("Initialized shared httpx.AsyncClient")
 
 

@@ -79,7 +79,7 @@ def apply_minimum_price(price: float, minimum: Optional[float] = None) -> float:
     return max(price, min_price)
 
 
-def calculate_stamp_price_usd(
+async def calculate_stamp_price_usd(
     duration_hours: int,
     depth: int = 17,
     include_breakdown: bool = True
@@ -113,7 +113,7 @@ def calculate_stamp_price_usd(
         Exception: If unable to fetch chainstate from Bee node
     """
     # Get current price from chainstate
-    chainstate = get_chainstate()
+    chainstate = await get_chainstate()
     current_price = int(chainstate.get("currentPrice", 0))
 
     if current_price <= 0:
@@ -172,7 +172,7 @@ def calculate_stamp_price_usd(
     return result
 
 
-def calculate_upload_price_usd(
+async def calculate_upload_price_usd(
     size_bytes: int,
     duration_hours: int = 24,
     include_breakdown: bool = True
@@ -216,7 +216,7 @@ def calculate_upload_price_usd(
         depth += 1
 
     # Calculate stamp price for this depth and duration
-    stamp_price = calculate_stamp_price_usd(
+    stamp_price = await calculate_stamp_price_usd(
         duration_hours=duration_hours,
         depth=depth,
         include_breakdown=include_breakdown
@@ -248,7 +248,7 @@ def calculate_upload_price_usd(
     return result
 
 
-def get_price_quote(
+async def get_price_quote(
     operation: str,
     **kwargs
 ) -> Dict[str, Any]:
@@ -276,11 +276,11 @@ def get_price_quote(
     if operation == "stamp_purchase":
         duration_hours = kwargs.get("duration_hours", 24)
         depth = kwargs.get("depth", 17)
-        price_info = calculate_stamp_price_usd(duration_hours, depth)
+        price_info = await calculate_stamp_price_usd(duration_hours, depth)
     elif operation == "upload":
         size_bytes = kwargs.get("size_bytes", 0)
         duration_hours = kwargs.get("duration_hours", 24)
-        price_info = calculate_upload_price_usd(size_bytes, duration_hours)
+        price_info = await calculate_upload_price_usd(size_bytes, duration_hours)
     else:
         raise ValueError(f"Unknown operation type: {operation}")
 
