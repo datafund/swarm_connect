@@ -476,8 +476,11 @@ class StampPoolManager:
                 needed = target_count - current_count
                 if needed > 0:
                     logger.info(f"Pool depth {depth}: need {needed} stamps (have {current_count}, target {target_count})")
-                    for _ in range(needed):
+                    for i in range(needed):
                         try:
+                            # Delay between purchases to avoid Bee node rate limiting (429)
+                            if i > 0:
+                                await asyncio.sleep(15)
                             batch_id = await self._purchase_stamp(depth)
                             if batch_id:
                                 results["stamps_purchased"] += 1
@@ -516,8 +519,8 @@ class StampPoolManager:
 
         return results
 
-    async def _purchase_stamp(self, depth: int) -> Optional[str]:
-        """Purchase a new stamp for the pool."""
+    async def _purchase_stamp(self, depth: int, max_retries: int = 3) -> Optional[str]:
+        """Purchase a new stamp for the pool. Retries on 429 rate limiting."""
         try:
             # Get current price (Bee API returns currentPrice as a string)
             chainstate = await swarm_api.get_chainstate()
@@ -533,8 +536,22 @@ class StampPoolManager:
 
             logger.info(f"Purchasing stamp for pool: depth={depth}, amount={amount}, duration={duration_hours}h")
 
-            # Purchase the stamp
-            batch_id = await swarm_api.purchase_postage_stamp(amount, depth, label)
+            # Purchase the stamp with retry on 429
+            batch_id = None
+            for attempt in range(max_retries):
+                try:
+                    batch_id = await swarm_api.purchase_postage_stamp(amount, depth, label)
+                    break
+                except Exception as e:
+                    if "429" in str(e) and attempt < max_retries - 1:
+                        wait_time = 15 * (attempt + 1)
+                        logger.warning(f"Bee node rate limited (429), retrying in {wait_time}s (attempt {attempt + 1}/{max_retries})")
+                        await asyncio.sleep(wait_time)
+                    else:
+                        raise
+
+            if not batch_id:
+                return None
 
             # Wait for stamp to become usable (up to 90 seconds)
             usable = await self._wait_for_stamp_usable(batch_id, timeout=90)
