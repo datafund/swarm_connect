@@ -360,6 +360,26 @@ The gateway exposes a `/metrics` endpoint (Prometheus text format) when `METRICS
 
 **Info**: `gateway_info{version, environment, x402_enabled, pool_enabled, notary_enabled}`
 
+### Local Monitoring Stack
+
+A local Prometheus + Grafana setup is in `monitoring/` for development:
+
+```bash
+# Start the gateway
+SWARM_BEE_API_URL=http://localhost:1633 python run.py
+
+# Start Prometheus + Grafana (in another terminal)
+docker compose -f monitoring/docker-compose.monitoring.yml up -d
+
+# Access:
+# - Gateway metrics: http://localhost:8000/metrics
+# - Prometheus:      http://localhost:9090
+# - Grafana:         http://localhost:3000 (admin/admin)
+
+# Stop
+docker compose -f monitoring/docker-compose.monitoring.yml down
+```
+
 ### Monitoring Checklist for New Features
 
 When adding a new feature, consider:

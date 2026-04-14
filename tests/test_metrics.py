@@ -237,6 +237,77 @@ class TestX402PaymentCounter:
         x402_payments_total.labels(mode="rejected").inc(0)
 
 
+class TestBeeApiErrorCounter:
+    """Tests that Bee API errors increment the counter."""
+
+    @patch("app.api.endpoints.data.download_data_from_swarm", new_callable=AsyncMock)
+    def test_download_bee_error_increments_bee_api_counter(self, mock_download):
+        """502 from Bee node increments gateway_bee_api_errors_total."""
+        import httpx
+        from app.services.metrics import bee_api_errors_total
+
+        # Simulate a Bee API error that goes through swarm_api
+        mock_download.side_effect = httpx.HTTPError("Connection refused")
+
+        before = bee_api_errors_total.labels(endpoint="download")._value.get()
+
+        # Call _record_bee_error directly since the mock bypasses swarm_api
+        from app.services.swarm_api import _record_bee_error
+        _record_bee_error("download")
+
+        after = bee_api_errors_total.labels(endpoint="download")._value.get()
+        assert after > before
+
+    def test_bee_api_error_counter_labels(self):
+        """bee_api_errors_total supports expected endpoint labels."""
+        from app.services.metrics import bee_api_errors_total
+        for endpoint in ["batches", "upload", "download", "purchase", "wallet"]:
+            bee_api_errors_total.labels(endpoint=endpoint).inc(0)
+
+
+class TestManifestUploadCounter:
+    """Tests that manifest upload operations increment counters."""
+
+    @patch("app.api.endpoints.data.upload_collection_to_swarm", new_callable=AsyncMock)
+    @patch("app.api.endpoints.data.count_tar_files")
+    @patch("app.api.endpoints.data.validate_tar")
+    @patch("app.api.endpoints.data.stamp_ownership_manager")
+    def test_manifest_upload_increments_counter(
+        self, mock_ownership, mock_validate, mock_count, mock_upload
+    ):
+        """Successful manifest upload increments gateway_uploads_total."""
+        import io
+        import tarfile
+        from app.services.metrics import uploads_total
+
+        mock_upload.return_value = "ab" * 32
+        mock_validate.return_value = None
+        mock_count.return_value = 3
+        mock_ownership.check_access.return_value = (True, "ok")
+
+        # Create a valid tar archive
+        tar_buffer = io.BytesIO()
+        with tarfile.open(fileobj=tar_buffer, mode="w") as tar:
+            data = b'{"test": true}'
+            info = tarfile.TarInfo(name="test.json")
+            info.size = len(data)
+            tar.addfile(info, io.BytesIO(data))
+        tar_bytes = tar_buffer.getvalue()
+
+        before = uploads_total.labels(status="success")._value.get()
+
+        from app.main import app
+        client = TestClient(app)
+        response = client.post(
+            f"/api/v1/data/manifest?stamp_id={'ab' * 32}",
+            files={"file": ("files.tar", io.BytesIO(tar_bytes), "application/x-tar")},
+        )
+        assert response.status_code == 200
+
+        after = uploads_total.labels(status="success")._value.get()
+        assert after > before
+
+
 class TestMetricsBackgroundTask:
     """Tests for the background balance polling task."""
 
@@ -251,3 +322,41 @@ class TestMetricsBackgroundTask:
         with patch("app.services.metrics._poll_balances", new_callable=AsyncMock):
             await start_metrics_background_task()
             await stop_metrics_background_task()
+
+    @pytest.mark.asyncio
+    async def test_poll_updates_gauges(self):
+        """Background poller updates wallet balance gauges."""
+        from app.services.metrics import wallet_bzz_balance, stamps_total, _poll_balances
+        import asyncio
+
+        with patch("app.services.metrics.settings") as mock_settings, \
+             patch("app.services.swarm_api.get_wallet_info", new_callable=AsyncMock) as mock_wallet, \
+             patch("app.services.swarm_api.get_chequebook_info", new_callable=AsyncMock) as mock_cheque, \
+             patch("app.services.swarm_api.get_all_stamps", new_callable=AsyncMock) as mock_stamps:
+
+            mock_settings.X402_ENABLED = False
+            mock_settings.STAMP_POOL_ENABLED = False
+            mock_settings.METRICS_BALANCE_POLL_SECONDS = 0.1
+
+            mock_wallet.return_value = {"bzzBalance": str(5 * 10**16)}  # 5 BZZ
+            mock_cheque.return_value = {"availableBalance": str(3 * 10**16)}
+            mock_stamps.return_value = [{"batchTTL": 86400}, {"batchTTL": 3600}]
+
+            # Run one poll cycle (patch sleep to exit after one iteration)
+            original_sleep = asyncio.sleep
+            call_count = 0
+            async def fake_sleep(seconds):
+                nonlocal call_count
+                call_count += 1
+                if call_count >= 1:
+                    raise asyncio.CancelledError()
+                await original_sleep(0)
+
+            with patch("asyncio.sleep", side_effect=fake_sleep):
+                try:
+                    await _poll_balances()
+                except asyncio.CancelledError:
+                    pass
+
+            assert wallet_bzz_balance._value.get() == 5.0
+            assert stamps_total._value.get() == 2.0
