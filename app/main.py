@@ -27,9 +27,29 @@ async def lifespan(app: FastAPI):
         logger.info("Starting stamp pool background task")
         await stamp_pool_manager.start_background_task()
 
+    # Start metrics background polling if enabled
+    if settings.METRICS_ENABLED:
+        from app.services.metrics import (
+            start_metrics_background_task,
+            gateway_info,
+        )
+        gateway_info.info({
+            "version": VERSION,
+            "environment": settings.GATEWAY_ENVIRONMENT,
+            "x402_enabled": str(settings.X402_ENABLED),
+            "pool_enabled": str(settings.STAMP_POOL_ENABLED),
+            "notary_enabled": str(settings.NOTARY_ENABLED),
+        })
+        await start_metrics_background_task()
+
     yield
 
     # === Shutdown ===
+    # Stop metrics background task
+    if settings.METRICS_ENABLED:
+        from app.services.metrics import stop_metrics_background_task
+        await stop_metrics_background_task()
+
     # Stop stamp pool background task if running
     if settings.STAMP_POOL_ENABLED:
         from app.services.stamp_pool import stamp_pool_manager
@@ -76,6 +96,17 @@ app.add_middleware(
     allow_headers=["*"],
 )
 logger.info(f"CORS enabled for origins: {cors_origins}")
+
+# Add Prometheus metrics endpoint if enabled
+if settings.METRICS_ENABLED:
+    from prometheus_fastapi_instrumentator import Instrumentator
+    instrumentator = Instrumentator(
+        should_group_status_codes=False,
+        should_ignore_untemplated=True,
+        excluded_handlers=["/metrics"],
+    )
+    instrumentator.instrument(app).expose(app, endpoint="/metrics", include_in_schema=False)
+    logger.info("Prometheus metrics enabled at /metrics")
 
 # Build x402 dependency list for protected routers (stamps, data)
 if settings.X402_ENABLED:

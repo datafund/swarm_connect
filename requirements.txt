@@ -12,6 +12,10 @@ python-multipart>=0.0.20  # For file upload support in FastAPI
 x402==1.0.0               # Official x402 Python SDK (pinned - v2.x has breaking API changes)
 eth-account>=0.8.0        # For wallet signature verification
 
+# Prometheus monitoring
+prometheus-fastapi-instrumentator>=6.0.0
+prometheus_client>=0.19.0
+
 # Testing dependencies
 pytest>=7.0.0
 pytest-asyncio>=0.21.0

@@ -107,6 +107,11 @@ class Settings(BaseSettings):
     RATE_LIMIT_PER_MINUTE: int = 60  # Requests per minute per IP
     RATE_LIMIT_BURST: int = 10  # Extra burst capacity above per-minute limit
 
+    # === Metrics/Monitoring ===
+    METRICS_ENABLED: bool = True  # Expose /metrics endpoint for Prometheus
+    METRICS_BALANCE_POLL_SECONDS: int = 60  # How often to poll wallet balances for metrics
+    GATEWAY_ENVIRONMENT: str = "development"  # Environment label (development/staging/production)
+
     # === CORS Settings ===
     # Enable CORS for browser-based SDK usage (e.g., React/Vite frontends)
     CORS_ALLOWED_ORIGINS: str = "*"  # Comma-separated origins or "*" for all

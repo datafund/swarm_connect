@@ -35,6 +35,9 @@ from app.services.provenance import (
     NotaryNotEnabledError
 )
 from app.services.signing import NotConfiguredError
+from app.services.metrics import (
+    uploads_total, upload_bytes_total, downloads_total, notary_signatures_total,
+)
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -307,7 +310,9 @@ async def upload_data(
                 data_bytes = signed_doc.raw_json.encode('utf-8')
                 content_type = "application/json"  # Signed documents are always JSON
                 logger.info(f"Document signed by notary, signatures count: {len(signed_doc.signatures)}")
+                notary_signatures_total.labels(status="success").inc()
             except NotaryNotEnabledError as e:
+                notary_signatures_total.labels(status="error").inc()
                 raise HTTPException(
                     status_code=400,
                     detail={
@@ -317,6 +322,7 @@ async def upload_data(
                     }
                 )
             except NotConfiguredError as e:
+                notary_signatures_total.labels(status="error").inc()
                 raise HTTPException(
                     status_code=400,
                     detail={
@@ -326,6 +332,7 @@ async def upload_data(
                     }
                 )
             except DocumentValidationError as e:
+                notary_signatures_total.labels(status="error").inc()
                 raise HTTPException(
                     status_code=400,
                     detail={
@@ -367,6 +374,9 @@ async def upload_data(
                 total_ms=total_ms
             )
 
+        uploads_total.labels(status="success").inc()
+        upload_bytes_total.inc(len(data_bytes))
+
         response = DataUploadResponse(
             reference=reference,
             message=f"File '{file.filename}' uploaded successfully",
@@ -389,8 +399,10 @@ async def upload_data(
         )
 
     except HTTPException:
+        uploads_total.labels(status="error").inc()
         raise  # Re-raise HTTP exceptions as-is
     except httpx.HTTPError as e:
+        uploads_total.labels(status="error").inc()
         logger.error(f"Swarm API error during upload: {e}")
         # Check if the failure was due to stamp issues
         failure_info = await check_upload_failure_reason(stamp_id, str(e))
@@ -406,9 +418,11 @@ async def upload_data(
             raise HTTPException(status_code=400, detail=detail)
         raise HTTPException(status_code=502, detail="Failed to upload data to Swarm. The Bee node may be unavailable.")
     except ValueError as e:
+        uploads_total.labels(status="error").inc()
         logger.error(f"Data processing error during upload: {e}")
         raise HTTPException(status_code=400, detail="Data upload error. Please check your request and try again.")
     except Exception as e:
+        uploads_total.labels(status="error").inc()
         logger.error(f"Unexpected error during upload: {e}")
         raise HTTPException(status_code=500, detail="Internal server error during upload")
 
@@ -437,6 +451,8 @@ async def download_data(
         # Detect content type and generate user-friendly filename
         content_type, filename = _detect_content_type_and_filename(data_bytes, reference)
 
+        downloads_total.labels(status="success").inc()
+
         # Return raw data with user-friendly filename
         return Response(
             content=data_bytes,
@@ -449,12 +465,15 @@ async def download_data(
         )
 
     except FileNotFoundError as e:
+        downloads_total.labels(status="error").inc()
         logger.warning(f"Data not found for reference {reference}: {e}")
         raise HTTPException(status_code=404, detail=f"Data not found for reference {reference}")
     except httpx.HTTPError as e:
+        downloads_total.labels(status="error").inc()
         logger.error(f"Swarm API error during download: {e}")
         raise HTTPException(status_code=502, detail="Failed to download data from Swarm. The Bee node may be unavailable.")
     except Exception as e:
+        downloads_total.labels(status="error").inc()
         logger.error(f"Unexpected error during download: {e}")
         raise HTTPException(status_code=500, detail="Internal server error during download")
 
@@ -496,6 +515,8 @@ async def download_data_json(
         # Encode as base64
         data_b64 = base64.b64encode(data_bytes).decode('utf-8')
 
+        downloads_total.labels(status="success").inc()
+
         return DataDownloadResponse(
             data=data_b64,
             content_type=content_type,
@@ -504,12 +525,15 @@ async def download_data_json(
         )
 
     except FileNotFoundError as e:
+        downloads_total.labels(status="error").inc()
         logger.warning(f"Data not found for reference {reference}: {e}")
         raise HTTPException(status_code=404, detail=f"Data not found for reference {reference}")
     except httpx.HTTPError as e:
+        downloads_total.labels(status="error").inc()
         logger.error(f"Swarm API error during download: {e}")
         raise HTTPException(status_code=502, detail="Failed to download data from Swarm. The Bee node may be unavailable.")
     except Exception as e:
+        downloads_total.labels(status="error").inc()
         logger.error(f"Unexpected error during download: {e}")
         raise HTTPException(status_code=500, detail="Internal server error during download")
 
@@ -749,6 +773,9 @@ async def upload_manifest(
                 files_per_second=files_per_second
             )
 
+        uploads_total.labels(status="success").inc()
+        upload_bytes_total.inc(len(tar_bytes))
+
         response = ManifestUploadResponse(
             reference=reference,
             file_count=file_count,
@@ -776,14 +803,13 @@ async def upload_manifest(
         )
 
     except HTTPException:
-        # Re-raise HTTP exceptions as-is
+        uploads_total.labels(status="error").inc()
         raise
     except httpx.HTTPError as e:
+        uploads_total.labels(status="error").inc()
         logger.error(f"Swarm API error during manifest upload: {e}")
-        # Check if the failure was due to stamp issues
         failure_info = await check_upload_failure_reason(stamp_id, str(e))
         if failure_info:
-            # Return structured error response
             detail = {
                 "code": failure_info.get("code"),
                 "message": failure_info.get("message"),
@@ -794,8 +820,10 @@ async def upload_manifest(
             raise HTTPException(status_code=400, detail=detail)
         raise HTTPException(status_code=502, detail="Failed to upload collection to Swarm. The Bee node may be unavailable.")
     except ValueError as e:
+        uploads_total.labels(status="error").inc()
         logger.error(f"Data processing error during manifest upload: {e}")
         raise HTTPException(status_code=400, detail="Manifest upload error. Please check your request and try again.")
     except Exception as e:
+        uploads_total.labels(status="error").inc()
         logger.error(f"Unexpected error during manifest upload: {e}")
         raise HTTPException(status_code=500, detail="Internal server error during manifest upload")

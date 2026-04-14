@@ -15,11 +15,12 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import JSONResponse
 
 from app.core.config import settings
+from app.services.metrics import rate_limit_hits_total
 
 logger = logging.getLogger(__name__)
 
 # Paths exempt from rate limiting
-EXEMPT_PATHS = {"/", "/health", "/docs", "/redoc", "/openapi.json"}
+EXEMPT_PATHS = {"/", "/health", "/docs", "/redoc", "/openapi.json", "/metrics"}
 
 
 def _is_exempt_path(path: str) -> bool:
@@ -147,6 +148,7 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         allowed, stats = self._counter.is_allowed(client_ip, limit)
 
         if not allowed:
+            rate_limit_hits_total.inc()
             retry_after = stats.get("retry_after", 60)
             logger.warning(f"Rate limit exceeded for {client_ip}: {request.method} {request.url.path}")
             return JSONResponse(
