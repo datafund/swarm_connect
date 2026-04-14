@@ -380,6 +380,28 @@ X402_AUDIT_LOG_PATH=logs/x402_audit.jsonl
 
 See [x402 Operator Guide](docs/x402-operator-guide.md) for complete setup instructions.
 
+## Monitoring
+
+The gateway exposes a Prometheus metrics endpoint at `GET /metrics` for operational monitoring.
+
+**What's tracked:**
+- HTTP request rate, latency, and error rate (auto-instrumented)
+- Upload/download counts and bytes transferred
+- Stamp purchases and pool acquisitions
+- Wallet balances (BZZ, xDAI, chequebook, Base ETH)
+- Stamp pool availability and TTL
+- x402 payment mode breakdown
+- Rate limit rejections
+
+**Configuration:**
+```bash
+METRICS_ENABLED=true                # Expose /metrics (default: true)
+METRICS_BALANCE_POLL_SECONDS=60     # Balance polling interval (default: 60s)
+GATEWAY_ENVIRONMENT=production      # Environment label for multi-instance setups
+```
+
+**Stack:** Prometheus + Grafana Cloud + Telegram alerting. See the [monitoring epic](https://github.com/datafund/swarm_connect/issues/179) for setup details.
+
 ## API Endpoints
 
 ### Stamp Management Endpoints

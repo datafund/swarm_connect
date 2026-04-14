@@ -1,0 +1,11 @@
+global:
+  scrape_interval: 15s
+
+scrape_configs:
+  - job_name: "provenance-gateway"
+    metrics_path: "/metrics"
+    static_configs:
+      # host.docker.internal resolves to the host machine from inside Docker
+      - targets: ["host.docker.internal:8000"]
+        labels:
+          environment: "development"

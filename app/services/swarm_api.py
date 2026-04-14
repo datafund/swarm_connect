@@ -9,8 +9,17 @@ from urllib.parse import urljoin
 from app.core.config import settings
 from app.services.http_client import get_client
 from app.services.stamp_ownership import stamp_ownership_manager
+from app.services.metrics import bee_api_errors_total
 
 logger = logging.getLogger(__name__)
+
+
+def _record_bee_error(endpoint: str):
+    """Increment Bee API error counter for the given endpoint."""
+    try:
+        bee_api_errors_total.labels(endpoint=endpoint).inc()
+    except Exception:
+        pass  # Never let metrics break the request
 
 async def get_all_stamps() -> List[Dict[str, Any]]:
     """
@@ -47,6 +56,7 @@ async def get_all_stamps() -> List[Dict[str, Any]]:
 
 
     except httpx.HTTPError as e:
+        _record_bee_error("batches")
         logger.error(f"Error fetching stamps from Swarm API ({api_url}): {e}")
         raise
 
@@ -147,6 +157,7 @@ async def purchase_postage_stamp(amount: int, depth: int, label: Optional[str] =
         return batch_id
 
     except httpx.HTTPError as e:
+        _record_bee_error("purchase")
         logger.error(f"Error purchasing stamp from Swarm API ({api_url}): {e}")
         raise
     except (ValueError, KeyError) as e:
@@ -637,6 +648,7 @@ async def upload_data_to_swarm(
         return reference
 
     except httpx.HTTPError as e:
+        _record_bee_error("upload")
         logger.error(f"Error uploading data to Swarm API ({api_url}): {e}")
         raise
     except (ValueError, KeyError) as e:
@@ -673,6 +685,7 @@ async def download_data_from_swarm(reference: str) -> bytes:
         return response.content
 
     except httpx.HTTPError as e:
+        _record_bee_error("download")
         logger.error(f"Error downloading data from Swarm API ({api_url}): {e}")
         raise
 
@@ -705,6 +718,7 @@ async def get_wallet_info() -> Dict[str, Any]:
         return response_json
 
     except httpx.HTTPError as e:
+        _record_bee_error("wallet")
         logger.error(f"Error fetching wallet info from Swarm API ({api_url}): {e}")
         raise
     except (ValueError, KeyError) as e:
