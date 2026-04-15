@@ -179,6 +179,131 @@
         "gridPos": { "h": 8, "w": 8, "x": 16, "y": 36 },
         "targets": [{ "expr": "sum(rate(gateway_bee_api_errors_total{environment=~\"$environment\"}[5m])) by (endpoint)", "legendFormat": "{{endpoint}}" }],
         "fieldConfig": { "defaults": { "unit": "reqps", "custom": { "drawStyle": "line", "lineInterpolation": "smooth", "fillOpacity": 20 }, "color": { "fixedColor": "red", "mode": "fixed" } } }
+      },
+      {
+        "id": 60, "title": "Total Stamps Provisioned (cumulative)", "type": "stat",
+        "description": "Total stamps provisioned since last restart, split by method. Direct = POST /stamps/ (slow, ~1 min). Pool = POST /pool/acquire (instant, <5s).",
+        "gridPos": { "h": 4, "w": 8, "x": 0, "y": 44 },
+        "targets": [
+          { "expr": "sum(gateway_stamp_purchases_total{environment=~\"$environment\",status=\"success\"}) or vector(0)", "legendFormat": "direct purchases" },
+          { "expr": "sum(gateway_pool_acquires_total{environment=~\"$environment\",status=\"success\"}) or vector(0)", "legendFormat": "pool acquires" }
+        ],
+        "fieldConfig": { "defaults": { "thresholds": { "mode": "absolute", "steps": [{ "value": null, "color": "green" }] } } },
+        "options": { "graphMode": "none", "textMode": "value_and_name" }
+      },
+      {
+        "id": 61, "title": "Stamps by Size (cumulative)", "type": "stat",
+        "description": "Total stamps provisioned by size preset since last restart. Combines both direct purchases and pool acquires.",
+        "gridPos": { "h": 4, "w": 8, "x": 8, "y": 44 },
+        "targets": [
+          { "expr": "sum(gateway_stamp_purchases_total{environment=~\"$environment\",status=\"success\"}) by (size) + (sum(gateway_pool_acquires_total{environment=~\"$environment\",status=\"success\"}) by (size) or vector(0))", "legendFormat": "{{size}}" }
+        ],
+        "fieldConfig": { "defaults": { "thresholds": { "mode": "absolute", "steps": [{ "value": null, "color": "blue" }] } } },
+        "options": { "graphMode": "none", "textMode": "value_and_name" }
+      },
+      {
+        "id": 62, "title": "Stamp Provision Failures (cumulative)", "type": "stat",
+        "description": "Failed stamp provisioning attempts. Direct failures = insufficient funds or Bee node errors. Pool failures = pool exhausted (409).",
+        "gridPos": { "h": 4, "w": 8, "x": 16, "y": 44 },
+        "targets": [
+          { "expr": "sum(gateway_stamp_purchases_total{environment=~\"$environment\",status=\"error\"}) or vector(0)", "legendFormat": "direct failures" },
+          { "expr": "sum(gateway_pool_acquires_total{environment=~\"$environment\",status=\"error\"}) or vector(0)", "legendFormat": "pool failures" }
+        ],
+        "fieldConfig": { "defaults": { "thresholds": { "mode": "absolute", "steps": [{ "value": null, "color": "green" }, { "value": 1, "color": "red" }] } } },
+        "options": { "graphMode": "none", "textMode": "value_and_name" }
+      },
+      {
+        "id": 63, "title": "Direct Purchases by Size", "type": "timeseries",
+        "description": "Rate of direct stamp purchases (POST /stamps/) by size preset over time. These take ~1 minute due to blockchain confirmation.",
+        "gridPos": { "h": 8, "w": 8, "x": 0, "y": 48 },
+        "targets": [
+          { "expr": "sum(rate(gateway_stamp_purchases_total{environment=~\"$environment\",status=\"success\"}[5m])) by (size)", "legendFormat": "{{size}}" }
+        ],
+        "fieldConfig": { "defaults": { "unit": "reqps", "custom": { "drawStyle": "bars", "fillOpacity": 50, "stacking": { "mode": "normal" } } } }
+      },
+      {
+        "id": 64, "title": "Pool Acquires by Size", "type": "timeseries",
+        "description": "Rate of pool stamp acquisitions (POST /pool/acquire) by size preset over time. Instant delivery (<5s) from pre-purchased pool.",
+        "gridPos": { "h": 8, "w": 8, "x": 8, "y": 48 },
+        "targets": [
+          { "expr": "sum(rate(gateway_pool_acquires_total{environment=~\"$environment\",status=\"success\"}[5m])) by (size)", "legendFormat": "{{size}}" }
+        ],
+        "fieldConfig": { "defaults": { "unit": "reqps", "custom": { "drawStyle": "bars", "fillOpacity": 50, "stacking": { "mode": "normal" } } } }
+      },
+      {
+        "id": 65, "title": "Pool vs Direct (total rate)", "type": "timeseries",
+        "description": "Comparison of stamp provisioning methods over time. Ideally most stamps come from the pool (instant) rather than direct purchases (slow).",
+        "gridPos": { "h": 8, "w": 8, "x": 16, "y": 48 },
+        "targets": [
+          { "expr": "sum(rate(gateway_stamp_purchases_total{environment=~\"$environment\",status=\"success\"}[5m]))", "legendFormat": "direct purchases" },
+          { "expr": "sum(rate(gateway_pool_acquires_total{environment=~\"$environment\",status=\"success\"}[5m]))", "legendFormat": "pool acquires" }
+        ],
+        "fieldConfig": { "defaults": { "unit": "reqps", "custom": { "drawStyle": "line", "lineInterpolation": "smooth", "fillOpacity": 30, "stacking": { "mode": "normal" } } } }
+      },
+      {
+        "id": 70, "title": "Data Volume Uploaded", "type": "timeseries",
+        "description": "Rate of data uploaded to the gateway in bytes per second. Spikes indicate large uploads or batch operations.",
+        "gridPos": { "h": 8, "w": 8, "x": 0, "y": 56 },
+        "targets": [
+          { "expr": "rate(gateway_upload_bytes_total{environment=~\"$environment\"}[5m])", "legendFormat": "{{environment}}" }
+        ],
+        "fieldConfig": { "defaults": { "unit": "Bps", "custom": { "drawStyle": "line", "fillOpacity": 20, "gradientMode": "scheme" }, "color": { "mode": "continuous-blues" } } }
+      },
+      {
+        "id": 71, "title": "HTTP Status Code Breakdown", "type": "timeseries",
+        "description": "Request rate by HTTP status code group. 2xx = success, 4xx = client error (bad input, auth), 5xx = server error (Bee node issues). Useful for spotting spikes in specific error types.",
+        "gridPos": { "h": 8, "w": 8, "x": 8, "y": 56 },
+        "targets": [
+          { "expr": "sum(rate(http_requests_total{environment=~\"$environment\",status=~\"2..\"}[5m]))", "legendFormat": "2xx" },
+          { "expr": "sum(rate(http_requests_total{environment=~\"$environment\",status=~\"4..\"}[5m]))", "legendFormat": "4xx" },
+          { "expr": "sum(rate(http_requests_total{environment=~\"$environment\",status=~\"5..\"}[5m]))", "legendFormat": "5xx" }
+        ],
+        "fieldConfig": { "defaults": { "unit": "reqps", "custom": { "drawStyle": "line", "lineInterpolation": "smooth", "fillOpacity": 15 } }, "overrides": [
+          { "matcher": { "id": "byName", "options": "2xx" }, "properties": [{ "id": "color", "value": { "fixedColor": "green", "mode": "fixed" } }] },
+          { "matcher": { "id": "byName", "options": "4xx" }, "properties": [{ "id": "color", "value": { "fixedColor": "yellow", "mode": "fixed" } }] },
+          { "matcher": { "id": "byName", "options": "5xx" }, "properties": [{ "id": "color", "value": { "fixedColor": "red", "mode": "fixed" } }] }
+        ] }
+      },
+      {
+        "id": 72, "title": "Latency by Endpoint (p95)", "type": "timeseries",
+        "description": "95th percentile response time per endpoint. Identifies which API handlers are slowest. Upload/download endpoints are typically slower due to Bee node I/O.",
+        "gridPos": { "h": 8, "w": 8, "x": 16, "y": 56 },
+        "targets": [
+          { "expr": "histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket{environment=~\"$environment\"}[5m])) by (le, handler))", "legendFormat": "{{handler}}" }
+        ],
+        "fieldConfig": { "defaults": { "unit": "s", "custom": { "drawStyle": "line", "lineInterpolation": "smooth", "fillOpacity": 5 } } }
+      },
+      {
+        "id": 73, "title": "Notary Signing", "type": "timeseries",
+        "description": "Rate of notary signing operations (POST /data/?sign=notary). Shows successful signatures and failures (not enabled, bad document format). Only active when NOTARY_ENABLED=true.",
+        "gridPos": { "h": 8, "w": 8, "x": 0, "y": 64 },
+        "targets": [
+          { "expr": "sum(rate(gateway_notary_signatures_total{environment=~\"$environment\",status=\"success\"}[5m]))", "legendFormat": "signed" },
+          { "expr": "sum(rate(gateway_notary_signatures_total{environment=~\"$environment\",status=\"error\"}[5m]))", "legendFormat": "errors" }
+        ],
+        "fieldConfig": { "defaults": { "unit": "reqps", "custom": { "drawStyle": "line", "fillOpacity": 15 } }, "overrides": [
+          { "matcher": { "id": "byName", "options": "signed" }, "properties": [{ "id": "color", "value": { "fixedColor": "green", "mode": "fixed" } }] },
+          { "matcher": { "id": "byName", "options": "errors" }, "properties": [{ "id": "color", "value": { "fixedColor": "red", "mode": "fixed" } }] }
+        ] }
+      },
+      {
+        "id": 74, "title": "Gateway Version", "type": "stat",
+        "description": "Current gateway version and configuration. Version resets on deploy — use Uptime panel to see when last deploy happened.",
+        "gridPos": { "h": 4, "w": 12, "x": 8, "y": 64 },
+        "targets": [
+          { "expr": "gateway_info{environment=~\"$environment\"}", "legendFormat": "{{environment}}: v{{version}} | x402={{x402_enabled}} pool={{pool_enabled}} notary={{notary_enabled}}" }
+        ],
+        "fieldConfig": { "defaults": { "mappings": [{ "type": "value", "options": { "1": { "text": "" } } }], "thresholds": { "mode": "absolute", "steps": [{ "value": null, "color": "transparent" }] } } },
+        "options": { "graphMode": "none", "textMode": "name", "colorMode": "none" }
+      },
+      {
+        "id": 75, "title": "Uptime (deploy history)", "type": "timeseries",
+        "description": "Gateway uptime in hours. Each drop to zero marks a deploy or restart. Useful for correlating metric changes with deployments.",
+        "gridPos": { "h": 4, "w": 4, "x": 20, "y": 64 },
+        "targets": [
+          { "expr": "gateway_uptime_seconds{environment=~\"$environment\"} / 3600", "legendFormat": "{{environment}}" }
+        ],
+        "fieldConfig": { "defaults": { "unit": "h", "custom": { "drawStyle": "line", "fillOpacity": 10 }, "color": { "fixedColor": "green", "mode": "fixed" } } }
       }
     ],
     "schemaVersion": 39
