@@ -1,0 +1,51 @@
+// Grafana Alloy configuration for Provenance Gateway monitoring
+// Scrapes /metrics from gateway containers and pushes to Grafana Cloud
+
+// ── Scrape development gateway (dev branch) ─────────────────────────────────
+
+prometheus.scrape "development" {
+  targets = [{"__address__" = "provenance_gateway_dev:8000"}]
+  metrics_path = "/metrics"
+  scrape_interval = "15s"
+  forward_to = [prometheus.relabel.add_environment_development.receiver]
+}
+
+prometheus.relabel "add_environment_development" {
+  rule {
+    action       = "replace"
+    target_label = "environment"
+    replacement  = "development"
+  }
+  forward_to = [prometheus.remote_write.grafana_cloud.receiver]
+}
+
+// ── Scrape main gateway (main branch) ───────────────────────────────────────
+
+prometheus.scrape "main" {
+  targets = [{"__address__" = "provenance_gateway:8000"}]
+  metrics_path = "/metrics"
+  scrape_interval = "15s"
+  forward_to = [prometheus.relabel.add_environment_main.receiver]
+}
+
+prometheus.relabel "add_environment_main" {
+  rule {
+    action       = "replace"
+    target_label = "environment"
+    replacement  = "main"
+  }
+  forward_to = [prometheus.remote_write.grafana_cloud.receiver]
+}
+
+// ── Push to Grafana Cloud ───────────────────────────────────────────────────
+
+prometheus.remote_write "grafana_cloud" {
+  endpoint {
+    url = "https://prometheus-prod-01-eu-west-0.grafana.net/api/prom/push"
+
+    basic_auth {
+      username = env("GRAFANA_CLOUD_PROM_USERNAME")
+      password = env("GRAFANA_CLOUD_API_TOKEN")
+    }
+  }
+}

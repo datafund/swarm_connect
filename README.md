@@ -380,6 +380,54 @@ X402_AUDIT_LOG_PATH=logs/x402_audit.jsonl
 
 See [x402 Operator Guide](docs/x402-operator-guide.md) for complete setup instructions.
 
+## Monitoring
+
+The gateway has built-in Prometheus monitoring with a Grafana Cloud dashboard.
+
+**Architecture:**
+```
+Gateway ──/metrics──> Grafana Alloy ──remote write──> Grafana Cloud
+                      (Docker)                        (dashboards + alerts)
+```
+
+- Gateway exposes `GET /metrics` with Prometheus text format
+- [Grafana Alloy](https://grafana.com/docs/alloy/) runs as a sidecar container, scrapes metrics every 15s
+- Metrics are pushed to Grafana Cloud (free tier: 10k series, 14-day retention)
+- Dashboard: [datafund.grafana.net/d/gateway-overview](https://datafund.grafana.net/d/gateway-overview)
+
+**What's tracked:**
+- HTTP request rate, latency percentiles (p50/p95/p99), and error rate
+- Upload/download counts and bytes transferred
+- Stamp purchases and pool acquisitions
+- Wallet balances (BZZ, xDAI, chequebook, Base ETH) with alert thresholds
+- Stamp pool availability by size and minimum TTL
+- x402 payment mode breakdown (paid/free/rejected)
+- Bee node API error rate by endpoint
+- Rate limit rejections
+
+**Configuration:**
+```bash
+METRICS_ENABLED=true                # Expose /metrics (default: true)
+METRICS_BALANCE_POLL_SECONDS=60     # Balance polling interval (default: 60s)
+GATEWAY_ENVIRONMENT=development     # Environment label: development or main
+```
+
+**Local development:**
+```bash
+# Run local Prometheus + Grafana
+docker compose -f monitoring/docker-compose.monitoring.yml up -d
+# Prometheus: http://localhost:9090
+# Grafana:    http://localhost:3000 (admin/admin)
+```
+
+**Grafana Cloud setup** (for new deployments):
+1. Create a [Grafana Cloud](https://grafana.com/products/cloud/) account (free tier)
+2. Create an access policy with `metrics:write` scope, generate a token
+3. Set GitHub secrets: `GRAFANA_CLOUD_PROM_USERNAME` (instance ID) and `GRAFANA_CLOUD_API_TOKEN`
+4. Alloy deploys automatically via `docker-compose.yml` on next push
+
+See the [monitoring epic](https://github.com/datafund/swarm_connect/issues/179) for full details.
+
 ## API Endpoints
 
 ### Stamp Management Endpoints

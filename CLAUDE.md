@@ -110,6 +110,11 @@ Security settings:
 - `RATE_LIMIT_PER_MINUTE`: Requests per minute per IP (default: `60`)
 - `RATE_LIMIT_BURST`: Extra burst capacity above per-minute limit (default: `10`)
 
+Monitoring:
+- `METRICS_ENABLED`: Expose `/metrics` Prometheus endpoint (default: `true`)
+- `METRICS_BALANCE_POLL_SECONDS`: Wallet balance polling interval (default: `60`)
+- `GATEWAY_ENVIRONMENT`: Environment label for metrics (default: `development`)
+
 Notary signing (optional):
 - `NOTARY_ENABLED`: Enable notary signing feature (default: `false`)
 - `NOTARY_PRIVATE_KEY`: Hex-encoded Ethereum private key for signing (64 characters, no 0x prefix). Generate with `python scripts/generate_notary_key.py`
@@ -327,6 +332,91 @@ mcp__context7__get-library-docs with the resolved library ID
 
 **Note**: If ethersphere/bee is not available in Context7, implement functionality based on observed API behavior and document any assumptions clearly.
 
+## Monitoring
+
+### Prometheus Metrics
+
+The gateway exposes a `/metrics` endpoint (Prometheus text format) when `METRICS_ENABLED=true`.
+
+**Auto-instrumented** (from `prometheus-fastapi-instrumentator`):
+- `http_requests_total{method, handler, status}` — request count
+- `http_request_duration_seconds{method, handler}` — latency histogram
+- `http_requests_in_progress` — active requests gauge
+
+**Custom counters** (incremented in endpoint handlers):
+- `gateway_uploads_total{status}`, `gateway_upload_bytes_total`
+- `gateway_downloads_total{status}`
+- `gateway_stamp_purchases_total{size, status}`
+- `gateway_pool_acquires_total{size, status}`
+- `gateway_notary_signatures_total{status}`
+- `gateway_x402_payments_total{mode}` (paid/free/rejected)
+- `gateway_rate_limit_hits_total`
+
+**Custom gauges** (polled every `METRICS_BALANCE_POLL_SECONDS`):
+- `gateway_wallet_bzz_balance`, `gateway_wallet_xdai_balance`
+- `gateway_chequebook_available_balance`, `gateway_base_eth_balance`
+- `gateway_stamp_pool_available{size}`, `gateway_stamps_total`
+- `gateway_stamp_min_ttl_seconds`, `gateway_uptime_seconds`
+
+**Info**: `gateway_info{version, environment, x402_enabled, pool_enabled, notary_enabled}`
+
+### Production Monitoring Stack
+
+```
+Gateway containers ──/metrics──> Alloy ──remote write──> Grafana Cloud
+  (port 8000)                   (Docker)                 (dashboards + alerts)
+```
+
+**How it works:**
+- Grafana Alloy runs as a Docker container alongside the gateways (`docker-compose.yml`)
+- Alloy scrapes `/metrics` from both gateway containers every 15s via Docker network
+- Alloy pushes metrics to Grafana Cloud Prometheus (remote write)
+- Grafana Cloud stores metrics (14-day retention) and hosts dashboards
+- Environment labels: `development` (dev branch) and `main` (main branch)
+
+**Credentials** (stored in GitHub secrets, injected at deploy):
+- `GRAFANA_CLOUD_PROM_USERNAME` — Prometheus instance ID
+- `GRAFANA_CLOUD_API_TOKEN` — API token with `metrics:write` scope
+
+**Dashboard:** `datafund.grafana.net/d/gateway-overview`
+
+**Key files:**
+- `monitoring/alloy/config.alloy` — Alloy scrape + remote write config
+- `monitoring/provisioning/dashboards/gateway-overview.json` — dashboard JSON (pushed to Grafana Cloud via API)
+
+### Local Monitoring Stack
+
+A local Prometheus + Grafana setup is in `monitoring/` for development:
+
+```bash
+# Start the gateway
+SWARM_BEE_API_URL=http://localhost:1633 python run.py
+
+# Start Prometheus + Grafana (in another terminal)
+docker compose -f monitoring/docker-compose.monitoring.yml up -d
+
+# Access:
+# - Gateway metrics: http://localhost:8000/metrics
+# - Prometheus:      http://localhost:9090
+# - Grafana:         http://localhost:3000 (admin/admin)
+
+# Push dashboard to local Grafana
+curl -X POST http://admin:admin@localhost:3000/api/dashboards/db \
+  -H "Content-Type: application/json" \
+  -d @monitoring/provisioning/dashboards/gateway-overview.json
+
+# Stop
+docker compose -f monitoring/docker-compose.monitoring.yml down
+```
+
+### Monitoring Checklist for New Features
+
+When adding a new feature, consider:
+- **Does it need a counter?** New operation type (API call, transaction) → add a Counter in `app/services/metrics.py`
+- **Does it need a gauge?** New stateful resource (balance, pool, queue) → add a Gauge
+- **Does it need an alert?** New failure mode → document the alert rule
+- **Config?** → Update `.env.example` and `deploy.yml`
+
 ## Documentation Maintenance
 
 ### Architecture Documentation
@@ -494,3 +584,58 @@ If the remote gateway (provenance-gateway.datafund.io) returns 503 or appears br
 - Do NOT include Claude/AI mentions, co-author tags, or "Generated with Claude" footers in commit messages
 - Do NOT include "Generated with Claude Code" or similar footers in PR descriptions
 - Keep commit messages and PR descriptions clean and professional - just describe the changes
+
+## PLUR Domain Scoping
+
+When calling `plur_learn`, always set:
+- `domain`: `provenance.gateway`
+- `scope`: `project:swarm-connect`
+
+This ensures engrams are tagged for retrieval in the right context across the global store.
+
+## PLUR Memory
+
+You have persistent memory via PLUR. Corrections, preferences, and conventions persist across sessions as engrams.
+
+> **PLUR is its own MCP server.** The tools below come from the `plur` MCP server registered by `plur init` — `plur_session_start`, `plur_learn`, `plur_recall_hybrid`, `plur_feedback`, `plur_session_end`. If you do not see these exact tool names, **PLUR is not connected**: stop and run `plur doctor` to diagnose. Do **not** substitute tools from other MCP servers (e.g. `datacore_*`) — those belong to a different system and will not persist anything for PLUR.
+
+### Session Workflow
+
+1. **Start**: Call `plur_session_start` with task description — injects relevant engrams
+2. **Learn**: When corrected or discovering something new, call `plur_learn` immediately
+3. **Recall**: Before answering factual questions, call `plur_recall_hybrid` — check memory first
+4. **Feedback**: Rate injected engrams with `plur_feedback` (positive/negative) — trains relevance
+5. **End**: Call `plur_session_end` with summary + engram_suggestions
+
+Do not ask permission to use these tools — they are your memory system.
+
+### When to check memory
+
+Before reaching for web search, file reads, or guessing — apply this priority:
+1. Is the answer already in engrams? → `plur_recall_hybrid`
+2. Is the answer in the local filesystem? → Read/Grep/Glob
+3. Is the answer derivable from context already loaded? → Just answer
+4. Only if 1-3 fail → Use external tools
+
+| Domain | When to recall |
+|--------|----------------|
+| Decisions | Past design choices, architecture rationale |
+| Corrections | API quirks, bugs, wrong assumptions |
+| Preferences | Formatting, tone, workflow, tool choices |
+| Conventions | Tag formats, file routing, naming rules |
+| Infrastructure | Server IPs, SSH configs, deployment targets |
+
+### When corrected
+
+When the user corrects you ("no, use X not Y", "that's wrong"):
+1. Call `plur_learn` immediately — before continuing the task
+2. Call `plur_feedback` with negative signal on the wrong engram if one was injected
+3. Then continue with the corrected approach
+
+### Verification
+
+When recalling facts that will drive actions:
+1. State the recalled fact explicitly before acting on it
+2. Include the engram ID or search that produced it
+3. If no engram matches, say so and verify from the filesystem
+4. Never interpolate between two engrams to produce a "probably correct" composite

@@ -9,6 +9,7 @@ from app.core.config import settings
 from app.services import swarm_api
 from app.services.stamp_ownership import stamp_ownership_manager
 from app.services.stamp_tracker import record_purchase
+from app.services.metrics import stamp_purchases_total
 from app.api.models.stamp import (
     StampDetails,
     StampPurchaseRequest,
@@ -409,26 +410,34 @@ async def purchase_stamp(
                 source="direct_purchase"
             )
 
+        size_label = stamp_request.size or "custom"
+        stamp_purchases_total.labels(size=size_label, status="success").inc()
+
         return StampPurchaseResponse(
             batchID=batch_id,
             message="Postage stamp purchased successfully"
         )
 
     except HTTPException:
+        size_label = stamp_request.size or "custom"
+        stamp_purchases_total.labels(size=size_label, status="error").inc()
         raise  # Re-raise HTTP exceptions as-is
     except httpx.HTTPError as e:
+        stamp_purchases_total.labels(size=stamp_request.size or "custom", status="error").inc()
         logger.error(f"Failed to purchase stamp from Swarm API: {e}")
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail="Could not purchase stamp. The Bee node may be unavailable."
         )
     except ValueError as e:
+        stamp_purchases_total.labels(size=stamp_request.size or "custom", status="error").inc()
         logger.error(f"Invalid response from Swarm API during stamp purchase: {e}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Invalid response from Swarm API. Please try again."
         )
     except Exception as e:
+        stamp_purchases_total.labels(size=stamp_request.size or "custom", status="error").inc()
         logger.error(f"Unexpected error during stamp purchase: {e}", exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,

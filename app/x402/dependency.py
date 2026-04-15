@@ -19,6 +19,7 @@ from x402.types import PaymentPayload
 from x402.facilitator import FacilitatorClient, FacilitatorConfig
 
 from app.core.config import settings
+from app.services.metrics import x402_payments_total
 from app.x402.pricing import get_price_quote
 from app.x402.ratelimit import check_rate_limit, get_rate_limit_headers, get_free_tier_stats
 from app.x402.base_balance import check_base_eth_balance
@@ -158,6 +159,7 @@ async def require_x402_payment(request: Request) -> None:
         free_tier_info = get_free_tier_stats(client_ip) if settings.X402_FREE_TIER_ENABLED else None
 
         logger.info(f"x402: No payment header, returning 402 for ${price_usd}")
+        x402_payments_total.labels(mode="rejected").inc()
 
         response_body = {
             "x402Version": X402_VERSION,
@@ -185,6 +187,7 @@ async def require_x402_payment(request: Request) -> None:
 
         if is_allowed:
             logger.info(f"x402: Free tier access granted for {client_ip} ({stats['requests_made']}/{stats['limit']} requests)")
+            x402_payments_total.labels(mode="free").inc()
             request.state.x402_mode = "free-tier"
             request.state.x402_payer = None
             request.state.x402_rate_limit_stats = stats
@@ -248,6 +251,7 @@ async def require_x402_payment(request: Request) -> None:
         raise HTTPException(status_code=402, detail=response_body)
 
     logger.info(f"x402: Payment verified for payer {verify_response.payer}")
+    x402_payments_total.labels(mode="paid").inc()
 
     # Store payment info on request.state for middleware settlement
     request.state.x402_mode = "paid"

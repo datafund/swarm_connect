@@ -16,6 +16,7 @@ import logging
 from app.core.config import settings
 from app.services.stamp_pool import stamp_pool_manager, PoolStampStatus
 from app.services.stamp_ownership import stamp_ownership_manager
+from app.services.metrics import pool_acquires_total
 from app.api.models.stamp import SIZE_PRESETS
 
 router = APIRouter()
@@ -206,6 +207,7 @@ async def acquire_stamp(
 
     if not stamp:
         size_name = depth_to_size_name(requested_depth)
+        pool_acquires_total.labels(size=size_name, status="error").inc()
         raise HTTPException(
             status_code=409,
             detail={
@@ -221,7 +223,8 @@ async def acquire_stamp(
     released = stamp_pool_manager.release_stamp(stamp.batch_id, released_to=client_ip)
 
     if not released:
-        # Race condition - stamp was taken between check and release
+        size_name = depth_to_size_name(requested_depth)
+        pool_acquires_total.labels(size=size_name, status="error").inc()
         raise HTTPException(
             status_code=409,
             detail={
@@ -255,6 +258,7 @@ async def acquire_stamp(
         logger.info(f"Triggered immediate replenishment for depth {released.depth}")
 
     size_name = depth_to_size_name(released.depth)
+    pool_acquires_total.labels(size=size_name, status="success").inc()
 
     message = f"Stamp acquired from pool (depth={released.depth}, size={size_name})"
     if fallback_used:
