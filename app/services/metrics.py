@@ -93,26 +93,26 @@ async def _poll_balances():
             if _start_time is not None:
                 uptime_seconds.set(time.monotonic() - _start_time)
 
-            # Wallet balances — use preflight checks which parse all balances
-            # correctly (BZZ from bzzBalance, xDAI from nativeTokenBalance)
+            # Wallet balances (requires HTTP client to be initialized)
             try:
-                from app.x402.preflight import (
-                    check_xbzz_balance,
-                    check_xdai_balance,
-                    check_chequebook_balance,
-                )
-                xbzz = await check_xbzz_balance()
-                wallet_bzz_balance.set(xbzz.get("balance_bzz", 0))
-
-                xdai = await check_xdai_balance()
-                wallet_xdai_balance.set(xdai.get("balance_xdai", 0))
-
-                cheque = await check_chequebook_balance()
-                chequebook_available_balance.set(
-                    cheque.get("available_bzz", 0)
-                )
+                from app.services.swarm_api import get_wallet_info
+                wallet = await get_wallet_info()
+                bzz_raw = wallet.get("bzzBalance", "0")
+                # BZZ balance is in PLUR (1 BZZ = 1e16 PLUR)
+                bzz = int(bzz_raw) / 1e16 if bzz_raw else 0
+                wallet_bzz_balance.set(bzz)
             except Exception as e:
-                logger.debug(f"Metrics: failed to get wallet balances: {e}")
+                logger.debug(f"Metrics: failed to get wallet info: {e}")
+
+            # Chequebook balance
+            try:
+                from app.services.swarm_api import get_chequebook_info
+                cheque = await get_chequebook_info()
+                available_raw = cheque.get("availableBalance", "0")
+                available = int(available_raw) / 1e16 if available_raw else 0
+                chequebook_available_balance.set(available)
+            except Exception as e:
+                logger.debug(f"Metrics: failed to get chequebook info: {e}")
 
             # Base ETH balance (only when x402 enabled)
             if settings.X402_ENABLED:
