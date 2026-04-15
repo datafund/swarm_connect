@@ -146,15 +146,16 @@ async def _poll_balances():
             if settings.STAMP_POOL_ENABLED:
                 try:
                     from app.services.stamp_pool import stamp_pool_manager
+                    DEPTH_TO_SIZE = {17: "small", 20: "medium", 22: "large"}
                     status = stamp_pool_manager.get_status()
-                    reserves = status.get("reserves", {})
-                    for size_name, info in reserves.items():
+                    current_levels = status.get("current_levels", {})
+                    reserve_config = status.get("reserve_config", {})
+                    for depth, target in reserve_config.items():
+                        size_name = DEPTH_TO_SIZE.get(int(depth), f"depth-{depth}")
                         stamp_pool_available.labels(size=size_name).set(
-                            info.get("available", 0)
+                            current_levels.get(int(depth), 0)
                         )
-                        stamp_pool_target.labels(size=size_name).set(
-                            info.get("target", 0)
-                        )
+                        stamp_pool_target.labels(size=size_name).set(target)
                 except Exception as e:
                     logger.debug(f"Metrics: failed to get pool status: {e}")
 

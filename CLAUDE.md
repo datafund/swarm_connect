@@ -360,6 +360,30 @@ The gateway exposes a `/metrics` endpoint (Prometheus text format) when `METRICS
 
 **Info**: `gateway_info{version, environment, x402_enabled, pool_enabled, notary_enabled}`
 
+### Production Monitoring Stack
+
+```
+Gateway containers ──/metrics──> Alloy ──remote write──> Grafana Cloud
+  (port 8000)                   (Docker)                 (dashboards + alerts)
+```
+
+**How it works:**
+- Grafana Alloy runs as a Docker container alongside the gateways (`docker-compose.yml`)
+- Alloy scrapes `/metrics` from both gateway containers every 15s via Docker network
+- Alloy pushes metrics to Grafana Cloud Prometheus (remote write)
+- Grafana Cloud stores metrics (14-day retention) and hosts dashboards
+- Environment labels: `development` (dev branch) and `main` (main branch)
+
+**Credentials** (stored in GitHub secrets, injected at deploy):
+- `GRAFANA_CLOUD_PROM_USERNAME` — Prometheus instance ID
+- `GRAFANA_CLOUD_API_TOKEN` — API token with `metrics:write` scope
+
+**Dashboard:** `datafund.grafana.net/d/gateway-overview`
+
+**Key files:**
+- `monitoring/alloy/config.alloy` — Alloy scrape + remote write config
+- `monitoring/provisioning/dashboards/gateway-overview.json` — dashboard JSON (pushed to Grafana Cloud via API)
+
 ### Local Monitoring Stack
 
 A local Prometheus + Grafana setup is in `monitoring/` for development:
@@ -375,6 +399,11 @@ docker compose -f monitoring/docker-compose.monitoring.yml up -d
 # - Gateway metrics: http://localhost:8000/metrics
 # - Prometheus:      http://localhost:9090
 # - Grafana:         http://localhost:3000 (admin/admin)
+
+# Push dashboard to local Grafana
+curl -X POST http://admin:admin@localhost:3000/api/dashboards/db \
+  -H "Content-Type: application/json" \
+  -d @monitoring/provisioning/dashboards/gateway-overview.json
 
 # Stop
 docker compose -f monitoring/docker-compose.monitoring.yml down
