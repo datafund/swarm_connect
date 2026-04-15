@@ -65,7 +65,7 @@ jobs:
           RATE_LIMIT_BURST=${{ vars.RATE_LIMIT_BURST || '10' }}
           METRICS_ENABLED=${{ vars.METRICS_ENABLED || 'true' }}
           METRICS_BALANCE_POLL_SECONDS=${{ vars.METRICS_BALANCE_POLL_SECONDS || '60' }}
-          GATEWAY_ENVIRONMENT=staging
+          GATEWAY_ENVIRONMENT=development
           EOF
 
       - name: write env file for main
@@ -98,7 +98,7 @@ jobs:
           RATE_LIMIT_BURST=${{ vars.RATE_LIMIT_BURST || '10' }}
           METRICS_ENABLED=${{ vars.METRICS_ENABLED || 'true' }}
           METRICS_BALANCE_POLL_SECONDS=${{ vars.METRICS_BALANCE_POLL_SECONDS || '60' }}
-          GATEWAY_ENVIRONMENT=production
+          GATEWAY_ENVIRONMENT=main
           EOF
 
       - name: deploy

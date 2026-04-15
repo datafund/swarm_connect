@@ -10,6 +10,23 @@
       "from": "now-1h",
       "to": "now"
     },
+    "templating": {
+      "list": [
+        {
+          "name": "environment",
+          "label": "Environment",
+          "type": "query",
+          "datasource": { "type": "prometheus", "uid": "grafanacloud-prom" },
+          "query": "label_values(gateway_info, environment)",
+          "current": { "text": "All", "value": "$__all" },
+          "includeAll": true,
+          "allValue": ".*",
+          "multi": true,
+          "refresh": 2,
+          "sort": 1
+        }
+      ]
+    },
     "panels": [
       {
         "id": 1,
@@ -18,7 +35,7 @@
         "gridPos": { "h": 4, "w": 4, "x": 0, "y": 0 },
         "targets": [
           {
-            "expr": "up{job=\"provenance-gateway\"}",
+            "expr": "up{environment=~\"$environment\"}",
             "legendFormat": "{{environment}}"
           }
         ],
@@ -44,8 +61,8 @@
         "gridPos": { "h": 4, "w": 4, "x": 4, "y": 0 },
         "targets": [
           {
-            "expr": "gateway_uptime_seconds / 3600",
-            "legendFormat": "hours"
+            "expr": "gateway_uptime_seconds{environment=~\"$environment\"} / 3600",
+            "legendFormat": "{{environment}}"
           }
         ],
         "fieldConfig": {
@@ -68,7 +85,7 @@
         "gridPos": { "h": 4, "w": 4, "x": 8, "y": 0 },
         "targets": [
           {
-            "expr": "sum(rate(http_requests_total[5m]))",
+            "expr": "sum(rate(http_requests_total{environment=~\"$environment\"}[5m]))",
             "legendFormat": "req/s"
           }
         ],
@@ -92,7 +109,7 @@
         "gridPos": { "h": 4, "w": 4, "x": 12, "y": 0 },
         "targets": [
           {
-            "expr": "sum(rate(http_requests_total{status=~\"5..\"}[5m])) / sum(rate(http_requests_total[5m])) * 100 or vector(0)",
+            "expr": "sum(rate(http_requests_total{environment=~\"$environment\",status=~\"5..\"}[5m])) / sum(rate(http_requests_total{environment=~\"$environment\"}[5m])) * 100 or vector(0)",
             "legendFormat": "5xx %"
           }
         ],
@@ -118,7 +135,7 @@
         "gridPos": { "h": 4, "w": 4, "x": 16, "y": 0 },
         "targets": [
           {
-            "expr": "gateway_uploads_total{status=\"success\"} or vector(0)",
+            "expr": "sum(gateway_uploads_total{environment=~\"$environment\",status=\"success\"}) or vector(0)",
             "legendFormat": "uploads"
           }
         ],
@@ -140,7 +157,7 @@
         "gridPos": { "h": 4, "w": 4, "x": 20, "y": 0 },
         "targets": [
           {
-            "expr": "gateway_downloads_total{status=\"success\"} or vector(0)",
+            "expr": "sum(gateway_downloads_total{environment=~\"$environment\",status=\"success\"}) or vector(0)",
             "legendFormat": "downloads"
           }
         ],
@@ -162,7 +179,7 @@
         "gridPos": { "h": 8, "w": 12, "x": 0, "y": 4 },
         "targets": [
           {
-            "expr": "sum by (handler) (rate(http_requests_total[5m]))",
+            "expr": "sum by (handler) (rate(http_requests_total{environment=~\"$environment\"}[5m]))",
             "legendFormat": "{{handler}}"
           }
         ],
@@ -184,15 +201,15 @@
         "gridPos": { "h": 8, "w": 12, "x": 12, "y": 4 },
         "targets": [
           {
-            "expr": "histogram_quantile(0.50, sum(rate(http_request_duration_highr_seconds_bucket[5m])) by (le))",
+            "expr": "histogram_quantile(0.50, sum(rate(http_request_duration_highr_seconds_bucket{environment=~\"$environment\"}[5m])) by (le))",
             "legendFormat": "p50"
           },
           {
-            "expr": "histogram_quantile(0.95, sum(rate(http_request_duration_highr_seconds_bucket[5m])) by (le))",
+            "expr": "histogram_quantile(0.95, sum(rate(http_request_duration_highr_seconds_bucket{environment=~\"$environment\"}[5m])) by (le))",
             "legendFormat": "p95"
           },
           {
-            "expr": "histogram_quantile(0.99, sum(rate(http_request_duration_highr_seconds_bucket[5m])) by (le))",
+            "expr": "histogram_quantile(0.99, sum(rate(http_request_duration_highr_seconds_bucket{environment=~\"$environment\"}[5m])) by (le))",
             "legendFormat": "p99"
           }
         ],
@@ -214,19 +231,19 @@
         "gridPos": { "h": 8, "w": 12, "x": 0, "y": 12 },
         "targets": [
           {
-            "expr": "sum(rate(gateway_uploads_total{status=\"success\"}[5m]))",
+            "expr": "sum(rate(gateway_uploads_total{environment=~\"$environment\",status=\"success\"}[5m]))",
             "legendFormat": "uploads (ok)"
           },
           {
-            "expr": "sum(rate(gateway_uploads_total{status=\"error\"}[5m]))",
+            "expr": "sum(rate(gateway_uploads_total{environment=~\"$environment\",status=\"error\"}[5m]))",
             "legendFormat": "uploads (error)"
           },
           {
-            "expr": "sum(rate(gateway_downloads_total{status=\"success\"}[5m]))",
+            "expr": "sum(rate(gateway_downloads_total{environment=~\"$environment\",status=\"success\"}[5m]))",
             "legendFormat": "downloads (ok)"
           },
           {
-            "expr": "sum(rate(gateway_downloads_total{status=\"error\"}[5m]))",
+            "expr": "sum(rate(gateway_downloads_total{environment=~\"$environment\",status=\"error\"}[5m]))",
             "legendFormat": "downloads (error)"
           }
         ],
@@ -248,19 +265,19 @@
         "gridPos": { "h": 8, "w": 12, "x": 12, "y": 12 },
         "targets": [
           {
-            "expr": "sum(rate(gateway_stamp_purchases_total{status=\"success\"}[5m]))",
+            "expr": "sum(rate(gateway_stamp_purchases_total{environment=~\"$environment\",status=\"success\"}[5m]))",
             "legendFormat": "purchases (ok)"
           },
           {
-            "expr": "sum(rate(gateway_stamp_purchases_total{status=\"error\"}[5m]))",
+            "expr": "sum(rate(gateway_stamp_purchases_total{environment=~\"$environment\",status=\"error\"}[5m]))",
             "legendFormat": "purchases (error)"
           },
           {
-            "expr": "sum(rate(gateway_pool_acquires_total{status=\"success\"}[5m]))",
+            "expr": "sum(rate(gateway_pool_acquires_total{environment=~\"$environment\",status=\"success\"}[5m]))",
             "legendFormat": "pool acquires (ok)"
           },
           {
-            "expr": "sum(rate(gateway_pool_acquires_total{status=\"error\"}[5m]))",
+            "expr": "sum(rate(gateway_pool_acquires_total{environment=~\"$environment\",status=\"error\"}[5m]))",
             "legendFormat": "pool acquires (error)"
           }
         ],
@@ -282,8 +299,8 @@
         "gridPos": { "h": 8, "w": 6, "x": 0, "y": 20 },
         "targets": [
           {
-            "expr": "gateway_wallet_bzz_balance",
-            "legendFormat": "BZZ"
+            "expr": "gateway_wallet_bzz_balance{environment=~\"$environment\"}",
+            "legendFormat": "{{environment}}"
           }
         ],
         "fieldConfig": {
@@ -313,8 +330,8 @@
         "gridPos": { "h": 8, "w": 6, "x": 6, "y": 20 },
         "targets": [
           {
-            "expr": "gateway_wallet_xdai_balance",
-            "legendFormat": "xDAI"
+            "expr": "gateway_wallet_xdai_balance{environment=~\"$environment\"}",
+            "legendFormat": "{{environment}}"
           }
         ],
         "fieldConfig": {
@@ -344,8 +361,8 @@
         "gridPos": { "h": 8, "w": 6, "x": 12, "y": 20 },
         "targets": [
           {
-            "expr": "gateway_chequebook_available_balance",
-            "legendFormat": "Chequebook BZZ"
+            "expr": "gateway_chequebook_available_balance{environment=~\"$environment\"}",
+            "legendFormat": "{{environment}}"
           }
         ],
         "fieldConfig": {
@@ -375,8 +392,8 @@
         "gridPos": { "h": 8, "w": 6, "x": 18, "y": 20 },
         "targets": [
           {
-            "expr": "gateway_base_eth_balance",
-            "legendFormat": "ETH (Base)"
+            "expr": "gateway_base_eth_balance{environment=~\"$environment\"}",
+            "legendFormat": "{{environment}}"
           }
         ],
         "fieldConfig": {
@@ -407,8 +424,8 @@
         "gridPos": { "h": 8, "w": 8, "x": 0, "y": 28 },
         "targets": [
           {
-            "expr": "gateway_stamp_pool_available",
-            "legendFormat": "{{size}}"
+            "expr": "gateway_stamp_pool_available{environment=~\"$environment\"}",
+            "legendFormat": "{{environment}} — {{size}}"
           }
         ],
         "fieldConfig": {
@@ -435,8 +452,8 @@
         "gridPos": { "h": 8, "w": 8, "x": 8, "y": 28 },
         "targets": [
           {
-            "expr": "gateway_stamps_total",
-            "legendFormat": "stamps"
+            "expr": "gateway_stamps_total{environment=~\"$environment\"}",
+            "legendFormat": "{{environment}}"
           }
         ],
         "fieldConfig": {
@@ -456,8 +473,8 @@
         "gridPos": { "h": 8, "w": 8, "x": 16, "y": 28 },
         "targets": [
           {
-            "expr": "gateway_stamp_min_ttl_seconds / 3600",
-            "legendFormat": "min TTL (hours)"
+            "expr": "gateway_stamp_min_ttl_seconds{environment=~\"$environment\"} / 3600",
+            "legendFormat": "{{environment}}"
           }
         ],
         "fieldConfig": {
@@ -483,10 +500,10 @@
         "id": 50,
         "title": "x402 Payment Modes",
         "type": "timeseries",
-        "gridPos": { "h": 8, "w": 12, "x": 0, "y": 36 },
+        "gridPos": { "h": 8, "w": 8, "x": 0, "y": 36 },
         "targets": [
           {
-            "expr": "sum(rate(gateway_x402_payments_total[5m])) by (mode)",
+            "expr": "sum(rate(gateway_x402_payments_total{environment=~\"$environment\"}[5m])) by (mode)",
             "legendFormat": "{{mode}}"
           }
         ],
@@ -505,11 +522,11 @@
         "id": 51,
         "title": "Rate Limit Hits",
         "type": "timeseries",
-        "gridPos": { "h": 8, "w": 12, "x": 12, "y": 36 },
+        "gridPos": { "h": 8, "w": 8, "x": 8, "y": 36 },
         "targets": [
           {
-            "expr": "rate(gateway_rate_limit_hits_total[5m])",
-            "legendFormat": "rate limit hits/s"
+            "expr": "rate(gateway_rate_limit_hits_total{environment=~\"$environment\"}[5m])",
+            "legendFormat": "{{environment}}"
           }
         ],
         "fieldConfig": {
@@ -520,6 +537,29 @@
               "fillOpacity": 20
             },
             "color": { "fixedColor": "orange", "mode": "fixed" }
+          }
+        }
+      },
+      {
+        "id": 52,
+        "title": "Bee API Errors",
+        "type": "timeseries",
+        "gridPos": { "h": 8, "w": 8, "x": 16, "y": 36 },
+        "targets": [
+          {
+            "expr": "sum(rate(gateway_bee_api_errors_total{environment=~\"$environment\"}[5m])) by (endpoint)",
+            "legendFormat": "{{endpoint}}"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "reqps",
+            "custom": {
+              "drawStyle": "line",
+              "lineInterpolation": "smooth",
+              "fillOpacity": 20
+            },
+            "color": { "fixedColor": "red", "mode": "fixed" }
           }
         }
       }

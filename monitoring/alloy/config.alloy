@@ -1,38 +1,38 @@
 // Grafana Alloy configuration for Provenance Gateway monitoring
 // Scrapes /metrics from gateway containers and pushes to Grafana Cloud
 
-// ── Scrape staging gateway ──────────────────────────────────────────────────
+// ── Scrape development gateway (dev branch) ─────────────────────────────────
 
-prometheus.scrape "staging" {
+prometheus.scrape "development" {
   targets = [{"__address__" = "provenance_gateway_dev:8000"}]
   metrics_path = "/metrics"
   scrape_interval = "15s"
-  forward_to = [prometheus.relabel.add_environment_staging.receiver]
+  forward_to = [prometheus.relabel.add_environment_development.receiver]
 }
 
-prometheus.relabel "add_environment_staging" {
+prometheus.relabel "add_environment_development" {
   rule {
     action       = "replace"
     target_label = "environment"
-    replacement  = "staging"
+    replacement  = "development"
   }
   forward_to = [prometheus.remote_write.grafana_cloud.receiver]
 }
 
-// ── Scrape production gateway ───────────────────────────────────────────────
+// ── Scrape main gateway (main branch) ───────────────────────────────────────
 
-prometheus.scrape "production" {
+prometheus.scrape "main" {
   targets = [{"__address__" = "provenance_gateway:8000"}]
   metrics_path = "/metrics"
   scrape_interval = "15s"
-  forward_to = [prometheus.relabel.add_environment_production.receiver]
+  forward_to = [prometheus.relabel.add_environment_main.receiver]
 }
 
-prometheus.relabel "add_environment_production" {
+prometheus.relabel "add_environment_main" {
   rule {
     action       = "replace"
     target_label = "environment"
-    replacement  = "production"
+    replacement  = "main"
   }
   forward_to = [prometheus.remote_write.grafana_cloud.receiver]
 }
