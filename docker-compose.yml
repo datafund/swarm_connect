@@ -35,3 +35,15 @@ services:
       interval: 30s
       timeout: 10s
       retries: 3
+
+  alloy:
+    image: grafana/alloy:latest
+    volumes:
+      - ./monitoring/alloy/config.alloy:/etc/alloy/config.alloy:ro
+    environment:
+      - GRAFANA_CLOUD_PROM_USERNAME=${GRAFANA_CLOUD_PROM_USERNAME}
+      - GRAFANA_CLOUD_API_TOKEN=${GRAFANA_CLOUD_API_TOKEN}
+    command: ["run", "/etc/alloy/config.alloy"]
+    restart: unless-stopped
+    depends_on:
+      - provenance_gateway_dev

@@ -102,8 +102,13 @@ jobs:
           EOF
 
       - name: deploy
-        run: >
-          cd /opt/ && rm -rf swarm_connect && git clone -b $GITHUB_REF_NAME https://github.com/datafund/swarm_connect.git && cd swarm_connect && docker compose up -d
+        run: |
+          cd /opt/ && rm -rf swarm_connect && git clone -b $GITHUB_REF_NAME https://github.com/datafund/swarm_connect.git && cd swarm_connect
+          cat > .env << EOF
+          GRAFANA_CLOUD_PROM_USERNAME=${{ secrets.GRAFANA_CLOUD_PROM_USERNAME }}
+          GRAFANA_CLOUD_API_TOKEN=${{ secrets.GRAFANA_CLOUD_API_TOKEN }}
+          EOF
+          docker compose up -d --force-recreate
 
       - name: post-deploy diagnostics
         run: |
