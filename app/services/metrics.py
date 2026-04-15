@@ -148,12 +148,10 @@ async def _poll_balances():
                     from app.services.stamp_pool import stamp_pool_manager
                     DEPTH_TO_SIZE = {17: "small", 20: "medium", 22: "large"}
                     status = stamp_pool_manager.get_status()
-                    current_levels = status.get("current_levels", {})
-                    reserve_config = status.get("reserve_config", {})
-                    for depth, target in reserve_config.items():
+                    for depth, target in status.reserve_config.items():
                         size_name = DEPTH_TO_SIZE.get(int(depth), f"depth-{depth}")
                         stamp_pool_available.labels(size=size_name).set(
-                            current_levels.get(int(depth), 0)
+                            status.current_levels.get(int(depth), 0)
                         )
                         stamp_pool_target.labels(size=size_name).set(target)
                 except Exception as e:
