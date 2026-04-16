@@ -45,6 +45,9 @@ stamps_total = Gauge(
 stamp_min_ttl_seconds = Gauge(
     "gateway_stamp_min_ttl_seconds", "Lowest TTL among active stamps"
 )
+pool_stamp_min_ttl_seconds = Gauge(
+    "gateway_pool_stamp_min_ttl_seconds", "Lowest TTL among pooled stamps"
+)
 uptime_seconds = Gauge(
     "gateway_uptime_seconds", "Process uptime in seconds"
 )
@@ -154,6 +157,21 @@ async def _poll_balances():
                             status.current_levels.get(int(depth), 0)
                         )
                         stamp_pool_target.labels(size=size_name).set(target)
+
+                    # Pool stamp min TTL — check TTL of all available pool stamps
+                    pool_min_ttl = float("inf")
+                    for depth_ids in status.available_stamps.values():
+                        for batch_id in depth_ids:
+                            try:
+                                ttl = await stamp_pool_manager._get_stamp_ttl(batch_id)
+                                if ttl is not None and ttl > 0:
+                                    pool_min_ttl = min(pool_min_ttl, ttl)
+                            except Exception:
+                                pass
+                    if pool_min_ttl < float("inf"):
+                        pool_stamp_min_ttl_seconds.set(pool_min_ttl)
+                    else:
+                        pool_stamp_min_ttl_seconds.set(0)
                 except Exception as e:
                     logger.debug(f"Metrics: failed to get pool status: {e}")
 
