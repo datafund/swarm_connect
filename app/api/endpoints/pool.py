@@ -110,6 +110,7 @@ class ManualCheckResponse(BaseModel):
     stamps_topped_up: int = Field(..., description="Number of stamps topped up")
     stamps_synced: int = Field(0, description="Number of existing stamps synced to pool")
     errors: List[str] = Field(default_factory=list, description="Errors encountered")
+    topup_debug: Optional[List[Dict]] = Field(None, description="Debug info for topup decisions")
 
 
 # === Helper Functions ===
@@ -332,5 +333,6 @@ async def trigger_pool_check():
         stamps_purchased=result.get("stamps_purchased", 0),
         stamps_topped_up=result.get("stamps_topped_up", 0),
         stamps_synced=result.get("stamps_synced", 0),
-        errors=result.get("errors", [])
+        errors=result.get("errors", []),
+        topup_debug=result.get("topup_debug"),
     )
