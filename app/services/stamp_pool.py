@@ -602,14 +602,20 @@ class StampPoolManager:
         return False
 
     async def _get_stamp_ttl(self, batch_id: str) -> Optional[int]:
-        """Get current TTL for a stamp."""
+        """Get current TTL for a stamp via direct Bee API lookup."""
         try:
-            stamps = await swarm_api.get_all_stamps_processed()
-            stamp = next((s for s in stamps if s.get("batchID") == batch_id), None)
-            if stamp:
-                return stamp.get("batchTTL", 0)
+            from app.services.http_client import get_client
+            from urllib.parse import urljoin
+            api_url = urljoin(str(settings.SWARM_BEE_API_URL), f"stamps/{batch_id}")
+            client = get_client()
+            response = await client.get(api_url, timeout=10)
+            if response.status_code == 200:
+                data = response.json()
+                return data.get("batchTTL", 0)
+            else:
+                logger.warning(f"Stamp TTL lookup failed for {batch_id[:16]}...: HTTP {response.status_code}")
         except Exception as e:
-            logger.warning(f"Error getting stamp TTL: {e}")
+            logger.warning(f"Error getting stamp TTL for {batch_id[:16]}...: {e}")
         return None
 
     async def _update_stamp_ttls(self):
