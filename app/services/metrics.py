@@ -97,7 +97,9 @@ async def _poll_balances():
                 uptime_seconds.set(time.monotonic() - _start_time)
 
             # Wallet balances — use preflight checks which parse all balances
-            # correctly (BZZ from bzzBalance, xDAI from nativeTokenBalance)
+            # correctly (BZZ from bzzBalance, xDAI from nativeTokenBalance).
+            # Only update gauges on success — keep last known value on failure
+            # to avoid false 0-balance alerts from transient Bee node issues.
             try:
                 from app.x402.preflight import (
                     check_xbzz_balance,
@@ -105,15 +107,16 @@ async def _poll_balances():
                     check_chequebook_balance,
                 )
                 xbzz = await check_xbzz_balance()
-                wallet_bzz_balance.set(xbzz.get("balance_bzz", 0))
+                if xbzz.get("ok") or xbzz.get("balance_bzz", 0) > 0:
+                    wallet_bzz_balance.set(xbzz["balance_bzz"])
 
                 xdai = await check_xdai_balance()
-                wallet_xdai_balance.set(xdai.get("balance_xdai", 0))
+                if xdai.get("ok") or xdai.get("balance_xdai", 0) > 0:
+                    wallet_xdai_balance.set(xdai["balance_xdai"])
 
                 cheque = await check_chequebook_balance()
-                chequebook_available_balance.set(
-                    cheque.get("available_bzz", 0)
-                )
+                if cheque.get("ok") or cheque.get("available_bzz", 0) > 0:
+                    chequebook_available_balance.set(cheque["available_bzz"])
             except Exception as e:
                 logger.debug(f"Metrics: failed to get wallet balances: {e}")
 
@@ -122,7 +125,8 @@ async def _poll_balances():
                 try:
                     from app.x402.base_balance import check_base_eth_balance
                     base = await check_base_eth_balance()
-                    base_eth_balance.set(base.get("balance_eth", 0))
+                    if base.get("ok") or base.get("balance_eth", 0) > 0:
+                        base_eth_balance.set(base["balance_eth"])
                 except Exception as e:
                     logger.debug(f"Metrics: failed to get base ETH balance: {e}")
 
