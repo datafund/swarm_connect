@@ -497,17 +497,32 @@ class StampPoolManager:
                     if s.status == PoolStampStatus.AVAILABLE
                 ]
 
+            results["topup_debug"] = []
             for stamp in stamps_to_topup:
                 # Get current TTL from Bee node
                 current_ttl = await self._get_stamp_ttl(stamp.batch_id)
+                debug = {
+                    "stamp": stamp.batch_id[:16],
+                    "ttl_seconds": current_ttl,
+                    "ttl_hours": round(current_ttl / 3600, 1) if current_ttl else None,
+                    "threshold_hours": settings.STAMP_POOL_MIN_TTL_HOURS,
+                    "needs_topup": current_ttl is not None and current_ttl < min_ttl_seconds,
+                }
                 if current_ttl is not None and current_ttl < min_ttl_seconds:
                     try:
                         await self._topup_stamp(stamp.batch_id)
                         results["stamps_topped_up"] += 1
+                        debug["result"] = "topped_up"
                     except Exception as e:
                         error_msg = f"Failed to top up stamp {stamp.batch_id[:16]}...: {e}"
                         logger.error(error_msg)
                         results["errors"].append(error_msg)
+                        debug["result"] = f"error: {e}"
+                elif current_ttl is None:
+                    debug["result"] = "skipped: ttl_lookup_returned_none"
+                else:
+                    debug["result"] = "skipped: above_threshold"
+                results["topup_debug"].append(debug)
 
             self._errors = results["errors"]
 
