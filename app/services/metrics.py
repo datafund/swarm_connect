@@ -81,6 +81,9 @@ rate_limit_hits_total = Counter(
 bee_api_errors_total = Counter(
     "gateway_bee_api_errors_total", "Upstream Bee node errors", ["endpoint"]
 )
+bee_poll_total = Counter(
+    "gateway_bee_poll_total", "Balance poll attempts", ["status"]
+)
 
 # ── Background task ──────────────────────────────────────────────────────────
 
@@ -117,7 +120,10 @@ async def _poll_balances():
                 cheque = await check_chequebook_balance()
                 if cheque.get("ok") or cheque.get("available_bzz", 0) > 0:
                     chequebook_available_balance.set(cheque["available_bzz"])
+
+                bee_poll_total.labels(status="success").inc()
             except Exception as e:
+                bee_poll_total.labels(status="error").inc()
                 logger.debug(f"Metrics: failed to get wallet balances: {e}")
 
             # Base ETH balance (only when x402 enabled)
