@@ -3,7 +3,7 @@
 Unit tests for x402 pre-flight balance checks.
 """
 import pytest
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch, MagicMock, AsyncMock
 
 from app.x402.preflight import (
     plur_to_bzz,
@@ -48,9 +48,10 @@ class TestConversionFunctions:
 class TestCheckXBZZBalance:
     """Test xBZZ balance checks."""
 
-    @patch("app.x402.preflight.get_wallet_info")
+    @patch("app.x402.preflight.get_wallet_info", new_callable=AsyncMock)
     @patch("app.x402.preflight.settings")
-    def test_xbzz_above_threshold(self, mock_settings, mock_get_wallet):
+    @pytest.mark.asyncio
+    async def test_xbzz_above_threshold(self, mock_settings, mock_get_wallet):
         """xBZZ balance above threshold returns ok=True."""
         mock_settings.X402_XBZZ_WARN_THRESHOLD = 10.0
         mock_get_wallet.return_value = {
@@ -58,16 +59,17 @@ class TestCheckXBZZBalance:
             "bzzBalance": str(20 * PLUR_PER_BZZ)  # 20 BZZ
         }
 
-        result = check_xbzz_balance()
+        result = await check_xbzz_balance()
 
         assert result["ok"] is True
         assert result["balance_bzz"] == 20.0
         assert result["threshold_bzz"] == 10.0
         assert result["warning"] is None
 
-    @patch("app.x402.preflight.get_wallet_info")
+    @patch("app.x402.preflight.get_wallet_info", new_callable=AsyncMock)
     @patch("app.x402.preflight.settings")
-    def test_xbzz_below_threshold(self, mock_settings, mock_get_wallet):
+    @pytest.mark.asyncio
+    async def test_xbzz_below_threshold(self, mock_settings, mock_get_wallet):
         """xBZZ balance below threshold returns ok=False with warning."""
         mock_settings.X402_XBZZ_WARN_THRESHOLD = 10.0
         mock_get_wallet.return_value = {
@@ -75,16 +77,17 @@ class TestCheckXBZZBalance:
             "bzzBalance": str(5 * PLUR_PER_BZZ)  # 5 BZZ
         }
 
-        result = check_xbzz_balance()
+        result = await check_xbzz_balance()
 
         assert result["ok"] is False
         assert result["balance_bzz"] == 5.0
         assert result["threshold_bzz"] == 10.0
         assert "below threshold" in result["warning"]
 
-    @patch("app.x402.preflight.get_wallet_info")
+    @patch("app.x402.preflight.get_wallet_info", new_callable=AsyncMock)
     @patch("app.x402.preflight.settings")
-    def test_xbzz_at_exact_threshold(self, mock_settings, mock_get_wallet):
+    @pytest.mark.asyncio
+    async def test_xbzz_at_exact_threshold(self, mock_settings, mock_get_wallet):
         """xBZZ balance exactly at threshold returns ok=True."""
         mock_settings.X402_XBZZ_WARN_THRESHOLD = 10.0
         mock_get_wallet.return_value = {
@@ -92,19 +95,20 @@ class TestCheckXBZZBalance:
             "bzzBalance": str(10 * PLUR_PER_BZZ)  # 10 BZZ
         }
 
-        result = check_xbzz_balance()
+        result = await check_xbzz_balance()
 
         assert result["ok"] is True
         assert result["balance_bzz"] == 10.0
 
-    @patch("app.x402.preflight.get_wallet_info")
+    @patch("app.x402.preflight.get_wallet_info", new_callable=AsyncMock)
     @patch("app.x402.preflight.settings")
-    def test_xbzz_api_error(self, mock_settings, mock_get_wallet):
+    @pytest.mark.asyncio
+    async def test_xbzz_api_error(self, mock_settings, mock_get_wallet):
         """API error returns ok=False with error message."""
         mock_settings.X402_XBZZ_WARN_THRESHOLD = 10.0
         mock_get_wallet.side_effect = Exception("Connection refused")
 
-        result = check_xbzz_balance()
+        result = await check_xbzz_balance()
 
         assert result["ok"] is False
         assert result["balance_bzz"] == 0.0
@@ -114,9 +118,10 @@ class TestCheckXBZZBalance:
 class TestCheckXDAIBalance:
     """Test xDAI balance checks."""
 
-    @patch("app.x402.preflight.get_wallet_info")
+    @patch("app.x402.preflight.get_wallet_info", new_callable=AsyncMock)
     @patch("app.x402.preflight.settings")
-    def test_xdai_above_threshold(self, mock_settings, mock_get_wallet):
+    @pytest.mark.asyncio
+    async def test_xdai_above_threshold(self, mock_settings, mock_get_wallet):
         """xDAI balance above threshold returns ok=True."""
         mock_settings.X402_XDAI_WARN_THRESHOLD = 0.5
         mock_get_wallet.return_value = {
@@ -124,16 +129,17 @@ class TestCheckXDAIBalance:
             "nativeTokenBalance": str(int(1.0 * WEI_PER_XDAI))  # 1 xDAI
         }
 
-        result = check_xdai_balance()
+        result = await check_xdai_balance()
 
         assert result["ok"] is True
         assert result["balance_xdai"] == 1.0
         assert result["threshold_xdai"] == 0.5
         assert result["warning"] is None
 
-    @patch("app.x402.preflight.get_wallet_info")
+    @patch("app.x402.preflight.get_wallet_info", new_callable=AsyncMock)
     @patch("app.x402.preflight.settings")
-    def test_xdai_below_threshold(self, mock_settings, mock_get_wallet):
+    @pytest.mark.asyncio
+    async def test_xdai_below_threshold(self, mock_settings, mock_get_wallet):
         """xDAI balance below threshold returns ok=False with warning."""
         mock_settings.X402_XDAI_WARN_THRESHOLD = 0.5
         mock_get_wallet.return_value = {
@@ -141,16 +147,17 @@ class TestCheckXDAIBalance:
             "nativeTokenBalance": str(int(0.1 * WEI_PER_XDAI))  # 0.1 xDAI
         }
 
-        result = check_xdai_balance()
+        result = await check_xdai_balance()
 
         assert result["ok"] is False
         assert result["balance_xdai"] == 0.1
         assert "below threshold" in result["warning"]
         assert "gas" in result["warning"].lower()
 
-    @patch("app.x402.preflight.get_wallet_info")
+    @patch("app.x402.preflight.get_wallet_info", new_callable=AsyncMock)
     @patch("app.x402.preflight.settings")
-    def test_xdai_missing_field(self, mock_settings, mock_get_wallet):
+    @pytest.mark.asyncio
+    async def test_xdai_missing_field(self, mock_settings, mock_get_wallet):
         """Missing nativeTokenBalance field defaults to 0."""
         mock_settings.X402_XDAI_WARN_THRESHOLD = 0.5
         mock_get_wallet.return_value = {
@@ -158,7 +165,7 @@ class TestCheckXDAIBalance:
             # nativeTokenBalance missing
         }
 
-        result = check_xdai_balance()
+        result = await check_xdai_balance()
 
         assert result["ok"] is False
         assert result["balance_xdai"] == 0.0
@@ -167,9 +174,10 @@ class TestCheckXDAIBalance:
 class TestCheckChequebookBalance:
     """Test chequebook balance checks."""
 
-    @patch("app.x402.preflight.get_chequebook_info")
+    @patch("app.x402.preflight.get_chequebook_info", new_callable=AsyncMock)
     @patch("app.x402.preflight.settings")
-    def test_chequebook_above_threshold(self, mock_settings, mock_get_chequebook):
+    @pytest.mark.asyncio
+    async def test_chequebook_above_threshold(self, mock_settings, mock_get_chequebook):
         """Chequebook balance above threshold returns ok=True."""
         mock_settings.X402_CHEQUEBOOK_WARN_THRESHOLD = 5.0
         mock_get_chequebook.return_value = {
@@ -178,7 +186,7 @@ class TestCheckChequebookBalance:
             "totalBalance": str(15 * PLUR_PER_BZZ)  # 15 BZZ
         }
 
-        result = check_chequebook_balance()
+        result = await check_chequebook_balance()
 
         assert result["ok"] is True
         assert result["available_balance_bzz"] == 10.0
@@ -186,9 +194,10 @@ class TestCheckChequebookBalance:
         assert result["threshold_bzz"] == 5.0
         assert result["warning"] is None
 
-    @patch("app.x402.preflight.get_chequebook_info")
+    @patch("app.x402.preflight.get_chequebook_info", new_callable=AsyncMock)
     @patch("app.x402.preflight.settings")
-    def test_chequebook_below_threshold(self, mock_settings, mock_get_chequebook):
+    @pytest.mark.asyncio
+    async def test_chequebook_below_threshold(self, mock_settings, mock_get_chequebook):
         """Chequebook balance below threshold returns ok=False with warning."""
         mock_settings.X402_CHEQUEBOOK_WARN_THRESHOLD = 5.0
         mock_get_chequebook.return_value = {
@@ -197,23 +206,24 @@ class TestCheckChequebookBalance:
             "totalBalance": str(5 * PLUR_PER_BZZ)  # 5 BZZ
         }
 
-        result = check_chequebook_balance()
+        result = await check_chequebook_balance()
 
         assert result["ok"] is False
         assert result["available_balance_bzz"] == 2.0
         assert "below threshold" in result["warning"]
         assert "bandwidth" in result["warning"].lower()
 
-    @patch("app.x402.preflight.get_chequebook_balance")
-    @patch("app.x402.preflight.get_chequebook_info")
+    @patch("app.x402.preflight.get_chequebook_balance", new_callable=AsyncMock)
+    @patch("app.x402.preflight.get_chequebook_info", new_callable=AsyncMock)
     @patch("app.x402.preflight.settings")
-    def test_chequebook_api_error(self, mock_settings, mock_get_chequebook_info, mock_get_chequebook_balance):
+    @pytest.mark.asyncio
+    async def test_chequebook_api_error(self, mock_settings, mock_get_chequebook_info, mock_get_chequebook_balance):
         """API error returns ok=False with error message."""
         mock_settings.X402_CHEQUEBOOK_WARN_THRESHOLD = 5.0
         mock_get_chequebook_info.side_effect = Exception("Connection refused")
         mock_get_chequebook_balance.side_effect = Exception("Connection refused")
 
-        result = check_chequebook_balance()
+        result = await check_chequebook_balance()
 
         assert result["ok"] is False
         assert result["available_balance_bzz"] == 0.0
@@ -223,10 +233,11 @@ class TestCheckChequebookBalance:
 class TestCheckPreflightBalances:
     """Test combined pre-flight balance checks."""
 
-    @patch("app.x402.preflight.check_chequebook_balance")
-    @patch("app.x402.preflight.check_xdai_balance")
-    @patch("app.x402.preflight.check_xbzz_balance")
-    def test_all_checks_pass(self, mock_xbzz, mock_xdai, mock_chequebook):
+    @patch("app.x402.preflight.check_chequebook_balance", new_callable=AsyncMock)
+    @patch("app.x402.preflight.check_xdai_balance", new_callable=AsyncMock)
+    @patch("app.x402.preflight.check_xbzz_balance", new_callable=AsyncMock)
+    @pytest.mark.asyncio
+    async def test_all_checks_pass(self, mock_xbzz, mock_xdai, mock_chequebook):
         """All checks passing returns can_accept=True."""
         mock_xbzz.return_value = {
             "ok": True,
@@ -255,7 +266,7 @@ class TestCheckPreflightBalances:
             "warning": None
         }
 
-        result = check_preflight_balances()
+        result = await check_preflight_balances()
 
         assert result["can_accept"] is True
         assert result["xbzz_ok"] is True
@@ -264,10 +275,11 @@ class TestCheckPreflightBalances:
         assert len(result["warnings"]) == 0
         assert len(result["errors"]) == 0
 
-    @patch("app.x402.preflight.check_chequebook_balance")
-    @patch("app.x402.preflight.check_xdai_balance")
-    @patch("app.x402.preflight.check_xbzz_balance")
-    def test_low_balance_warnings(self, mock_xbzz, mock_xdai, mock_chequebook):
+    @patch("app.x402.preflight.check_chequebook_balance", new_callable=AsyncMock)
+    @patch("app.x402.preflight.check_xdai_balance", new_callable=AsyncMock)
+    @patch("app.x402.preflight.check_xbzz_balance", new_callable=AsyncMock)
+    @pytest.mark.asyncio
+    async def test_low_balance_warnings(self, mock_xbzz, mock_xdai, mock_chequebook):
         """Low balances generate warnings but can still accept."""
         mock_xbzz.return_value = {
             "ok": False,
@@ -296,7 +308,7 @@ class TestCheckPreflightBalances:
             "warning": None
         }
 
-        result = check_preflight_balances()
+        result = await check_preflight_balances()
 
         # Can accept even with low balance (warning only)
         assert result["can_accept"] is True
@@ -304,10 +316,11 @@ class TestCheckPreflightBalances:
         assert len(result["warnings"]) == 1
         assert len(result["errors"]) == 0
 
-    @patch("app.x402.preflight.check_chequebook_balance")
-    @patch("app.x402.preflight.check_xdai_balance")
-    @patch("app.x402.preflight.check_xbzz_balance")
-    def test_api_error_generates_warning_not_error(self, mock_xbzz, mock_xdai, mock_chequebook):
+    @patch("app.x402.preflight.check_chequebook_balance", new_callable=AsyncMock)
+    @patch("app.x402.preflight.check_xdai_balance", new_callable=AsyncMock)
+    @patch("app.x402.preflight.check_xbzz_balance", new_callable=AsyncMock)
+    @pytest.mark.asyncio
+    async def test_api_error_generates_warning_not_error(self, mock_xbzz, mock_xdai, mock_chequebook):
         """Bee node connectivity issues are warnings, not blocking errors."""
         mock_xbzz.return_value = {
             "ok": False,
@@ -336,7 +349,7 @@ class TestCheckPreflightBalances:
             "warning": None
         }
 
-        result = check_preflight_balances()
+        result = await check_preflight_balances()
 
         # Gateway stays available; Bee node issues are warnings not errors
         assert result["can_accept"] is True
@@ -345,10 +358,11 @@ class TestCheckPreflightBalances:
         unreachable_warnings = [w for w in result["warnings"] if "unreachable" in w.lower()]
         assert len(unreachable_warnings) == 1
 
-    @patch("app.x402.preflight.check_chequebook_balance")
-    @patch("app.x402.preflight.check_xdai_balance")
-    @patch("app.x402.preflight.check_xbzz_balance")
-    def test_balances_structure(self, mock_xbzz, mock_xdai, mock_chequebook):
+    @patch("app.x402.preflight.check_chequebook_balance", new_callable=AsyncMock)
+    @patch("app.x402.preflight.check_xdai_balance", new_callable=AsyncMock)
+    @patch("app.x402.preflight.check_xbzz_balance", new_callable=AsyncMock)
+    @pytest.mark.asyncio
+    async def test_balances_structure(self, mock_xbzz, mock_xdai, mock_chequebook):
         """Verify balances structure in response."""
         mock_xbzz.return_value = {
             "ok": True,
@@ -377,7 +391,7 @@ class TestCheckPreflightBalances:
             "warning": None
         }
 
-        result = check_preflight_balances()
+        result = await check_preflight_balances()
 
         # Verify balances structure
         assert "balances" in result
@@ -395,10 +409,11 @@ class TestCheckPreflightBalances:
         assert result["balances"]["chequebook"]["total_bzz"] == 15.0
         assert result["balances"]["chequebook"]["threshold_bzz"] == 5.0
 
-    @patch("app.x402.preflight.check_chequebook_balance")
-    @patch("app.x402.preflight.check_xdai_balance")
-    @patch("app.x402.preflight.check_xbzz_balance")
-    def test_multiple_warnings(self, mock_xbzz, mock_xdai, mock_chequebook):
+    @patch("app.x402.preflight.check_chequebook_balance", new_callable=AsyncMock)
+    @patch("app.x402.preflight.check_xdai_balance", new_callable=AsyncMock)
+    @patch("app.x402.preflight.check_xbzz_balance", new_callable=AsyncMock)
+    @pytest.mark.asyncio
+    async def test_multiple_warnings(self, mock_xbzz, mock_xdai, mock_chequebook):
         """Multiple low balances generate multiple warnings."""
         mock_xbzz.return_value = {
             "ok": False,
@@ -427,7 +442,7 @@ class TestCheckPreflightBalances:
             "warning": "Chequebook below threshold"
         }
 
-        result = check_preflight_balances()
+        result = await check_preflight_balances()
 
         # Can still accept (low balance = warning, not error)
         assert result["can_accept"] is True
