@@ -610,18 +610,20 @@ class TestHealthEndpointWithX402:
         clear_balance_cache()
 
     @patch("app.main.settings")
-    def test_health_without_x402(self, mock_settings):
+    @pytest.mark.asyncio
+    async def test_health_without_x402(self, mock_settings):
         mock_settings.X402_ENABLED = False
         mock_settings.PROJECT_NAME = "Test Gateway"
         from app.main import read_root
-        response = read_root()
+        response = await read_root()
         assert response["status"] == "ok"
         assert "x402" not in response
 
-    @patch("app.x402.preflight.check_preflight_balances")
-    @patch("app.x402.base_balance.check_base_eth_balance")
+    @patch("app.x402.preflight.check_preflight_balances", new_callable=AsyncMock)
+    @patch("app.x402.base_balance.check_base_eth_balance", new_callable=AsyncMock)
     @patch("app.main.settings")
-    def test_health_with_x402_healthy(self, mock_settings, mock_base_balance, mock_preflight):
+    @pytest.mark.asyncio
+    async def test_health_with_x402_healthy(self, mock_settings, mock_base_balance, mock_preflight):
         mock_settings.X402_ENABLED = True
         mock_settings.PROJECT_NAME = "Test Gateway"
         mock_base_balance.return_value = {
@@ -638,14 +640,15 @@ class TestHealthEndpointWithX402:
             "warnings": [], "errors": []
         }
         from app.main import read_root
-        response = read_root()
+        response = await read_root()
         assert response["status"] == "ok"
         assert response["x402"]["enabled"] is True
 
-    @patch("app.x402.preflight.check_preflight_balances")
-    @patch("app.x402.base_balance.check_base_eth_balance")
+    @patch("app.x402.preflight.check_preflight_balances", new_callable=AsyncMock)
+    @patch("app.x402.base_balance.check_base_eth_balance", new_callable=AsyncMock)
     @patch("app.main.settings")
-    def test_health_with_x402_degraded(self, mock_settings, mock_base_balance, mock_preflight):
+    @pytest.mark.asyncio
+    async def test_health_with_x402_degraded(self, mock_settings, mock_base_balance, mock_preflight):
         mock_settings.X402_ENABLED = True
         mock_settings.PROJECT_NAME = "Test Gateway"
         mock_base_balance.return_value = {
@@ -663,14 +666,15 @@ class TestHealthEndpointWithX402:
             "warnings": [], "errors": []
         }
         from app.main import read_root
-        response = read_root()
+        response = await read_root()
         assert response["status"] == "degraded"
         assert len(response["x402"]["warnings"]) == 1
 
-    @patch("app.x402.preflight.check_preflight_balances")
-    @patch("app.x402.base_balance.check_base_eth_balance")
+    @patch("app.x402.preflight.check_preflight_balances", new_callable=AsyncMock)
+    @patch("app.x402.base_balance.check_base_eth_balance", new_callable=AsyncMock)
     @patch("app.main.settings")
-    def test_health_with_x402_critical_still_returns_200(self, mock_settings, mock_base_balance, mock_preflight):
+    @pytest.mark.asyncio
+    async def test_health_with_x402_critical_still_returns_200(self, mock_settings, mock_base_balance, mock_preflight):
         mock_settings.X402_ENABLED = True
         mock_settings.PROJECT_NAME = "Test Gateway"
         mock_base_balance.return_value = {
@@ -688,14 +692,15 @@ class TestHealthEndpointWithX402:
             "warnings": [], "errors": []
         }
         from app.main import read_root
-        response = read_root()
+        response = await read_root()
         assert response["status"] == "critical"
         assert len(response["x402"]["errors"]) == 1
 
-    @patch("app.x402.preflight.check_preflight_balances")
-    @patch("app.x402.base_balance.check_base_eth_balance")
+    @patch("app.x402.preflight.check_preflight_balances", new_callable=AsyncMock)
+    @patch("app.x402.base_balance.check_base_eth_balance", new_callable=AsyncMock)
     @patch("app.main.settings")
-    def test_health_includes_wallet_addresses(self, mock_settings, mock_base_balance, mock_preflight):
+    @pytest.mark.asyncio
+    async def test_health_includes_wallet_addresses(self, mock_settings, mock_base_balance, mock_preflight):
         mock_settings.X402_ENABLED = True
         mock_settings.PROJECT_NAME = "Test Gateway"
         test_address = "0x1234567890abcdef1234567890abcdef12345678"
@@ -713,7 +718,7 @@ class TestHealthEndpointWithX402:
             "warnings": [], "errors": []
         }
         from app.main import read_root
-        response = read_root()
+        response = await read_root()
         assert response["x402"]["base_wallet"]["address"] == test_address
 
 

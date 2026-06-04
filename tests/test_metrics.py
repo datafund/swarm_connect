@@ -329,9 +329,14 @@ class TestMetricsBackgroundTask:
         from app.services.metrics import wallet_bzz_balance, stamps_total, _poll_balances
         import asyncio
 
+        # _poll_balances reads wallet/chequebook balances via the preflight
+        # check_* helpers, which bind get_wallet_info/get_chequebook_info at
+        # their own module level — so patch them there, not on swarm_api.
+        # get_all_stamps is imported locally inside _poll_balances, so patching
+        # it on swarm_api works.
         with patch("app.services.metrics.settings") as mock_settings, \
-             patch("app.services.swarm_api.get_wallet_info", new_callable=AsyncMock) as mock_wallet, \
-             patch("app.services.swarm_api.get_chequebook_info", new_callable=AsyncMock) as mock_cheque, \
+             patch("app.x402.preflight.get_wallet_info", new_callable=AsyncMock) as mock_wallet, \
+             patch("app.x402.preflight.get_chequebook_info", new_callable=AsyncMock) as mock_cheque, \
              patch("app.services.swarm_api.get_all_stamps", new_callable=AsyncMock) as mock_stamps:
 
             mock_settings.X402_ENABLED = False
