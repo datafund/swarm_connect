@@ -474,20 +474,29 @@ feature branches → dev → main
 
 2. **Develop and test locally** on the feature branch
 
-3. **Create PR to merge into `dev`**:
+3. **Run the full test suite locally — MANDATORY before any PR to `dev` or `main`**:
+   ```bash
+   source venv/bin/activate && python -m pytest tests/ -v
+   ```
+   - There is **no CI test gate** — `deploy.yml` only deploys, it does not run pytest. The full suite passing locally is the only thing standing between a regression and staging/production.
+   - **Do not open or merge a PR to `dev` or `main` with failing or broken tests.** If a test is failing, either fix it or, if it is a known pre-existing failure, explicitly call it out in the PR description with a tracking issue — never let it pass silently.
+   - This is a **development-process rule**, enforced by discipline, not automation. (Historically, the x402 async migration broke ~51 tests for months precisely because nothing ran them — see the test-repair issue.)
+
+4. **Create PR to merge into `dev`**:
    - All code must go through PR review
    - CI/CD automatically deploys to staging (`provenance-gateway.dev.datafund.io`)
 
-4. **Test on staging environment** before promoting to production
+5. **Test on staging environment** before promoting to production
 
-5. **Create PR to merge `dev` into `main`**:
-   - Only after staging validation
+6. **Create PR to merge `dev` into `main`**:
+   - Only after staging validation **and** a clean local `pytest tests/` run
    - CI/CD automatically deploys to production (`provenance-gateway.datafund.io`)
 
 ### Branch Protection Rules
 
 - **Never push directly to `main`** - always use PRs
 - **Never push directly to `dev`** - always use PRs from feature branches
+- **Always run `python -m pytest tests/` locally and confirm it is green before opening or merging a PR into `dev` or `main`** - no CI runs the tests, so this is a manual gate
 - Feature branches can be pushed directly
 
 ### Deployment Environments
