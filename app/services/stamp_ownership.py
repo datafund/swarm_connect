@@ -9,11 +9,11 @@ backward compatibility.
 """
 import json
 import logging
-import os
 from datetime import datetime, timezone
 from threading import Lock
 from typing import Dict, Optional, Set, Tuple
 
+from app.core.atomic_io import atomic_write_json
 from app.core.config import settings
 
 logger = logging.getLogger(__name__)
@@ -39,11 +39,7 @@ class StampOwnershipManager:
         """Persist ownership registry to state file."""
         state_file = self._get_state_file_path()
         try:
-            state_dir = os.path.dirname(state_file)
-            if state_dir:
-                os.makedirs(state_dir, exist_ok=True)
-            with open(state_file, 'w') as f:
-                json.dump(self._registry, f)
+            atomic_write_json(state_file, self._registry)
             logger.debug(f"Saved ownership state: {len(self._registry)} stamps to {state_file}")
         except Exception as e:
             logger.error(f"Failed to save ownership state to {state_file}: {e}")

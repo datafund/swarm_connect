@@ -17,13 +17,13 @@ See GitHub Issue #63 for full specification.
 import asyncio
 import json
 import logging
-import os
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Dict, List, Optional, Set
 from threading import Lock
 
+from app.core.atomic_io import atomic_write_json
 from app.core.config import settings
 from app.services import swarm_api
 from app.services.stamp_ownership import stamp_ownership_manager
@@ -102,12 +102,8 @@ class StampPoolManager:
         """Persist current pool batch IDs to state file."""
         state_file = self._get_state_file_path()
         try:
-            state_dir = os.path.dirname(state_file)
-            if state_dir:
-                os.makedirs(state_dir, exist_ok=True)
             batch_ids = list(self._pool.keys())
-            with open(state_file, 'w') as f:
-                json.dump(batch_ids, f)
+            atomic_write_json(state_file, batch_ids)
             logger.debug(f"Saved pool state: {len(batch_ids)} stamps to {state_file}")
         except Exception as e:
             logger.error(f"Failed to save pool state to {state_file}: {e}")
