@@ -45,6 +45,7 @@ async def lifespan(app: FastAPI):
             "x402_enabled": str(settings.X402_ENABLED),
             "pool_enabled": str(settings.STAMP_POOL_ENABLED),
             "notary_enabled": str(settings.NOTARY_ENABLED),
+            "chunk_upload_enabled": str(settings.CHUNK_UPLOAD_ENABLED),
         })
         await start_metrics_background_task()
 

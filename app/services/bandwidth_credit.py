@@ -182,6 +182,11 @@ class BandwidthCreditManager:
         with self._lock:
             return sum(1 for e in self._balances.values() if int(e.get("balance_bytes", 0)) > 0)
 
+    def total_outstanding_bytes(self) -> int:
+        """Sum of all unspent credit balances in bytes (for metrics)."""
+        with self._lock:
+            return sum(int(e.get("balance_bytes", 0)) for e in self._balances.values())
+
     def issue_token(self, address: str) -> str:
         """
         Return a bearer credit token bound to an address, creating one if needed.

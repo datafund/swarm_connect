@@ -10,6 +10,12 @@ from app.api.models.chunk import ChunkUploadResponse, CreditTopUpResponse
 from app.core.config import settings
 from app.services.bandwidth_credit import bandwidth_credit_manager
 from app.services.bandwidth_free_tier import free_tier_tracker
+from app.services.metrics import (
+    bandwidth_topup_bytes_total,
+    bandwidth_topups_total,
+    chunk_upload_bytes_total,
+    chunk_uploads_total,
+)
 from app.services.swarm_api import upload_chunk_to_swarm
 from app.x402.audit import AuditEventType, log_audit_event
 from app.x402.middleware import get_client_ip
@@ -117,6 +123,9 @@ async def top_up_credit(
     credited_bytes = mb * BYTES_PER_MB
     new_balance = bandwidth_credit_manager.credit(payer, credited_bytes)
     token = bandwidth_credit_manager.issue_token(payer)
+
+    bandwidth_topups_total.labels(status="success").inc()
+    bandwidth_topup_bytes_total.inc(credited_bytes)
 
     log_audit_event(
         event_type=AuditEventType.CREDIT_TOPPED_UP,
@@ -278,6 +287,9 @@ async def upload_chunk(
             bytes_charged = chunk_len
             credit_balance = remaining
 
+    # Billing mode for metrics: free / paid (credit) / none (billing disabled).
+    mode = "free" if free_ip else ("paid" if billing_address else "none")
+
     # --- Forward the chunk to Bee. Refund the debit if forwarding fails. ---
     try:
         reference = await upload_chunk_to_swarm(chunk_bytes, stamp, deferred=deferred)
@@ -287,6 +299,7 @@ async def upload_chunk(
             bandwidth_credit_manager.credit(billing_address, chunk_len)
         if free_ip is not None:
             free_tier_tracker.refund(free_ip, chunk_len)
+        chunk_uploads_total.labels(status="error", mode=mode).inc()
         if isinstance(e, httpx.HTTPError):
             logger.error(f"Failed to forward chunk to Swarm API: {e}")
             raise HTTPException(
@@ -298,6 +311,9 @@ async def upload_chunk(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Invalid response from Swarm API. Please try again.",
         )
+
+    chunk_uploads_total.labels(status="success", mode=mode).inc()
+    chunk_upload_bytes_total.inc(chunk_len)
 
     if billing_address is not None:
         log_audit_event(

@@ -358,14 +358,19 @@ The gateway exposes a `/metrics` endpoint (Prometheus text format) when `METRICS
 - `gateway_notary_signatures_total{status}`
 - `gateway_x402_payments_total{mode}` (paid/free/rejected)
 - `gateway_rate_limit_hits_total`
+- `gateway_chunk_uploads_total{status, mode}` (mode = paid/free/none), `gateway_chunk_upload_bytes_total`
+- `gateway_bandwidth_topups_total{status}`, `gateway_bandwidth_topup_bytes_total`
 
 **Custom gauges** (polled every `METRICS_BALANCE_POLL_SECONDS`):
 - `gateway_wallet_bzz_balance`, `gateway_wallet_xdai_balance`
 - `gateway_chequebook_available_balance`, `gateway_base_eth_balance`
 - `gateway_stamp_pool_available{size}`, `gateway_stamps_total`
 - `gateway_stamp_min_ttl_seconds`, `gateway_uptime_seconds`
+- `gateway_bandwidth_credit_accounts`, `gateway_bandwidth_credit_bytes_total` (when `CHUNK_UPLOAD_ENABLED`)
 
-**Info**: `gateway_info{version, environment, x402_enabled, pool_enabled, notary_enabled}`
+**Info**: `gateway_info{version, environment, x402_enabled, pool_enabled, notary_enabled, chunk_upload_enabled}`
+
+> New metrics are scraped by Grafana Alloy and remote-written to Grafana Cloud automatically once deployed (no extra wiring). Adding them as **panels** on `monitoring/provisioning/dashboards/gateway-overview.json` is a separate, deliberate step (tracked in its own issue).
 
 ### Production Monitoring Stack
 
