@@ -154,6 +154,11 @@ CORS (browser access):
 - `GET /api/v1/data/{reference}`: Download raw data from Swarm (returns bytes directly)
 - `GET /api/v1/data/{reference}/json`: Download data with JSON metadata (base64-encoded)
 
+#### Chunk Forwarding (pre-stamped, Flow A)
+- `POST /api/v1/chunks/`: Forward a single **client-supplied pre-stamped** chunk to Bee `POST /chunks`. Raw chunk in the body, marshaled stamp in the `Swarm-Postage-Stamp` header (sent instead of `Swarm-Postage-Batch-Id`); optional `?deferred=true` (default false). The client owns the postage batch and signs locally; the gateway is a thin forwarder and does **not** verify the stamp (Bee does). Always mounted; the handler returns 404 when `CHUNK_UPLOAD_ENABLED=false`.
+  - Config: `CHUNK_UPLOAD_ENABLED` (default false), `CHUNK_UPLOAD_MAX_BYTES_PER_REQUEST` (default 4104).
+  - Bandwidth is billed via a prepaid byte-denominated credit ledger keyed by client address (`app/services/bandwidth_credit.py`, `BANDWIDTH_CREDIT_STATE_FILE`): one x402 top-up funds many chunk debits. Pricing/top-up/debit and free-tier wiring are tracked in follow-up issues (#221/#222).
+
 #### Stamp Pool (Low-Latency Provisioning)
 - `GET /api/v1/pool/status`: Get pool status and reserve levels
 - `POST /api/v1/pool/acquire`: Acquire stamp from pool instantly (<5 seconds vs >1 minute)

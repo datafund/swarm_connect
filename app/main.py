@@ -5,7 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from app.core.config import settings
 from app.core.version import VERSION
-from app.api.endpoints import stamps, data, wallet, pool, notary
+from app.api.endpoints import stamps, data, wallet, pool, notary, chunks
 import logging
 
 # Configure basic logging
@@ -20,6 +20,12 @@ async def lifespan(app: FastAPI):
     # Initialize shared HTTP client (must be first — other services depend on it)
     from app.services.http_client import init_client, close_client
     await init_client()
+
+    # Load bandwidth credit ledger so prepaid balances survive restarts
+    if settings.CHUNK_UPLOAD_ENABLED:
+        from app.services.bandwidth_credit import bandwidth_credit_manager
+        bandwidth_credit_manager.load_on_startup()
+        logger.info("Bandwidth credit ledger loaded")
 
     # Start stamp pool background task if enabled
     if settings.STAMP_POOL_ENABLED:
@@ -123,6 +129,10 @@ app.include_router(data.router, prefix=f"{settings.API_V1_STR}/data", tags=["dat
 app.include_router(wallet.router, prefix=f"{settings.API_V1_STR}", tags=["wallet"])
 app.include_router(pool.router, prefix=f"{settings.API_V1_STR}/pool", tags=["pool"])
 app.include_router(notary.router, prefix=f"{settings.API_V1_STR}/notary", tags=["notary"])
+# Chunk forwarding (Flow A). Router is always mounted; the handler guards on
+# CHUNK_UPLOAD_ENABLED (returns 404 when off). x402 bandwidth billing is wired
+# separately (issue #221), so no x402 dependency is attached here yet.
+app.include_router(chunks.router, prefix=f"{settings.API_V1_STR}/chunks", tags=["chunks"])
 
 @app.get("/", summary="Health Check", tags=["default"])
 @app.get("/health", summary="Health Check", tags=["default"], include_in_schema=False)

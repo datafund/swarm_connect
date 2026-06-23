@@ -98,6 +98,21 @@ class Settings(BaseSettings):
     # === Upload Limits ===
     MAX_UPLOAD_SIZE_MB: int = 10  # Maximum file upload size in megabytes
 
+    # === Chunk Upload (stamped-chunk forwarding, Flow A) ===
+    # When enabled, the gateway forwards a single client-supplied PRE-STAMPED chunk
+    # to the Bee node's POST /chunks endpoint using the Swarm-Postage-Stamp header.
+    # The client controls the postage stamp; the gateway is a thin forwarder and does
+    # NOT verify the stamp signature/owner (Bee does that).
+    CHUNK_UPLOAD_ENABLED: bool = False  # Master switch for chunk forwarding feature
+    # A single Swarm chunk is at most an 8-byte span prefix + 4096 bytes of payload.
+    CHUNK_UPLOAD_MAX_BYTES_PER_REQUEST: int = 4104  # Hard cap on the chunk body size
+
+    # === Bandwidth Credit Ledger ===
+    # Prepaid, byte-denominated credit balances keyed by client address. One x402
+    # payment tops up a balance; each chunk upload debits bytes from it. This avoids
+    # the per-request minimum-price floor collapsing onto every tiny chunk.
+    BANDWIDTH_CREDIT_STATE_FILE: str = "data/bandwidth_credit.json"  # Ledger persistence path
+
     # === JSON Body Limits ===
     MAX_JSON_BODY_BYTES: int = 1_048_576  # Maximum JSON body size (1 MB)
     MAX_JSON_DEPTH: int = 20  # Maximum JSON nesting depth

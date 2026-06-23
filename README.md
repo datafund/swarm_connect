@@ -280,6 +280,9 @@ Swarm Connect is a FastAPI-based API gateway that provides comprehensive access 
 - `GET /api/v1/data/{reference}`: Download raw data from Swarm (returns bytes directly)
 - `GET /api/v1/data/{reference}/json`: Download data with JSON metadata (base64-encoded)
 
+#### Chunk Forwarding (pre-stamped)
+- `POST /api/v1/chunks/`: Forward a single **client-supplied pre-stamped** chunk to Swarm. Send the raw chunk as the body and the marshaled stamp in the `Swarm-Postage-Stamp` header. The client owns the postage batch and stamps locally; the gateway is a thin forwarder (does not verify the stamp — Bee does). Optional `?deferred=true`. Requires `CHUNK_UPLOAD_ENABLED=true` (returns 404 when disabled). Bandwidth is billed via a prepaid credit ledger (x402 wiring tracked separately).
+
 #### Wallet Information
 - `GET /api/v1/wallet`: Get the wallet address and BZZ balance of the Bee node
 - `GET /api/v1/chequebook`: Get the chequebook address and balance information of the Bee node
