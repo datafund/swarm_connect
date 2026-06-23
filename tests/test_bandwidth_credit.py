@@ -131,6 +131,38 @@ class TestPersistence:
         assert saved["0xa"]["balance_bytes"] == 1234
 
 
+class TestTokens:
+    def test_issue_and_resolve(self, manager):
+        manager.credit("0xABC", 1000)
+        token = manager.issue_token("0xABC")
+        assert token
+        assert manager.resolve_token(token) == "0xabc"
+
+    def test_issue_idempotent(self, manager):
+        manager.credit("0xABC", 1000)
+        t1 = manager.issue_token("0xABC")
+        t2 = manager.issue_token("0xABC")
+        assert t1 == t2
+
+    def test_resolve_unknown_token_none(self, manager):
+        assert manager.resolve_token("nope") is None
+        assert manager.resolve_token("") is None
+
+    def test_token_case_insensitive_address(self, manager):
+        token = manager.issue_token("0xAbCdEf")
+        assert manager.resolve_token(token) == "0xabcdef"
+
+    def test_token_persists_across_reload(self, state_file):
+        mgr1 = BandwidthCreditManager(state_file=state_file)
+        mgr1.credit("0xA", 500)
+        token = mgr1.issue_token("0xA")
+
+        mgr2 = BandwidthCreditManager(state_file=state_file)
+        mgr2.load_on_startup()
+        assert mgr2.resolve_token(token) == "0xa"
+        assert mgr2.balance("0xa") == 500
+
+
 class TestConcurrency:
     def test_concurrent_debits_never_overspend(self, manager):
         """1000 concurrent 1-byte debits against a 600-byte balance: exactly 600 succeed,

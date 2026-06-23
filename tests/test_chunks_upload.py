@@ -19,9 +19,12 @@ def client():
 
 
 def _enabled_settings(max_bytes=4104):
+    # X402 off: these tests cover pure forwarding without bandwidth billing
+    # (billing/credit behavior is covered in test_chunks_billing.py).
     ms = MagicMock()
     ms.CHUNK_UPLOAD_ENABLED = True
     ms.CHUNK_UPLOAD_MAX_BYTES_PER_REQUEST = max_bytes
+    ms.X402_ENABLED = False
     return ms
 
 

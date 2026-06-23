@@ -156,8 +156,10 @@ CORS (browser access):
 
 #### Chunk Forwarding (pre-stamped, Flow A)
 - `POST /api/v1/chunks/`: Forward a single **client-supplied pre-stamped** chunk to Bee `POST /chunks`. Raw chunk in the body, marshaled stamp in the `Swarm-Postage-Stamp` header (sent instead of `Swarm-Postage-Batch-Id`); optional `?deferred=true` (default false). The client owns the postage batch and signs locally; the gateway is a thin forwarder and does **not** verify the stamp (Bee does). Always mounted; the handler returns 404 when `CHUNK_UPLOAD_ENABLED=false`.
-  - Config: `CHUNK_UPLOAD_ENABLED` (default false), `CHUNK_UPLOAD_MAX_BYTES_PER_REQUEST` (default 4104).
-  - Bandwidth is billed via a prepaid byte-denominated credit ledger keyed by client address (`app/services/bandwidth_credit.py`, `BANDWIDTH_CREDIT_STATE_FILE`): one x402 top-up funds many chunk debits. Pricing/top-up/debit and free-tier wiring are tracked in follow-up issues (#221/#222).
+- `POST /api/v1/chunks/credit?mb={n}`: x402-paid prepaid **bandwidth credit** top-up. Priced via the `bandwidth` operation in `pricing.py` at `X402_BANDWIDTH_USD_PER_GB` (min `BANDWIDTH_CREDIT_MIN_TOPUP_MB`). Credit is bound to the verified x402 payer wallet; returns a bearer token.
+  - **Billing model**: chunk uploads carry no per-request payment. When `X402_ENABLED`, the client tops up once, then presents the bearer token via the `X-Bandwidth-Credit-Token` header on each `POST /chunks/`; the chunk's byte length is debited from the prepaid balance (atomic check-and-debit; refunded if the Bee forward fails). Only `/chunks/credit` is in `PROTECTED_ENDPOINTS`. Free-tier quota access is a follow-up (#222).
+  - Ledger: `app/services/bandwidth_credit.py` (`BandwidthCreditManager`), address-keyed balances + `token -> address` index, persisted to `BANDWIDTH_CREDIT_STATE_FILE`.
+  - Config: `CHUNK_UPLOAD_ENABLED` (default false), `CHUNK_UPLOAD_MAX_BYTES_PER_REQUEST` (4104), `X402_BANDWIDTH_USD_PER_GB`, `BANDWIDTH_CREDIT_MIN_TOPUP_MB`, `BANDWIDTH_CREDIT_STATE_FILE`.
 
 #### Stamp Pool (Low-Latency Provisioning)
 - `GET /api/v1/pool/status`: Get pool status and reserve levels

@@ -16,6 +16,7 @@ Modeled on app/services/stamp_ownership.py.
 """
 import json
 import logging
+import secrets
 from datetime import datetime, timezone
 from threading import Lock
 from typing import Dict, Optional, Tuple
@@ -36,8 +37,11 @@ class BandwidthCreditManager:
     """
 
     def __init__(self, state_file: Optional[str] = None):
-        # address -> {balance_bytes, updated_at, total_topped_up_bytes}
+        # address -> {balance_bytes, updated_at, total_topped_up_bytes, token}
         self._balances: Dict[str, dict] = {}
+        # token -> address (rebuilt from balances on load; the token also lives
+        # inside each balance entry so the existing persistence format is unchanged)
+        self._token_index: Dict[str, str] = {}
         self._lock = Lock()
         self._state_file = state_file
 
@@ -80,6 +84,13 @@ class BandwidthCreditManager:
         except Exception as e:
             logger.warning(f"Error loading bandwidth credit ledger from {state_file}: {e}, starting fresh")
             self._balances = {}
+
+        # Rebuild the token index from the loaded balances
+        self._token_index = {
+            entry["token"]: addr
+            for addr, entry in self._balances.items()
+            if entry.get("token")
+        }
 
     def credit(self, address: str, bytes_amount: int) -> int:
         """
@@ -170,6 +181,53 @@ class BandwidthCreditManager:
         """Number of accounts with a non-zero balance (for metrics)."""
         with self._lock:
             return sum(1 for e in self._balances.values() if int(e.get("balance_bytes", 0)) > 0)
+
+    def issue_token(self, address: str) -> str:
+        """
+        Return a bearer credit token bound to an address, creating one if needed.
+
+        The token is the credit account's API key: it is established at x402 top-up
+        time (the address is the verified x402 payer) and presented on subsequent
+        chunk uploads to spend the prepaid balance. Idempotent — repeated calls for
+        the same address return the same token.
+
+        Args:
+            address: Client address (the x402 payer that funded the credit).
+
+        Returns:
+            The bearer token string.
+
+        Raises:
+            ValueError: If address is empty.
+        """
+        if not address:
+            raise ValueError("address is required")
+        key = self._normalize(address)
+        with self._lock:
+            entry = self._balances.get(key)
+            if entry is None:
+                entry = {
+                    "balance_bytes": 0,
+                    "total_topped_up_bytes": 0,
+                    "updated_at": datetime.now(timezone.utc).isoformat(),
+                }
+                self._balances[key] = entry
+            existing = entry.get("token")
+            if existing:
+                return existing
+            token = secrets.token_urlsafe(32)
+            entry["token"] = token
+            entry["updated_at"] = datetime.now(timezone.utc).isoformat()
+            self._token_index[token] = key
+            self._save_state()
+            return token
+
+    def resolve_token(self, token: str) -> Optional[str]:
+        """Resolve a bearer credit token to its address, or None if unknown."""
+        if not token:
+            return None
+        with self._lock:
+            return self._token_index.get(token)
 
     def load_on_startup(self):
         """Load ledger state on application startup."""

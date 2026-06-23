@@ -281,7 +281,8 @@ Swarm Connect is a FastAPI-based API gateway that provides comprehensive access 
 - `GET /api/v1/data/{reference}/json`: Download data with JSON metadata (base64-encoded)
 
 #### Chunk Forwarding (pre-stamped)
-- `POST /api/v1/chunks/`: Forward a single **client-supplied pre-stamped** chunk to Swarm. Send the raw chunk as the body and the marshaled stamp in the `Swarm-Postage-Stamp` header. The client owns the postage batch and stamps locally; the gateway is a thin forwarder (does not verify the stamp — Bee does). Optional `?deferred=true`. Requires `CHUNK_UPLOAD_ENABLED=true` (returns 404 when disabled). Bandwidth is billed via a prepaid credit ledger (x402 wiring tracked separately).
+- `POST /api/v1/chunks/`: Forward a single **client-supplied pre-stamped** chunk to Swarm. Send the raw chunk as the body and the marshaled stamp in the `Swarm-Postage-Stamp` header. The client owns the postage batch and stamps locally; the gateway is a thin forwarder (does not verify the stamp — Bee does). Optional `?deferred=true`. Requires `CHUNK_UPLOAD_ENABLED=true` (returns 404 when disabled). When x402 is enabled, the upload spends prepaid bandwidth credit: present the bearer token from the top-up in the `X-Bandwidth-Credit-Token` header (the chunk's byte length is debited).
+- `POST /api/v1/chunks/credit?mb={n}`: Add prepaid bandwidth credit with a single x402 payment (priced at `X402_BANDWIDTH_USD_PER_GB`, minimum `BANDWIDTH_CREDIT_MIN_TOPUP_MB`). Returns a bearer **credit token** bound to the payer wallet; reuse it across many chunk uploads so per-chunk requests never hit the minimum-price floor.
 
 #### Wallet Information
 - `GET /api/v1/wallet`: Get the wallet address and BZZ balance of the Bee node

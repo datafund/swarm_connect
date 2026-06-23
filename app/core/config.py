@@ -112,6 +112,10 @@ class Settings(BaseSettings):
     # payment tops up a balance; each chunk upload debits bytes from it. This avoids
     # the per-request minimum-price floor collapsing onto every tiny chunk.
     BANDWIDTH_CREDIT_STATE_FILE: str = "data/bandwidth_credit.json"  # Ledger persistence path
+    # Bandwidth price used to convert an x402 top-up payment into byte credit.
+    X402_BANDWIDTH_USD_PER_GB: float = 0.10  # USD per GB of upload bandwidth (1 GB = 10^9 bytes)
+    # Minimum top-up so a single x402 payment clears the per-request price floor.
+    BANDWIDTH_CREDIT_MIN_TOPUP_MB: int = 100  # Minimum credit top-up in MB (1 MB = 10^6 bytes)
 
     # === JSON Body Limits ===
     MAX_JSON_BODY_BYTES: int = 1_048_576  # Maximum JSON body size (1 MB)

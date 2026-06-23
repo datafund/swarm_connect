@@ -130,9 +130,10 @@ app.include_router(wallet.router, prefix=f"{settings.API_V1_STR}", tags=["wallet
 app.include_router(pool.router, prefix=f"{settings.API_V1_STR}/pool", tags=["pool"])
 app.include_router(notary.router, prefix=f"{settings.API_V1_STR}/notary", tags=["notary"])
 # Chunk forwarding (Flow A). Router is always mounted; the handler guards on
-# CHUNK_UPLOAD_ENABLED (returns 404 when off). x402 bandwidth billing is wired
-# separately (issue #221), so no x402 dependency is attached here yet.
-app.include_router(chunks.router, prefix=f"{settings.API_V1_STR}/chunks", tags=["chunks"])
+# CHUNK_UPLOAD_ENABLED (returns 404 when off). The x402 dependency gates only the
+# credit top-up (POST /chunks/credit, listed in PROTECTED_ENDPOINTS); the chunk
+# upload itself spends prepaid credit via a bearer token, not a per-request payment.
+app.include_router(chunks.router, prefix=f"{settings.API_V1_STR}/chunks", tags=["chunks"], dependencies=x402_deps)
 
 @app.get("/", summary="Health Check", tags=["default"])
 @app.get("/health", summary="Health Check", tags=["default"], include_in_schema=False)
