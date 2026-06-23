@@ -106,6 +106,10 @@ class Settings(BaseSettings):
     CHUNK_UPLOAD_ENABLED: bool = False  # Master switch for chunk forwarding feature
     # A single Swarm chunk is at most an 8-byte span prefix + 4096 bytes of payload.
     CHUNK_UPLOAD_MAX_BYTES_PER_REQUEST: int = 4104  # Hard cap on the chunk body size
+    # Free tier for chunk uploads: a per-IP daily byte quota, independent of the
+    # x402 (stamp/data) free tier. Opt in per request with header X-Payment-Mode: free.
+    CHUNK_UPLOAD_FREE_TIER_ENABLED: bool = True  # Allow free chunk uploads within a daily quota
+    CHUNK_UPLOAD_FREE_TIER_MB_PER_DAY: int = 100  # Free bytes per IP per UTC day (1 MB = 10^6 bytes)
 
     # === Bandwidth Credit Ledger ===
     # Prepaid, byte-denominated credit balances keyed by client address. One x402

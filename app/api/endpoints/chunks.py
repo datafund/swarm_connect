@@ -9,8 +9,10 @@ from fastapi import APIRouter, Header, HTTPException, Query, Request, status
 from app.api.models.chunk import ChunkUploadResponse, CreditTopUpResponse
 from app.core.config import settings
 from app.services.bandwidth_credit import bandwidth_credit_manager
+from app.services.bandwidth_free_tier import free_tier_tracker
 from app.services.swarm_api import upload_chunk_to_swarm
 from app.x402.audit import AuditEventType, log_audit_event
+from app.x402.middleware import get_client_ip
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -203,55 +205,88 @@ async def upload_chunk(
 
     chunk_len = len(chunk_bytes)
 
-    # --- Billing: spend prepaid bandwidth credit (when x402 is enabled) ---
-    # The chunk upload carries no per-request x402 payment; it debits a prepaid
-    # balance identified by the bearer credit token. Free-tier (quota-based) access
-    # is added in a follow-up (#222); for now, billing requires a credit token.
-    billing_address: Optional[str] = None
+    # --- Billing (when x402 is enabled) ---
+    # The chunk upload carries no per-request x402 payment. Two paths:
+    #   free  (X-Payment-Mode: free) -> debit a per-IP daily byte quota
+    #   paid  (default)              -> debit prepaid credit via the bearer token
+    billing_address: Optional[str] = None  # paid (credit) path
+    free_ip: Optional[str] = None          # free-tier path
     bytes_charged: Optional[int] = None
     credit_balance: Optional[int] = None
 
     if settings.X402_ENABLED:
-        if not credit_token:
-            raise HTTPException(
-                status_code=402,
-                detail={
-                    "code": "CREDIT_REQUIRED",
-                    "message": f"A bandwidth credit token is required. Top up first.",
-                    "payment_info": _topup_info(),
-                },
-            )
-        billing_address = bandwidth_credit_manager.resolve_token(credit_token)
-        if not billing_address:
-            raise HTTPException(
-                status_code=402,
-                detail={
-                    "code": "INVALID_CREDIT_TOKEN",
-                    "message": "The bandwidth credit token is unknown. Top up to obtain a valid token.",
-                    "payment_info": _topup_info(),
-                },
-            )
-        ok, remaining = bandwidth_credit_manager.debit(billing_address, chunk_len)
-        if not ok:
-            raise HTTPException(
-                status_code=402,
-                detail={
-                    "code": "INSUFFICIENT_CREDIT",
-                    "message": f"Insufficient bandwidth credit ({remaining} bytes left, need {chunk_len}).",
-                    "balance_bytes": remaining,
-                    "payment_info": _topup_info(),
-                },
-            )
-        bytes_charged = chunk_len
-        credit_balance = remaining
+        payment_mode = request.headers.get("X-Payment-Mode", "").lower()
+
+        if payment_mode == "free":
+            if not settings.CHUNK_UPLOAD_FREE_TIER_ENABLED:
+                raise HTTPException(
+                    status_code=402,
+                    detail={
+                        "code": "FREE_TIER_DISABLED",
+                        "message": "Free-tier chunk uploads are disabled. Top up bandwidth credit instead.",
+                        "payment_info": _topup_info(),
+                    },
+                )
+            free_ip = get_client_ip(request)
+            daily_limit = settings.CHUNK_UPLOAD_FREE_TIER_MB_PER_DAY * BYTES_PER_MB
+            allowed, remaining = free_tier_tracker.try_consume(free_ip, chunk_len, daily_limit)
+            if not allowed:
+                raise HTTPException(
+                    status_code=429,
+                    detail={
+                        "code": "FREE_QUOTA_EXCEEDED",
+                        "message": (
+                            f"Free-tier daily quota exhausted ({remaining} bytes left, need {chunk_len}). "
+                            "Top up bandwidth credit for higher limits."
+                        ),
+                        "remaining_bytes": remaining,
+                        "payment_info": _topup_info(),
+                    },
+                )
+            bytes_charged = chunk_len
+        else:
+            if not credit_token:
+                raise HTTPException(
+                    status_code=402,
+                    detail={
+                        "code": "CREDIT_REQUIRED",
+                        "message": "A bandwidth credit token is required. Top up first, or use X-Payment-Mode: free.",
+                        "payment_info": _topup_info(),
+                    },
+                )
+            billing_address = bandwidth_credit_manager.resolve_token(credit_token)
+            if not billing_address:
+                raise HTTPException(
+                    status_code=402,
+                    detail={
+                        "code": "INVALID_CREDIT_TOKEN",
+                        "message": "The bandwidth credit token is unknown. Top up to obtain a valid token.",
+                        "payment_info": _topup_info(),
+                    },
+                )
+            ok, remaining = bandwidth_credit_manager.debit(billing_address, chunk_len)
+            if not ok:
+                raise HTTPException(
+                    status_code=402,
+                    detail={
+                        "code": "INSUFFICIENT_CREDIT",
+                        "message": f"Insufficient bandwidth credit ({remaining} bytes left, need {chunk_len}).",
+                        "balance_bytes": remaining,
+                        "payment_info": _topup_info(),
+                    },
+                )
+            bytes_charged = chunk_len
+            credit_balance = remaining
 
     # --- Forward the chunk to Bee. Refund the debit if forwarding fails. ---
     try:
         reference = await upload_chunk_to_swarm(chunk_bytes, stamp, deferred=deferred)
     except (httpx.HTTPError, ValueError) as e:
+        # Refund: the upload never landed, so the client shouldn't be charged.
         if billing_address is not None:
-            # Refund: the upload never landed, so the client shouldn't be charged.
             bandwidth_credit_manager.credit(billing_address, chunk_len)
+        if free_ip is not None:
+            free_tier_tracker.refund(free_ip, chunk_len)
         if isinstance(e, httpx.HTTPError):
             logger.error(f"Failed to forward chunk to Swarm API: {e}")
             raise HTTPException(
