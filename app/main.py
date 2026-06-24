@@ -172,6 +172,22 @@ async def read_root():
         "message": f"Welcome to {settings.PROJECT_NAME}"
     }
 
+    # Bee node connectivity/health — surfaces whether the node can actually reach
+    # the network (networkAvailability), peer count, mode, reserve. Cheap (cached),
+    # always included. A node with networkAvailability != Available accepts uploads
+    # (201) that may not propagate, so flag it here.
+    try:
+        from app.services.swarm_api import get_node_status_summary
+        node = await get_node_status_summary()
+        response_data["bee_node"] = node
+        # Only downgrade on a definitive bad signal (network unreachable -> uploads
+        # won't propagate). A transient inability to query the node, or warmup, is
+        # surfaced via bee_node.warnings but doesn't flip the gateway to degraded.
+        if node.get("network_availability") == "Unavailable" and response_data["status"] == "ok":
+            response_data["status"] = "degraded"
+    except Exception as e:
+        logger.warning(f"Health: failed to summarize Bee node status: {e}")
+
     # If x402 is enabled, include wallet status
     if settings.X402_ENABLED:
         from app.x402.base_balance import check_base_eth_balance
