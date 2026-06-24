@@ -73,6 +73,11 @@ python -m pytest tests/test_manifest_upload.py -v
 - Auto-prunes entries older than 10 minutes to prevent unbounded growth
 - Functions: `record_purchase()`, `get_purchase_time()`, `clear_tracker()`
 
+**Gnosis Chain Client (`app/services/gnosis_chain.py`)** — Flow B (#225/#227):
+- The gateway's first on-chain WRITE capability: signs/sends ERC20 `approve` + PostageStamp `createBatch` on Gnosis so a batch can be owned by an arbitrary address (Bee's HTTP API always makes the node the owner). Returns the created `batchId` (`keccak256(abi.encode(signer, nonce))`).
+- `GnosisChainClient.create_batch(owner, initial_balance_per_chunk, depth, ...)` is async (web3 is sync → runs in `asyncio.to_thread`). Skips `approve` when allowance already covers cost. Uses web3.py (already pulled in by x402; no new heavy dep). Build txs with an explicit nonce + EIP-1559 fees (never set `gasPrice` alongside maxFee).
+- Config: `GNOSIS_RPC_URL`, `GNOSIS_PRIVATE_KEY` (SENSITIVE — env/secret, never logged), `GNOSIS_CHAIN_ID` (100 mainnet / 11155111 testnet), optional `POSTAGE_STAMP_CONTRACT_ADDRESS` / `BZZ_TOKEN_ADDRESS` (default per chain id). Drives `POST /api/v1/stamps/for-owner` (#228).
+
 **Stamps API (`app/api/endpoints/stamps.py`)**:
 - Provides `/api/v1/stamps/{stamp_id}` endpoint
 - Fetches all stamps from Swarm and filters by ID

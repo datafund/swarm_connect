@@ -95,6 +95,17 @@ class Settings(BaseSettings):
     DEBUG_ALLOWED_ADDRESSES: str = ""
     DEBUG_SIG_MAX_AGE_SECONDS: int = 300  # signature freshness window (replay guard)
 
+    # === Flow B: Gnosis chain client (buy postage batches for an external owner) ===
+    # Signs/sends approve + createBatch on Gnosis so a batch can be owned by an
+    # arbitrary address. The signing key is SENSITIVE — handle like NOTARY_PRIVATE_KEY
+    # (env/secret, never logged). Drives POST /api/v1/stamps/for-owner (#228).
+    GNOSIS_RPC_URL: Optional[str] = None
+    GNOSIS_PRIVATE_KEY: Optional[str] = None  # funded Gnosis wallet (xBZZ + xDAI), pays for batches
+    GNOSIS_CHAIN_ID: int = 100  # 100 = Gnosis mainnet, 11155111 = Sepolia testnet
+    # Contract/token addresses default per chain id when unset (see gnosis_chain.py).
+    POSTAGE_STAMP_CONTRACT_ADDRESS: Optional[str] = None
+    BZZ_TOKEN_ADDRESS: Optional[str] = None
+
     # === Notary/Provenance Signing Settings ===
     # The notary feature allows the gateway to sign documents with an authoritative timestamp.
     # This provides proof that a document existed at a specific time, signed by the gateway.
