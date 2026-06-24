@@ -27,7 +27,11 @@ import os
 import pytest
 import requests
 
+from tests.tools.swarm_stamp import chunk_address, make_chunk, stamp_chunk
+
 GATEWAY_URL = os.environ.get("CHUNK_LIVE_GATEWAY_URL")
+# Bee node used to mint real (node-signed) stamps via its /envelope endpoint.
+BEE_URL = os.environ.get("CHUNK_LIVE_BEE_URL", "http://localhost:1633")
 
 pytestmark = pytest.mark.skipif(
     not GATEWAY_URL,
@@ -36,6 +40,21 @@ pytestmark = pytest.mark.skipif(
 
 # 226 hex chars = a well-formed 113-byte marshaled stamp shape (not a real signature).
 WELL_FORMED_STAMP = "ab" * 113
+
+
+def _pick_usable_batch():
+    """Return a usable batch ID on the Bee node, or None (skip)."""
+    try:
+        resp = requests.get(f"{BEE_URL}/stamps", timeout=10)
+        resp.raise_for_status()
+        data = resp.json()
+        stamps = data.get("stamps", data) if isinstance(data, dict) else data
+        for s in stamps:
+            if s.get("usable") and s.get("batchID"):
+                return s["batchID"]
+    except Exception:
+        return None
+    return None
 
 
 def _chunks_url():
@@ -101,3 +120,38 @@ def test_credit_topup_disabled_without_x402():
     r = requests.post(_chunks_url() + "/credit?mb=100", timeout=15)
     assert r.status_code == 400
     assert r.json()["detail"]["code"] == "BILLING_DISABLED"
+
+
+def test_real_signed_chunk_roundtrip():
+    """Full happy path: a real node-signed chunk is accepted and retrievable.
+
+    Mints a valid stamp via the Bee node's /envelope endpoint (no private key
+    needed), uploads the chunk through the gateway, and confirms Bee accepts it
+    (201), the returned reference equals the locally-computed chunk address, and
+    the chunk reads back byte-for-byte.
+    """
+    batch_id = _pick_usable_batch()
+    if not batch_id:
+        pytest.skip(f"no usable postage batch on Bee node at {BEE_URL}")
+
+    payload = b"chunk-forwarding-live-test-" + os.urandom(8).hex().encode()
+    chunk, stamp_hex, addr_hex = stamp_chunk(BEE_URL, batch_id, payload)
+
+    # Sanity: our BMT address matches a fresh recomputation.
+    assert chunk_address(make_chunk(payload)).hex() == addr_hex
+
+    r = requests.post(
+        _chunks_url() + "/", data=chunk,
+        headers={
+            "Swarm-Postage-Stamp": stamp_hex,
+            "Content-Type": "application/octet-stream",
+        },
+        timeout=30,
+    )
+    assert r.status_code == 201, r.text
+    reference = r.json()["reference"]
+    assert reference.lower() == addr_hex.lower()
+
+    got = requests.get(f"{BEE_URL}/chunks/{reference}", timeout=15)
+    assert got.status_code == 200
+    assert got.content == chunk

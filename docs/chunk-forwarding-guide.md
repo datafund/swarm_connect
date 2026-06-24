@@ -61,7 +61,9 @@ CHUNK_LIVE_GATEWAY_URL=http://127.0.0.1:8011 \
     python -m pytest tests/test_chunks_live.py -v
 ```
 
-`tests/test_chunks_live.py` sends real chunks through the gateway to Bee and asserts validation, forwarding, and error surfacing. It skips when `CHUNK_LIVE_GATEWAY_URL` is unset, so the normal `pytest tests/` run stays hermetic. The valid-stamp happy path (Bee accepts → `201` → retrievable) needs a client-owned batch + local stamping (bee-js); that client path is validated by the Flow B spike (#226).
+`tests/test_chunks_live.py` sends real chunks through the gateway to Bee and asserts validation, forwarding, error surfacing, **and a full signed round-trip** (Bee accepts → `201` → chunk reads back byte-for-byte). It skips when `CHUNK_LIVE_GATEWAY_URL` is unset, so the normal `pytest tests/` run stays hermetic.
+
+The round-trip mints a **real** stamp without any private key by using the Bee node's `POST /envelope/{address}` endpoint (the node signs a presigned stamp with a batch it owns); `tests/tools/swarm_stamp.py` computes the Swarm BMT chunk address, fetches the envelope, and marshals the 113-byte `Swarm-Postage-Stamp`. This validates the **gateway + Bee** path locally. The **production agent flow** — the client signs with *its own* key against a client-owned batch (e.g. `Cafe137/chunkstorm` or bee-js `Stamper`) — requires creating a batch with the client's address as owner on Gnosis and is covered by the Flow B spike (#226).
 
 ---
 
