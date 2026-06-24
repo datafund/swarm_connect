@@ -86,6 +86,15 @@ class Settings(BaseSettings):
     # Stamp ownership: file path for persisting stamp ownership records
     STAMP_OWNERSHIP_FILE: str = "data/stamp_owners.json"
 
+    # === Debug Proxy (read-only Bee diagnostics, signature-gated) ===
+    # Comma-separated 0x addresses allowed to read Bee diagnostics via
+    # GET /api/v1/debug/bee/{path}. Access requires an EIP-191 signature from one
+    # of these addresses over "swarm-connect-debug:<unix_ts>" (headers
+    # X-Debug-Address optional, X-Debug-Timestamp, X-Debug-Signature). Empty =>
+    # endpoint disabled (404). Addresses are public identifiers, not secrets.
+    DEBUG_ALLOWED_ADDRESSES: str = ""
+    DEBUG_SIG_MAX_AGE_SECONDS: int = 300  # signature freshness window (replay guard)
+
     # === Notary/Provenance Signing Settings ===
     # The notary feature allows the gateway to sign documents with an authoritative timestamp.
     # This provides proof that a document existed at a specific time, signed by the gateway.
@@ -166,6 +175,12 @@ class Settings(BaseSettings):
         if not self.X402_WHITELIST_IPS:
             return []
         return [ip.strip() for ip in self.X402_WHITELIST_IPS.split(",") if ip.strip()]
+
+    def get_debug_allowed_addresses(self) -> List[str]:
+        """Parse the debug allow-list into lowercased 0x addresses."""
+        if not self.DEBUG_ALLOWED_ADDRESSES:
+            return []
+        return [a.strip().lower() for a in self.DEBUG_ALLOWED_ADDRESSES.split(",") if a.strip()]
 
     def get_stamp_pool_reserve_config(self) -> dict:
         """Get stamp pool reserve configuration as {depth: count} dict.

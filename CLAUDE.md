@@ -154,6 +154,9 @@ CORS (browser access):
 - `GET /api/v1/data/{reference}`: Download raw data from Swarm (returns bytes directly)
 - `GET /api/v1/data/{reference}/json`: Download data with JSON metadata (base64-encoded)
 
+#### Debug (read-only Bee diagnostics, signature-gated)
+- `GET /api/v1/debug/bee/{path}`: read-only proxy to allow-listed Bee endpoints (`topology`, `addresses`, `peers`, `status`, `chainstate`, `reservestate`, `redistributionstate`, `node`, `health`, `readiness`, `stamps`, `batches`, `chequebook`, `wallet`) for diagnosing the gateway's Bee node when you only have gateway access. Disabled (404) unless `DEBUG_ALLOWED_ADDRESSES` (comma-separated 0x addresses) is set. Auth = EIP-191 signature from an allow-listed address over `swarm-connect-debug:<unix_ts>` via headers `X-Debug-Timestamp` + `X-Debug-Signature` (freshness window `DEBUG_SIG_MAX_AGE_SECONDS`, default 300s). No stored secret; never proxies writes.
+
 #### Chunk Forwarding (pre-stamped, Flow A)
 - `POST /api/v1/chunks/`: Forward a single **client-supplied pre-stamped** chunk to Bee `POST /chunks`. Raw chunk in the body, marshaled stamp in the `Swarm-Postage-Stamp` header (sent instead of `Swarm-Postage-Batch-Id`); optional `?deferred=true` (default false). The client owns the postage batch and signs locally; the gateway is a thin forwarder and does **not** verify the stamp (Bee does). Always mounted; the handler returns 404 when `CHUNK_UPLOAD_ENABLED=false`.
 - `POST /api/v1/chunks/credit?mb={n}`: x402-paid prepaid **bandwidth credit** top-up. Priced via the `bandwidth` operation in `pricing.py` at `X402_BANDWIDTH_USD_PER_GB` (min `BANDWIDTH_CREDIT_MIN_TOPUP_MB`). Credit is bound to the verified x402 payer wallet; returns a bearer token.

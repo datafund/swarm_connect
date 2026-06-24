@@ -67,6 +67,8 @@ jobs:
           X402_BANDWIDTH_USD_PER_GB=${{ vars.X402_BANDWIDTH_USD_PER_GB || '0.10' }}
           BANDWIDTH_CREDIT_MIN_TOPUP_MB=${{ vars.BANDWIDTH_CREDIT_MIN_TOPUP_MB || '100' }}
           BANDWIDTH_CREDIT_STATE_FILE=${{ vars.BANDWIDTH_CREDIT_STATE_FILE || 'data/bandwidth_credit.json' }}
+          DEBUG_ALLOWED_ADDRESSES=${{ vars.DEBUG_ALLOWED_ADDRESSES || '' }}
+          DEBUG_SIG_MAX_AGE_SECONDS=${{ vars.DEBUG_SIG_MAX_AGE_SECONDS || '300' }}
           RATE_LIMIT_ENABLED=${{ vars.RATE_LIMIT_ENABLED || 'true' }}
           RATE_LIMIT_PER_MINUTE=${{ vars.RATE_LIMIT_PER_MINUTE || '60' }}
           RATE_LIMIT_BURST=${{ vars.RATE_LIMIT_BURST || '10' }}
@@ -107,6 +109,8 @@ jobs:
           X402_BANDWIDTH_USD_PER_GB=${{ vars.X402_BANDWIDTH_USD_PER_GB || '0.10' }}
           BANDWIDTH_CREDIT_MIN_TOPUP_MB=${{ vars.BANDWIDTH_CREDIT_MIN_TOPUP_MB || '100' }}
           BANDWIDTH_CREDIT_STATE_FILE=${{ vars.BANDWIDTH_CREDIT_STATE_FILE || 'data/bandwidth_credit.json' }}
+          DEBUG_ALLOWED_ADDRESSES=${{ vars.DEBUG_ALLOWED_ADDRESSES || '' }}
+          DEBUG_SIG_MAX_AGE_SECONDS=${{ vars.DEBUG_SIG_MAX_AGE_SECONDS || '300' }}
           RATE_LIMIT_ENABLED=${{ vars.RATE_LIMIT_ENABLED || 'true' }}
           RATE_LIMIT_PER_MINUTE=${{ vars.RATE_LIMIT_PER_MINUTE || '60' }}
           RATE_LIMIT_BURST=${{ vars.RATE_LIMIT_BURST || '10' }}
