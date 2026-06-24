@@ -81,6 +81,27 @@ rate_limit_hits_total = Counter(
 bee_api_errors_total = Counter(
     "gateway_bee_api_errors_total", "Upstream Bee node errors", ["endpoint"]
 )
+chunk_uploads_total = Counter(
+    "gateway_chunk_uploads_total", "Pre-stamped chunk forwarding attempts", ["status", "mode"]
+)
+chunk_upload_bytes_total = Counter(
+    "gateway_chunk_upload_bytes_total", "Total bytes forwarded as pre-stamped chunks"
+)
+bandwidth_topups_total = Counter(
+    "gateway_bandwidth_topups_total", "Bandwidth credit top-ups", ["status"]
+)
+bandwidth_topup_bytes_total = Counter(
+    "gateway_bandwidth_topup_bytes_total", "Total bytes of bandwidth credit sold via top-ups"
+)
+
+# ── Bandwidth credit gauges (updated by background poller) ───────────────────
+
+bandwidth_credit_accounts = Gauge(
+    "gateway_bandwidth_credit_accounts", "Bandwidth credit accounts with a non-zero balance"
+)
+bandwidth_credit_bytes_total = Gauge(
+    "gateway_bandwidth_credit_bytes_total", "Total outstanding (unspent) bandwidth credit in bytes"
+)
 
 # ── Background task ──────────────────────────────────────────────────────────
 
@@ -178,6 +199,15 @@ async def _poll_balances():
                         pool_stamp_min_ttl_seconds.set(0)
                 except Exception as e:
                     logger.debug(f"Metrics: failed to get pool status: {e}")
+
+            # Bandwidth credit ledger (chunk forwarding feature)
+            if settings.CHUNK_UPLOAD_ENABLED:
+                try:
+                    from app.services.bandwidth_credit import bandwidth_credit_manager
+                    bandwidth_credit_accounts.set(bandwidth_credit_manager.account_count())
+                    bandwidth_credit_bytes_total.set(bandwidth_credit_manager.total_outstanding_bytes())
+                except Exception as e:
+                    logger.debug(f"Metrics: failed to get bandwidth credit state: {e}")
 
         except Exception as e:
             logger.warning(f"Metrics background poll error: {e}")

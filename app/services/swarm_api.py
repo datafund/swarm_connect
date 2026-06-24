@@ -656,6 +656,63 @@ async def upload_data_to_swarm(
         raise ValueError(f"Could not parse data upload response: {e}") from e
 
 
+async def upload_chunk_to_swarm(
+    chunk_bytes: bytes,
+    marshaled_stamp: str,
+    deferred: bool = False
+) -> str:
+    """
+    Forwards a single PRE-STAMPED chunk to the Swarm network via Bee's POST /chunks.
+
+    Unlike upload_data_to_swarm (which uses a node-owned batch via Swarm-Postage-Batch-Id),
+    this passes the client-supplied marshaled postage stamp in the Swarm-Postage-Stamp
+    header and does NOT send a batch-id header. This lets a client that owns a postage
+    batch stamp its own chunks locally and use the gateway purely as a forwarder. The
+    gateway does not verify the stamp signature/owner — the Bee node does.
+
+    Args:
+        chunk_bytes: The raw chunk (8-byte span prefix + up to 4096 bytes of payload).
+        marshaled_stamp: Hex-encoded 113-byte marshaled postage stamp
+                         (batchID[0:32] + index[32:40] + timestamp[40:48] + signature[48:113]).
+        deferred: If True, deferred upload (local first, async sync). If False (default),
+                  direct upload (chunk pushed to the network for immediate availability).
+
+    Returns:
+        The Swarm reference hash of the uploaded chunk.
+
+    Raises:
+        httpx.HTTPError: If the HTTP request to the Swarm API fails.
+        ValueError: If the response is malformed or missing the reference.
+    """
+    api_url = urljoin(str(settings.SWARM_BEE_API_URL), "chunks")
+    headers = {
+        "Content-Type": "application/octet-stream",
+        "Swarm-Postage-Stamp": marshaled_stamp,
+        "Swarm-Deferred-Upload": str(deferred).lower(),
+    }
+
+    try:
+        client = get_client()
+        response = await client.post(api_url, content=chunk_bytes, headers=headers, timeout=60)
+        response.raise_for_status()
+
+        response_json = response.json()
+        reference = response_json.get("reference")
+        if not reference:
+            raise ValueError("API Response missing 'reference' from chunk upload")
+
+        logger.info(f"Successfully forwarded chunk to Swarm with reference: {reference}")
+        return reference
+
+    except httpx.HTTPError as e:
+        _record_bee_error("chunk_upload")
+        logger.error(f"Error forwarding chunk to Swarm API ({api_url}): {e}")
+        raise
+    except (ValueError, KeyError) as e:
+        logger.error(f"Error parsing chunk upload response: {e}")
+        raise ValueError(f"Could not parse chunk upload response: {e}") from e
+
+
 async def download_data_from_swarm(reference: str) -> bytes:
     """
     Downloads data from the Swarm network using a reference hash.

@@ -27,6 +27,7 @@ logger = logging.getLogger(__name__)
 
 # Conversion constants
 PLUR_PER_BZZ = 10 ** 16  # 1 BZZ = 10^16 PLUR
+BYTES_PER_GB = 10 ** 9   # 1 GB = 10^9 bytes (for bandwidth pricing)
 
 
 def plur_to_bzz(plur: int) -> float:
@@ -248,6 +249,66 @@ async def calculate_upload_price_usd(
     return result
 
 
+def calculate_bandwidth_price_usd(
+    size_bytes: int,
+    include_breakdown: bool = True
+) -> Dict[str, Any]:
+    """
+    Calculate the USD price for a quantity of upload bandwidth.
+
+    Used to price a prepaid bandwidth-credit top-up: the client pays this amount in
+    USDC via x402 and receives `size_bytes` of credit. Storage is NOT charged here —
+    pre-stamped chunk uploads are paid for by the client's own postage batch; the
+    gateway only bills bandwidth.
+
+    Formula:
+    1. cost_usd = (size_bytes / 10^9) * X402_BANDWIDTH_USD_PER_GB
+    2. Apply markup percentage
+    3. Enforce minimum price
+
+    Args:
+        size_bytes: Amount of bandwidth in bytes.
+        include_breakdown: Whether to include a detailed breakdown.
+
+    Returns:
+        Dict with price_usd, price_per_gb, markup_percent, minimum_applied, and
+        (optionally) a breakdown.
+    """
+    rate_per_gb = settings.X402_BANDWIDTH_USD_PER_GB
+    cost_usd = (size_bytes / BYTES_PER_GB) * rate_per_gb
+
+    markup_percent = settings.X402_MARKUP_PERCENT
+    price_with_markup = apply_markup(cost_usd, markup_percent)
+
+    min_price = settings.X402_MIN_PRICE_USD
+    final_price = apply_minimum_price(price_with_markup, min_price)
+    minimum_applied = price_with_markup < min_price
+
+    result = {
+        "price_usd": round(final_price, 6),
+        "price_per_gb": rate_per_gb,
+        "markup_percent": markup_percent,
+        "minimum_applied": minimum_applied,
+    }
+
+    if include_breakdown:
+        result["breakdown"] = {
+            "size_bytes": size_bytes,
+            "rate_usd_per_gb": rate_per_gb,
+            "cost_usd_before_markup": round(cost_usd, 6),
+            "cost_usd_with_markup": round(price_with_markup, 6),
+            "minimum_price_usd": min_price,
+            "final_price_usd": round(final_price, 6),
+        }
+
+    logger.info(
+        f"Calculated bandwidth price: {size_bytes} bytes -> "
+        f"${final_price:.4f} USD (rate=${rate_per_gb}/GB, markup={markup_percent}%)"
+    )
+
+    return result
+
+
 async def get_price_quote(
     operation: str,
     **kwargs
@@ -281,6 +342,9 @@ async def get_price_quote(
         size_bytes = kwargs.get("size_bytes", 0)
         duration_hours = kwargs.get("duration_hours", 24)
         price_info = await calculate_upload_price_usd(size_bytes, duration_hours)
+    elif operation == "bandwidth":
+        size_bytes = kwargs.get("size_bytes", 0)
+        price_info = calculate_bandwidth_price_usd(size_bytes)
     else:
         raise ValueError(f"Unknown operation type: {operation}")
 

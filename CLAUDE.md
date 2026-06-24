@@ -154,6 +154,13 @@ CORS (browser access):
 - `GET /api/v1/data/{reference}`: Download raw data from Swarm (returns bytes directly)
 - `GET /api/v1/data/{reference}/json`: Download data with JSON metadata (base64-encoded)
 
+#### Chunk Forwarding (pre-stamped, Flow A)
+- `POST /api/v1/chunks/`: Forward a single **client-supplied pre-stamped** chunk to Bee `POST /chunks`. Raw chunk in the body, marshaled stamp in the `Swarm-Postage-Stamp` header (sent instead of `Swarm-Postage-Batch-Id`); optional `?deferred=true` (default false). The client owns the postage batch and signs locally; the gateway is a thin forwarder and does **not** verify the stamp (Bee does). Always mounted; the handler returns 404 when `CHUNK_UPLOAD_ENABLED=false`.
+- `POST /api/v1/chunks/credit?mb={n}`: x402-paid prepaid **bandwidth credit** top-up. Priced via the `bandwidth` operation in `pricing.py` at `X402_BANDWIDTH_USD_PER_GB` (min `BANDWIDTH_CREDIT_MIN_TOPUP_MB`). Credit is bound to the verified x402 payer wallet; returns a bearer token.
+  - **Billing model**: chunk uploads carry no per-request payment. When `X402_ENABLED`, the client tops up once, then presents the bearer token via the `X-Bandwidth-Credit-Token` header on each `POST /chunks/`; the chunk's byte length is debited from the prepaid balance (atomic check-and-debit; refunded if the Bee forward fails). A **free** path is also available: send `X-Payment-Mode: free` to draw from a per-IP daily byte quota (`app/services/bandwidth_free_tier.py`, in-memory, resets per UTC day), returning `429` when exhausted (also refunded on Bee failure). Only `/chunks/credit` is in `PROTECTED_ENDPOINTS`.
+  - Ledger: `app/services/bandwidth_credit.py` (`BandwidthCreditManager`), address-keyed balances + `token -> address` index, persisted to `BANDWIDTH_CREDIT_STATE_FILE`.
+  - Config: `CHUNK_UPLOAD_ENABLED` (default false), `CHUNK_UPLOAD_MAX_BYTES_PER_REQUEST` (4104), `X402_BANDWIDTH_USD_PER_GB`, `BANDWIDTH_CREDIT_MIN_TOPUP_MB`, `BANDWIDTH_CREDIT_STATE_FILE`, `CHUNK_UPLOAD_FREE_TIER_ENABLED`, `CHUNK_UPLOAD_FREE_TIER_MB_PER_DAY` (free tier is independent of the x402 `X402_FREE_TIER_*` settings).
+
 #### Stamp Pool (Low-Latency Provisioning)
 - `GET /api/v1/pool/status`: Get pool status and reserve levels
 - `POST /api/v1/pool/acquire`: Acquire stamp from pool instantly (<5 seconds vs >1 minute)
@@ -351,14 +358,19 @@ The gateway exposes a `/metrics` endpoint (Prometheus text format) when `METRICS
 - `gateway_notary_signatures_total{status}`
 - `gateway_x402_payments_total{mode}` (paid/free/rejected)
 - `gateway_rate_limit_hits_total`
+- `gateway_chunk_uploads_total{status, mode}` (mode = paid/free/none), `gateway_chunk_upload_bytes_total`
+- `gateway_bandwidth_topups_total{status}`, `gateway_bandwidth_topup_bytes_total`
 
 **Custom gauges** (polled every `METRICS_BALANCE_POLL_SECONDS`):
 - `gateway_wallet_bzz_balance`, `gateway_wallet_xdai_balance`
 - `gateway_chequebook_available_balance`, `gateway_base_eth_balance`
 - `gateway_stamp_pool_available{size}`, `gateway_stamps_total`
 - `gateway_stamp_min_ttl_seconds`, `gateway_uptime_seconds`
+- `gateway_bandwidth_credit_accounts`, `gateway_bandwidth_credit_bytes_total` (when `CHUNK_UPLOAD_ENABLED`)
 
-**Info**: `gateway_info{version, environment, x402_enabled, pool_enabled, notary_enabled}`
+**Info**: `gateway_info{version, environment, x402_enabled, pool_enabled, notary_enabled, chunk_upload_enabled}`
+
+> New metrics are scraped by Grafana Alloy and remote-written to Grafana Cloud automatically once deployed (no extra wiring). Adding them as **panels** on `monitoring/provisioning/dashboards/gateway-overview.json` is a separate, deliberate step (tracked in its own issue).
 
 ### Production Monitoring Stack
 

@@ -98,6 +98,29 @@ class Settings(BaseSettings):
     # === Upload Limits ===
     MAX_UPLOAD_SIZE_MB: int = 10  # Maximum file upload size in megabytes
 
+    # === Chunk Upload (stamped-chunk forwarding, Flow A) ===
+    # When enabled, the gateway forwards a single client-supplied PRE-STAMPED chunk
+    # to the Bee node's POST /chunks endpoint using the Swarm-Postage-Stamp header.
+    # The client controls the postage stamp; the gateway is a thin forwarder and does
+    # NOT verify the stamp signature/owner (Bee does that).
+    CHUNK_UPLOAD_ENABLED: bool = False  # Master switch for chunk forwarding feature
+    # A single Swarm chunk is at most an 8-byte span prefix + 4096 bytes of payload.
+    CHUNK_UPLOAD_MAX_BYTES_PER_REQUEST: int = 4104  # Hard cap on the chunk body size
+    # Free tier for chunk uploads: a per-IP daily byte quota, independent of the
+    # x402 (stamp/data) free tier. Opt in per request with header X-Payment-Mode: free.
+    CHUNK_UPLOAD_FREE_TIER_ENABLED: bool = True  # Allow free chunk uploads within a daily quota
+    CHUNK_UPLOAD_FREE_TIER_MB_PER_DAY: int = 100  # Free bytes per IP per UTC day (1 MB = 10^6 bytes)
+
+    # === Bandwidth Credit Ledger ===
+    # Prepaid, byte-denominated credit balances keyed by client address. One x402
+    # payment tops up a balance; each chunk upload debits bytes from it. This avoids
+    # the per-request minimum-price floor collapsing onto every tiny chunk.
+    BANDWIDTH_CREDIT_STATE_FILE: str = "data/bandwidth_credit.json"  # Ledger persistence path
+    # Bandwidth price used to convert an x402 top-up payment into byte credit.
+    X402_BANDWIDTH_USD_PER_GB: float = 0.10  # USD per GB of upload bandwidth (1 GB = 10^9 bytes)
+    # Minimum top-up so a single x402 payment clears the per-request price floor.
+    BANDWIDTH_CREDIT_MIN_TOPUP_MB: int = 100  # Minimum credit top-up in MB (1 MB = 10^6 bytes)
+
     # === JSON Body Limits ===
     MAX_JSON_BODY_BYTES: int = 1_048_576  # Maximum JSON body size (1 MB)
     MAX_JSON_DEPTH: int = 20  # Maximum JSON nesting depth
