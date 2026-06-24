@@ -16,6 +16,14 @@ Chunk address:
     keccak256( span[8 LE] || bmt_root(payload) )
 where bmt_root is the binary-Merkle (pairwise keccak256) root over the payload
 zero-padded to 4096 bytes, taken as 128 raw 32-byte segments.
+
+Two ways to obtain the stamp signature:
+  - get_envelope/marshal_stamp: the Bee node signs (needs a node-owned batch, no key).
+  - sign_stamp: sign client-side with the batch OWNER private key (self-custody).
+IMPORTANT: the stamp signature is an EIP-191 personal_sign over the digest
+keccak256(addr || batchId || index || timestamp), with v in {27,28} — verified
+against ethersphere/bee crypto.Recover (hashWithEthereumPrefix), NOT a plain
+secp256k1 sign of the digest.
 """
 from __future__ import annotations
 
@@ -69,6 +77,44 @@ def marshal_stamp(batch_id_hex: str, envelope: dict) -> str:
     assert len(timestamp) == 8, f"timestamp must be 8 bytes, got {len(timestamp)}"
     assert len(signature) == 65, f"signature must be 65 bytes, got {len(signature)}"
     return (batch_id + index + timestamp + signature).hex()
+
+
+def sign_stamp(
+    owner_private_key: str,
+    chunk: bytes,
+    batch_id_hex: str,
+    height: int = 0,
+    timestamp_ms: int = None,
+) -> tuple[str, str, str]:
+    """Sign a postage stamp for `chunk` CLIENT-SIDE with the batch owner key.
+
+    The agent owning the batch signs its own stamps off-node (self-custody). The
+    signature is an EIP-191 personal_sign over keccak256(addr||batchId||index||timestamp).
+
+    Args:
+        owner_private_key: Hex private key of the batch owner.
+        chunk: The chunk bytes (8-byte span + payload), e.g. from make_chunk().
+        batch_id_hex: The owner's postage batch id.
+        height: Within-bucket index (0 for the first chunk in a bucket).
+        timestamp_ms: Override timestamp (ms); defaults to now.
+
+    Returns:
+        (marshaled_stamp_hex, chunk_address_hex, signer_address).
+    """
+    import time as _time
+
+    from eth_account import Account
+    from eth_account.messages import encode_defunct
+
+    addr = chunk_address(chunk)
+    bid = bytes.fromhex(batch_id_hex[2:] if batch_id_hex.startswith("0x") else batch_id_hex)
+    bucket = int.from_bytes(addr[:2], "big")
+    index = bucket.to_bytes(4, "big") + int(height).to_bytes(4, "big")
+    ts = (timestamp_ms if timestamp_ms is not None else int(_time.time() * 1000)).to_bytes(8, "big")
+    to_sign = keccak(addr + bid + index + ts)  # digest Bee re-derives and recovers against
+    signed = Account.sign_message(encode_defunct(primitive=to_sign), private_key=owner_private_key)
+    stamp = bid + index + ts + bytes(signed.signature)  # v already 27/28
+    return stamp.hex(), addr.hex(), Account.from_key(owner_private_key).address
 
 
 def stamp_chunk(bee_url: str, batch_id_hex: str, payload: bytes) -> tuple[bytes, str, str]:

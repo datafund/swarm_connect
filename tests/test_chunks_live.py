@@ -27,7 +27,7 @@ import os
 import pytest
 import requests
 
-from tests.tools.swarm_stamp import chunk_address, make_chunk, stamp_chunk
+from tests.tools.swarm_stamp import chunk_address, make_chunk, sign_stamp, stamp_chunk
 
 GATEWAY_URL = os.environ.get("CHUNK_LIVE_GATEWAY_URL")
 # Bee node used to mint real (node-signed) stamps via its /envelope endpoint.
@@ -153,5 +153,34 @@ def test_real_signed_chunk_roundtrip():
     assert reference.lower() == addr_hex.lower()
 
     got = requests.get(f"{BEE_URL}/chunks/{reference}", timeout=15)
+    assert got.status_code == 200
+    assert got.content == chunk
+
+
+def test_owner_signed_chunk_through_gateway():
+    """Full self-custody flow: the batch OWNER signs its own stamp (client-side,
+    EIP-191) and pushes the chunk through the gateway to a same-network Bee node.
+
+    Needs CHUNK_LIVE_OWNER_KEY (owner private key) and CHUNK_LIVE_BATCH_ID (a batch
+    owned by that key on the network BEE_URL/the gateway is connected to).
+    """
+    owner_key = os.environ.get("CHUNK_LIVE_OWNER_KEY")
+    batch_id = os.environ.get("CHUNK_LIVE_BATCH_ID")
+    if not (owner_key and batch_id):
+        pytest.skip("set CHUNK_LIVE_OWNER_KEY and CHUNK_LIVE_BATCH_ID for the self-custody test")
+
+    payload = b"self-custody-live-" + os.urandom(8).hex().encode()
+    chunk = make_chunk(payload)
+    stamp_hex, addr_hex, signer = sign_stamp(owner_key, chunk, batch_id)
+
+    r = requests.post(
+        _chunks_url() + "/", data=chunk,
+        headers={"Swarm-Postage-Stamp": stamp_hex, "Content-Type": "application/octet-stream"},
+        timeout=30,
+    )
+    assert r.status_code == 201, r.text
+    assert r.json()["reference"].lower() == addr_hex.lower()
+
+    got = requests.get(f"{BEE_URL}/chunks/{addr_hex}", timeout=20)
     assert got.status_code == 200
     assert got.content == chunk
