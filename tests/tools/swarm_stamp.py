@@ -27,7 +27,13 @@ secp256k1 sign of the digest.
 """
 from __future__ import annotations
 
+import json
+import os
+import time
+
 import requests
+from eth_account import Account
+from eth_account.messages import encode_defunct
 from eth_hash.auto import keccak
 
 SEGMENT_SIZE = 32
@@ -115,6 +121,89 @@ def sign_stamp(
     signed = Account.sign_message(encode_defunct(primitive=to_sign), private_key=owner_private_key)
     stamp = bid + index + ts + bytes(signed.signature)  # v already 27/28
     return stamp.hex(), addr.hex(), Account.from_key(owner_private_key).address
+
+
+BUCKET_DEPTH = 16  # fixed by the Swarm protocol
+NUM_BUCKETS = 1 << BUCKET_DEPTH  # 65536
+
+
+class BucketFullError(Exception):
+    """Raised when a postage bucket has no free slots left for a batch/depth."""
+
+
+class Stamper:
+    """Stateful client-side postage stamper for a single owned batch.
+
+    Tracks a per-bucket height counter (like chunkstorm / bee-js Stamper) so each
+    chunk gets a unique (bucket, height) index — reusing an index overwrites the
+    earlier chunk (mutable batch) or is rejected (immutable). State is persisted
+    to JSON so counters survive restarts; without that, a restart would reset to 0
+    and start overwriting.
+
+    Capacity per bucket = 2^(depth - 16); a depth-17 batch holds only 2 per bucket.
+    """
+
+    def __init__(self, owner_private_key, batch_id_hex, depth, buckets=None, state_file=None):
+        self._key = owner_private_key
+        self.address = Account.from_key(owner_private_key).address
+        self.batch_id_hex = batch_id_hex[2:] if batch_id_hex.startswith("0x") else batch_id_hex
+        self._batch_id = bytes.fromhex(self.batch_id_hex)
+        self.depth = int(depth)
+        self.max_slot = 1 << (self.depth - BUCKET_DEPTH)
+        self.buckets = dict(buckets) if buckets else {}  # bucket(int) -> next height
+        self.state_file = state_file
+
+    # --- persistence ---
+    @classmethod
+    def load(cls, owner_private_key, batch_id_hex, depth, state_file):
+        """Load a stamper's bucket counters from state_file, or start fresh."""
+        buckets = {}
+        if state_file and os.path.exists(state_file):
+            try:
+                with open(state_file) as f:
+                    data = json.load(f)
+                if data.get("batch_id", "").lower() == (
+                    batch_id_hex[2:] if batch_id_hex.startswith("0x") else batch_id_hex
+                ).lower():
+                    buckets = {int(k): int(v) for k, v in data.get("buckets", {}).items()}
+            except (json.JSONDecodeError, ValueError, OSError):
+                buckets = {}
+        return cls(owner_private_key, batch_id_hex, depth, buckets=buckets, state_file=state_file)
+
+    def save(self):
+        if not self.state_file:
+            return
+        directory = os.path.dirname(self.state_file) or "."
+        os.makedirs(directory, exist_ok=True)
+        tmp = self.state_file + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump({"batch_id": self.batch_id_hex, "depth": self.depth,
+                       "buckets": {str(k): v for k, v in self.buckets.items()}}, f)
+        os.replace(tmp, self.state_file)
+
+    # --- stamping ---
+    def stamp(self, chunk: bytes, timestamp_ms: int = None) -> tuple[str, str]:
+        """Sign a stamp for `chunk`, advancing the bucket counter.
+
+        Returns (marshaled_stamp_hex, chunk_address_hex). Raises BucketFullError
+        if the chunk's bucket is full for this batch depth.
+        """
+        addr = chunk_address(chunk)
+        bucket = int.from_bytes(addr[:2], "big")
+        height = self.buckets.get(bucket, 0)
+        if height >= self.max_slot:
+            raise BucketFullError(
+                f"bucket {bucket} full ({self.max_slot} slots at depth {self.depth}); "
+                "use a higher-depth batch"
+            )
+        index = bucket.to_bytes(4, "big") + height.to_bytes(4, "big")
+        ts = (timestamp_ms if timestamp_ms is not None else int(time.time() * 1000)).to_bytes(8, "big")
+        to_sign = keccak(addr + self._batch_id + index + ts)
+        signed = Account.sign_message(encode_defunct(primitive=to_sign), private_key=self._key)
+        stamp = self._batch_id + index + ts + bytes(signed.signature)
+        self.buckets[bucket] = height + 1
+        self.save()
+        return stamp.hex(), addr.hex()
 
 
 def stamp_chunk(bee_url: str, batch_id_hex: str, payload: bytes) -> tuple[bytes, str, str]:

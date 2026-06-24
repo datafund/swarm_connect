@@ -6,11 +6,18 @@ No node/network required — validates BMT chunk addressing and that client-side
 sign_stamp produces a correctly-formatted, EIP-191-signed postage stamp that
 recovers to the owner (the format Bee's crypto.Recover validates).
 """
+import pytest
 from eth_account import Account
 from eth_account.messages import encode_defunct
 from eth_hash.auto import keccak
 
-from tests.tools.swarm_stamp import chunk_address, make_chunk, sign_stamp
+from tests.tools.swarm_stamp import (
+    BucketFullError,
+    Stamper,
+    chunk_address,
+    make_chunk,
+    sign_stamp,
+)
 
 OWNER_KEY = "0x" + "11" * 32
 OWNER = Account.from_key(OWNER_KEY).address
@@ -61,3 +68,44 @@ def test_sign_stamp_bucket_matches_chunk_address():
     index = bytes.fromhex(stamp_hex)[32:40]
     bucket = int.from_bytes(index[:4], "big")
     assert bucket == int.from_bytes(addr[:2], "big")  # top 16 bits of the chunk address
+
+
+def _height(stamp_hex: str) -> int:
+    return int.from_bytes(bytes.fromhex(stamp_hex)[36:40], "big")
+
+
+def test_stamper_increments_height_in_same_bucket():
+    st = Stamper(OWNER_KEY, BATCH, depth=20)  # 16 slots/bucket
+    chunk = make_chunk(b"same-bucket-chunk")
+    s1, _ = st.stamp(chunk, timestamp_ms=1)
+    s2, _ = st.stamp(chunk, timestamp_ms=1)
+    assert (_height(s1), _height(s2)) == (0, 1)
+
+
+def test_stamper_persists_and_resumes(tmp_path):
+    sf = str(tmp_path / "stamper.json")
+    chunk = make_chunk(b"persist-chunk")
+    Stamper.load(OWNER_KEY, BATCH, depth=20, state_file=sf).stamp(chunk, timestamp_ms=1)  # height 0
+    # A fresh stamper loaded from the same state continues at height 1, not 0
+    s, _ = Stamper.load(OWNER_KEY, BATCH, depth=20, state_file=sf).stamp(chunk, timestamp_ms=1)
+    assert _height(s) == 1
+
+
+def test_stamper_raises_when_bucket_full():
+    st = Stamper(OWNER_KEY, BATCH, depth=17)  # only 2 slots/bucket
+    chunk = make_chunk(b"fill-bucket")
+    st.stamp(chunk, timestamp_ms=1)
+    st.stamp(chunk, timestamp_ms=1)
+    with pytest.raises(BucketFullError):
+        st.stamp(chunk, timestamp_ms=1)
+
+
+def test_stamper_signature_recovers_owner():
+    st = Stamper(OWNER_KEY, BATCH, depth=20)
+    chunk = make_chunk(b"recover-me")
+    stamp_hex, addr_hex = st.stamp(chunk, timestamp_ms=1_700_000_000_000)
+    raw = bytes.fromhex(stamp_hex)
+    bid, index, ts, sig = bytes.fromhex(BATCH[2:]), raw[32:40], raw[40:48], raw[48:]
+    to_sign = keccak(bytes.fromhex(addr_hex) + bid + index + ts)
+    rec = Account.recover_message(encode_defunct(primitive=to_sign), signature=sig)
+    assert rec.lower() == OWNER.lower()
