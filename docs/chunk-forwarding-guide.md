@@ -49,6 +49,20 @@ Exposed on `/metrics` (scraped by Alloy → Grafana Cloud automatically once dep
 
 Dashboard panels are tracked separately (#234).
 
+### Local end-to-end testing
+
+Against a local Bee node, run the gateway as a pure forwarder and point the live test suite at it:
+
+```bash
+SWARM_BEE_API_URL=http://localhost:1633 CHUNK_UPLOAD_ENABLED=true \
+    X402_ENABLED=false PORT=8011 python run.py
+
+CHUNK_LIVE_GATEWAY_URL=http://127.0.0.1:8011 \
+    python -m pytest tests/test_chunks_live.py -v
+```
+
+`tests/test_chunks_live.py` sends real chunks through the gateway to Bee and asserts validation, forwarding, and error surfacing. It skips when `CHUNK_LIVE_GATEWAY_URL` is unset, so the normal `pytest tests/` run stays hermetic. The valid-stamp happy path (Bee accepts → `201` → retrievable) needs a client-owned batch + local stamping (bee-js); that client path is validated by the Flow B spike (#226).
+
 ---
 
 ## Client guide

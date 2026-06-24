@@ -10,3 +10,4 @@ venv/
 *.db
 VERSION
 data/
+logs/
