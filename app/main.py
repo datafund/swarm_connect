@@ -5,7 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from app.core.config import settings
 from app.core.version import VERSION
-from app.api.endpoints import stamps, data, wallet, pool, notary, chunks
+from app.api.endpoints import stamps, data, wallet, pool, notary, chunks, debug
 import logging
 
 # Configure basic logging
@@ -135,6 +135,9 @@ app.include_router(notary.router, prefix=f"{settings.API_V1_STR}/notary", tags=[
 # credit top-up (POST /chunks/credit, listed in PROTECTED_ENDPOINTS); the chunk
 # upload itself spends prepaid credit via a bearer token, not a per-request payment.
 app.include_router(chunks.router, prefix=f"{settings.API_V1_STR}/chunks", tags=["chunks"], dependencies=x402_deps)
+# Signature-gated read-only Bee diagnostics proxy. Always mounted; the handler
+# returns 404 unless DEBUG_ALLOWED_ADDRESSES is configured.
+app.include_router(debug.router, prefix=f"{settings.API_V1_STR}/debug", tags=["debug"])
 
 @app.get("/", summary="Health Check", tags=["default"])
 @app.get("/health", summary="Health Check", tags=["default"], include_in_schema=False)
