@@ -615,7 +615,9 @@ class TestHealthEndpointWithX402:
         mock_settings.X402_ENABLED = False
         mock_settings.PROJECT_NAME = "Test Gateway"
         from app.main import read_root
-        response = await read_root()
+        with patch("app.services.swarm_api.get_node_status_summary",
+                   new=AsyncMock(return_value={"healthy": True, "network_availability": "Available", "warnings": []})):
+            response = await read_root()
         assert response["status"] == "ok"
         assert "x402" not in response
 
@@ -640,7 +642,9 @@ class TestHealthEndpointWithX402:
             "warnings": [], "errors": []
         }
         from app.main import read_root
-        response = await read_root()
+        with patch("app.services.swarm_api.get_node_status_summary",
+                   new=AsyncMock(return_value={"healthy": True, "network_availability": "Available", "warnings": []})):
+            response = await read_root()
         assert response["status"] == "ok"
         assert response["x402"]["enabled"] is True
 

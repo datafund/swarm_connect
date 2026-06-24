@@ -265,7 +265,7 @@ Swarm Connect is a FastAPI-based API gateway that provides comprehensive access 
 ### Available API Endpoints
 
 #### Core Endpoints
-- `GET /`: Health check endpoint
+- `GET /` (and `/health`): Health check. Always includes a `bee_node` section with the Bee node's connectivity — `mode`, `connected_peers`, `population`, `reachability`, `network_availability` (Available/Unavailable/Unknown), `storage_radius`, `warming_up`, a `healthy` flag, and `warnings`. `status` becomes `degraded` when `network_availability` is `Unavailable` (the node can't reach the storer network, so uploads may return success without propagating). When x402 is enabled, also includes the `x402` wallet section.
 
 #### Stamp Management
 - `POST /api/v1/stamps/`: Purchase new postage stamps with time-based or advanced parameters

@@ -126,7 +126,7 @@ CORS (browser access):
 ### API Endpoints
 
 #### Core Endpoints
-- `GET /`: Health check endpoint
+- `GET /` (and `/health`): Health check. Always includes a `bee_node` section (from Bee `/topology` + `/status`, 15s cached): `mode`, `connected_peers`, `population`, `depth`, `reachability`, `network_availability` (Available/Unavailable/Unknown — Bee sets this from outbound-dial results; Unavailable = OS network/host-unreachable on dials), `storage_radius`, `reserve_size`, `warming_up`, `healthy`, `warnings`. Overall `status` → `degraded` when `network_availability` is `Unavailable` (node can't reach the storer network → uploads may 201 without propagating). x402 wallet section added when `X402_ENABLED`.
 
 #### Stamp Management
 - `POST /api/v1/stamps/`: Purchase new postage stamps (records purchase time for propagation tracking)

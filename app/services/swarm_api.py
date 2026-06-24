@@ -1,6 +1,7 @@
 # app/services/swarm_api.py
 import asyncio
 import datetime
+import time
 import httpx
 import logging
 from typing import List, Dict, Any, Optional
@@ -745,6 +746,88 @@ async def download_data_from_swarm(reference: str) -> bytes:
         _record_bee_error("download")
         logger.error(f"Error downloading data from Swarm API ({api_url}): {e}")
         raise
+
+
+# Short cache so frequent /health calls don't hammer the Bee node.
+_node_status_cache: Dict[str, Any] = {"data": None, "ts": 0.0}
+NODE_STATUS_TTL_SECONDS = 15
+
+
+async def get_node_status_summary(use_cache: bool = True) -> Dict[str, Any]:
+    """
+    Summarize the Bee node's connectivity/health for the gateway /health endpoint.
+
+    Surfaces the signals that determine whether the node can actually push chunks to
+    the network: networkAvailability (Available/Unavailable/Unknown — set by Bee from
+    outbound dial results), connected peer count, mode, and reserve/radius. This lets
+    a client see node health directly from the gateway, without a slow cross-node
+    retrieval probe.
+
+    Returns a dict with a `healthy` boolean and human-readable `warnings`. Never raises.
+    """
+    now = time.time()
+    if use_cache and _node_status_cache["data"] is not None and (now - _node_status_cache["ts"]) < NODE_STATUS_TTL_SECONDS:
+        return _node_status_cache["data"]
+
+    topo: Dict[str, Any] = {}
+    status: Dict[str, Any] = {}
+    try:
+        client = get_client()
+        t_url = urljoin(str(settings.SWARM_BEE_API_URL), "topology")
+        s_url = urljoin(str(settings.SWARM_BEE_API_URL), "status")
+        tr, sr = await asyncio.gather(
+            client.get(t_url, timeout=8),
+            client.get(s_url, timeout=8),
+            return_exceptions=True,
+        )
+        if not isinstance(tr, Exception):
+            try:
+                tr.raise_for_status()
+                topo = tr.json()
+            except Exception:
+                pass
+        if not isinstance(sr, Exception):
+            try:
+                sr.raise_for_status()
+                status = sr.json()
+            except Exception:
+                pass
+    except Exception as e:
+        logger.warning(f"Failed to fetch Bee node status: {e}")
+
+    na = topo.get("networkAvailability")
+    warming = status.get("isWarmingUp")
+    summary: Dict[str, Any] = {
+        "mode": status.get("beeMode"),
+        "connected_peers": status.get("connectedPeers", topo.get("connected")),
+        "population": topo.get("population"),
+        "depth": topo.get("depth"),
+        "reachability": topo.get("reachability"),
+        "network_availability": na,
+        "neighborhood_size": status.get("neighborhoodSize"),
+        "storage_radius": status.get("storageRadius"),
+        "reserve_size": status.get("reserveSize"),
+        "warming_up": warming,
+    }
+
+    warnings = []
+    if not topo and not status:
+        warnings.append("could not query the Bee node (topology/status unavailable)")
+        summary["healthy"] = False
+    else:
+        if na is not None and na != "Available":
+            warnings.append(
+                f"network availability is '{na}' — the node may not reach the storer "
+                "network; uploads can report success without propagating"
+            )
+        if warming:
+            warnings.append("node is warming up")
+        summary["healthy"] = (na == "Available") and not bool(warming)
+    summary["warnings"] = warnings
+
+    _node_status_cache["data"] = summary
+    _node_status_cache["ts"] = now
+    return summary
 
 
 async def get_wallet_info() -> Dict[str, Any]:
