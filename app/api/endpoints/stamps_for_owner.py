@@ -9,18 +9,23 @@ gateway's Gnosis funds, so it is OFF by default and guarded (#230):
   - owner allow-list (STAMP_FOR_OTHERS_REQUIRE_WHITELIST / _OWNER_WHITELIST),
   - hard caps on depth / BZZ cost / duration — all enforced BEFORE any on-chain spend.
 
-x402 payment is added separately (#229); this endpoint works standalone.
+When x402 is enabled (#229) the caller pays for the service via the /api/v1/stamps/
+protected prefix; free-tier creation is OFF by default (real BZZ is spent). Before the
+on-chain write the gateway's own signer wallet is preflighted (#231) so we never attempt
+a createBatch we cannot fund.
 """
 import logging
 
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, HTTPException, Request, status
 
 from app.api.models.stamp import StampForOwnerRequest, StampForOwnerResponse
 from app.core.config import settings
-from app.services import swarm_api
+from app.services import metrics, swarm_api
 from app.services.gnosis_chain import GnosisChainError, gnosis_chain_client
 from app.services.stamp_ownership import stamp_ownership_manager
 from app.services.stamp_tracker import record_purchase
+from app.x402.audit import log_stamp_purchased
+from app.x402.middleware import get_client_ip
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -34,7 +39,7 @@ PLUR_PER_BZZ = 10 ** 16
     status_code=status.HTTP_201_CREATED,
     summary="Create a postage batch owned by an external address",
 )
-async def create_batch_for_owner(body: StampForOwnerRequest) -> StampForOwnerResponse:
+async def create_batch_for_owner(body: StampForOwnerRequest, request: Request) -> StampForOwnerResponse:
     """Create a postage batch on Gnosis owned by `body.owner` (Flow B).
 
     Guarded by a master toggle, an owner allow-list, and hard caps (depth/BZZ/duration),
@@ -83,14 +88,39 @@ async def create_batch_for_owner(body: StampForOwnerRequest) -> StampForOwnerRes
             "message": f"batch cost {cost_bzz:.6f} BZZ exceeds max {settings.STAMP_FOR_OTHERS_MAX_BZZ} BZZ",
             "cost_bzz": round(cost_bzz, 6), "max_bzz": settings.STAMP_FOR_OTHERS_MAX_BZZ})
 
+    # --- x402: free-tier creation is OFF by default (#229), since this spends real BZZ ---
+    x402_mode = getattr(request.state, "x402_mode", None)
+    payer = getattr(request.state, "x402_payer", None)
+    if x402_mode == "free-tier" and not settings.STAMP_FOR_OTHERS_FREE_TIER_ENABLED:
+        metrics.for_owner_batches_total.labels(status="payment_required").inc()
+        raise HTTPException(status_code=status.HTTP_402_PAYMENT_REQUIRED, detail={
+            "code": "FREE_TIER_DISABLED",
+            "message": "Buy-batch-for-owner requires payment (free tier disabled); send an X-PAYMENT header."})
+
     if not gnosis_chain_client.is_configured:
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                             detail="Gnosis chain client is not configured on this gateway.")
+
+    # --- preflight the signer wallet (#231): never attempt a createBatch we can't fund ---
+    try:
+        pf = await gnosis_chain_client.preflight(required_plur=total_cost_plur)
+    except Exception as e:
+        logger.error(f"for-owner: signer preflight failed: {e}")
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                            detail="Could not read the gateway signer wallet balance.")
+    if pf["is_critical"]:
+        metrics.for_owner_batches_total.labels(status="insufficient_funds").inc()
+        logger.error(f"for-owner: signer wallet cannot fund batch: {pf['warnings']}")
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail={
+            "code": "SIGNER_INSUFFICIENT_FUNDS",
+            "message": "Gateway signer wallet has insufficient funds to create this batch.",
+            "warnings": pf["warnings"]})
 
     # --- on-chain createBatch(owner=...) ---
     try:
         result = await gnosis_chain_client.create_batch(owner, amount, depth, immutable=body.immutable)
     except GnosisChainError as e:
+        metrics.for_owner_batches_total.labels(status="error").inc()
         logger.error(f"for-owner: createBatch failed: {e}")
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY,
                             detail=f"createBatch failed: {e}")
@@ -102,6 +132,18 @@ async def create_batch_for_owner(body: StampForOwnerRequest) -> StampForOwnerRes
     record_purchase(bid)
     stamp_ownership_manager.register_stamp(batch_id=bid, owner=owner, mode="paid", source="created_for_owner")
     prop = swarm_api.calculate_propagation_signals(bid, usable=None)
+
+    # metrics + audit (payer is the x402 caller; owner is the batch owner)
+    metrics.for_owner_batches_total.labels(status="success").inc()
+    metrics.for_owner_bzz_spent_total.inc(total_cost_plur)
+    try:
+        log_stamp_purchased(
+            client_ip=get_client_ip(request), stamp_id=bid, amount=amount, depth=depth,
+            duration_hours=body.duration_hours, cost_bzz=round(cost_bzz, 8),
+            wallet_address=payer or result["owner"],
+        )
+    except Exception as e:  # auditing must never fail the request
+        logger.debug(f"for-owner: audit log failed: {e}")
 
     return StampForOwnerResponse(
         batchID=bid,

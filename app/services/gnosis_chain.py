@@ -20,6 +20,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import secrets
+import time
 from typing import Any, Dict, Optional
 
 from eth_abi import encode as abi_encode
@@ -31,6 +32,7 @@ from app.core.config import settings
 logger = logging.getLogger(__name__)
 
 BUCKET_DEPTH = 16  # fixed by the Swarm protocol
+PLUR_PER_BZZ = 10 ** 16  # 1 BZZ = 10^16 PLUR
 
 # Verified contract/token addresses per chain (ethersphere/go-storage-incentives-abi).
 CHAIN_DEFAULTS = {
@@ -93,6 +95,8 @@ class GnosisChainClient:
         self._bzz = (bzz_token or settings.BZZ_TOKEN_ADDRESS or defaults.get("bzz_token"))
         self._w3 = None
         self._acct = None
+        self._bal_cache = None
+        self._bal_ts = 0.0
 
     def __repr__(self):  # never leak the key
         return f"<GnosisChainClient chain_id={self._chain_id} configured={self.is_configured}>"
@@ -181,8 +185,44 @@ class GnosisChainClient:
             "address": acct.address,
         }
 
-    async def get_balances(self) -> Dict[str, int]:
-        return await asyncio.to_thread(self._balance_sync)
+    async def get_balances(self, use_cache: bool = True) -> Dict[str, int]:
+        now = time.time()
+        if use_cache and self._bal_cache is not None and (now - self._bal_ts) < 15:
+            return self._bal_cache
+        bals = await asyncio.to_thread(self._balance_sync)
+        self._bal_cache, self._bal_ts = bals, now
+        return bals
+
+    async def preflight(self, required_plur: int = 0, use_cache: bool = False) -> Dict[str, Any]:
+        """Check the signer wallet can fund a batch (gas + BZZ) before spending.
+
+        is_critical (block) when xDAI is below the gas floor or xBZZ can't cover
+        `required_plur`. Returns balances + warnings for /health and metrics.
+        """
+        bals = await self.get_balances(use_cache=use_cache)
+        xbzz_plur, xdai_wei = bals["xbzz_plur"], bals["xdai_wei"]
+        xdai = xdai_wei / 1e18
+        xbzz = xbzz_plur / PLUR_PER_BZZ
+        crit = settings.GNOSIS_XDAI_CRITICAL_THRESHOLD
+        no_gas = xdai < crit
+        insufficient_bzz = required_plur > 0 and xbzz_plur < required_plur
+        warnings = []
+        if no_gas:
+            warnings.append(f"signer xDAI {xdai:.6f} below critical {crit} — cannot pay gas")
+        elif xdai < settings.GNOSIS_XDAI_WARN_THRESHOLD:
+            warnings.append(f"signer xDAI {xdai:.6f} low")
+        if insufficient_bzz:
+            warnings.append(f"signer xBZZ {xbzz:.6f} below batch cost {required_plur / PLUR_PER_BZZ:.6f}")
+        elif xbzz < settings.GNOSIS_XBZZ_WARN_THRESHOLD:
+            warnings.append(f"signer xBZZ {xbzz:.6f} low")
+        return {
+            "ok": not (no_gas or insufficient_bzz),
+            "is_critical": no_gas or insufficient_bzz,
+            "address": bals.get("address"),
+            "xbzz_bzz": round(xbzz, 8),
+            "xdai": round(xdai, 8),
+            "warnings": warnings,
+        }
 
 
 # Global singleton (configured from settings).

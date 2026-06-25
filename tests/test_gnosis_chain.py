@@ -5,7 +5,7 @@ Tests for the Gnosis chain client (Flow B #227).
 The on-chain orchestration is tested by patching _connect() to return a fake
 web3 + account, so no RPC or web3 internals are needed.
 """
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from eth_abi import encode as abi_encode
@@ -125,3 +125,36 @@ async def test_create_batch_async_wraps_sync():
     with patch.object(GnosisChainClient, "_connect", return_value=(w3, acct)):
         res = await c.create_batch(OWNER, 1000, 17, nonce=NONCE)
     assert res["batch_id"] == compute_batch_id(ADDR, NONCE)
+
+
+# --------------------------------------------------------------------------- #
+# signer preflight (#231)
+# --------------------------------------------------------------------------- #
+@pytest.mark.asyncio
+async def test_preflight_ok_when_funded():
+    c = GnosisChainClient(rpc_url="x", private_key=KEY, chain_id=100)
+    c.get_balances = AsyncMock(return_value={
+        "xbzz_plur": 10 * 10**16, "xdai_wei": 10**18, "address": ADDR})  # 10 BZZ, 1 xDAI
+    pf = await c.preflight(required_plur=2 * 10**16)
+    assert pf["ok"] and not pf["is_critical"]
+    assert pf["warnings"] == []
+
+
+@pytest.mark.asyncio
+async def test_preflight_critical_no_gas():
+    c = GnosisChainClient(rpc_url="x", private_key=KEY, chain_id=100)
+    c.get_balances = AsyncMock(return_value={
+        "xbzz_plur": 10 * 10**16, "xdai_wei": 0, "address": ADDR})  # no xDAI -> no gas
+    pf = await c.preflight(required_plur=10**16)
+    assert pf["is_critical"] and not pf["ok"]
+    assert any("xDAI" in w for w in pf["warnings"])
+
+
+@pytest.mark.asyncio
+async def test_preflight_critical_insufficient_bzz():
+    c = GnosisChainClient(rpc_url="x", private_key=KEY, chain_id=100)
+    c.get_balances = AsyncMock(return_value={
+        "xbzz_plur": 10**15, "xdai_wei": 10**18, "address": ADDR})  # 0.1 BZZ < cost
+    pf = await c.preflight(required_plur=10**16)  # needs 1 BZZ
+    assert pf["is_critical"]
+    assert any("xBZZ" in w for w in pf["warnings"])

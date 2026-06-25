@@ -46,6 +46,7 @@ async def lifespan(app: FastAPI):
             "pool_enabled": str(settings.STAMP_POOL_ENABLED),
             "notary_enabled": str(settings.NOTARY_ENABLED),
             "chunk_upload_enabled": str(settings.CHUNK_UPLOAD_ENABLED),
+            "stamp_purchase_for_others_enabled": str(settings.STAMP_PURCHASE_FOR_OTHERS_ENABLED),
         })
         await start_metrics_background_task()
 
@@ -138,10 +139,11 @@ app.include_router(chunks.router, prefix=f"{settings.API_V1_STR}/chunks", tags=[
 # Signature-gated read-only Bee diagnostics proxy. Always mounted; the handler
 # returns 404 unless DEBUG_ALLOWED_ADDRESSES is configured.
 app.include_router(debug.router, prefix=f"{settings.API_V1_STR}/debug", tags=["debug"])
-# Flow B: create batch for an external owner. Separate router (no x402 dep yet — that
-# is #229) so it isn't caught by the /stamps/ payment gate; handler 404s + is guarded
-# (toggle off by default, allow-list + caps) so the spend path is never open.
-app.include_router(stamps_for_owner.router, prefix=f"{settings.API_V1_STR}/stamps", tags=["stamps"])
+# Flow B: create batch for an external owner. Carries the x402 dependency (#229) so,
+# when x402 is enabled, the caller pays for the service via the /api/v1/stamps/ protected
+# prefix; the handler is also 404'd + guarded (toggle off by default, allow-list + caps)
+# so the on-chain spend path is never open.
+app.include_router(stamps_for_owner.router, prefix=f"{settings.API_V1_STR}/stamps", tags=["stamps"], dependencies=x402_deps)
 
 @app.get("/", summary="Health Check", tags=["default"])
 @app.get("/health", summary="Health Check", tags=["default"], include_in_schema=False)

@@ -20,7 +20,7 @@ def client():
 
 
 def _settings(enabled=True, require_wl=False, whitelist=None,
-              max_depth=22, max_bzz=1.0, max_dur=168):
+              max_depth=22, max_bzz=1.0, max_dur=168, free_tier=False):
     ms = MagicMock()
     ms.STAMP_PURCHASE_FOR_OTHERS_ENABLED = enabled
     ms.STAMP_FOR_OTHERS_REQUIRE_WHITELIST = require_wl
@@ -28,6 +28,7 @@ def _settings(enabled=True, require_wl=False, whitelist=None,
     ms.STAMP_FOR_OTHERS_MAX_DEPTH = max_depth
     ms.STAMP_FOR_OTHERS_MAX_BZZ = max_bzz
     ms.STAMP_FOR_OTHERS_MAX_DURATION_HOURS = max_dur
+    ms.STAMP_FOR_OTHERS_FREE_TIER_ENABLED = free_tier
     return ms
 
 
@@ -40,6 +41,7 @@ def env():
         return {"batch_id": "0x" + "ab" * 32, "tx_hash": "0xdead", "owner": owner}
 
     gc.create_batch = AsyncMock(side_effect=_cb)
+    gc.preflight = AsyncMock(return_value={"is_critical": False, "warnings": []})
     with patch("app.services.swarm_api.get_chainstate", AsyncMock(return_value={"currentPrice": "100000"})), \
          patch("app.api.endpoints.stamps_for_owner.gnosis_chain_client", gc), \
          patch("app.api.endpoints.stamps_for_owner.record_purchase"), \
@@ -104,3 +106,23 @@ def test_at_limit_succeeds(client, env):
     with patch("app.api.endpoints.stamps_for_owner.settings", _settings(max_depth=17)):
         r = _post(client, size="small")  # depth 17 == max
     assert r.status_code == 201
+
+
+# --- signer preflight (#231): never spend if the gateway wallet can't fund it ---
+def test_insufficient_signer_funds_503_no_spend(client, env):
+    env.preflight = AsyncMock(return_value={
+        "is_critical": True, "warnings": ["signer xDAI 0.0 below critical"]})
+    with patch("app.api.endpoints.stamps_for_owner.settings", _settings()):
+        r = _post(client)
+    assert r.status_code == 503
+    assert r.json()["detail"]["code"] == "SIGNER_INSUFFICIENT_FUNDS"
+    env.create_batch.assert_not_called()  # no spend attempted
+
+
+def test_preflight_called_with_batch_cost(client, env):
+    with patch("app.api.endpoints.stamps_for_owner.settings", _settings()):
+        r = _post(client)
+    assert r.status_code == 201
+    env.preflight.assert_awaited_once()
+    # required_plur passed so preflight can compare against xBZZ
+    assert env.preflight.call_args.kwargs.get("required_plur", 0) > 0

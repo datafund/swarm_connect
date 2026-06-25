@@ -115,6 +115,11 @@ class Settings(BaseSettings):
     STAMP_FOR_OTHERS_MAX_DEPTH: int = 22              # cap batch depth (capacity)
     STAMP_FOR_OTHERS_MAX_BZZ: float = 1.0             # cap BZZ spent per batch
     STAMP_FOR_OTHERS_MAX_DURATION_HOURS: int = 168    # cap TTL (1 week)
+    STAMP_FOR_OTHERS_FREE_TIER_ENABLED: bool = False  # free creation OFF by default (real BZZ spend)
+    # Signer (GNOSIS_PRIVATE_KEY) wallet thresholds for preflight + metrics (#231).
+    GNOSIS_XDAI_CRITICAL_THRESHOLD: float = 0.005     # block (503) if xDAI below this (no gas)
+    GNOSIS_XDAI_WARN_THRESHOLD: float = 0.05
+    GNOSIS_XBZZ_WARN_THRESHOLD: float = 0.5           # warn if xBZZ (BZZ units) below this
 
     # === Notary/Provenance Signing Settings ===
     # The notary feature allows the gateway to sign documents with an authoritative timestamp.

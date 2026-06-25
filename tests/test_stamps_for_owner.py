@@ -39,6 +39,7 @@ def env():
         return {"batch_id": "0x" + "ab" * 32, "tx_hash": "0xdead", "owner": owner}
 
     gc.create_batch = AsyncMock(side_effect=_cb)
+    gc.preflight = AsyncMock(return_value={"is_critical": False, "warnings": []})
     with patch("app.services.swarm_api.get_chainstate", AsyncMock(return_value={"currentPrice": "100000"})), \
          patch("app.api.endpoints.stamps_for_owner.gnosis_chain_client", gc), \
          patch("app.api.endpoints.stamps_for_owner.record_purchase") as rp, \

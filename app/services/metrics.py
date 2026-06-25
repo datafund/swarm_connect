@@ -103,6 +103,20 @@ bandwidth_credit_bytes_total = Gauge(
     "gateway_bandwidth_credit_bytes_total", "Total outstanding (unspent) bandwidth credit in bytes"
 )
 
+# ── Flow B: buy-batch-for-owner (#231) ──────────────────────────────────────
+for_owner_batches_total = Counter(
+    "gateway_for_owner_batches_total", "createBatch-for-owner attempts", ["status"]
+)
+for_owner_bzz_spent_total = Counter(
+    "gateway_for_owner_bzz_spent_total", "Total PLUR spent creating batches for owners"
+)
+gnosis_signer_xbzz_balance = Gauge(
+    "gateway_gnosis_signer_xbzz_balance", "Gnosis signer wallet xBZZ balance (BZZ)"
+)
+gnosis_signer_xdai_balance = Gauge(
+    "gateway_gnosis_signer_xdai_balance", "Gnosis signer wallet xDAI balance"
+)
+
 # ── Background task ──────────────────────────────────────────────────────────
 
 _background_task = None
@@ -208,6 +222,17 @@ async def _poll_balances():
                     bandwidth_credit_bytes_total.set(bandwidth_credit_manager.total_outstanding_bytes())
                 except Exception as e:
                     logger.debug(f"Metrics: failed to get bandwidth credit state: {e}")
+
+            # Gnosis signer wallet balances (buy-batch-for-owner feature)
+            if settings.STAMP_PURCHASE_FOR_OTHERS_ENABLED:
+                try:
+                    from app.services.gnosis_chain import gnosis_chain_client
+                    if gnosis_chain_client.is_configured:
+                        bals = await gnosis_chain_client.get_balances()
+                        gnosis_signer_xbzz_balance.set(bals["xbzz_plur"] / 1e16)
+                        gnosis_signer_xdai_balance.set(bals["xdai_wei"] / 1e18)
+                except Exception as e:
+                    logger.debug(f"Metrics: failed to get Gnosis signer balances: {e}")
 
         except Exception as e:
             logger.warning(f"Metrics background poll error: {e}")
