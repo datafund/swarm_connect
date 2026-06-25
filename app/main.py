@@ -5,7 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from app.core.config import settings
 from app.core.version import VERSION
-from app.api.endpoints import stamps, data, wallet, pool, notary, chunks, debug
+from app.api.endpoints import stamps, data, wallet, pool, notary, chunks, debug, stamps_for_owner
 import logging
 
 # Configure basic logging
@@ -138,6 +138,10 @@ app.include_router(chunks.router, prefix=f"{settings.API_V1_STR}/chunks", tags=[
 # Signature-gated read-only Bee diagnostics proxy. Always mounted; the handler
 # returns 404 unless DEBUG_ALLOWED_ADDRESSES is configured.
 app.include_router(debug.router, prefix=f"{settings.API_V1_STR}/debug", tags=["debug"])
+# Flow B: create batch for an external owner. Separate router (no x402 dep yet — that
+# is #229) so it isn't caught by the /stamps/ payment gate; handler 404s + is guarded
+# (toggle off by default, allow-list + caps) so the spend path is never open.
+app.include_router(stamps_for_owner.router, prefix=f"{settings.API_V1_STR}/stamps", tags=["stamps"])
 
 @app.get("/", summary="Health Check", tags=["default"])
 @app.get("/health", summary="Health Check", tags=["default"], include_in_schema=False)

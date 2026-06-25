@@ -273,6 +273,7 @@ Swarm Connect is a FastAPI-based API gateway that provides comprehensive access 
 - `GET /api/v1/stamps/{stamp_id}`: Retrieve specific stamp batch details
 - `GET /api/v1/stamps/{stamp_id}/check`: Check stamp health for uploads (errors and warnings)
 - `PATCH /api/v1/stamps/{stamp_id}/extend`: Extend existing stamps with additional funds
+- `POST /api/v1/stamps/for-owner`: **Create a postage batch owned by an arbitrary address** (Flow B). Calls `PostageStamp.createBatch(owner=…)` on Gnosis so the owner can sign its own stamps off-node. Body: `owner` (0x address), `size`/`depth`, `duration_hours`, optional `immutable`. Returns `batchID` + `txHash`. **Spends the gateway's Gnosis funds**, so it is OFF by default (`STAMP_PURCHASE_FOR_OTHERS_ENABLED`; 404 when off) and guarded by an owner **allow-list** (`STAMP_FOR_OTHERS_REQUIRE_WHITELIST` / `_OWNER_WHITELIST`) and hard caps (`STAMP_FOR_OTHERS_MAX_DEPTH` / `_MAX_BZZ` / `_MAX_DURATION_HOURS`), all enforced before any spend.
 
 #### Data Operations
 - `POST /api/v1/data/?stamp_id={id}&content_type={type}`: Upload raw data to Swarm

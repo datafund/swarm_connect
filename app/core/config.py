@@ -106,6 +106,16 @@ class Settings(BaseSettings):
     POSTAGE_STAMP_CONTRACT_ADDRESS: Optional[str] = None
     BZZ_TOKEN_ADDRESS: Optional[str] = None
 
+    # === Flow B: buy postage batch for an external owner — endpoint (#228) + guards (#230) ===
+    # POST /api/v1/stamps/for-owner. SPENDS the gateway's Gnosis funds, so it is OFF by
+    # default and gated by an owner allow-list + hard alpha caps.
+    STAMP_PURCHASE_FOR_OTHERS_ENABLED: bool = False  # master toggle (router 404s when off)
+    STAMP_FOR_OTHERS_REQUIRE_WHITELIST: bool = True   # require owner in the allow-list
+    STAMP_FOR_OTHERS_OWNER_WHITELIST: str = ""        # comma-separated 0x owner addresses allowed
+    STAMP_FOR_OTHERS_MAX_DEPTH: int = 22              # cap batch depth (capacity)
+    STAMP_FOR_OTHERS_MAX_BZZ: float = 1.0             # cap BZZ spent per batch
+    STAMP_FOR_OTHERS_MAX_DURATION_HOURS: int = 168    # cap TTL (1 week)
+
     # === Notary/Provenance Signing Settings ===
     # The notary feature allows the gateway to sign documents with an authoritative timestamp.
     # This provides proof that a document existed at a specific time, signed by the gateway.
@@ -186,6 +196,12 @@ class Settings(BaseSettings):
         if not self.X402_WHITELIST_IPS:
             return []
         return [ip.strip() for ip in self.X402_WHITELIST_IPS.split(",") if ip.strip()]
+
+    def get_stamp_for_others_whitelist(self) -> List[str]:
+        """Parse the for-owner allow-list into lowercased 0x addresses."""
+        if not self.STAMP_FOR_OTHERS_OWNER_WHITELIST:
+            return []
+        return [a.strip().lower() for a in self.STAMP_FOR_OTHERS_OWNER_WHITELIST.split(",") if a.strip()]
 
     def get_debug_allowed_addresses(self) -> List[str]:
         """Parse the debug allow-list into lowercased 0x addresses."""
