@@ -492,6 +492,7 @@ class TestProtectedEndpoints:
             ("POST", "/api/v1/stamps/"),
             ("POST", "/api/v1/data/"),
             ("POST", "/api/v1/data/manifest"),
+            ("POST", "/api/v1/chunks/credit"),
         ]
         assert PROTECTED_ENDPOINTS == expected
 

@@ -265,7 +265,7 @@ Swarm Connect is a FastAPI-based API gateway that provides comprehensive access 
 ### Available API Endpoints
 
 #### Core Endpoints
-- `GET /`: Health check endpoint
+- `GET /` (and `/health`): Health check. Always includes a `bee_node` section with the Bee node's connectivity — `mode`, `connected_peers`, `population`, `reachability`, `network_availability` (Available/Unavailable/Unknown), `storage_radius`, `warming_up`, a `healthy` flag, and `warnings`. `status` becomes `degraded` when `network_availability` is `Unavailable` (the node can't reach the storer network, so uploads may return success without propagating). When x402 is enabled, also includes the `x402` wallet section.
 
 #### Stamp Management
 - `POST /api/v1/stamps/`: Purchase new postage stamps with time-based or advanced parameters
@@ -279,6 +279,15 @@ Swarm Connect is a FastAPI-based API gateway that provides comprehensive access 
 - `POST /api/v1/data/manifest?stamp_id={id}`: Upload TAR archive as collection/manifest (15x faster for batch uploads)
 - `GET /api/v1/data/{reference}`: Download raw data from Swarm (returns bytes directly)
 - `GET /api/v1/data/{reference}/json`: Download data with JSON metadata (base64-encoded)
+
+#### Debug (read-only Bee diagnostics)
+- `GET /api/v1/debug/bee/{path}`: signature-gated read-only proxy to allow-listed Bee diagnostic endpoints (`topology`, `addresses`, `peers`, `status`, `chainstate`, …) for operators who only have gateway access. Disabled (404) unless `DEBUG_ALLOWED_ADDRESSES` is set; requires an EIP-191 signature from an allow-listed address (`X-Debug-Timestamp` + `X-Debug-Signature` over `swarm-connect-debug:<unix_ts>`). No shared secret is stored.
+
+#### Chunk Forwarding (pre-stamped)
+- `POST /api/v1/chunks/`: Forward a single **client-supplied pre-stamped** chunk to Swarm. Send the raw chunk as the body and the marshaled stamp in the `Swarm-Postage-Stamp` header. The client owns the postage batch and stamps locally; the gateway is a thin forwarder (does not verify the stamp — Bee does). Optional `?deferred=true`. Requires `CHUNK_UPLOAD_ENABLED=true` (returns 404 when disabled). When x402 is enabled, the upload spends prepaid bandwidth credit: present the bearer token from the top-up in the `X-Bandwidth-Credit-Token` header (the chunk's byte length is debited). A **free tier** is also available — send `X-Payment-Mode: free` to draw from a per-IP daily byte quota (`CHUNK_UPLOAD_FREE_TIER_MB_PER_DAY`); exceeding it returns `429`.
+- `POST /api/v1/chunks/credit?mb={n}`: Add prepaid bandwidth credit with a single x402 payment (priced at `X402_BANDWIDTH_USD_PER_GB`, minimum `BANDWIDTH_CREDIT_MIN_TOPUP_MB`). Returns a bearer **credit token** bound to the payer wallet; reuse it across many chunk uploads so per-chunk requests never hit the minimum-price floor.
+
+See the [Chunk Forwarding Guide](docs/chunk-forwarding-guide.md) for operator configuration and client integration.
 
 #### Wallet Information
 - `GET /api/v1/wallet`: Get the wallet address and BZZ balance of the Bee node

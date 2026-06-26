@@ -86,6 +86,15 @@ class Settings(BaseSettings):
     # Stamp ownership: file path for persisting stamp ownership records
     STAMP_OWNERSHIP_FILE: str = "data/stamp_owners.json"
 
+    # === Debug Proxy (read-only Bee diagnostics, signature-gated) ===
+    # Comma-separated 0x addresses allowed to read Bee diagnostics via
+    # GET /api/v1/debug/bee/{path}. Access requires an EIP-191 signature from one
+    # of these addresses over "swarm-connect-debug:<unix_ts>" (headers
+    # X-Debug-Address optional, X-Debug-Timestamp, X-Debug-Signature). Empty =>
+    # endpoint disabled (404). Addresses are public identifiers, not secrets.
+    DEBUG_ALLOWED_ADDRESSES: str = ""
+    DEBUG_SIG_MAX_AGE_SECONDS: int = 300  # signature freshness window (replay guard)
+
     # === Notary/Provenance Signing Settings ===
     # The notary feature allows the gateway to sign documents with an authoritative timestamp.
     # This provides proof that a document existed at a specific time, signed by the gateway.
@@ -97,6 +106,29 @@ class Settings(BaseSettings):
 
     # === Upload Limits ===
     MAX_UPLOAD_SIZE_MB: int = 10  # Maximum file upload size in megabytes
+
+    # === Chunk Upload (stamped-chunk forwarding, Flow A) ===
+    # When enabled, the gateway forwards a single client-supplied PRE-STAMPED chunk
+    # to the Bee node's POST /chunks endpoint using the Swarm-Postage-Stamp header.
+    # The client controls the postage stamp; the gateway is a thin forwarder and does
+    # NOT verify the stamp signature/owner (Bee does that).
+    CHUNK_UPLOAD_ENABLED: bool = False  # Master switch for chunk forwarding feature
+    # A single Swarm chunk is at most an 8-byte span prefix + 4096 bytes of payload.
+    CHUNK_UPLOAD_MAX_BYTES_PER_REQUEST: int = 4104  # Hard cap on the chunk body size
+    # Free tier for chunk uploads: a per-IP daily byte quota, independent of the
+    # x402 (stamp/data) free tier. Opt in per request with header X-Payment-Mode: free.
+    CHUNK_UPLOAD_FREE_TIER_ENABLED: bool = True  # Allow free chunk uploads within a daily quota
+    CHUNK_UPLOAD_FREE_TIER_MB_PER_DAY: int = 100  # Free bytes per IP per UTC day (1 MB = 10^6 bytes)
+
+    # === Bandwidth Credit Ledger ===
+    # Prepaid, byte-denominated credit balances keyed by client address. One x402
+    # payment tops up a balance; each chunk upload debits bytes from it. This avoids
+    # the per-request minimum-price floor collapsing onto every tiny chunk.
+    BANDWIDTH_CREDIT_STATE_FILE: str = "data/bandwidth_credit.json"  # Ledger persistence path
+    # Bandwidth price used to convert an x402 top-up payment into byte credit.
+    X402_BANDWIDTH_USD_PER_GB: float = 0.10  # USD per GB of upload bandwidth (1 GB = 10^9 bytes)
+    # Minimum top-up so a single x402 payment clears the per-request price floor.
+    BANDWIDTH_CREDIT_MIN_TOPUP_MB: int = 100  # Minimum credit top-up in MB (1 MB = 10^6 bytes)
 
     # === JSON Body Limits ===
     MAX_JSON_BODY_BYTES: int = 1_048_576  # Maximum JSON body size (1 MB)
@@ -143,6 +175,12 @@ class Settings(BaseSettings):
         if not self.X402_WHITELIST_IPS:
             return []
         return [ip.strip() for ip in self.X402_WHITELIST_IPS.split(",") if ip.strip()]
+
+    def get_debug_allowed_addresses(self) -> List[str]:
+        """Parse the debug allow-list into lowercased 0x addresses."""
+        if not self.DEBUG_ALLOWED_ADDRESSES:
+            return []
+        return [a.strip().lower() for a in self.DEBUG_ALLOWED_ADDRESSES.split(",") if a.strip()]
 
     def get_stamp_pool_reserve_config(self) -> dict:
         """Get stamp pool reserve configuration as {depth: count} dict.

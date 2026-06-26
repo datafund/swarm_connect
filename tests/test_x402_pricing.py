@@ -3,7 +3,7 @@
 Unit tests for x402 pricing service.
 """
 import pytest
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch, MagicMock, AsyncMock
 
 from app.x402.pricing import (
     plur_to_bzz,
@@ -73,8 +73,9 @@ class TestCalculateStampPriceUSD:
     """Test stamp price calculations."""
 
     @patch("app.x402.pricing.settings")
-    @patch("app.x402.pricing.get_chainstate")
-    def test_basic_stamp_price(self, mock_chainstate, mock_settings):
+    @patch("app.x402.pricing.get_chainstate", new_callable=AsyncMock)
+    @pytest.mark.asyncio
+    async def test_basic_stamp_price(self, mock_chainstate, mock_settings):
         """Calculate basic stamp price."""
         # Configure mocks
         mock_settings.X402_BZZ_USD_RATE = 0.50
@@ -84,7 +85,7 @@ class TestCalculateStampPriceUSD:
         # Current price of 1000 PLUR per chunk per block
         mock_chainstate.return_value = {"currentPrice": "1000"}
 
-        result = calculate_stamp_price_usd(
+        result = await calculate_stamp_price_usd(
             duration_hours=24,
             depth=17,
             include_breakdown=True
@@ -104,8 +105,9 @@ class TestCalculateStampPriceUSD:
         assert result["markup_percent"] == 50.0
 
     @patch("app.x402.pricing.settings")
-    @patch("app.x402.pricing.get_chainstate")
-    def test_minimum_price_applied(self, mock_chainstate, mock_settings):
+    @patch("app.x402.pricing.get_chainstate", new_callable=AsyncMock)
+    @pytest.mark.asyncio
+    async def test_minimum_price_applied(self, mock_chainstate, mock_settings):
         """Verify minimum price is applied for small requests."""
         mock_settings.X402_BZZ_USD_RATE = 0.50
         mock_settings.X402_MARKUP_PERCENT = 0.0
@@ -114,7 +116,7 @@ class TestCalculateStampPriceUSD:
         # Very low price to trigger minimum
         mock_chainstate.return_value = {"currentPrice": "1"}
 
-        result = calculate_stamp_price_usd(
+        result = await calculate_stamp_price_usd(
             duration_hours=1,
             depth=17,
             include_breakdown=True
@@ -124,8 +126,9 @@ class TestCalculateStampPriceUSD:
         assert result["minimum_applied"] is True
 
     @patch("app.x402.pricing.settings")
-    @patch("app.x402.pricing.get_chainstate")
-    def test_markup_applied(self, mock_chainstate, mock_settings):
+    @patch("app.x402.pricing.get_chainstate", new_callable=AsyncMock)
+    @pytest.mark.asyncio
+    async def test_markup_applied(self, mock_chainstate, mock_settings):
         """Verify markup is correctly applied."""
         mock_settings.X402_BZZ_USD_RATE = 1.00  # 1:1 for easy calculation
         mock_settings.X402_MARKUP_PERCENT = 100.0  # Double the price
@@ -133,7 +136,7 @@ class TestCalculateStampPriceUSD:
 
         mock_chainstate.return_value = {"currentPrice": "1000000"}
 
-        result = calculate_stamp_price_usd(
+        result = await calculate_stamp_price_usd(
             duration_hours=24,
             depth=17,
             include_breakdown=True
@@ -146,17 +149,19 @@ class TestCalculateStampPriceUSD:
         # Allow for rounding
         assert abs(final_price - base_cost * 2) < 0.01
 
-    @patch("app.x402.pricing.get_chainstate")
-    def test_invalid_chainstate_price(self, mock_chainstate):
+    @patch("app.x402.pricing.get_chainstate", new_callable=AsyncMock)
+    @pytest.mark.asyncio
+    async def test_invalid_chainstate_price(self, mock_chainstate):
         """Raise error for invalid chainstate price."""
         mock_chainstate.return_value = {"currentPrice": "0"}
 
         with pytest.raises(ValueError, match="Invalid current price"):
-            calculate_stamp_price_usd(duration_hours=24, depth=17)
+            await calculate_stamp_price_usd(duration_hours=24, depth=17)
 
     @patch("app.x402.pricing.settings")
-    @patch("app.x402.pricing.get_chainstate")
-    def test_breakdown_structure(self, mock_chainstate, mock_settings):
+    @patch("app.x402.pricing.get_chainstate", new_callable=AsyncMock)
+    @pytest.mark.asyncio
+    async def test_breakdown_structure(self, mock_chainstate, mock_settings):
         """Verify breakdown contains all expected fields."""
         mock_settings.X402_BZZ_USD_RATE = 0.50
         mock_settings.X402_MARKUP_PERCENT = 50.0
@@ -164,7 +169,7 @@ class TestCalculateStampPriceUSD:
 
         mock_chainstate.return_value = {"currentPrice": "1000"}
 
-        result = calculate_stamp_price_usd(
+        result = await calculate_stamp_price_usd(
             duration_hours=24,
             depth=17,
             include_breakdown=True
@@ -183,8 +188,9 @@ class TestCalculateStampPriceUSD:
         assert "final_price_usd" in breakdown
 
     @patch("app.x402.pricing.settings")
-    @patch("app.x402.pricing.get_chainstate")
-    def test_no_breakdown_option(self, mock_chainstate, mock_settings):
+    @patch("app.x402.pricing.get_chainstate", new_callable=AsyncMock)
+    @pytest.mark.asyncio
+    async def test_no_breakdown_option(self, mock_chainstate, mock_settings):
         """Verify breakdown can be excluded."""
         mock_settings.X402_BZZ_USD_RATE = 0.50
         mock_settings.X402_MARKUP_PERCENT = 50.0
@@ -192,7 +198,7 @@ class TestCalculateStampPriceUSD:
 
         mock_chainstate.return_value = {"currentPrice": "1000"}
 
-        result = calculate_stamp_price_usd(
+        result = await calculate_stamp_price_usd(
             duration_hours=24,
             depth=17,
             include_breakdown=False
@@ -205,8 +211,9 @@ class TestCalculateUploadPriceUSD:
     """Test upload price calculations."""
 
     @patch("app.x402.pricing.settings")
-    @patch("app.x402.pricing.get_chainstate")
-    def test_small_upload(self, mock_chainstate, mock_settings):
+    @patch("app.x402.pricing.get_chainstate", new_callable=AsyncMock)
+    @pytest.mark.asyncio
+    async def test_small_upload(self, mock_chainstate, mock_settings):
         """Calculate price for small upload (fits in minimum depth)."""
         mock_settings.X402_BZZ_USD_RATE = 0.50
         mock_settings.X402_MARKUP_PERCENT = 50.0
@@ -215,7 +222,7 @@ class TestCalculateUploadPriceUSD:
         mock_chainstate.return_value = {"currentPrice": "1000"}
 
         # 1 KB upload
-        result = calculate_upload_price_usd(
+        result = await calculate_upload_price_usd(
             size_bytes=1024,
             duration_hours=24,
             include_breakdown=True
@@ -226,8 +233,9 @@ class TestCalculateUploadPriceUSD:
         assert result["breakdown"]["depth_used"] == 17  # Minimum depth
 
     @patch("app.x402.pricing.settings")
-    @patch("app.x402.pricing.get_chainstate")
-    def test_large_upload_increases_depth(self, mock_chainstate, mock_settings):
+    @patch("app.x402.pricing.get_chainstate", new_callable=AsyncMock)
+    @pytest.mark.asyncio
+    async def test_large_upload_increases_depth(self, mock_chainstate, mock_settings):
         """Large uploads should use higher depth."""
         mock_settings.X402_BZZ_USD_RATE = 0.50
         mock_settings.X402_MARKUP_PERCENT = 50.0
@@ -236,7 +244,7 @@ class TestCalculateUploadPriceUSD:
         mock_chainstate.return_value = {"currentPrice": "1000"}
 
         # 1 GB upload - should need depth > 17
-        result = calculate_upload_price_usd(
+        result = await calculate_upload_price_usd(
             size_bytes=1024 * 1024 * 1024,  # 1 GB
             duration_hours=24,
             include_breakdown=True
@@ -246,8 +254,9 @@ class TestCalculateUploadPriceUSD:
         assert result["breakdown"]["depth_used"] > 17
 
     @patch("app.x402.pricing.settings")
-    @patch("app.x402.pricing.get_chainstate")
-    def test_upload_breakdown_structure(self, mock_chainstate, mock_settings):
+    @patch("app.x402.pricing.get_chainstate", new_callable=AsyncMock)
+    @pytest.mark.asyncio
+    async def test_upload_breakdown_structure(self, mock_chainstate, mock_settings):
         """Verify upload breakdown contains expected fields."""
         mock_settings.X402_BZZ_USD_RATE = 0.50
         mock_settings.X402_MARKUP_PERCENT = 50.0
@@ -255,7 +264,7 @@ class TestCalculateUploadPriceUSD:
 
         mock_chainstate.return_value = {"currentPrice": "1000"}
 
-        result = calculate_upload_price_usd(
+        result = await calculate_upload_price_usd(
             size_bytes=1024,
             duration_hours=24,
             include_breakdown=True
@@ -274,8 +283,9 @@ class TestGetPriceQuote:
     """Test price quote generation."""
 
     @patch("app.x402.pricing.settings")
-    @patch("app.x402.pricing.get_chainstate")
-    def test_stamp_purchase_quote(self, mock_chainstate, mock_settings):
+    @patch("app.x402.pricing.get_chainstate", new_callable=AsyncMock)
+    @pytest.mark.asyncio
+    async def test_stamp_purchase_quote(self, mock_chainstate, mock_settings):
         """Generate quote for stamp purchase."""
         mock_settings.X402_BZZ_USD_RATE = 0.50
         mock_settings.X402_MARKUP_PERCENT = 50.0
@@ -285,7 +295,7 @@ class TestGetPriceQuote:
 
         mock_chainstate.return_value = {"currentPrice": "1000"}
 
-        result = get_price_quote(
+        result = await get_price_quote(
             operation="stamp_purchase",
             duration_hours=24,
             depth=17
@@ -298,8 +308,9 @@ class TestGetPriceQuote:
         assert "details" in result
 
     @patch("app.x402.pricing.settings")
-    @patch("app.x402.pricing.get_chainstate")
-    def test_upload_quote(self, mock_chainstate, mock_settings):
+    @patch("app.x402.pricing.get_chainstate", new_callable=AsyncMock)
+    @pytest.mark.asyncio
+    async def test_upload_quote(self, mock_chainstate, mock_settings):
         """Generate quote for upload."""
         mock_settings.X402_BZZ_USD_RATE = 0.50
         mock_settings.X402_MARKUP_PERCENT = 50.0
@@ -309,7 +320,7 @@ class TestGetPriceQuote:
 
         mock_chainstate.return_value = {"currentPrice": "1000"}
 
-        result = get_price_quote(
+        result = await get_price_quote(
             operation="upload",
             size_bytes=1024,
             duration_hours=24
@@ -320,8 +331,9 @@ class TestGetPriceQuote:
         assert result["network"] == "base-sepolia"
 
     @patch("app.x402.pricing.settings")
-    @patch("app.x402.pricing.get_chainstate")
-    def test_missing_pay_to_address(self, mock_chainstate, mock_settings):
+    @patch("app.x402.pricing.get_chainstate", new_callable=AsyncMock)
+    @pytest.mark.asyncio
+    async def test_missing_pay_to_address(self, mock_chainstate, mock_settings):
         """Handle missing pay_to address gracefully."""
         mock_settings.X402_BZZ_USD_RATE = 0.50
         mock_settings.X402_MARKUP_PERCENT = 50.0
@@ -331,7 +343,7 @@ class TestGetPriceQuote:
 
         mock_chainstate.return_value = {"currentPrice": "1000"}
 
-        result = get_price_quote(
+        result = await get_price_quote(
             operation="stamp_purchase",
             duration_hours=24
         )
@@ -339,18 +351,20 @@ class TestGetPriceQuote:
         # Should use placeholder address
         assert result["pay_to"] == "0x0000000000000000000000000000000000000000"
 
-    def test_unknown_operation(self):
+    @pytest.mark.asyncio
+    async def test_unknown_operation(self):
         """Raise error for unknown operation type."""
         with pytest.raises(ValueError, match="Unknown operation type"):
-            get_price_quote(operation="unknown_operation")
+            await get_price_quote(operation="unknown_operation")
 
 
 class TestPricingFormulas:
     """Test the pricing formula calculations."""
 
     @patch("app.x402.pricing.settings")
-    @patch("app.x402.pricing.get_chainstate")
-    def test_price_increases_with_duration(self, mock_chainstate, mock_settings):
+    @patch("app.x402.pricing.get_chainstate", new_callable=AsyncMock)
+    @pytest.mark.asyncio
+    async def test_price_increases_with_duration(self, mock_chainstate, mock_settings):
         """Longer duration should increase price."""
         mock_settings.X402_BZZ_USD_RATE = 0.50
         mock_settings.X402_MARKUP_PERCENT = 50.0
@@ -358,14 +372,15 @@ class TestPricingFormulas:
 
         mock_chainstate.return_value = {"currentPrice": "1000000"}
 
-        price_24h = calculate_stamp_price_usd(duration_hours=24, depth=17)
-        price_48h = calculate_stamp_price_usd(duration_hours=48, depth=17)
+        price_24h = await calculate_stamp_price_usd(duration_hours=24, depth=17)
+        price_48h = await calculate_stamp_price_usd(duration_hours=48, depth=17)
 
         assert price_48h["price_usd"] > price_24h["price_usd"]
 
     @patch("app.x402.pricing.settings")
-    @patch("app.x402.pricing.get_chainstate")
-    def test_price_increases_with_depth(self, mock_chainstate, mock_settings):
+    @patch("app.x402.pricing.get_chainstate", new_callable=AsyncMock)
+    @pytest.mark.asyncio
+    async def test_price_increases_with_depth(self, mock_chainstate, mock_settings):
         """Higher depth (more storage) should increase price."""
         mock_settings.X402_BZZ_USD_RATE = 0.50
         mock_settings.X402_MARKUP_PERCENT = 50.0
@@ -373,15 +388,16 @@ class TestPricingFormulas:
 
         mock_chainstate.return_value = {"currentPrice": "1000000"}
 
-        price_d17 = calculate_stamp_price_usd(duration_hours=24, depth=17)
-        price_d20 = calculate_stamp_price_usd(duration_hours=24, depth=20)
+        price_d17 = await calculate_stamp_price_usd(duration_hours=24, depth=17)
+        price_d20 = await calculate_stamp_price_usd(duration_hours=24, depth=20)
 
         # depth 20 has 8x the capacity of depth 17, so should cost more
         assert price_d20["price_usd"] > price_d17["price_usd"]
 
     @patch("app.x402.pricing.settings")
-    @patch("app.x402.pricing.get_chainstate")
-    def test_price_scales_with_exchange_rate(self, mock_chainstate, mock_settings):
+    @patch("app.x402.pricing.get_chainstate", new_callable=AsyncMock)
+    @pytest.mark.asyncio
+    async def test_price_scales_with_exchange_rate(self, mock_chainstate, mock_settings):
         """Higher exchange rate should increase USD price."""
         mock_settings.X402_MARKUP_PERCENT = 0.0
         mock_settings.X402_MIN_PRICE_USD = 0.0
@@ -390,11 +406,11 @@ class TestPricingFormulas:
 
         # Price at $0.50/BZZ
         mock_settings.X402_BZZ_USD_RATE = 0.50
-        price_low = calculate_stamp_price_usd(duration_hours=24, depth=17)
+        price_low = await calculate_stamp_price_usd(duration_hours=24, depth=17)
 
         # Price at $1.00/BZZ (2x rate)
         mock_settings.X402_BZZ_USD_RATE = 1.00
-        price_high = calculate_stamp_price_usd(duration_hours=24, depth=17)
+        price_high = await calculate_stamp_price_usd(duration_hours=24, depth=17)
 
         # Price should approximately double
         ratio = price_high["price_usd"] / price_low["price_usd"]

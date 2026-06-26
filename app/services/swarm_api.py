@@ -1,6 +1,7 @@
 # app/services/swarm_api.py
 import asyncio
 import datetime
+import time
 import httpx
 import logging
 from typing import List, Dict, Any, Optional
@@ -656,6 +657,63 @@ async def upload_data_to_swarm(
         raise ValueError(f"Could not parse data upload response: {e}") from e
 
 
+async def upload_chunk_to_swarm(
+    chunk_bytes: bytes,
+    marshaled_stamp: str,
+    deferred: bool = False
+) -> str:
+    """
+    Forwards a single PRE-STAMPED chunk to the Swarm network via Bee's POST /chunks.
+
+    Unlike upload_data_to_swarm (which uses a node-owned batch via Swarm-Postage-Batch-Id),
+    this passes the client-supplied marshaled postage stamp in the Swarm-Postage-Stamp
+    header and does NOT send a batch-id header. This lets a client that owns a postage
+    batch stamp its own chunks locally and use the gateway purely as a forwarder. The
+    gateway does not verify the stamp signature/owner — the Bee node does.
+
+    Args:
+        chunk_bytes: The raw chunk (8-byte span prefix + up to 4096 bytes of payload).
+        marshaled_stamp: Hex-encoded 113-byte marshaled postage stamp
+                         (batchID[0:32] + index[32:40] + timestamp[40:48] + signature[48:113]).
+        deferred: If True, deferred upload (local first, async sync). If False (default),
+                  direct upload (chunk pushed to the network for immediate availability).
+
+    Returns:
+        The Swarm reference hash of the uploaded chunk.
+
+    Raises:
+        httpx.HTTPError: If the HTTP request to the Swarm API fails.
+        ValueError: If the response is malformed or missing the reference.
+    """
+    api_url = urljoin(str(settings.SWARM_BEE_API_URL), "chunks")
+    headers = {
+        "Content-Type": "application/octet-stream",
+        "Swarm-Postage-Stamp": marshaled_stamp,
+        "Swarm-Deferred-Upload": str(deferred).lower(),
+    }
+
+    try:
+        client = get_client()
+        response = await client.post(api_url, content=chunk_bytes, headers=headers, timeout=60)
+        response.raise_for_status()
+
+        response_json = response.json()
+        reference = response_json.get("reference")
+        if not reference:
+            raise ValueError("API Response missing 'reference' from chunk upload")
+
+        logger.info(f"Successfully forwarded chunk to Swarm with reference: {reference}")
+        return reference
+
+    except httpx.HTTPError as e:
+        _record_bee_error("chunk_upload")
+        logger.error(f"Error forwarding chunk to Swarm API ({api_url}): {e}")
+        raise
+    except (ValueError, KeyError) as e:
+        logger.error(f"Error parsing chunk upload response: {e}")
+        raise ValueError(f"Could not parse chunk upload response: {e}") from e
+
+
 async def download_data_from_swarm(reference: str) -> bytes:
     """
     Downloads data from the Swarm network using a reference hash.
@@ -688,6 +746,88 @@ async def download_data_from_swarm(reference: str) -> bytes:
         _record_bee_error("download")
         logger.error(f"Error downloading data from Swarm API ({api_url}): {e}")
         raise
+
+
+# Short cache so frequent /health calls don't hammer the Bee node.
+_node_status_cache: Dict[str, Any] = {"data": None, "ts": 0.0}
+NODE_STATUS_TTL_SECONDS = 15
+
+
+async def get_node_status_summary(use_cache: bool = True) -> Dict[str, Any]:
+    """
+    Summarize the Bee node's connectivity/health for the gateway /health endpoint.
+
+    Surfaces the signals that determine whether the node can actually push chunks to
+    the network: networkAvailability (Available/Unavailable/Unknown — set by Bee from
+    outbound dial results), connected peer count, mode, and reserve/radius. This lets
+    a client see node health directly from the gateway, without a slow cross-node
+    retrieval probe.
+
+    Returns a dict with a `healthy` boolean and human-readable `warnings`. Never raises.
+    """
+    now = time.time()
+    if use_cache and _node_status_cache["data"] is not None and (now - _node_status_cache["ts"]) < NODE_STATUS_TTL_SECONDS:
+        return _node_status_cache["data"]
+
+    topo: Dict[str, Any] = {}
+    status: Dict[str, Any] = {}
+    try:
+        client = get_client()
+        t_url = urljoin(str(settings.SWARM_BEE_API_URL), "topology")
+        s_url = urljoin(str(settings.SWARM_BEE_API_URL), "status")
+        tr, sr = await asyncio.gather(
+            client.get(t_url, timeout=8),
+            client.get(s_url, timeout=8),
+            return_exceptions=True,
+        )
+        if not isinstance(tr, Exception):
+            try:
+                tr.raise_for_status()
+                topo = tr.json()
+            except Exception:
+                pass
+        if not isinstance(sr, Exception):
+            try:
+                sr.raise_for_status()
+                status = sr.json()
+            except Exception:
+                pass
+    except Exception as e:
+        logger.warning(f"Failed to fetch Bee node status: {e}")
+
+    na = topo.get("networkAvailability")
+    warming = status.get("isWarmingUp")
+    summary: Dict[str, Any] = {
+        "mode": status.get("beeMode"),
+        "connected_peers": status.get("connectedPeers", topo.get("connected")),
+        "population": topo.get("population"),
+        "depth": topo.get("depth"),
+        "reachability": topo.get("reachability"),
+        "network_availability": na,
+        "neighborhood_size": status.get("neighborhoodSize"),
+        "storage_radius": status.get("storageRadius"),
+        "reserve_size": status.get("reserveSize"),
+        "warming_up": warming,
+    }
+
+    warnings = []
+    if not topo and not status:
+        warnings.append("could not query the Bee node (topology/status unavailable)")
+        summary["healthy"] = False
+    else:
+        if na is not None and na != "Available":
+            warnings.append(
+                f"network availability is '{na}' — the node may not reach the storer "
+                "network; uploads can report success without propagating"
+            )
+        if warming:
+            warnings.append("node is warming up")
+        summary["healthy"] = (na == "Available") and not bool(warming)
+    summary["warnings"] = warnings
+
+    _node_status_cache["data"] = summary
+    _node_status_cache["ts"] = now
+    return summary
 
 
 async def get_wallet_info() -> Dict[str, Any]:

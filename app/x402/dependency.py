@@ -57,6 +57,21 @@ async def _calculate_price_for_request(request: Request) -> dict:
     """
     path = request.url.path
 
+    if "/chunks/credit" in path:
+        qp = request.query_params
+        try:
+            mb = int(qp.get("mb", settings.BANDWIDTH_CREDIT_MIN_TOPUP_MB))
+        except (TypeError, ValueError):
+            mb = settings.BANDWIDTH_CREDIT_MIN_TOPUP_MB
+        if mb < settings.BANDWIDTH_CREDIT_MIN_TOPUP_MB:
+            mb = settings.BANDWIDTH_CREDIT_MIN_TOPUP_MB
+        size_bytes = mb * 1_000_000  # 1 MB = 10^6 bytes
+        quote = await get_price_quote(operation="bandwidth", size_bytes=size_bytes)
+        return {
+            "price_usd": quote["price_usd"],
+            "description": f"Bandwidth credit top-up ({mb} MB)",
+        }
+
     if "/stamps/" in path:
         quote = await get_price_quote(
             operation="stamp_purchase",

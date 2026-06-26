@@ -50,6 +50,8 @@ class AuditEventType(Enum):
     STAMP_PURCHASED = "stamp_purchased"
     STAMP_RELEASED = "stamp_released"
     DATA_UPLOADED = "data_uploaded"
+    CREDIT_TOPPED_UP = "credit_topped_up"
+    CREDIT_DEBITED = "credit_debited"
     ERROR = "error"
 
 

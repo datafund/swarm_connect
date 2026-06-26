@@ -126,7 +126,7 @@ CORS (browser access):
 ### API Endpoints
 
 #### Core Endpoints
-- `GET /`: Health check endpoint
+- `GET /` (and `/health`): Health check. Always includes a `bee_node` section (from Bee `/topology` + `/status`, 15s cached): `mode`, `connected_peers`, `population`, `depth`, `reachability`, `network_availability` (Available/Unavailable/Unknown — Bee sets this from outbound-dial results; Unavailable = OS network/host-unreachable on dials), `storage_radius`, `reserve_size`, `warming_up`, `healthy`, `warnings`. Overall `status` → `degraded` when `network_availability` is `Unavailable` (node can't reach the storer network → uploads may 201 without propagating). x402 wallet section added when `X402_ENABLED`.
 
 #### Stamp Management
 - `POST /api/v1/stamps/`: Purchase new postage stamps (records purchase time for propagation tracking)
@@ -153,6 +153,16 @@ CORS (browser access):
 - `POST /api/v1/data/manifest?stamp_id={id}&redundancy={level}`: Upload TAR archive as collection/manifest (15x faster for batch uploads)
 - `GET /api/v1/data/{reference}`: Download raw data from Swarm (returns bytes directly)
 - `GET /api/v1/data/{reference}/json`: Download data with JSON metadata (base64-encoded)
+
+#### Debug (read-only Bee diagnostics, signature-gated)
+- `GET /api/v1/debug/bee/{path}`: read-only proxy to allow-listed Bee endpoints (`topology`, `addresses`, `peers`, `status`, `chainstate`, `reservestate`, `redistributionstate`, `node`, `health`, `readiness`, `stamps`, `batches`, `chequebook`, `wallet`) for diagnosing the gateway's Bee node when you only have gateway access. Disabled (404) unless `DEBUG_ALLOWED_ADDRESSES` (comma-separated 0x addresses) is set. Auth = EIP-191 signature from an allow-listed address over `swarm-connect-debug:<unix_ts>` via headers `X-Debug-Timestamp` + `X-Debug-Signature` (freshness window `DEBUG_SIG_MAX_AGE_SECONDS`, default 300s). No stored secret; never proxies writes.
+
+#### Chunk Forwarding (pre-stamped, Flow A)
+- `POST /api/v1/chunks/`: Forward a single **client-supplied pre-stamped** chunk to Bee `POST /chunks`. Raw chunk in the body, marshaled stamp in the `Swarm-Postage-Stamp` header (sent instead of `Swarm-Postage-Batch-Id`); optional `?deferred=true` (default false). The client owns the postage batch and signs locally; the gateway is a thin forwarder and does **not** verify the stamp (Bee does). Always mounted; the handler returns 404 when `CHUNK_UPLOAD_ENABLED=false`.
+- `POST /api/v1/chunks/credit?mb={n}`: x402-paid prepaid **bandwidth credit** top-up. Priced via the `bandwidth` operation in `pricing.py` at `X402_BANDWIDTH_USD_PER_GB` (min `BANDWIDTH_CREDIT_MIN_TOPUP_MB`). Credit is bound to the verified x402 payer wallet; returns a bearer token.
+  - **Billing model**: chunk uploads carry no per-request payment. When `X402_ENABLED`, the client tops up once, then presents the bearer token via the `X-Bandwidth-Credit-Token` header on each `POST /chunks/`; the chunk's byte length is debited from the prepaid balance (atomic check-and-debit; refunded if the Bee forward fails). A **free** path is also available: send `X-Payment-Mode: free` to draw from a per-IP daily byte quota (`app/services/bandwidth_free_tier.py`, in-memory, resets per UTC day), returning `429` when exhausted (also refunded on Bee failure). Only `/chunks/credit` is in `PROTECTED_ENDPOINTS`.
+  - Ledger: `app/services/bandwidth_credit.py` (`BandwidthCreditManager`), address-keyed balances + `token -> address` index, persisted to `BANDWIDTH_CREDIT_STATE_FILE`.
+  - Config: `CHUNK_UPLOAD_ENABLED` (default false), `CHUNK_UPLOAD_MAX_BYTES_PER_REQUEST` (4104), `X402_BANDWIDTH_USD_PER_GB`, `BANDWIDTH_CREDIT_MIN_TOPUP_MB`, `BANDWIDTH_CREDIT_STATE_FILE`, `CHUNK_UPLOAD_FREE_TIER_ENABLED`, `CHUNK_UPLOAD_FREE_TIER_MB_PER_DAY` (free tier is independent of the x402 `X402_FREE_TIER_*` settings).
 
 #### Stamp Pool (Low-Latency Provisioning)
 - `GET /api/v1/pool/status`: Get pool status and reserve levels
@@ -351,14 +361,19 @@ The gateway exposes a `/metrics` endpoint (Prometheus text format) when `METRICS
 - `gateway_notary_signatures_total{status}`
 - `gateway_x402_payments_total{mode}` (paid/free/rejected)
 - `gateway_rate_limit_hits_total`
+- `gateway_chunk_uploads_total{status, mode}` (mode = paid/free/none), `gateway_chunk_upload_bytes_total`
+- `gateway_bandwidth_topups_total{status}`, `gateway_bandwidth_topup_bytes_total`
 
 **Custom gauges** (polled every `METRICS_BALANCE_POLL_SECONDS`):
 - `gateway_wallet_bzz_balance`, `gateway_wallet_xdai_balance`
 - `gateway_chequebook_available_balance`, `gateway_base_eth_balance`
 - `gateway_stamp_pool_available{size}`, `gateway_stamps_total`
 - `gateway_stamp_min_ttl_seconds`, `gateway_uptime_seconds`
+- `gateway_bandwidth_credit_accounts`, `gateway_bandwidth_credit_bytes_total` (when `CHUNK_UPLOAD_ENABLED`)
 
-**Info**: `gateway_info{version, environment, x402_enabled, pool_enabled, notary_enabled}`
+**Info**: `gateway_info{version, environment, x402_enabled, pool_enabled, notary_enabled, chunk_upload_enabled}`
+
+> New metrics are scraped by Grafana Alloy and remote-written to Grafana Cloud automatically once deployed (no extra wiring). Adding them as **panels** on `monitoring/provisioning/dashboards/gateway-overview.json` is a separate, deliberate step (tracked in its own issue).
 
 ### Production Monitoring Stack
 
@@ -474,20 +489,29 @@ feature branches → dev → main
 
 2. **Develop and test locally** on the feature branch
 
-3. **Create PR to merge into `dev`**:
+3. **Run the full test suite locally — MANDATORY before any PR to `dev` or `main`**:
+   ```bash
+   source venv/bin/activate && python -m pytest tests/ -v
+   ```
+   - There is **no CI test gate** — `deploy.yml` only deploys, it does not run pytest. The full suite passing locally is the only thing standing between a regression and staging/production.
+   - **Do not open or merge a PR to `dev` or `main` with failing or broken tests.** If a test is failing, either fix it or, if it is a known pre-existing failure, explicitly call it out in the PR description with a tracking issue — never let it pass silently.
+   - This is a **development-process rule**, enforced by discipline, not automation. (Historically, the x402 async migration broke ~51 tests for months precisely because nothing ran them — see the test-repair issue.)
+
+4. **Create PR to merge into `dev`**:
    - All code must go through PR review
    - CI/CD automatically deploys to staging (`provenance-gateway.dev.datafund.io`)
 
-4. **Test on staging environment** before promoting to production
+5. **Test on staging environment** before promoting to production
 
-5. **Create PR to merge `dev` into `main`**:
-   - Only after staging validation
+6. **Create PR to merge `dev` into `main`**:
+   - Only after staging validation **and** a clean local `pytest tests/` run
    - CI/CD automatically deploys to production (`provenance-gateway.datafund.io`)
 
 ### Branch Protection Rules
 
 - **Never push directly to `main`** - always use PRs
 - **Never push directly to `dev`** - always use PRs from feature branches
+- **Always run `python -m pytest tests/` locally and confirm it is green before opening or merging a PR into `dev` or `main`** - no CI runs the tests, so this is a manual gate
 - Feature branches can be pushed directly
 
 ### Deployment Environments
