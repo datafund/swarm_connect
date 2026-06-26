@@ -73,6 +73,12 @@ python -m pytest tests/test_manifest_upload.py -v
 - Auto-prunes entries older than 10 minutes to prevent unbounded growth
 - Functions: `record_purchase()`, `get_purchase_time()`, `clear_tracker()`
 
+**Gnosis Chain Client (`app/services/gnosis_chain.py`)** — Flow B (#225/#227):
+- The gateway's first on-chain WRITE capability: signs/sends ERC20 `approve` + PostageStamp `createBatch` on Gnosis so a batch can be owned by an arbitrary address (Bee's HTTP API always makes the node the owner). Returns the created `batchId` (`keccak256(abi.encode(signer, nonce))`).
+- `GnosisChainClient.create_batch(owner, initial_balance_per_chunk, depth, ...)` is async (web3 is sync → runs in `asyncio.to_thread`). Skips `approve` when allowance already covers cost. Uses web3.py (already pulled in by x402; no new heavy dep). Build txs with an explicit nonce + EIP-1559 fees (never set `gasPrice` alongside maxFee).
+- Config: `GNOSIS_RPC_URL`, `GNOSIS_PRIVATE_KEY` (SENSITIVE — env/secret, never logged), `GNOSIS_CHAIN_ID` (100 mainnet / 11155111 testnet), optional `POSTAGE_STAMP_CONTRACT_ADDRESS` / `BZZ_TOKEN_ADDRESS` (default per chain id). Drives `POST /api/v1/stamps/for-owner` (#228).
+- `get_balances()` (15s cache) + `preflight(required_plur)` (#231) read the signer wallet's xBZZ + xDAI; preflight returns `is_critical` when xDAI is below `GNOSIS_XDAI_CRITICAL_THRESHOLD` (no gas) or xBZZ can't cover the batch — used to refuse `503` before spending, and to drive the `gateway_gnosis_signer_xbzz/xdai_balance` metrics gauges.
+
 **Stamps API (`app/api/endpoints/stamps.py`)**:
 - Provides `/api/v1/stamps/{stamp_id}` endpoint
 - Fetches all stamps from Swarm and filters by ID
@@ -134,6 +140,7 @@ CORS (browser access):
 - `GET /api/v1/stamps/{stamp_id}`: Retrieve specific stamp batch details including propagation timing
 - `GET /api/v1/stamps/{stamp_id}/check`: Check stamp health for uploads (errors, warnings, can_upload status, propagation status)
 - `PATCH /api/v1/stamps/{stamp_id}/extend`: Extend existing stamps with additional funds
+- `POST /api/v1/stamps/for-owner` (Flow B #228/#230): create a postage batch owned by an arbitrary address via `GnosisChainClient.create_batch` (PostageStamp.createBatch on Gnosis), so the owner can sign its own stamps off-node. Body: `owner` (0x, never assumed = payer), `size`/`depth`, `duration_hours`, `immutable`. Returns `batchID` (64-hex, no 0x) + `txHash` + propagation info; records the batch in the ownership registry (`source="created_for_owner"`, informational — on-chain ownership is source of truth). **Spends the gateway's Gnosis funds**, so: OFF by default (`STAMP_PURCHASE_FOR_OTHERS_ENABLED`, router 404s when off); owner **allow-list** (`STAMP_FOR_OTHERS_REQUIRE_WHITELIST` + `_OWNER_WHITELIST`); hard caps `STAMP_FOR_OTHERS_MAX_DEPTH` / `_MAX_BZZ` / `_MAX_DURATION_HOURS` — ALL enforced before any on-chain spend. Plus a signer-wallet **preflight** (#231): refuses `503 SIGNER_INSUFFICIENT_FUNDS` if the gateway can't fund the batch (gas/xBZZ), checked after the caps and before createBatch. **x402 (#229):** mounted WITH the x402 dependency, so when `X402_ENABLED` the caller pays via the `/stamps/` protected prefix (priced from the actual depth/duration by reading the body in `_calculate_price_for_request`); free-tier creation is OFF by default (`STAMP_FOR_OTHERS_FREE_TIER_ENABLED`, else `402 FREE_TIER_DISABLED`). Payer (x402) ≠ owner (`body.owner`). Emits `gateway_for_owner_batches_total{status}` + `_bzz_spent_total` and audits each creation. See `docs/buy-batch-for-owner-guide.md`.
 
 **Stamp list query parameters**:
 - `global` (bool): If true, return all stamps including non-local (old behavior)

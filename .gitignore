@@ -11,3 +11,6 @@ venv/
 VERSION
 data/
 logs/
+
+# Test artifact: MagicMock path leaks from stamp-pool tests
+MagicMock/

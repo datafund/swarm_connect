@@ -164,6 +164,46 @@ class StampPurchaseResponse(BaseModel):
     }
 
 
+class StampForOwnerRequest(BaseModel):
+    """Request to create a postage batch owned by an arbitrary address (Flow B).
+
+    The `owner` is the address that will OWN the batch (and can sign its own stamps).
+    It is NEVER assumed equal to the x402 payer.
+    """
+    owner: str = Field(
+        ...,
+        description="0x address that will own the batch.",
+        pattern=r"^0x[a-fA-F0-9]{40}$",
+        example="0x571dEAC541E65312Bdb027E1C570e2751f8A6795",
+    )
+    duration_hours: int = Field(default=24, ge=24, description="Desired TTL in hours (min 24).")
+    size: Optional[Literal["small", "medium", "large"]] = Field(
+        default=None, description="Storage size preset (overrides depth)."
+    )
+    depth: Optional[int] = Field(default=None, ge=16, le=32, description="Batch depth (advanced).")
+    immutable: bool = Field(default=False, description="Create an immutable batch (default mutable).")
+
+    def get_effective_depth(self) -> int:
+        if self.size is not None:
+            return SIZE_PRESETS[self.size]
+        if self.depth is not None:
+            return self.depth
+        return 17
+
+
+class StampForOwnerResponse(BaseModel):
+    """Response for a successful create-batch-for-owner."""
+    batchID: str = Field(..., description="The created batch ID (keccak256(abi.encode(signer, nonce))).")
+    owner: str = Field(..., description="The batch owner address.")
+    depth: int = Field(..., description="The batch depth used.")
+    duration_hours: int = Field(..., description="Requested TTL in hours.")
+    txHash: str = Field(..., description="createBatch transaction hash on Gnosis.")
+    secondsSincePurchase: Optional[int] = Field(None, description="Seconds since creation.")
+    estimatedReadyAt: Optional[str] = Field(None, description="ISO timestamp when the batch should be usable.")
+    propagationStatus: Optional[str] = Field(None, description="'propagating' / 'ready' / 'unknown'.")
+    message: str = Field(default="Batch created for owner", description="Success message.")
+
+
 class StampExtensionRequest(BaseModel):
     """Request model for extending a postage stamp.
 
