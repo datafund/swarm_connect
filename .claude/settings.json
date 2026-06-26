@@ -1,0 +1,114 @@
+{
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "npx @plur-ai/cli hook-inject",
+            "timeout": 15
+          }
+        ]
+      }
+    ],
+    "PostCompact": [
+      {
+        "matcher": "auto|manual",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "npx @plur-ai/cli hook-inject --rehydrate",
+            "timeout": 15
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "EnterPlanMode",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "npx @plur-ai/cli hook-inject --event plan_mode",
+            "timeout": 10
+          }
+        ]
+      },
+      {
+        "matcher": "Skill",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "npx @plur-ai/cli hook-inject --event skill",
+            "timeout": 10
+          }
+        ]
+      },
+      {
+        "matcher": "Agent",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "npx @plur-ai/cli hook-inject --event agent",
+            "timeout": 10
+          }
+        ]
+      },
+      {
+        "matcher": "Bash|Edit|Write|Agent",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "npx @plur-ai/cli hook-observe",
+            "timeout": 3
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Bash|Edit|Write|Agent",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "npx @plur-ai/cli hook-observe --post",
+            "timeout": 3
+          }
+        ]
+      }
+    ],
+    "SubagentStart": [
+      {
+        "matcher": ".*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "npx @plur-ai/cli hook-inject --event subagent",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "npx @plur-ai/cli hook-learn-check",
+            "timeout": 2
+          }
+        ]
+      }
+    ]
+  },
+  "mcpServers": {
+    "plur": {
+      "command": "/bin/sh",
+      "args": [
+        "-lc",
+        "exec npx -y @plur-ai/mcp@latest"
+      ]
+    }
+  }
+}
