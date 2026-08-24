@@ -4,11 +4,18 @@ services:
     build: .
     image: swarm_connect:main
     ports:
-      - "8899:8000"
+      # Docker publishes ports via its own iptables chains, which bypass ufw — a
+      # published port is reachable from the internet even when the host firewall
+      # denies it. Set GATEWAY_BIND=127.0.0.1 on hosts that terminate TLS with a
+      # local reverse proxy, so the gateway is not also served in plaintext.
+      - "${GATEWAY_BIND:-0.0.0.0}:8899:8000"
     env_file:
       - /opt/swarm_connect.env
     environment:
-      - SWARM_BEE_API_URL=http://192.168.45.30:1633
+      # Host-overridable: set SWARM_BEE_API_URL in the host env file to point at a
+      # different Bee node (e.g. the bundled `bee` profile below, http://bee:1633).
+      # Unset -> the existing external node, so hosts need no configuration.
+      - SWARM_BEE_API_URL=${SWARM_BEE_API_URL:-http://192.168.45.30:1633}
     volumes:
       - /opt/swarm_connect_data:/app/data
     restart: unless-stopped
@@ -22,11 +29,13 @@ services:
     build: .
     image: swarm_connect:dev
     ports:
-      - "8900:8000"
+      - "${GATEWAY_BIND:-0.0.0.0}:8900:8000"
     env_file:
       - /opt/swarm_connect_dev.env
     environment:
-      - SWARM_BEE_API_URL=http://192.168.45.30:1633
+      # Separate override from production so the two environments can be pointed at
+      # different Bee nodes on the same host (e.g. http://bee-dev:1633).
+      - SWARM_BEE_API_URL=${SWARM_BEE_API_URL_DEV:-http://192.168.45.30:1633}
     volumes:
       - /opt/swarm_connect_dev_data:/app/data
     restart: unless-stopped
@@ -47,3 +56,65 @@ services:
     restart: unless-stopped
     depends_on:
       - provenance_gateway_dev
+
+  # ------------------------------------------------------------------------- #
+  # Optional bundled Bee nodes ("bee" profile)
+  #
+  # Lets a host run the gateway and its own Bee node as one self-contained stack
+  # instead of pointing at an external node. Both services sit behind the `bee`
+  # profile, so they are INERT unless the host opts in with COMPOSE_PROFILES=bee
+  # — a host that does not set it deploys exactly as before.
+  #
+  # The Bee API is deliberately NOT published: it has no authentication, so it is
+  # reachable only over the compose network (http://bee:1633 / http://bee-dev:1633).
+  # Only the p2p ports are exposed, on distinct host ports so the two nodes can
+  # coexist. BEE_NAT_ADDR must advertise the matching public host:port or peers
+  # cannot dial back — and since Bee 2.7.0 an invalid value fails startup.
+  # ------------------------------------------------------------------------- #
+  bee:
+    image: ethersphere/bee:${BEE_VERSION:-2.8.1}
+    profiles: ["bee"]
+    environment:
+      - BEE_MAINNET=true
+      - BEE_API_ADDR=:1633
+      - BEE_P2P_ADDR=:1634
+      - BEE_NAT_ADDR=${BEE_NAT_ADDR:-}
+      - BEE_SWAP_ENABLE=true          # required to push chunks
+      - BEE_FULL_NODE=${BEE_FULL_NODE:-false}
+      - BEE_PASSWORD=${BEE_PASSWORD:-}
+      - BEE_DATA_DIR=/home/bee/.bee
+      - BEE_VERBOSITY=${BEE_VERBOSITY:-3}
+    # The RPC endpoint is passed as an explicit flag: Bee reads the equivalent
+    # env var as empty (multi-dash key quirk), but the flag works.
+    command: start --blockchain-rpc-endpoint=${BEE_RPC_ENDPOINT:-}
+    ports:
+      - "${BEE_P2P_PORT:-1634}:1634/tcp"
+      - "${BEE_P2P_PORT:-1634}:1634/udp"
+    volumes:
+      - bee-data:/home/bee/.bee
+    restart: unless-stopped
+
+  bee-dev:
+    image: ethersphere/bee:${BEE_VERSION:-2.8.1}
+    profiles: ["bee"]
+    environment:
+      - BEE_MAINNET=true
+      - BEE_API_ADDR=:1633
+      - BEE_P2P_ADDR=:1634
+      - BEE_NAT_ADDR=${BEE_DEV_NAT_ADDR:-}
+      - BEE_SWAP_ENABLE=true
+      - BEE_FULL_NODE=${BEE_DEV_FULL_NODE:-false}
+      - BEE_PASSWORD=${BEE_DEV_PASSWORD:-}
+      - BEE_DATA_DIR=/home/bee/.bee
+      - BEE_VERBOSITY=${BEE_VERBOSITY:-3}
+    command: start --blockchain-rpc-endpoint=${BEE_RPC_ENDPOINT:-}
+    ports:
+      - "${BEE_DEV_P2P_PORT:-1734}:1634/tcp"
+      - "${BEE_DEV_P2P_PORT:-1734}:1634/udp"
+    volumes:
+      - bee-dev-data:/home/bee/.bee
+    restart: unless-stopped
+
+volumes:
+  bee-data:
+  bee-dev-data:
