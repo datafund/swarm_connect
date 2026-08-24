@@ -752,6 +752,34 @@ async def download_data_from_swarm(reference: str) -> bytes:
 _node_status_cache: Dict[str, Any] = {"data": None, "ts": 0.0}
 NODE_STATUS_TTL_SECONDS = 15
 
+# Read-only Bee diagnostic endpoints polled for the /health summary. Fetched
+# concurrently, and the whole summary is cached above, so the added endpoints
+# cost one round-trip per cache miss rather than per request.
+NODE_STATUS_ENDPOINTS = ("topology", "status", "health", "addresses", "chainstate")
+
+# Advisory warning thresholds. Deliberately module-level constants rather than
+# settings — they need no per-environment tuning, so they require no deploy.yml
+# or GitHub Environment wiring.
+LOW_PEER_WARN_THRESHOLD = 50   # connected peers below this is worth flagging
+CHAIN_LAG_WARN_BLOCKS = 100    # blocks behind the chain tip before flagging
+
+
+async def _fetch_bee_json(client, endpoint: str) -> Dict[str, Any]:
+    """GET one Bee diagnostic endpoint, returning {} on any failure.
+
+    Each endpoint is independent: one unavailable endpoint degrades that section
+    of the summary rather than losing the whole thing.
+    """
+    url = urljoin(str(settings.SWARM_BEE_API_URL), endpoint)
+    try:
+        resp = await client.get(url, timeout=8)
+        resp.raise_for_status()
+        data = resp.json()
+        return data if isinstance(data, dict) else {}
+    except Exception as e:
+        logger.debug(f"Bee diagnostic fetch failed ({endpoint}): {e}")
+        return {}
+
 
 async def get_node_status_summary(use_cache: bool = True) -> Dict[str, Any]:
     """
@@ -763,42 +791,52 @@ async def get_node_status_summary(use_cache: bool = True) -> Dict[str, Any]:
     a client see node health directly from the gateway, without a slow cross-node
     retrieval probe.
 
+    Also reports node identity and build (`overlay`, `version`, `api_version`) and
+    chain-sync position (`last_synced_block`, `chain_tip`, `chain_sync_lag_blocks`),
+    so an operator can diagnose the node without LAN access to its API.
+
     Returns a dict with a `healthy` boolean and human-readable `warnings`. Never raises.
     """
     now = time.time()
     if use_cache and _node_status_cache["data"] is not None and (now - _node_status_cache["ts"]) < NODE_STATUS_TTL_SECONDS:
         return _node_status_cache["data"]
 
-    topo: Dict[str, Any] = {}
-    status: Dict[str, Any] = {}
+    fetched: Dict[str, Dict[str, Any]] = {ep: {} for ep in NODE_STATUS_ENDPOINTS}
     try:
         client = get_client()
-        t_url = urljoin(str(settings.SWARM_BEE_API_URL), "topology")
-        s_url = urljoin(str(settings.SWARM_BEE_API_URL), "status")
-        tr, sr = await asyncio.gather(
-            client.get(t_url, timeout=8),
-            client.get(s_url, timeout=8),
+        results = await asyncio.gather(
+            *[_fetch_bee_json(client, ep) for ep in NODE_STATUS_ENDPOINTS],
             return_exceptions=True,
         )
-        if not isinstance(tr, Exception):
-            try:
-                tr.raise_for_status()
-                topo = tr.json()
-            except Exception:
-                pass
-        if not isinstance(sr, Exception):
-            try:
-                sr.raise_for_status()
-                status = sr.json()
-            except Exception:
-                pass
+        for endpoint, result in zip(NODE_STATUS_ENDPOINTS, results):
+            if isinstance(result, dict):
+                fetched[endpoint] = result
     except Exception as e:
         logger.warning(f"Failed to fetch Bee node status: {e}")
 
+    topo = fetched["topology"]
+    status = fetched["status"]
+    bee_health = fetched["health"]
+    addresses = fetched["addresses"]
+    chainstate = fetched["chainstate"]
+
     na = topo.get("networkAvailability")
     warming = status.get("isWarmingUp")
+    bee_status = bee_health.get("status")
+
+    # Chain sync lag: a node behind the tip may hold stale postage batch state.
+    last_synced = status.get("lastSyncedBlock")
+    chain_tip = chainstate.get("chainTip")
+    chain_lag = None
+    if isinstance(last_synced, int) and isinstance(chain_tip, int) and chain_tip >= last_synced:
+        chain_lag = chain_tip - last_synced
+
     summary: Dict[str, Any] = {
         "mode": status.get("beeMode"),
+        "version": bee_health.get("version"),
+        "api_version": bee_health.get("apiVersion"),
+        "bee_status": bee_status,
+        "overlay": addresses.get("overlay"),
         "connected_peers": status.get("connectedPeers", topo.get("connected")),
         "population": topo.get("population"),
         "depth": topo.get("depth"),
@@ -806,7 +844,14 @@ async def get_node_status_summary(use_cache: bool = True) -> Dict[str, Any]:
         "network_availability": na,
         "neighborhood_size": status.get("neighborhoodSize"),
         "storage_radius": status.get("storageRadius"),
+        "committed_depth": status.get("committedDepth"),
         "reserve_size": status.get("reserveSize"),
+        "reserve_size_within_radius": status.get("reserveSizeWithinRadius"),
+        "pullsync_rate": status.get("pullsyncRate"),
+        "batch_commitment": status.get("batchCommitment"),
+        "last_synced_block": last_synced,
+        "chain_tip": chain_tip,
+        "chain_sync_lag_blocks": chain_lag,
         "warming_up": warming,
     }
 
@@ -820,8 +865,24 @@ async def get_node_status_summary(use_cache: bool = True) -> Dict[str, Any]:
                 f"network availability is '{na}' — the node may not reach the storer "
                 "network; uploads can report success without propagating"
             )
+        peers = summary["connected_peers"]
+        if isinstance(peers, int) and peers < LOW_PEER_WARN_THRESHOLD:
+            warnings.append(
+                f"connected peer count is low ({peers} < {LOW_PEER_WARN_THRESHOLD}) — "
+                "the node may not reach the neighborhoods it needs to push to"
+            )
+        if chain_lag is not None and chain_lag > CHAIN_LAG_WARN_BLOCKS:
+            warnings.append(
+                f"node is {chain_lag} blocks behind the chain tip — postage batch "
+                "state may be stale"
+            )
+        if bee_status is not None and bee_status != "ok":
+            warnings.append(f"Bee reports status '{bee_status}'")
         if warming:
             warnings.append("node is warming up")
+        # Unchanged from #238 on purpose: only a definitive network signal (or
+        # warmup) flips `healthy`. The warnings above are advisory, so container
+        # healthchecks stay stable.
         summary["healthy"] = (na == "Available") and not bool(warming)
     summary["warnings"] = warnings
 

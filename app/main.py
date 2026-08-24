@@ -154,6 +154,12 @@ async def read_root():
     **Response fields**:
     - `status`: "ok" | "degraded" | "critical"
     - `message`: Gateway name
+    - `bee_node`: the Bee node's identity and build (`overlay`, `version`, `api_version`,
+      `bee_status`), connectivity (`mode`, `connected_peers`, `population`, `reachability`,
+      `network_availability`), reserve/radius (`storage_radius`, `committed_depth`,
+      `reserve_size`, `reserve_size_within_radius`, `pullsync_rate`, `batch_commitment`),
+      chain sync (`last_synced_block`, `chain_tip`, `chain_sync_lag_blocks`), plus a
+      `healthy` flag and advisory `warnings`
     - `x402` (when payments enabled): wallet status, free tier availability, and warnings
 
     **When x402 payments are enabled**, the response includes:
@@ -179,9 +185,10 @@ async def read_root():
     }
 
     # Bee node connectivity/health — surfaces whether the node can actually reach
-    # the network (networkAvailability), peer count, mode, reserve. Cheap (cached),
-    # always included. A node with networkAvailability != Available accepts uploads
-    # (201) that may not propagate, so flag it here.
+    # the network (networkAvailability), peer count, mode, reserve, plus node identity,
+    # build version and chain-sync position. Cheap (cached), always included. A node
+    # with networkAvailability != Available accepts uploads (201) that may not
+    # propagate, so flag it here.
     try:
         from app.services.swarm_api import get_node_status_summary
         node = await get_node_status_summary()

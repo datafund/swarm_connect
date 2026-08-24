@@ -23,9 +23,23 @@ def _resp(data):
     return r
 
 
-def _mock_client(topo, status):
+def _mock_client(topo, status, health=None, addresses=None, chainstate=None):
+    """Mock Bee that dispatches per diagnostic endpoint.
+
+    Endpoints not supplied answer {}, mirroring a Bee that doesn't serve them.
+    """
+    by_endpoint = {
+        "topology": topo,
+        "status": status,
+        "health": health or {},
+        "addresses": addresses or {},
+        "chainstate": chainstate or {},
+    }
+
     def fake_get(url, timeout=8):
-        return _resp(topo if url.endswith("topology") else status)
+        endpoint = url.rstrip("/").rsplit("/", 1)[-1]
+        return _resp(by_endpoint.get(endpoint, {}))
+
     c = MagicMock()
     c.get = AsyncMock(side_effect=fake_get)
     return c
@@ -72,6 +86,98 @@ class TestNodeStatusSummary:
             s = await swarm_api.get_node_status_summary(use_cache=False)
         assert s["healthy"] is False
         assert any("could not query" in w for w in s["warnings"])
+
+
+# --------------------------------------------------------------------------- #
+# node identity, build and chain-sync detail
+# --------------------------------------------------------------------------- #
+class TestNodeDetail:
+    TOPO = {"networkAvailability": "Available", "connected": 137, "population": 3794,
+            "depth": 9, "reachability": "Private"}
+    STATUS = {"beeMode": "light", "connectedPeers": 137, "isWarmingUp": False,
+              "storageRadius": 0, "reserveSize": 0, "reserveSizeWithinRadius": 0,
+              "pullsyncRate": 12.5, "committedDepth": 17, "batchCommitment": 4096,
+              "lastSyncedBlock": 41_000_000}
+    HEALTH = {"status": "ok", "version": "2.8.0-6ce78a76", "apiVersion": "7.4.0"}
+    ADDRESSES = {"overlay": "47f1994c" + "0" * 56, "ethereum": "0x7f73"}
+    CHAINSTATE = {"chainTip": 41_000_050, "block": 41_000_050}
+
+    async def _summary(self, **overrides):
+        kwargs = {"topo": self.TOPO, "status": self.STATUS, "health": self.HEALTH,
+                  "addresses": self.ADDRESSES, "chainstate": self.CHAINSTATE}
+        kwargs.update(overrides)
+        swarm_api._node_status_cache["data"] = None
+        client = _mock_client(kwargs["topo"], kwargs["status"], kwargs["health"],
+                              kwargs["addresses"], kwargs["chainstate"])
+        with patch("app.services.swarm_api.get_client", return_value=client):
+            return await swarm_api.get_node_status_summary(use_cache=False)
+
+    @pytest.mark.asyncio
+    async def test_surfaces_version_and_identity(self):
+        s = await self._summary()
+        assert s["version"] == "2.8.0-6ce78a76"
+        assert s["api_version"] == "7.4.0"
+        assert s["bee_status"] == "ok"
+        assert s["overlay"] == self.ADDRESSES["overlay"]
+
+    @pytest.mark.asyncio
+    async def test_surfaces_previously_discarded_status_fields(self):
+        s = await self._summary()
+        assert s["reserve_size_within_radius"] == 0
+        assert s["pullsync_rate"] == 12.5
+        assert s["committed_depth"] == 17
+        assert s["batch_commitment"] == 4096
+
+    @pytest.mark.asyncio
+    async def test_chain_lag_computed_and_not_warned_when_small(self):
+        s = await self._summary()
+        assert s["last_synced_block"] == 41_000_000
+        assert s["chain_tip"] == 41_000_050
+        assert s["chain_sync_lag_blocks"] == 50
+        assert not any("behind the chain tip" in w for w in s["warnings"])
+
+    @pytest.mark.asyncio
+    async def test_chain_lag_warns_when_beyond_threshold(self):
+        tip = self.STATUS["lastSyncedBlock"] + swarm_api.CHAIN_LAG_WARN_BLOCKS + 1
+        s = await self._summary(chainstate={"chainTip": tip})
+        assert s["chain_sync_lag_blocks"] == swarm_api.CHAIN_LAG_WARN_BLOCKS + 1
+        assert any("behind the chain tip" in w for w in s["warnings"])
+
+    @pytest.mark.asyncio
+    async def test_chain_lag_none_when_chainstate_unavailable(self):
+        s = await self._summary(chainstate={})
+        assert s["chain_tip"] is None
+        assert s["chain_sync_lag_blocks"] is None
+        assert not any("behind the chain tip" in w for w in s["warnings"])
+
+    @pytest.mark.asyncio
+    async def test_low_peer_count_warns_without_flipping_healthy(self):
+        # Available network but a collapsing peer set: advisory only.
+        low = dict(self.STATUS, connectedPeers=2)
+        s = await self._summary(status=low)
+        assert any("peer count is low" in w for w in s["warnings"])
+        assert s["healthy"] is True
+
+    @pytest.mark.asyncio
+    async def test_no_low_peer_warning_at_threshold(self):
+        at_threshold = dict(self.STATUS, connectedPeers=swarm_api.LOW_PEER_WARN_THRESHOLD)
+        s = await self._summary(status=at_threshold)
+        assert not any("peer count is low" in w for w in s["warnings"])
+
+    @pytest.mark.asyncio
+    async def test_non_ok_bee_status_warns(self):
+        s = await self._summary(health={"status": "degraded", "version": "2.8.0"})
+        assert any("Bee reports status 'degraded'" in w for w in s["warnings"])
+
+    @pytest.mark.asyncio
+    async def test_missing_optional_endpoints_leave_fields_none(self):
+        # Bee answers topology/status only — summary degrades field-wise, not wholesale.
+        s = await self._summary(health={}, addresses={}, chainstate={})
+        assert s["version"] is None
+        assert s["overlay"] is None
+        assert s["bee_status"] is None
+        assert s["connected_peers"] == 137
+        assert s["healthy"] is True
 
 
 # --------------------------------------------------------------------------- #

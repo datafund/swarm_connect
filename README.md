@@ -265,7 +265,7 @@ Swarm Connect is a FastAPI-based API gateway that provides comprehensive access 
 ### Available API Endpoints
 
 #### Core Endpoints
-- `GET /` (and `/health`): Health check. Always includes a `bee_node` section with the Bee node's connectivity — `mode`, `connected_peers`, `population`, `reachability`, `network_availability` (Available/Unavailable/Unknown), `storage_radius`, `warming_up`, a `healthy` flag, and `warnings`. `status` becomes `degraded` when `network_availability` is `Unavailable` (the node can't reach the storer network, so uploads may return success without propagating). When x402 is enabled, also includes the `x402` wallet section.
+- `GET /` (and `/health`): Health check. Always includes a `bee_node` section describing the Bee node — identity and build (`overlay`, `version`, `api_version`, `bee_status`), connectivity (`mode`, `connected_peers`, `population`, `reachability`, `network_availability` (Available/Unavailable/Unknown)), reserve and radius (`storage_radius`, `committed_depth`, `reserve_size`, `reserve_size_within_radius`, `pullsync_rate`, `batch_commitment`), chain sync (`last_synced_block`, `chain_tip`, `chain_sync_lag_blocks`), plus `warming_up`, a `healthy` flag, and `warnings`. `status` becomes `degraded` when `network_availability` is `Unavailable` (the node can't reach the storer network, so uploads may return success without propagating); other warnings — a low peer count, a large chain-sync lag, or a non-ok Bee status — are advisory and do not change `status`. When x402 is enabled, also includes the `x402` wallet section.
 
 #### Stamp Management
 - `POST /api/v1/stamps/`: Purchase new postage stamps with time-based or advanced parameters
