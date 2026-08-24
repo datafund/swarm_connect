@@ -109,6 +109,7 @@ unset and the stack behaves as it always has.
 | `BEE_P2P_PORT` / `BEE_DEV_P2P_PORT` | `1634` / `1734` | host p2p ports |
 | `BEE_FULL_NODE` / `BEE_DEV_FULL_NODE` | `false` | run as a full node instead of light |
 | `GATEWAY_BIND` | `0.0.0.0` | host interface the gateways bind to; set `127.0.0.1` behind a local reverse proxy |
+| `HOST_LABEL` | *(empty)* | value of the `host` label on metrics; set when more than one host runs the stack |
 
 **Running the gateway and its Bee node on one host** — set `COMPOSE_PROFILES=bee`
 and point each gateway at its own node (`http://bee:1633`, `http://bee-dev:1633`).

@@ -52,6 +52,10 @@ services:
     environment:
       - GRAFANA_CLOUD_PROM_USERNAME=${GRAFANA_CLOUD_PROM_USERNAME}
       - GRAFANA_CLOUD_API_TOKEN=${GRAFANA_CLOUD_API_TOKEN}
+      # Tags this host's metrics so several hosts running the stack stay
+      # distinguishable in Grafana. Empty by default -> no label added, so an
+      # existing host's series are unchanged until it is explicitly set.
+      - HOST_LABEL=${HOST_LABEL:-}
     command: ["run", "/etc/alloy/config.alloy"]
     restart: unless-stopped
     depends_on:
