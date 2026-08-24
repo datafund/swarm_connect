@@ -91,6 +91,35 @@ The server will be available at:
 - API Documentation: http://127.0.0.1:8000/docs
 - Alternative docs: http://127.0.0.1:8000/redoc
 
+### Compose host overrides
+
+`docker-compose.yml` reads a few variables from the compose `.env` file so one
+image can serve hosts with different topologies. All are optional — leave them
+unset and the stack behaves as it always has.
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `SWARM_BEE_API_URL` | external node | Bee endpoint for the production gateway |
+| `SWARM_BEE_API_URL_DEV` | external node | Bee endpoint for the staging gateway |
+| `COMPOSE_PROFILES` | *(unset)* | set to `bee` to also run the bundled Bee nodes |
+| `BEE_VERSION` | `2.8.1` | Bee image tag |
+| `BEE_RPC_ENDPOINT` | *(unset)* | Gnosis RPC endpoint (required with the `bee` profile) |
+| `BEE_PASSWORD` / `BEE_DEV_PASSWORD` | *(unset)* | keystore passwords |
+| `BEE_NAT_ADDR` / `BEE_DEV_NAT_ADDR` | *(unset)* | public `host:port` each node advertises |
+| `BEE_P2P_PORT` / `BEE_DEV_P2P_PORT` | `1634` / `1734` | host p2p ports |
+| `BEE_FULL_NODE` / `BEE_DEV_FULL_NODE` | `false` | run as a full node instead of light |
+
+**Running the gateway and its Bee node on one host** — set `COMPOSE_PROFILES=bee`
+and point each gateway at its own node (`http://bee:1633`, `http://bee-dev:1633`).
+The Bee API is never published to the host: it has no authentication, so it must
+not be reachable from outside the compose network. Only the p2p ports are exposed,
+and `BEE_NAT_ADDR` must advertise the matching public `host:port` or peers cannot
+dial back — since Bee 2.7.0 an invalid value fails startup rather than degrading
+silently.
+
+The deploy workflow appends `/opt/swarm_connect_host.env` to the compose `.env` if
+that file exists, so host-specific values survive a redeploy.
+
 ## Architecture
 
 Swarm Connect is a FastAPI-based API gateway that provides comprehensive access to Ethereum Swarm (distributed storage network) functionality. It offers complete postage stamp management and data operations through a clean, RESTful interface, eliminating the need for clients to interact directly with complex Swarm Bee node APIs.
