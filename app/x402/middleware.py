@@ -62,6 +62,10 @@ PROTECTED_ENDPOINTS = [
     ("POST", "/api/v1/stamps/"),
     ("POST", "/api/v1/data/"),
     ("POST", "/api/v1/data/manifest"),
+    # Bandwidth credit top-up is paid per-request. The chunk upload itself
+    # (POST /api/v1/chunks/) is NOT listed here — it spends prepaid credit via a
+    # bearer token rather than a per-request payment.
+    ("POST", "/api/v1/chunks/credit"),
 ]
 
 

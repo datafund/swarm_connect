@@ -73,6 +73,12 @@ python -m pytest tests/test_manifest_upload.py -v
 - Auto-prunes entries older than 10 minutes to prevent unbounded growth
 - Functions: `record_purchase()`, `get_purchase_time()`, `clear_tracker()`
 
+**Gnosis Chain Client (`app/services/gnosis_chain.py`)** — Flow B (#225/#227):
+- The gateway's first on-chain WRITE capability: signs/sends ERC20 `approve` + PostageStamp `createBatch` on Gnosis so a batch can be owned by an arbitrary address (Bee's HTTP API always makes the node the owner). Returns the created `batchId` (`keccak256(abi.encode(signer, nonce))`).
+- `GnosisChainClient.create_batch(owner, initial_balance_per_chunk, depth, ...)` is async (web3 is sync → runs in `asyncio.to_thread`). Skips `approve` when allowance already covers cost. Uses web3.py (already pulled in by x402; no new heavy dep). Build txs with an explicit nonce + EIP-1559 fees (never set `gasPrice` alongside maxFee).
+- Config: `GNOSIS_RPC_URL`, `GNOSIS_PRIVATE_KEY` (SENSITIVE — env/secret, never logged), `GNOSIS_CHAIN_ID` (100 mainnet / 11155111 testnet), optional `POSTAGE_STAMP_CONTRACT_ADDRESS` / `BZZ_TOKEN_ADDRESS` (default per chain id). Drives `POST /api/v1/stamps/for-owner` (#228).
+- `get_balances()` (15s cache) + `preflight(required_plur)` (#231) read the signer wallet's xBZZ + xDAI; preflight returns `is_critical` when xDAI is below `GNOSIS_XDAI_CRITICAL_THRESHOLD` (no gas) or xBZZ can't cover the batch — used to refuse `503` before spending, and to drive the `gateway_gnosis_signer_xbzz/xdai_balance` metrics gauges.
+
 **Stamps API (`app/api/endpoints/stamps.py`)**:
 - Provides `/api/v1/stamps/{stamp_id}` endpoint
 - Fetches all stamps from Swarm and filters by ID
@@ -126,7 +132,7 @@ CORS (browser access):
 ### API Endpoints
 
 #### Core Endpoints
-- `GET /`: Health check endpoint
+- `GET /` (and `/health`): Health check. Always includes a `bee_node` section (from Bee `/topology` + `/status` + `/health` + `/addresses` + `/chainstate`, fetched concurrently, 15s cached): identity/build `overlay`, `version`, `api_version`, `bee_status`; connectivity `mode`, `connected_peers`, `population`, `depth`, `reachability`, `network_availability` (Available/Unavailable/Unknown — Bee sets this from outbound-dial results; Unavailable = OS network/host-unreachable on dials); reserve/radius `storage_radius`, `committed_depth`, `reserve_size`, `reserve_size_within_radius`, `pullsync_rate`, `batch_commitment`; chain sync `last_synced_block`, `chain_tip`, `chain_sync_lag_blocks`; plus `warming_up`, `healthy`, `warnings`. Any endpoint that fails yields `null` for its fields rather than losing the whole section. Overall `status` → `degraded` when `network_availability` is `Unavailable` (node can't reach the storer network → uploads may 201 without propagating) — advisory warnings (low peer count `< LOW_PEER_WARN_THRESHOLD`, chain lag `> CHAIN_LAG_WARN_BLOCKS`, non-ok Bee status) never flip `healthy` or `status`. x402 wallet section added when `X402_ENABLED`.
 
 #### Stamp Management
 - `POST /api/v1/stamps/`: Purchase new postage stamps (records purchase time for propagation tracking)
@@ -134,6 +140,7 @@ CORS (browser access):
 - `GET /api/v1/stamps/{stamp_id}`: Retrieve specific stamp batch details including propagation timing
 - `GET /api/v1/stamps/{stamp_id}/check`: Check stamp health for uploads (errors, warnings, can_upload status, propagation status)
 - `PATCH /api/v1/stamps/{stamp_id}/extend`: Extend existing stamps with additional funds
+- `POST /api/v1/stamps/for-owner` (Flow B #228/#230): create a postage batch owned by an arbitrary address via `GnosisChainClient.create_batch` (PostageStamp.createBatch on Gnosis), so the owner can sign its own stamps off-node. Body: `owner` (0x, never assumed = payer), `size`/`depth`, `duration_hours`, `immutable`. Returns `batchID` (64-hex, no 0x) + `txHash` + propagation info; records the batch in the ownership registry (`source="created_for_owner"`, informational — on-chain ownership is source of truth). **Spends the gateway's Gnosis funds**, so: OFF by default (`STAMP_PURCHASE_FOR_OTHERS_ENABLED`, router 404s when off); owner **allow-list** (`STAMP_FOR_OTHERS_REQUIRE_WHITELIST` + `_OWNER_WHITELIST`); hard caps `STAMP_FOR_OTHERS_MAX_DEPTH` / `_MAX_BZZ` / `_MAX_DURATION_HOURS` — ALL enforced before any on-chain spend. Plus a signer-wallet **preflight** (#231): refuses `503 SIGNER_INSUFFICIENT_FUNDS` if the gateway can't fund the batch (gas/xBZZ), checked after the caps and before createBatch. **x402 (#229):** mounted WITH the x402 dependency, so when `X402_ENABLED` the caller pays via the `/stamps/` protected prefix (priced from the actual depth/duration by reading the body in `_calculate_price_for_request`); free-tier creation is OFF by default (`STAMP_FOR_OTHERS_FREE_TIER_ENABLED`, else `402 FREE_TIER_DISABLED`). Payer (x402) ≠ owner (`body.owner`). Emits `gateway_for_owner_batches_total{status}` + `_bzz_spent_total` and audits each creation. See `docs/buy-batch-for-owner-guide.md`.
 
 **Stamp list query parameters**:
 - `global` (bool): If true, return all stamps including non-local (old behavior)
@@ -153,6 +160,16 @@ CORS (browser access):
 - `POST /api/v1/data/manifest?stamp_id={id}&redundancy={level}`: Upload TAR archive as collection/manifest (15x faster for batch uploads)
 - `GET /api/v1/data/{reference}`: Download raw data from Swarm (returns bytes directly)
 - `GET /api/v1/data/{reference}/json`: Download data with JSON metadata (base64-encoded)
+
+#### Debug (read-only Bee diagnostics, signature-gated)
+- `GET /api/v1/debug/bee/{path}`: read-only proxy to allow-listed Bee endpoints (`topology`, `addresses`, `peers`, `status`, `chainstate`, `reservestate`, `redistributionstate`, `node`, `health`, `readiness`, `stamps`, `batches`, `chequebook`, `wallet`) for diagnosing the gateway's Bee node when you only have gateway access. Disabled (404) unless `DEBUG_ALLOWED_ADDRESSES` (comma-separated 0x addresses) is set. Auth = EIP-191 signature from an allow-listed address over `swarm-connect-debug:<unix_ts>` via headers `X-Debug-Timestamp` + `X-Debug-Signature` (freshness window `DEBUG_SIG_MAX_AGE_SECONDS`, default 300s). No stored secret; never proxies writes.
+
+#### Chunk Forwarding (pre-stamped, Flow A)
+- `POST /api/v1/chunks/`: Forward a single **client-supplied pre-stamped** chunk to Bee `POST /chunks`. Raw chunk in the body, marshaled stamp in the `Swarm-Postage-Stamp` header (sent instead of `Swarm-Postage-Batch-Id`); optional `?deferred=true` (default false). The client owns the postage batch and signs locally; the gateway is a thin forwarder and does **not** verify the stamp (Bee does). Always mounted; the handler returns 404 when `CHUNK_UPLOAD_ENABLED=false`.
+- `POST /api/v1/chunks/credit?mb={n}`: x402-paid prepaid **bandwidth credit** top-up. Priced via the `bandwidth` operation in `pricing.py` at `X402_BANDWIDTH_USD_PER_GB` (min `BANDWIDTH_CREDIT_MIN_TOPUP_MB`). Credit is bound to the verified x402 payer wallet; returns a bearer token.
+  - **Billing model**: chunk uploads carry no per-request payment. When `X402_ENABLED`, the client tops up once, then presents the bearer token via the `X-Bandwidth-Credit-Token` header on each `POST /chunks/`; the chunk's byte length is debited from the prepaid balance (atomic check-and-debit; refunded if the Bee forward fails). A **free** path is also available: send `X-Payment-Mode: free` to draw from a per-IP daily byte quota (`app/services/bandwidth_free_tier.py`, in-memory, resets per UTC day), returning `429` when exhausted (also refunded on Bee failure). Only `/chunks/credit` is in `PROTECTED_ENDPOINTS`.
+  - Ledger: `app/services/bandwidth_credit.py` (`BandwidthCreditManager`), address-keyed balances + `token -> address` index, persisted to `BANDWIDTH_CREDIT_STATE_FILE`.
+  - Config: `CHUNK_UPLOAD_ENABLED` (default false), `CHUNK_UPLOAD_MAX_BYTES_PER_REQUEST` (4104), `X402_BANDWIDTH_USD_PER_GB`, `BANDWIDTH_CREDIT_MIN_TOPUP_MB`, `BANDWIDTH_CREDIT_STATE_FILE`, `CHUNK_UPLOAD_FREE_TIER_ENABLED`, `CHUNK_UPLOAD_FREE_TIER_MB_PER_DAY` (free tier is independent of the x402 `X402_FREE_TIER_*` settings).
 
 #### Stamp Pool (Low-Latency Provisioning)
 - `GET /api/v1/pool/status`: Get pool status and reserve levels
@@ -351,14 +368,19 @@ The gateway exposes a `/metrics` endpoint (Prometheus text format) when `METRICS
 - `gateway_notary_signatures_total{status}`
 - `gateway_x402_payments_total{mode}` (paid/free/rejected)
 - `gateway_rate_limit_hits_total`
+- `gateway_chunk_uploads_total{status, mode}` (mode = paid/free/none), `gateway_chunk_upload_bytes_total`
+- `gateway_bandwidth_topups_total{status}`, `gateway_bandwidth_topup_bytes_total`
 
 **Custom gauges** (polled every `METRICS_BALANCE_POLL_SECONDS`):
 - `gateway_wallet_bzz_balance`, `gateway_wallet_xdai_balance`
 - `gateway_chequebook_available_balance`, `gateway_base_eth_balance`
 - `gateway_stamp_pool_available{size}`, `gateway_stamps_total`
 - `gateway_stamp_min_ttl_seconds`, `gateway_uptime_seconds`
+- `gateway_bandwidth_credit_accounts`, `gateway_bandwidth_credit_bytes_total` (when `CHUNK_UPLOAD_ENABLED`)
 
-**Info**: `gateway_info{version, environment, x402_enabled, pool_enabled, notary_enabled}`
+**Info**: `gateway_info{version, environment, x402_enabled, pool_enabled, notary_enabled, chunk_upload_enabled}`
+
+> New metrics are scraped by Grafana Alloy and remote-written to Grafana Cloud automatically once deployed (no extra wiring). Adding them as **panels** on `monitoring/provisioning/dashboards/gateway-overview.json` is a separate, deliberate step (tracked in its own issue).
 
 ### Production Monitoring Stack
 

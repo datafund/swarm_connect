@@ -86,6 +86,41 @@ class Settings(BaseSettings):
     # Stamp ownership: file path for persisting stamp ownership records
     STAMP_OWNERSHIP_FILE: str = "data/stamp_owners.json"
 
+    # === Debug Proxy (read-only Bee diagnostics, signature-gated) ===
+    # Comma-separated 0x addresses allowed to read Bee diagnostics via
+    # GET /api/v1/debug/bee/{path}. Access requires an EIP-191 signature from one
+    # of these addresses over "swarm-connect-debug:<unix_ts>" (headers
+    # X-Debug-Address optional, X-Debug-Timestamp, X-Debug-Signature). Empty =>
+    # endpoint disabled (404). Addresses are public identifiers, not secrets.
+    DEBUG_ALLOWED_ADDRESSES: str = ""
+    DEBUG_SIG_MAX_AGE_SECONDS: int = 300  # signature freshness window (replay guard)
+
+    # === Flow B: Gnosis chain client (buy postage batches for an external owner) ===
+    # Signs/sends approve + createBatch on Gnosis so a batch can be owned by an
+    # arbitrary address. The signing key is SENSITIVE — handle like NOTARY_PRIVATE_KEY
+    # (env/secret, never logged). Drives POST /api/v1/stamps/for-owner (#228).
+    GNOSIS_RPC_URL: Optional[str] = None
+    GNOSIS_PRIVATE_KEY: Optional[str] = None  # funded Gnosis wallet (xBZZ + xDAI), pays for batches
+    GNOSIS_CHAIN_ID: int = 100  # 100 = Gnosis mainnet, 11155111 = Sepolia testnet
+    # Contract/token addresses default per chain id when unset (see gnosis_chain.py).
+    POSTAGE_STAMP_CONTRACT_ADDRESS: Optional[str] = None
+    BZZ_TOKEN_ADDRESS: Optional[str] = None
+
+    # === Flow B: buy postage batch for an external owner — endpoint (#228) + guards (#230) ===
+    # POST /api/v1/stamps/for-owner. SPENDS the gateway's Gnosis funds, so it is OFF by
+    # default and gated by an owner allow-list + hard alpha caps.
+    STAMP_PURCHASE_FOR_OTHERS_ENABLED: bool = False  # master toggle (router 404s when off)
+    STAMP_FOR_OTHERS_REQUIRE_WHITELIST: bool = True   # require owner in the allow-list
+    STAMP_FOR_OTHERS_OWNER_WHITELIST: str = ""        # comma-separated 0x owner addresses allowed
+    STAMP_FOR_OTHERS_MAX_DEPTH: int = 22              # cap batch depth (capacity)
+    STAMP_FOR_OTHERS_MAX_BZZ: float = 1.0             # cap BZZ spent per batch
+    STAMP_FOR_OTHERS_MAX_DURATION_HOURS: int = 168    # cap TTL (1 week)
+    STAMP_FOR_OTHERS_FREE_TIER_ENABLED: bool = False  # free creation OFF by default (real BZZ spend)
+    # Signer (GNOSIS_PRIVATE_KEY) wallet thresholds for preflight + metrics (#231).
+    GNOSIS_XDAI_CRITICAL_THRESHOLD: float = 0.005     # block (503) if xDAI below this (no gas)
+    GNOSIS_XDAI_WARN_THRESHOLD: float = 0.05
+    GNOSIS_XBZZ_WARN_THRESHOLD: float = 0.5           # warn if xBZZ (BZZ units) below this
+
     # === Notary/Provenance Signing Settings ===
     # The notary feature allows the gateway to sign documents with an authoritative timestamp.
     # This provides proof that a document existed at a specific time, signed by the gateway.
@@ -97,6 +132,29 @@ class Settings(BaseSettings):
 
     # === Upload Limits ===
     MAX_UPLOAD_SIZE_MB: int = 10  # Maximum file upload size in megabytes
+
+    # === Chunk Upload (stamped-chunk forwarding, Flow A) ===
+    # When enabled, the gateway forwards a single client-supplied PRE-STAMPED chunk
+    # to the Bee node's POST /chunks endpoint using the Swarm-Postage-Stamp header.
+    # The client controls the postage stamp; the gateway is a thin forwarder and does
+    # NOT verify the stamp signature/owner (Bee does that).
+    CHUNK_UPLOAD_ENABLED: bool = False  # Master switch for chunk forwarding feature
+    # A single Swarm chunk is at most an 8-byte span prefix + 4096 bytes of payload.
+    CHUNK_UPLOAD_MAX_BYTES_PER_REQUEST: int = 4104  # Hard cap on the chunk body size
+    # Free tier for chunk uploads: a per-IP daily byte quota, independent of the
+    # x402 (stamp/data) free tier. Opt in per request with header X-Payment-Mode: free.
+    CHUNK_UPLOAD_FREE_TIER_ENABLED: bool = True  # Allow free chunk uploads within a daily quota
+    CHUNK_UPLOAD_FREE_TIER_MB_PER_DAY: int = 100  # Free bytes per IP per UTC day (1 MB = 10^6 bytes)
+
+    # === Bandwidth Credit Ledger ===
+    # Prepaid, byte-denominated credit balances keyed by client address. One x402
+    # payment tops up a balance; each chunk upload debits bytes from it. This avoids
+    # the per-request minimum-price floor collapsing onto every tiny chunk.
+    BANDWIDTH_CREDIT_STATE_FILE: str = "data/bandwidth_credit.json"  # Ledger persistence path
+    # Bandwidth price used to convert an x402 top-up payment into byte credit.
+    X402_BANDWIDTH_USD_PER_GB: float = 0.10  # USD per GB of upload bandwidth (1 GB = 10^9 bytes)
+    # Minimum top-up so a single x402 payment clears the per-request price floor.
+    BANDWIDTH_CREDIT_MIN_TOPUP_MB: int = 100  # Minimum credit top-up in MB (1 MB = 10^6 bytes)
 
     # === JSON Body Limits ===
     MAX_JSON_BODY_BYTES: int = 1_048_576  # Maximum JSON body size (1 MB)
@@ -143,6 +201,18 @@ class Settings(BaseSettings):
         if not self.X402_WHITELIST_IPS:
             return []
         return [ip.strip() for ip in self.X402_WHITELIST_IPS.split(",") if ip.strip()]
+
+    def get_stamp_for_others_whitelist(self) -> List[str]:
+        """Parse the for-owner allow-list into lowercased 0x addresses."""
+        if not self.STAMP_FOR_OTHERS_OWNER_WHITELIST:
+            return []
+        return [a.strip().lower() for a in self.STAMP_FOR_OTHERS_OWNER_WHITELIST.split(",") if a.strip()]
+
+    def get_debug_allowed_addresses(self) -> List[str]:
+        """Parse the debug allow-list into lowercased 0x addresses."""
+        if not self.DEBUG_ALLOWED_ADDRESSES:
+            return []
+        return [a.strip().lower() for a in self.DEBUG_ALLOWED_ADDRESSES.split(",") if a.strip()]
 
     def get_stamp_pool_reserve_config(self) -> dict:
         """Get stamp pool reserve configuration as {depth: count} dict.

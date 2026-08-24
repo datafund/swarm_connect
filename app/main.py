@@ -5,7 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from app.core.config import settings
 from app.core.version import VERSION
-from app.api.endpoints import stamps, data, wallet, pool, notary
+from app.api.endpoints import stamps, data, wallet, pool, notary, chunks, debug, stamps_for_owner
 import logging
 
 # Configure basic logging
@@ -20,6 +20,12 @@ async def lifespan(app: FastAPI):
     # Initialize shared HTTP client (must be first — other services depend on it)
     from app.services.http_client import init_client, close_client
     await init_client()
+
+    # Load bandwidth credit ledger so prepaid balances survive restarts
+    if settings.CHUNK_UPLOAD_ENABLED:
+        from app.services.bandwidth_credit import bandwidth_credit_manager
+        bandwidth_credit_manager.load_on_startup()
+        logger.info("Bandwidth credit ledger loaded")
 
     # Start stamp pool background task if enabled
     if settings.STAMP_POOL_ENABLED:
@@ -39,6 +45,8 @@ async def lifespan(app: FastAPI):
             "x402_enabled": str(settings.X402_ENABLED),
             "pool_enabled": str(settings.STAMP_POOL_ENABLED),
             "notary_enabled": str(settings.NOTARY_ENABLED),
+            "chunk_upload_enabled": str(settings.CHUNK_UPLOAD_ENABLED),
+            "stamp_purchase_for_others_enabled": str(settings.STAMP_PURCHASE_FOR_OTHERS_ENABLED),
         })
         await start_metrics_background_task()
 
@@ -123,6 +131,19 @@ app.include_router(data.router, prefix=f"{settings.API_V1_STR}/data", tags=["dat
 app.include_router(wallet.router, prefix=f"{settings.API_V1_STR}", tags=["wallet"])
 app.include_router(pool.router, prefix=f"{settings.API_V1_STR}/pool", tags=["pool"])
 app.include_router(notary.router, prefix=f"{settings.API_V1_STR}/notary", tags=["notary"])
+# Chunk forwarding (Flow A). Router is always mounted; the handler guards on
+# CHUNK_UPLOAD_ENABLED (returns 404 when off). The x402 dependency gates only the
+# credit top-up (POST /chunks/credit, listed in PROTECTED_ENDPOINTS); the chunk
+# upload itself spends prepaid credit via a bearer token, not a per-request payment.
+app.include_router(chunks.router, prefix=f"{settings.API_V1_STR}/chunks", tags=["chunks"], dependencies=x402_deps)
+# Signature-gated read-only Bee diagnostics proxy. Always mounted; the handler
+# returns 404 unless DEBUG_ALLOWED_ADDRESSES is configured.
+app.include_router(debug.router, prefix=f"{settings.API_V1_STR}/debug", tags=["debug"])
+# Flow B: create batch for an external owner. Carries the x402 dependency (#229) so,
+# when x402 is enabled, the caller pays for the service via the /api/v1/stamps/ protected
+# prefix; the handler is also 404'd + guarded (toggle off by default, allow-list + caps)
+# so the on-chain spend path is never open.
+app.include_router(stamps_for_owner.router, prefix=f"{settings.API_V1_STR}/stamps", tags=["stamps"], dependencies=x402_deps)
 
 @app.get("/", summary="Health Check", tags=["default"])
 @app.get("/health", summary="Health Check", tags=["default"], include_in_schema=False)
@@ -133,6 +154,12 @@ async def read_root():
     **Response fields**:
     - `status`: "ok" | "degraded" | "critical"
     - `message`: Gateway name
+    - `bee_node`: the Bee node's identity and build (`overlay`, `version`, `api_version`,
+      `bee_status`), connectivity (`mode`, `connected_peers`, `population`, `reachability`,
+      `network_availability`), reserve/radius (`storage_radius`, `committed_depth`,
+      `reserve_size`, `reserve_size_within_radius`, `pullsync_rate`, `batch_commitment`),
+      chain sync (`last_synced_block`, `chain_tip`, `chain_sync_lag_blocks`), plus a
+      `healthy` flag and advisory `warnings`
     - `x402` (when payments enabled): wallet status, free tier availability, and warnings
 
     **When x402 payments are enabled**, the response includes:
@@ -156,6 +183,23 @@ async def read_root():
         "status": "ok",
         "message": f"Welcome to {settings.PROJECT_NAME}"
     }
+
+    # Bee node connectivity/health — surfaces whether the node can actually reach
+    # the network (networkAvailability), peer count, mode, reserve, plus node identity,
+    # build version and chain-sync position. Cheap (cached), always included. A node
+    # with networkAvailability != Available accepts uploads (201) that may not
+    # propagate, so flag it here.
+    try:
+        from app.services.swarm_api import get_node_status_summary
+        node = await get_node_status_summary()
+        response_data["bee_node"] = node
+        # Only downgrade on a definitive bad signal (network unreachable -> uploads
+        # won't propagate). A transient inability to query the node, or warmup, is
+        # surfaced via bee_node.warnings but doesn't flip the gateway to degraded.
+        if node.get("network_availability") == "Unavailable" and response_data["status"] == "ok":
+            response_data["status"] = "degraded"
+    except Exception as e:
+        logger.warning(f"Health: failed to summarize Bee node status: {e}")
 
     # If x402 is enabled, include wallet status
     if settings.X402_ENABLED:

@@ -57,6 +57,46 @@ async def _calculate_price_for_request(request: Request) -> dict:
     """
     path = request.url.path
 
+    if "/chunks/credit" in path:
+        qp = request.query_params
+        try:
+            mb = int(qp.get("mb", settings.BANDWIDTH_CREDIT_MIN_TOPUP_MB))
+        except (TypeError, ValueError):
+            mb = settings.BANDWIDTH_CREDIT_MIN_TOPUP_MB
+        if mb < settings.BANDWIDTH_CREDIT_MIN_TOPUP_MB:
+            mb = settings.BANDWIDTH_CREDIT_MIN_TOPUP_MB
+        size_bytes = mb * 1_000_000  # 1 MB = 10^6 bytes
+        quote = await get_price_quote(operation="bandwidth", size_bytes=size_bytes)
+        return {
+            "price_usd": quote["price_usd"],
+            "description": f"Bandwidth credit top-up ({mb} MB)",
+        }
+
+    if "/stamps/for-owner" in path:
+        # Price the actual requested batch (Flow B). Read the JSON body — Starlette
+        # caches it, so the endpoint's Pydantic model still re-parses it afterwards.
+        from app.api.models.stamp import SIZE_PRESETS
+        try:
+            b = await request.json()
+        except Exception:
+            b = {}
+        size = b.get("size")
+        depth = b.get("depth")
+        if isinstance(size, str) and size in SIZE_PRESETS:
+            d = SIZE_PRESETS[size]
+        elif isinstance(depth, int):
+            d = depth
+        else:
+            d = 17
+        dur = b.get("duration_hours")
+        if not isinstance(dur, int):
+            dur = 24
+        quote = await get_price_quote(operation="stamp_purchase", duration_hours=dur, depth=d)
+        return {
+            "price_usd": quote["price_usd"],
+            "description": f"Create batch for owner (depth {d}, {dur}h)",
+        }
+
     if "/stamps/" in path:
         quote = await get_price_quote(
             operation="stamp_purchase",

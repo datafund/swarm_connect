@@ -11,6 +11,7 @@ python-multipart>=0.0.20  # For file upload support in FastAPI
 # x402 payment protocol (v1 - v2 under development)
 x402==1.0.0               # Official x402 Python SDK (pinned - v2.x has breaking API changes)
 eth-account>=0.8.0        # For wallet signature verification
+web3>=6.0.0               # Gnosis chain client (Flow B: createBatch for an external owner). Already pulled in by x402.
 
 # Prometheus monitoring
 prometheus-fastapi-instrumentator>=6.0.0

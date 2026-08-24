@@ -12,7 +12,15 @@ on:
 jobs:
   build:
     name: build
-    runs-on: [self-hosted, pljudfbee1]
+    # Deploy targets are data, not code: set the repository variable DEPLOY_RUNNERS
+    # to a JSON array of runner labels to add or retire a host without a code
+    # change. Unset -> the single existing host, i.e. current behaviour.
+    # fail-fast is off so one unavailable host cannot block the others.
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: ${{ fromJSON(vars.DEPLOY_RUNNERS || '["pljudfbee1"]') }}
+    runs-on: [self-hosted, "${{ matrix.runner }}"]
     # Use staging environment for dev branch, production for main branch
     environment: ${{ github.ref == 'refs/heads/dev' && 'staging' || (github.ref == 'refs/heads/main' && 'production' || '') }}
 
@@ -60,11 +68,35 @@ jobs:
           CORS_ALLOWED_ORIGINS=${{ vars.CORS_ALLOWED_ORIGINS || '*' }}
           CORS_ALLOW_CREDENTIALS=${{ vars.CORS_ALLOW_CREDENTIALS || 'false' }}
           MAX_UPLOAD_SIZE_MB=${{ vars.MAX_UPLOAD_SIZE_MB || '10' }}
+          CHUNK_UPLOAD_ENABLED=${{ vars.CHUNK_UPLOAD_ENABLED || 'false' }}
+          CHUNK_UPLOAD_MAX_BYTES_PER_REQUEST=${{ vars.CHUNK_UPLOAD_MAX_BYTES_PER_REQUEST || '4104' }}
+          CHUNK_UPLOAD_FREE_TIER_ENABLED=${{ vars.CHUNK_UPLOAD_FREE_TIER_ENABLED || 'true' }}
+          CHUNK_UPLOAD_FREE_TIER_MB_PER_DAY=${{ vars.CHUNK_UPLOAD_FREE_TIER_MB_PER_DAY || '100' }}
+          X402_BANDWIDTH_USD_PER_GB=${{ vars.X402_BANDWIDTH_USD_PER_GB || '0.10' }}
+          BANDWIDTH_CREDIT_MIN_TOPUP_MB=${{ vars.BANDWIDTH_CREDIT_MIN_TOPUP_MB || '100' }}
+          BANDWIDTH_CREDIT_STATE_FILE=${{ vars.BANDWIDTH_CREDIT_STATE_FILE || 'data/bandwidth_credit.json' }}
+          DEBUG_ALLOWED_ADDRESSES=${{ vars.DEBUG_ALLOWED_ADDRESSES || '' }}
+          DEBUG_SIG_MAX_AGE_SECONDS=${{ vars.DEBUG_SIG_MAX_AGE_SECONDS || '300' }}
           RATE_LIMIT_ENABLED=${{ vars.RATE_LIMIT_ENABLED || 'true' }}
           RATE_LIMIT_PER_MINUTE=${{ vars.RATE_LIMIT_PER_MINUTE || '60' }}
           RATE_LIMIT_BURST=${{ vars.RATE_LIMIT_BURST || '10' }}
           METRICS_ENABLED=${{ vars.METRICS_ENABLED || 'true' }}
           METRICS_BALANCE_POLL_SECONDS=${{ vars.METRICS_BALANCE_POLL_SECONDS || '60' }}
+          GNOSIS_RPC_URL=${{ vars.GNOSIS_RPC_URL || '' }}
+          GNOSIS_PRIVATE_KEY=${{ secrets.GNOSIS_PRIVATE_KEY || '' }}
+          GNOSIS_CHAIN_ID=${{ vars.GNOSIS_CHAIN_ID || '100' }}
+          POSTAGE_STAMP_CONTRACT_ADDRESS=${{ vars.POSTAGE_STAMP_CONTRACT_ADDRESS || '' }}
+          BZZ_TOKEN_ADDRESS=${{ vars.BZZ_TOKEN_ADDRESS || '' }}
+          STAMP_PURCHASE_FOR_OTHERS_ENABLED=${{ vars.STAMP_PURCHASE_FOR_OTHERS_ENABLED || 'false' }}
+          STAMP_FOR_OTHERS_REQUIRE_WHITELIST=${{ vars.STAMP_FOR_OTHERS_REQUIRE_WHITELIST || 'true' }}
+          STAMP_FOR_OTHERS_OWNER_WHITELIST=${{ vars.STAMP_FOR_OTHERS_OWNER_WHITELIST || '' }}
+          STAMP_FOR_OTHERS_MAX_DEPTH=${{ vars.STAMP_FOR_OTHERS_MAX_DEPTH || '22' }}
+          STAMP_FOR_OTHERS_MAX_BZZ=${{ vars.STAMP_FOR_OTHERS_MAX_BZZ || '1.0' }}
+          STAMP_FOR_OTHERS_MAX_DURATION_HOURS=${{ vars.STAMP_FOR_OTHERS_MAX_DURATION_HOURS || '168' }}
+          STAMP_FOR_OTHERS_FREE_TIER_ENABLED=${{ vars.STAMP_FOR_OTHERS_FREE_TIER_ENABLED || 'false' }}
+          GNOSIS_XDAI_CRITICAL_THRESHOLD=${{ vars.GNOSIS_XDAI_CRITICAL_THRESHOLD || '0.005' }}
+          GNOSIS_XDAI_WARN_THRESHOLD=${{ vars.GNOSIS_XDAI_WARN_THRESHOLD || '0.05' }}
+          GNOSIS_XBZZ_WARN_THRESHOLD=${{ vars.GNOSIS_XBZZ_WARN_THRESHOLD || '0.5' }}
           GATEWAY_ENVIRONMENT=development
           EOF
 
@@ -93,11 +125,35 @@ jobs:
           CORS_ALLOWED_ORIGINS=${{ vars.CORS_ALLOWED_ORIGINS || '*' }}
           CORS_ALLOW_CREDENTIALS=${{ vars.CORS_ALLOW_CREDENTIALS || 'false' }}
           MAX_UPLOAD_SIZE_MB=${{ vars.MAX_UPLOAD_SIZE_MB || '10' }}
+          CHUNK_UPLOAD_ENABLED=${{ vars.CHUNK_UPLOAD_ENABLED || 'false' }}
+          CHUNK_UPLOAD_MAX_BYTES_PER_REQUEST=${{ vars.CHUNK_UPLOAD_MAX_BYTES_PER_REQUEST || '4104' }}
+          CHUNK_UPLOAD_FREE_TIER_ENABLED=${{ vars.CHUNK_UPLOAD_FREE_TIER_ENABLED || 'true' }}
+          CHUNK_UPLOAD_FREE_TIER_MB_PER_DAY=${{ vars.CHUNK_UPLOAD_FREE_TIER_MB_PER_DAY || '100' }}
+          X402_BANDWIDTH_USD_PER_GB=${{ vars.X402_BANDWIDTH_USD_PER_GB || '0.10' }}
+          BANDWIDTH_CREDIT_MIN_TOPUP_MB=${{ vars.BANDWIDTH_CREDIT_MIN_TOPUP_MB || '100' }}
+          BANDWIDTH_CREDIT_STATE_FILE=${{ vars.BANDWIDTH_CREDIT_STATE_FILE || 'data/bandwidth_credit.json' }}
+          DEBUG_ALLOWED_ADDRESSES=${{ vars.DEBUG_ALLOWED_ADDRESSES || '' }}
+          DEBUG_SIG_MAX_AGE_SECONDS=${{ vars.DEBUG_SIG_MAX_AGE_SECONDS || '300' }}
           RATE_LIMIT_ENABLED=${{ vars.RATE_LIMIT_ENABLED || 'true' }}
           RATE_LIMIT_PER_MINUTE=${{ vars.RATE_LIMIT_PER_MINUTE || '60' }}
           RATE_LIMIT_BURST=${{ vars.RATE_LIMIT_BURST || '10' }}
           METRICS_ENABLED=${{ vars.METRICS_ENABLED || 'true' }}
           METRICS_BALANCE_POLL_SECONDS=${{ vars.METRICS_BALANCE_POLL_SECONDS || '60' }}
+          GNOSIS_RPC_URL=${{ vars.GNOSIS_RPC_URL || '' }}
+          GNOSIS_PRIVATE_KEY=${{ secrets.GNOSIS_PRIVATE_KEY || '' }}
+          GNOSIS_CHAIN_ID=${{ vars.GNOSIS_CHAIN_ID || '100' }}
+          POSTAGE_STAMP_CONTRACT_ADDRESS=${{ vars.POSTAGE_STAMP_CONTRACT_ADDRESS || '' }}
+          BZZ_TOKEN_ADDRESS=${{ vars.BZZ_TOKEN_ADDRESS || '' }}
+          STAMP_PURCHASE_FOR_OTHERS_ENABLED=${{ vars.STAMP_PURCHASE_FOR_OTHERS_ENABLED || 'false' }}
+          STAMP_FOR_OTHERS_REQUIRE_WHITELIST=${{ vars.STAMP_FOR_OTHERS_REQUIRE_WHITELIST || 'true' }}
+          STAMP_FOR_OTHERS_OWNER_WHITELIST=${{ vars.STAMP_FOR_OTHERS_OWNER_WHITELIST || '' }}
+          STAMP_FOR_OTHERS_MAX_DEPTH=${{ vars.STAMP_FOR_OTHERS_MAX_DEPTH || '22' }}
+          STAMP_FOR_OTHERS_MAX_BZZ=${{ vars.STAMP_FOR_OTHERS_MAX_BZZ || '1.0' }}
+          STAMP_FOR_OTHERS_MAX_DURATION_HOURS=${{ vars.STAMP_FOR_OTHERS_MAX_DURATION_HOURS || '168' }}
+          STAMP_FOR_OTHERS_FREE_TIER_ENABLED=${{ vars.STAMP_FOR_OTHERS_FREE_TIER_ENABLED || 'false' }}
+          GNOSIS_XDAI_CRITICAL_THRESHOLD=${{ vars.GNOSIS_XDAI_CRITICAL_THRESHOLD || '0.005' }}
+          GNOSIS_XDAI_WARN_THRESHOLD=${{ vars.GNOSIS_XDAI_WARN_THRESHOLD || '0.05' }}
+          GNOSIS_XBZZ_WARN_THRESHOLD=${{ vars.GNOSIS_XBZZ_WARN_THRESHOLD || '0.5' }}
           GATEWAY_ENVIRONMENT=main
           EOF
 
@@ -108,6 +164,14 @@ jobs:
           GRAFANA_CLOUD_PROM_USERNAME=${{ secrets.GRAFANA_CLOUD_PROM_USERNAME }}
           GRAFANA_CLOUD_API_TOKEN=${{ secrets.GRAFANA_CLOUD_API_TOKEN }}
           EOF
+          # Host-specific compose settings (Bee endpoints, COMPOSE_PROFILES, p2p
+          # ports, ...). Lives outside the clone so it survives the rm -rf above.
+          # Absent on hosts that need no overrides -> defaults in docker-compose.yml
+          # apply and the deploy is unchanged.
+          if [ -f /opt/swarm_connect_host.env ]; then
+            echo "Applying host overrides from /opt/swarm_connect_host.env"
+            cat /opt/swarm_connect_host.env >> .env
+          fi
           docker compose up -d --force-recreate
 
       - name: post-deploy diagnostics

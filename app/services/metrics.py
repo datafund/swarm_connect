@@ -81,6 +81,44 @@ rate_limit_hits_total = Counter(
 bee_api_errors_total = Counter(
     "gateway_bee_api_errors_total", "Upstream Bee node errors", ["endpoint"]
 )
+bee_poll_total = Counter(
+    "gateway_bee_poll_total", "Balance poll attempts", ["status"]
+)
+chunk_uploads_total = Counter(
+    "gateway_chunk_uploads_total", "Pre-stamped chunk forwarding attempts", ["status", "mode"]
+)
+chunk_upload_bytes_total = Counter(
+    "gateway_chunk_upload_bytes_total", "Total bytes forwarded as pre-stamped chunks"
+)
+bandwidth_topups_total = Counter(
+    "gateway_bandwidth_topups_total", "Bandwidth credit top-ups", ["status"]
+)
+bandwidth_topup_bytes_total = Counter(
+    "gateway_bandwidth_topup_bytes_total", "Total bytes of bandwidth credit sold via top-ups"
+)
+
+# ── Bandwidth credit gauges (updated by background poller) ───────────────────
+
+bandwidth_credit_accounts = Gauge(
+    "gateway_bandwidth_credit_accounts", "Bandwidth credit accounts with a non-zero balance"
+)
+bandwidth_credit_bytes_total = Gauge(
+    "gateway_bandwidth_credit_bytes_total", "Total outstanding (unspent) bandwidth credit in bytes"
+)
+
+# ── Flow B: buy-batch-for-owner (#231) ──────────────────────────────────────
+for_owner_batches_total = Counter(
+    "gateway_for_owner_batches_total", "createBatch-for-owner attempts", ["status"]
+)
+for_owner_bzz_spent_total = Counter(
+    "gateway_for_owner_bzz_spent_total", "Total PLUR spent creating batches for owners"
+)
+gnosis_signer_xbzz_balance = Gauge(
+    "gateway_gnosis_signer_xbzz_balance", "Gnosis signer wallet xBZZ balance (BZZ)"
+)
+gnosis_signer_xdai_balance = Gauge(
+    "gateway_gnosis_signer_xdai_balance", "Gnosis signer wallet xDAI balance"
+)
 
 # ── Background task ──────────────────────────────────────────────────────────
 
@@ -117,7 +155,10 @@ async def _poll_balances():
                 cheque = await check_chequebook_balance()
                 if cheque.get("ok") or cheque.get("available_bzz", 0) > 0:
                     chequebook_available_balance.set(cheque["available_bzz"])
+
+                bee_poll_total.labels(status="success").inc()
             except Exception as e:
+                bee_poll_total.labels(status="error").inc()
                 logger.debug(f"Metrics: failed to get wallet balances: {e}")
 
             # Base ETH balance (only when x402 enabled)
@@ -178,6 +219,26 @@ async def _poll_balances():
                         pool_stamp_min_ttl_seconds.set(0)
                 except Exception as e:
                     logger.debug(f"Metrics: failed to get pool status: {e}")
+
+            # Bandwidth credit ledger (chunk forwarding feature)
+            if settings.CHUNK_UPLOAD_ENABLED:
+                try:
+                    from app.services.bandwidth_credit import bandwidth_credit_manager
+                    bandwidth_credit_accounts.set(bandwidth_credit_manager.account_count())
+                    bandwidth_credit_bytes_total.set(bandwidth_credit_manager.total_outstanding_bytes())
+                except Exception as e:
+                    logger.debug(f"Metrics: failed to get bandwidth credit state: {e}")
+
+            # Gnosis signer wallet balances (buy-batch-for-owner feature)
+            if settings.STAMP_PURCHASE_FOR_OTHERS_ENABLED:
+                try:
+                    from app.services.gnosis_chain import gnosis_chain_client
+                    if gnosis_chain_client.is_configured:
+                        bals = await gnosis_chain_client.get_balances()
+                        gnosis_signer_xbzz_balance.set(bals["xbzz_plur"] / 1e16)
+                        gnosis_signer_xdai_balance.set(bals["xdai_wei"] / 1e18)
+                except Exception as e:
+                    logger.debug(f"Metrics: failed to get Gnosis signer balances: {e}")
 
         except Exception as e:
             logger.warning(f"Metrics background poll error: {e}")

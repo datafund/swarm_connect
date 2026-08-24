@@ -91,6 +91,37 @@ The server will be available at:
 - API Documentation: http://127.0.0.1:8000/docs
 - Alternative docs: http://127.0.0.1:8000/redoc
 
+### Compose host overrides
+
+`docker-compose.yml` reads a few variables from the compose `.env` file so one
+image can serve hosts with different topologies. All are optional — leave them
+unset and the stack behaves as it always has.
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `SWARM_BEE_API_URL` | external node | Bee endpoint for the production gateway |
+| `SWARM_BEE_API_URL_DEV` | external node | Bee endpoint for the staging gateway |
+| `COMPOSE_PROFILES` | *(unset)* | set to `bee` to also run the bundled Bee nodes |
+| `BEE_VERSION` | `2.8.1` | Bee image tag |
+| `BEE_RPC_ENDPOINT` | *(unset)* | Gnosis RPC endpoint (required with the `bee` profile) |
+| `BEE_PASSWORD` / `BEE_DEV_PASSWORD` | *(unset)* | keystore passwords |
+| `BEE_NAT_ADDR` / `BEE_DEV_NAT_ADDR` | *(unset)* | public `host:port` each node advertises |
+| `BEE_P2P_PORT` / `BEE_DEV_P2P_PORT` | `1634` / `1734` | host p2p ports |
+| `BEE_FULL_NODE` / `BEE_DEV_FULL_NODE` | `false` | run as a full node instead of light |
+| `GATEWAY_BIND` | `0.0.0.0` | host interface the gateways bind to; set `127.0.0.1` behind a local reverse proxy |
+| `HOST_LABEL` | *(empty)* | value of the `host` label on metrics; set when more than one host runs the stack |
+
+**Running the gateway and its Bee node on one host** — set `COMPOSE_PROFILES=bee`
+and point each gateway at its own node (`http://bee:1633`, `http://bee-dev:1633`).
+The Bee API is never published to the host: it has no authentication, so it must
+not be reachable from outside the compose network. Only the p2p ports are exposed,
+and `BEE_NAT_ADDR` must advertise the matching public `host:port` or peers cannot
+dial back — since Bee 2.7.0 an invalid value fails startup rather than degrading
+silently.
+
+The deploy workflow appends `/opt/swarm_connect_host.env` to the compose `.env` if
+that file exists, so host-specific values survive a redeploy.
+
 ## Architecture
 
 Swarm Connect is a FastAPI-based API gateway that provides comprehensive access to Ethereum Swarm (distributed storage network) functionality. It offers complete postage stamp management and data operations through a clean, RESTful interface, eliminating the need for clients to interact directly with complex Swarm Bee node APIs.
@@ -265,7 +296,7 @@ Swarm Connect is a FastAPI-based API gateway that provides comprehensive access 
 ### Available API Endpoints
 
 #### Core Endpoints
-- `GET /`: Health check endpoint
+- `GET /` (and `/health`): Health check. Always includes a `bee_node` section describing the Bee node — identity and build (`overlay`, `version`, `api_version`, `bee_status`), connectivity (`mode`, `connected_peers`, `population`, `reachability`, `network_availability` (Available/Unavailable/Unknown)), reserve and radius (`storage_radius`, `committed_depth`, `reserve_size`, `reserve_size_within_radius`, `pullsync_rate`, `batch_commitment`), chain sync (`last_synced_block`, `chain_tip`, `chain_sync_lag_blocks`), plus `warming_up`, a `healthy` flag, and `warnings`. `status` becomes `degraded` when `network_availability` is `Unavailable` (the node can't reach the storer network, so uploads may return success without propagating); other warnings — a low peer count, a large chain-sync lag, or a non-ok Bee status — are advisory and do not change `status`. When x402 is enabled, also includes the `x402` wallet section.
 
 #### Stamp Management
 - `POST /api/v1/stamps/`: Purchase new postage stamps with time-based or advanced parameters
@@ -273,12 +304,22 @@ Swarm Connect is a FastAPI-based API gateway that provides comprehensive access 
 - `GET /api/v1/stamps/{stamp_id}`: Retrieve specific stamp batch details
 - `GET /api/v1/stamps/{stamp_id}/check`: Check stamp health for uploads (errors and warnings)
 - `PATCH /api/v1/stamps/{stamp_id}/extend`: Extend existing stamps with additional funds
+- `POST /api/v1/stamps/for-owner`: **Create a postage batch owned by an arbitrary address** (Flow B). Calls `PostageStamp.createBatch(owner=…)` on Gnosis so the owner can sign its own stamps off-node. Body: `owner` (0x address), `size`/`depth`, `duration_hours`, optional `immutable`. Returns `batchID` + `txHash`. **Spends the gateway's Gnosis funds**, so it is OFF by default (`STAMP_PURCHASE_FOR_OTHERS_ENABLED`; 404 when off) and guarded by an owner **allow-list** (`STAMP_FOR_OTHERS_REQUIRE_WHITELIST` / `_OWNER_WHITELIST`) and hard caps (`STAMP_FOR_OTHERS_MAX_DEPTH` / `_MAX_BZZ` / `_MAX_DURATION_HOURS`), all enforced before any spend. When x402 is enabled the caller pays for the service (free tier off by default); before the on-chain write the gateway's signer wallet is preflighted so it never attempts a batch it can't fund. See the [Buy-Batch-for-Owner Guide](docs/buy-batch-for-owner-guide.md) for key custody, funding, and metrics.
 
 #### Data Operations
 - `POST /api/v1/data/?stamp_id={id}&content_type={type}`: Upload raw data to Swarm
 - `POST /api/v1/data/manifest?stamp_id={id}`: Upload TAR archive as collection/manifest (15x faster for batch uploads)
 - `GET /api/v1/data/{reference}`: Download raw data from Swarm (returns bytes directly)
 - `GET /api/v1/data/{reference}/json`: Download data with JSON metadata (base64-encoded)
+
+#### Debug (read-only Bee diagnostics)
+- `GET /api/v1/debug/bee/{path}`: signature-gated read-only proxy to allow-listed Bee diagnostic endpoints (`topology`, `addresses`, `peers`, `status`, `chainstate`, …) for operators who only have gateway access. Disabled (404) unless `DEBUG_ALLOWED_ADDRESSES` is set; requires an EIP-191 signature from an allow-listed address (`X-Debug-Timestamp` + `X-Debug-Signature` over `swarm-connect-debug:<unix_ts>`). No shared secret is stored.
+
+#### Chunk Forwarding (pre-stamped)
+- `POST /api/v1/chunks/`: Forward a single **client-supplied pre-stamped** chunk to Swarm. Send the raw chunk as the body and the marshaled stamp in the `Swarm-Postage-Stamp` header. The client owns the postage batch and stamps locally; the gateway is a thin forwarder (does not verify the stamp — Bee does). Optional `?deferred=true`. Requires `CHUNK_UPLOAD_ENABLED=true` (returns 404 when disabled). When x402 is enabled, the upload spends prepaid bandwidth credit: present the bearer token from the top-up in the `X-Bandwidth-Credit-Token` header (the chunk's byte length is debited). A **free tier** is also available — send `X-Payment-Mode: free` to draw from a per-IP daily byte quota (`CHUNK_UPLOAD_FREE_TIER_MB_PER_DAY`); exceeding it returns `429`.
+- `POST /api/v1/chunks/credit?mb={n}`: Add prepaid bandwidth credit with a single x402 payment (priced at `X402_BANDWIDTH_USD_PER_GB`, minimum `BANDWIDTH_CREDIT_MIN_TOPUP_MB`). Returns a bearer **credit token** bound to the payer wallet; reuse it across many chunk uploads so per-chunk requests never hit the minimum-price floor.
+
+See the [Chunk Forwarding Guide](docs/chunk-forwarding-guide.md) for operator configuration and client integration.
 
 #### Wallet Information
 - `GET /api/v1/wallet`: Get the wallet address and BZZ balance of the Bee node
