@@ -4,7 +4,11 @@ services:
     build: .
     image: swarm_connect:main
     ports:
-      - "8899:8000"
+      # Docker publishes ports via its own iptables chains, which bypass ufw — a
+      # published port is reachable from the internet even when the host firewall
+      # denies it. Set GATEWAY_BIND=127.0.0.1 on hosts that terminate TLS with a
+      # local reverse proxy, so the gateway is not also served in plaintext.
+      - "${GATEWAY_BIND:-0.0.0.0}:8899:8000"
     env_file:
       - /opt/swarm_connect.env
     environment:
@@ -25,7 +29,7 @@ services:
     build: .
     image: swarm_connect:dev
     ports:
-      - "8900:8000"
+      - "${GATEWAY_BIND:-0.0.0.0}:8900:8000"
     env_file:
       - /opt/swarm_connect_dev.env
     environment:
