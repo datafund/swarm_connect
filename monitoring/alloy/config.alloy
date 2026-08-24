@@ -16,6 +16,15 @@ prometheus.relabel "add_environment_development" {
     target_label = "environment"
     replacement  = "development"
   }
+  // Identifies which host produced the series. When more than one host runs
+  // this stack, `environment` alone is ambiguous and their metrics interleave
+  // under identical labels. Empty when HOST_LABEL is unset: Prometheus drops
+  // empty labels, so an unconfigured host keeps its existing series identity.
+  rule {
+    action       = "replace"
+    target_label = "host"
+    replacement  = sys.env("HOST_LABEL")
+  }
   forward_to = [prometheus.remote_write.grafana_cloud.receiver]
 }
 
@@ -34,6 +43,11 @@ prometheus.relabel "add_environment_main" {
     target_label = "environment"
     replacement  = "main"
   }
+  rule {
+    action       = "replace"
+    target_label = "host"
+    replacement  = sys.env("HOST_LABEL")
+  }
   forward_to = [prometheus.remote_write.grafana_cloud.receiver]
 }
 
@@ -44,8 +58,8 @@ prometheus.remote_write "grafana_cloud" {
     url = "https://prometheus-prod-01-eu-west-0.grafana.net/api/prom/push"
 
     basic_auth {
-      username = env("GRAFANA_CLOUD_PROM_USERNAME")
-      password = env("GRAFANA_CLOUD_API_TOKEN")
+      username = sys.env("GRAFANA_CLOUD_PROM_USERNAME")
+      password = sys.env("GRAFANA_CLOUD_API_TOKEN")
     }
   }
 }
