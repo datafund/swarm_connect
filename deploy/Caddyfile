@@ -1,0 +1,65 @@
+# Reverse proxy for the Provenance Gateway.
+#
+# The gateway containers bind to loopback only (GATEWAY_BIND=127.0.0.1), so this
+# proxy is the single entry point and terminates TLS. Publishing the gateway
+# ports directly would bypass it: Docker publishes through its own iptables
+# chains, which are not filtered by ufw.
+#
+# Hostnames come from the environment so this file is not tied to one
+# deployment. Set them in /etc/default/caddy (or the systemd unit's environment):
+#
+#   GATEWAY_HOST=provenance-gateway.example.io
+#   GATEWAY_DEV_HOST=provenance-gateway.dev.example.io
+#   ACME_EMAIL=ops@example.io
+#
+# Apply with:
+#   caddy validate --config /etc/caddy/Caddyfile
+#   systemctl reload caddy
+#
+# `caddy validate` treats deprecation warnings as failure, so it is worth running
+# before every reload rather than trusting a config that merely looks right.
+
+{
+	email {$ACME_EMAIL}
+}
+
+{$GATEWAY_HOST} {
+	# Caddy sets X-Forwarded-For by default. Both get_client_ip()
+	# implementations read it, and without it every caller collapses into one
+	# bucket — per-IP rate limiting and the x402 free-tier allowance would then
+	# be shared globally rather than per client.
+	reverse_proxy 127.0.0.1:8899 {
+		# Swarm uploads can be slow; do not cut them off mid-transfer.
+		transport http {
+			read_timeout 300s
+			write_timeout 300s
+		}
+	}
+
+	encode gzip
+
+	# stdout, captured by journald (journalctl -u caddy). Writing to a file under
+	# /var/log/caddy fails with permission denied under the packaged unit's
+	# sandboxing, and with no log directive at all Caddy records no requests —
+	# which left us unable to answer "was anyone calling this gateway?".
+	log {
+		output stdout
+		format json
+	}
+}
+
+{$GATEWAY_DEV_HOST} {
+	reverse_proxy 127.0.0.1:8900 {
+		transport http {
+			read_timeout 300s
+			write_timeout 300s
+		}
+	}
+
+	encode gzip
+
+	log {
+		output stdout
+		format json
+	}
+}
