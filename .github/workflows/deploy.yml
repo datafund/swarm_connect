@@ -175,6 +175,18 @@ jobs:
             cat /opt/swarm_connect_host.env >> .env
           fi
 
+          # Pin the compose project name. By default it is derived from the
+          # directory name, which makes container AND VOLUME names depend on a
+          # filesystem path: the Bee volumes are swarm_connect_bee-data and
+          # swarm_connect_bee-dev-data. Deploying from a different directory
+          # would therefore look for volumes that do not exist, create empty
+          # ones, and start Bee with no keystore — a new wallet, with the funded
+          # ones orphaned.
+          #
+          # Pinning it makes the path irrelevant to identity. Written last so
+          # nothing in the host env file can override it.
+          echo "COMPOSE_PROJECT_NAME=swarm_connect" >> .env
+
           # Recreate ONLY the service this branch owns. `docker compose up -d
           # --force-recreate` with no argument recreates every service, so a push
           # to dev restarted production and vice versa. That is not free: the
