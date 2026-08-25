@@ -84,6 +84,9 @@ class StampPoolManager:
         self._errors: List[str] = []
         self._pending_replenishments: Dict[int, int] = {}  # depth -> count of pending purchases
         self._state_file = state_file  # Allow override for testing
+        # False until a sync has actually read the node. Starts False so the very
+        # first check cannot purchase against an unverified (empty) pool.
+        self._last_sync_ok: bool = False
 
     @property
     def is_enabled(self) -> bool:
@@ -375,6 +378,8 @@ class StampPoolManager:
             # First run: no state file means empty pool, let purchase logic fill it
             if not known_ids:
                 logger.info("No known stamps in state file, pool will be filled by purchase logic")
+                # A genuinely empty state is a reliable answer, not a failure.
+                self._last_sync_ok = True
                 return 0
 
             all_stamps = await swarm_api.get_all_stamps_processed()
@@ -424,11 +429,15 @@ class StampPoolManager:
             if valid_ids != known_ids:
                 self._save_state()
 
+            self._last_sync_ok = True
             return synced_count
 
         except Exception as e:
             logger.error(f"Error syncing stamps from Bee node: {e}")
             self._errors.append(f"Sync error: {str(e)}")
+            # The pool's contents are now UNKNOWN, not known-to-be-empty. Record
+            # that so replenishment does not read the empty pool as a real deficit.
+            self._last_sync_ok = False
             return 0
 
     async def check_and_replenish(self) -> Dict[str, any]:
@@ -457,6 +466,22 @@ class StampPoolManager:
             # First, sync existing stamps from node
             synced = await self.sync_from_bee_node()
             results["stamps_synced"] = synced
+
+            # If that sync failed, the pool's contents are unknown — the in-memory
+            # pool is empty because nothing could be read back, not because the
+            # node holds no stamps. Purchasing here buys a full reserve on top of
+            # stamps that already exist. This happens on every restart where the
+            # Bee node is still starting up (it answers /batches with 503 until it
+            # has finished syncing), which is precisely when the gateway restarts
+            # alongside it, so the race is the normal case rather than a rare one.
+            if not self._last_sync_ok:
+                msg = ("Skipping replenishment: could not read stamp state from the "
+                       "Bee node, so the pool's current contents are unknown. "
+                       "Will retry on the next check.")
+                logger.warning(msg)
+                results["errors"].append(msg)
+                results["skipped"] = True
+                return results
 
             # Update TTL information for pool stamps
             await self._update_stamp_ttls()
