@@ -203,14 +203,12 @@ jobs:
           echo "Recreating $BRANCH_SERVICE (branch $GITHUB_REF_NAME)"
           docker compose up -d --force-recreate --no-deps "$BRANCH_SERVICE"
 
-          # Start host-level services (monitoring, and the bundled Bee nodes when
-          # the profile is active) if they are not already running. No
-          # --force-recreate: anything already up is left alone, including the
-          # other environment's gateway.
-          #
-          # This also covers alloy, which declares depends_on the staging gateway
-          # and so would otherwise never be started by a main-branch deploy.
-          docker compose up -d
+          # Host-level services (the bundled Bee nodes and the metrics agent) live
+          # in their own file because they are not branch-specific. Same project
+          # name, so they share the gateways' network and keep their existing
+          # container and volume names. No --force-recreate: anything already
+          # running is left alone.
+          docker compose -f docker-compose.host.yml up -d
 
       - name: post-deploy diagnostics
         run: |
