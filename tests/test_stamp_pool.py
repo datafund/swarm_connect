@@ -993,17 +993,31 @@ class TestSyncSurvivesMalformedRecords:
         assert manager._last_sync_ok is True
 
     @pytest.mark.asyncio
-    async def test_bad_record_is_kept_in_state_for_a_later_retry(self, state_file):
-        """A record we could not parse may be fine next cycle — don't drop it."""
+    async def test_bad_record_survives_a_state_rewrite(self, state_file):
+        """A record we could not parse may be fine next cycle — don't drop it.
+
+        The state file is only rewritten when something was actually removed, so
+        this includes a stamp that is genuinely gone from the node. That forces
+        the rewrite and makes the assertion meaningful: without it the file is
+        never touched and the check passes whatever the code does.
+        """
         manager = StampPoolManager(state_file=state_file)
         with open(state_file, "w") as f:
-            json.dump(["transient"], f)
+            json.dump(["unreadable", "gone", "good"], f)
 
+        # "gone" is absent from the node's response, so it is dropped and the
+        # state is rewritten. "unreadable" must survive that rewrite.
         with patch("app.services.swarm_api.get_all_stamps_processed",
-                   new=AsyncMock(return_value=[self._stamp("transient", amount=None)])):
+                   new=AsyncMock(return_value=[
+                       self._stamp("unreadable", amount=None, depth=None),
+                       self._stamp("good"),
+                   ])):
             await manager.sync_from_bee_node()
 
-        assert StampPoolManager(state_file=state_file)._load_state() == {"transient"}
+        persisted = StampPoolManager(state_file=state_file)._load_state()
+        assert "unreadable" in persisted, "an unparseable record must be retried, not dropped"
+        assert "good" in persisted
+        assert "gone" not in persisted, "a stamp no longer on the node should be removed"
 
     @pytest.mark.asyncio
     async def test_null_amount_is_treated_as_zero_not_an_error(self, state_file):

@@ -33,7 +33,6 @@ def coerce_int(value, default: int = 0) -> int:
         return default
 
 
-
 def _record_bee_error(endpoint: str):
     """Increment Bee API error counter for the given endpoint."""
     try:

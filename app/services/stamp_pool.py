@@ -102,11 +102,20 @@ class StampPoolManager:
         """Get the state file path, using override or settings."""
         return self._state_file or settings.STAMP_POOL_STATE_FILE
 
-    def _save_state(self):
-        """Persist current pool batch IDs to state file."""
+    def _save_state(self, extra_ids: Optional[Set[str]] = None):
+        """Persist current pool batch IDs to state file.
+
+        `extra_ids` are batch IDs to keep in state that are not in the pool —
+        records whose data could not be read this cycle. They are still ours and
+        may parse fine next time, so writing only the pool would silently drop
+        them.
+        """
         state_file = self._get_state_file_path()
         try:
-            batch_ids = list(self._pool.keys())
+            batch_ids = set(self._pool.keys())
+            if extra_ids:
+                batch_ids |= set(extra_ids)
+            batch_ids = sorted(batch_ids)
             atomic_write_json(state_file, batch_ids)
             logger.debug(f"Saved pool state: {len(batch_ids)} stamps to {state_file}")
         except Exception as e:
@@ -387,6 +396,9 @@ class StampPoolManager:
             stamp_map = {s.get("batchID"): s for s in all_stamps}
             synced_count = 0
             valid_ids = set()
+            # IDs we could not parse this cycle. They are kept in the state file
+            # so a transient unreadable field does not permanently lose a stamp.
+            unreadable_ids = set()
 
             with self._lock:
                 for batch_id in known_ids:
@@ -427,6 +439,7 @@ class StampPoolManager:
                             f"({e}); skipping it this cycle, keeping it in state"
                         )
                         valid_ids.add(batch_id)
+                        unreadable_ids.add(batch_id)
                         continue
 
                     label = stamp_data.get("label", "")
@@ -444,9 +457,10 @@ class StampPoolManager:
                     synced_count += 1
                     logger.info(f"Synced known stamp {batch_id[:16]}... to pool (depth={depth}, ttl={ttl}s)")
 
-            # Save cleaned state (only stamps that are still valid)
+            # Save cleaned state (stamps still valid, plus any we could not read
+            # this cycle — those are not in the pool but must not be forgotten).
             if valid_ids != known_ids:
-                self._save_state()
+                self._save_state(extra_ids=unreadable_ids)
 
             self._last_sync_ok = True
             return synced_count
