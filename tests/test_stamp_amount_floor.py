@@ -103,3 +103,55 @@ class TestBeeErrorIsNotMasked:
             r = client.post("/api/v1/stamps/", json={"size": "small"})
 
         assert r.status_code == 502
+
+
+class TestExtendPathBehavesLikePurchase:
+    """The extend path shares the boundary condition and must share the fix.
+
+    Both paths call calculate_stamp_amount() and both talk to Bee, so a caller
+    extending a stamp can hit the same minimum-validity refusal — and would have
+    been told the node was unavailable.
+    """
+
+    @pytest.fixture
+    def client(self):
+        return TestClient(app)
+
+    def test_bee_400_on_extend_surfaces_as_400(self, client):
+        err = _http_error(400, {"code": 400,
+                                "message": "insufficient amount for 24h minimum validity"})
+        existing = [{"batchID": "a" * 64, "depth": 17, "batchTTL": 86400}]
+        with patch("app.services.swarm_api.get_all_stamps_processed",
+                   new=AsyncMock(return_value=existing)), \
+             patch("app.services.swarm_api.get_chainstate",
+                   new=AsyncMock(return_value={"currentPrice": "77610",
+                                               "minimumValidityBlocks": 17280})), \
+             patch("app.services.swarm_api.check_sufficient_funds",
+                   new=AsyncMock(return_value={"sufficient": True})), \
+             patch("app.services.swarm_api.extend_postage_stamp",
+                   new=AsyncMock(side_effect=err)):
+            r = client.patch("/api/v1/stamps/" + "a" * 64 + "/extend",
+                             json={"duration_hours": 24})
+
+        assert r.status_code == 400
+        assert "insufficient amount" in r.json()["detail"]
+        assert "may be unavailable" not in r.json()["detail"]
+
+    def test_connection_failure_on_extend_still_reports_502(self, client):
+        request = httpx.Request("PATCH", "http://bee:1633/stamps/topup/x/1")
+        err = httpx.ConnectError("connection refused", request=request)
+        existing = [{"batchID": "a" * 64, "depth": 17, "batchTTL": 86400}]
+        with patch("app.services.swarm_api.get_all_stamps_processed",
+                   new=AsyncMock(return_value=existing)), \
+             patch("app.services.swarm_api.get_chainstate",
+                   new=AsyncMock(return_value={"currentPrice": "77610",
+                                               "minimumValidityBlocks": 17280})), \
+             patch("app.services.swarm_api.check_sufficient_funds",
+                   new=AsyncMock(return_value={"sufficient": True})), \
+             patch("app.services.swarm_api.extend_postage_stamp",
+                   new=AsyncMock(side_effect=err)):
+            r = client.patch("/api/v1/stamps/" + "a" * 64 + "/extend",
+                             json={"duration_hours": 24})
+
+        assert r.status_code == 502
+        assert "may be unavailable" in r.json()["detail"]

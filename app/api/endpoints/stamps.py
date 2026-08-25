@@ -575,6 +575,14 @@ async def extend_stamp(
         raise  # Re-raise HTTP exceptions as-is
     except httpx.HTTPError as e:
         logger.error(f"Failed to extend stamp {stamp_id} from Swarm API: {e}")
+        # Same reasoning as the purchase path: a 4xx from Bee describes the
+        # request, not the node's availability, and its message names the cause.
+        bee_status_code, bee_message = _bee_error_detail(e)
+        if bee_status_code is not None and 400 <= bee_status_code < 500:
+            raise HTTPException(
+                status_code=bee_status_code,
+                detail=f"Bee rejected the stamp extension: {bee_message}"
+            ) from e
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail="Could not extend stamp. The Bee node may be unavailable."
