@@ -27,6 +27,40 @@ from app.core.config import settings
 logger = logging.getLogger(__name__)
 
 
+BYTES_PER_MB = 1_000_000  # 1 MB = 10^6 bytes, matching the API documentation
+
+
+def parse_topup_mb(raw) -> Optional[int]:
+    """Parse the `mb` top-up parameter, strictly and in exactly one way.
+
+    Returns None when the value is not a plain integer.
+
+    This exists because the value was previously parsed twice with different
+    rules: the x402 pricing dependency used int(), which raises on a
+    float-formatted string like "1000000.0", while the endpoint used Pydantic's
+    lax int coercion, which accepts it. Pricing therefore fell back to the
+    minimum while the handler credited the full amount — a client could pay for
+    100 MB and receive a terabyte. Both paths must derive their number from this
+    one function so they cannot disagree.
+    """
+    if raw is None or isinstance(raw, bool):
+        return None
+    try:
+        return int(str(raw).strip())
+    except (TypeError, ValueError):
+        return None
+
+
+def effective_topup_mb(mb: int) -> int:
+    """Apply the configured minimum top-up.
+
+    Pricing and crediting must apply this identically, or the caller is charged
+    for one amount and credited another.
+    """
+    minimum = settings.BANDWIDTH_CREDIT_MIN_TOPUP_MB
+    return mb if mb >= minimum else minimum
+
+
 class BandwidthCreditManager:
     """
     Tracks prepaid bandwidth credit balances (in bytes) per client address.
