@@ -857,7 +857,22 @@ async def get_node_status_summary(use_cache: bool = True) -> Dict[str, Any]:
 
     warnings = []
     if not topo and not status:
-        warnings.append("could not query the Bee node (topology/status unavailable)")
+        # /topology and /status are gated behind Bee's startup: it answers them
+        # with 503 "Node is syncing" until it has replayed the postage snapshot,
+        # which takes minutes on a cold start. /health and /addresses answer
+        # immediately. So "these two are empty" means one of two very different
+        # things, and reporting the wrong one sends an operator to debug
+        # connectivity that is fine.
+        reachable = bool(bee_status or summary.get("overlay"))
+        if reachable:
+            warnings.append(
+                "Bee node is still starting up — it is reachable but not yet "
+                "serving topology/status"
+            )
+        else:
+            warnings.append("could not query the Bee node (topology/status unavailable)")
+        # Unchanged either way: a node that cannot report its topology must not
+        # be asserted healthy, whichever of the two reasons applies.
         summary["healthy"] = False
     else:
         if na is not None and na != "Available":

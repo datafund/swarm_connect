@@ -204,3 +204,69 @@ class TestHealthEndpoint:
         assert b["bee_node"]["healthy"] is False
         assert b["status"] == "degraded"
         assert any("network availability" in w for w in b["bee_node"]["warnings"])
+
+
+# --------------------------------------------------------------------------- #
+# starting-up vs unreachable
+# --------------------------------------------------------------------------- #
+class TestStartingUpVsUnreachable:
+    """A booting node must not be reported as an unreachable one.
+
+    Bee gates /topology and /status behind startup, answering them with 503
+    "Node is syncing" until the postage snapshot is replayed — minutes on a cold
+    start — while /health and /addresses answer immediately. Both cases leave
+    topo and status empty, so the summary previously reported "could not query
+    the Bee node" for a node that had just told us its version.
+    """
+
+    HEALTH = {"status": "ok", "version": "2.8.1-7cf53193", "apiVersion": "8.1.0"}
+    ADDRESSES = {"overlay": "7c74f416" + "0" * 56}
+
+    @pytest.mark.asyncio
+    async def test_starting_up_says_so(self):
+        swarm_api._node_status_cache["data"] = None
+        client = _mock_client({}, {}, self.HEALTH, self.ADDRESSES, {})
+        with patch("app.services.swarm_api.get_client", return_value=client):
+            s = await swarm_api.get_node_status_summary(use_cache=False)
+
+        assert any("still starting up" in w for w in s["warnings"])
+        assert not any("could not query" in w for w in s["warnings"])
+        # It told us its version, so the fields we could read are still present.
+        assert s["version"] == "2.8.1-7cf53193"
+        assert s["healthy"] is False
+
+    @pytest.mark.asyncio
+    async def test_genuinely_unreachable_still_says_could_not_query(self):
+        swarm_api._node_status_cache["data"] = None
+        c = MagicMock()
+        c.get = AsyncMock(side_effect=Exception("connection refused"))
+        with patch("app.services.swarm_api.get_client", return_value=c):
+            s = await swarm_api.get_node_status_summary(use_cache=False)
+
+        assert any("could not query" in w for w in s["warnings"])
+        assert not any("still starting up" in w for w in s["warnings"])
+        assert s["healthy"] is False
+
+    @pytest.mark.asyncio
+    async def test_overlay_alone_is_enough_to_prove_reachability(self):
+        """/health may fail while /addresses succeeds; either proves it answered."""
+        swarm_api._node_status_cache["data"] = None
+        client = _mock_client({}, {}, {}, self.ADDRESSES, {})
+        with patch("app.services.swarm_api.get_client", return_value=client):
+            s = await swarm_api.get_node_status_summary(use_cache=False)
+
+        assert any("still starting up" in w for w in s["warnings"])
+
+    @pytest.mark.asyncio
+    async def test_gateway_status_stays_ok_while_node_starts(self):
+        """Startup must not flip the gateway to degraded.
+
+        network_availability is None during startup, not "Unavailable", so the
+        degrade rule from #238 does not fire. Pinned so a future change to the
+        warning text cannot quietly change health semantics too.
+        """
+        swarm_api._node_status_cache["data"] = None
+        client = _mock_client({}, {}, self.HEALTH, self.ADDRESSES, {})
+        with patch("app.services.swarm_api.get_client", return_value=client):
+            s = await swarm_api.get_node_status_summary(use_cache=False)
+        assert s["network_availability"] is None
