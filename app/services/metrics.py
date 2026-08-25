@@ -21,11 +21,18 @@ gateway_info = Info("gateway", "Gateway version and configuration")
 
 # ── Gauges (updated by background poller) ────────────────────────────────────
 
+# The `wallet` label carries the Gnosis address the balance belongs to. Without
+# it an alert on these metrics cannot name the wallet to fund, so the address
+# had to be written into the alert text by hand — where it named one specific
+# node, was therefore already wrong for the other environment, and became wrong
+# for both when that node was replaced. An operator acting on it would have sent
+# funds to a decommissioned wallet. Each environment has exactly one wallet, so
+# this adds no meaningful cardinality.
 wallet_bzz_balance = Gauge(
-    "gateway_wallet_bzz_balance", "Bee node BZZ balance"
+    "gateway_wallet_bzz_balance", "Bee node BZZ balance", ["wallet"]
 )
 wallet_xdai_balance = Gauge(
-    "gateway_wallet_xdai_balance", "Bee node xDAI balance"
+    "gateway_wallet_xdai_balance", "Bee node xDAI balance", ["wallet"]
 )
 chequebook_available_balance = Gauge(
     "gateway_chequebook_available_balance", "Chequebook available BZZ balance"
@@ -183,11 +190,15 @@ async def _poll_balances():
                 )
                 xbzz = await check_xbzz_balance()
                 if xbzz.get("ok") or xbzz.get("balance_bzz", 0) > 0:
-                    wallet_bzz_balance.set(xbzz["balance_bzz"])
+                    wallet_bzz_balance.labels(
+                        wallet=xbzz.get("wallet_address") or "unknown"
+                    ).set(xbzz["balance_bzz"])
 
                 xdai = await check_xdai_balance()
                 if xdai.get("ok") or xdai.get("balance_xdai", 0) > 0:
-                    wallet_xdai_balance.set(xdai["balance_xdai"])
+                    wallet_xdai_balance.labels(
+                        wallet=xdai.get("wallet_address") or "unknown"
+                    ).set(xdai["balance_xdai"])
 
                 cheque = await check_chequebook_balance()
                 if cheque.get("ok") or cheque.get("available_bzz", 0) > 0:
