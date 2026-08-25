@@ -942,3 +942,98 @@ class TestReplenishGuardOnUnreadableNode:
     def test_sync_flag_starts_false(self, state_file):
         """Before any sync the pool contents are unverified, so no purchasing."""
         assert StampPoolManager(state_file=state_file)._last_sync_ok is False
+
+
+class TestSyncSurvivesMalformedRecords:
+    """One unreadable record must not abort the whole sync.
+
+    Regression: `int(stamp_data.get("amount", 0))` raises on a present-but-null
+    or empty value, because the default only applies when the key is ABSENT.
+    Bee returns `amount: null` on every /batches entry, and the merged view only
+    fills it from /stamps, which is incomplete while the node is starting. The
+    try/except wrapped the entire loop, so one bad record discarded every other
+    known stamp. Observed in production as:
+
+        ERROR Error syncing stamps from Bee node:
+              invalid literal for int() with base 10: ''
+
+    Before the replenish guard (see TestReplenishGuardOnUnreadableNode) that
+    read as an empty pool and bought a full reserve on every check interval.
+    """
+
+    @pytest.fixture
+    def state_file(self, tmp_path):
+        return str(tmp_path / "pool_state.json")
+
+    def _stamp(self, batch_id, **over):
+        d = {"batchID": batch_id, "depth": 17, "amount": "1000000",
+             "usable": True, "batchTTL": 86400, "label": "x"}
+        d.update(over)
+        return d
+
+    @pytest.mark.asyncio
+    async def test_one_bad_record_does_not_lose_the_others(self, state_file):
+        manager = StampPoolManager(state_file=state_file)
+        with open(state_file, "w") as f:
+            json.dump(["good_a", "bad", "good_b"], f)
+
+        stamps = [
+            self._stamp("good_a"),
+            self._stamp("bad", amount="", depth=None),   # the production shape
+            self._stamp("good_b", depth=20),
+        ]
+        with patch("app.services.swarm_api.get_all_stamps_processed",
+                   new=AsyncMock(return_value=stamps)):
+            synced = await manager.sync_from_bee_node()
+
+        assert synced == 2, "the two readable stamps must still be imported"
+        assert "good_a" in manager._pool and "good_b" in manager._pool
+        assert "bad" not in manager._pool
+        # The sync read the node successfully, so replenishment stays allowed.
+        assert manager._last_sync_ok is True
+
+    @pytest.mark.asyncio
+    async def test_bad_record_is_kept_in_state_for_a_later_retry(self, state_file):
+        """A record we could not parse may be fine next cycle — don't drop it."""
+        manager = StampPoolManager(state_file=state_file)
+        with open(state_file, "w") as f:
+            json.dump(["transient"], f)
+
+        with patch("app.services.swarm_api.get_all_stamps_processed",
+                   new=AsyncMock(return_value=[self._stamp("transient", amount=None)])):
+            await manager.sync_from_bee_node()
+
+        assert StampPoolManager(state_file=state_file)._load_state() == {"transient"}
+
+    @pytest.mark.asyncio
+    async def test_null_amount_is_treated_as_zero_not_an_error(self, state_file):
+        """amount is null on every /batches entry; depth is what actually matters."""
+        manager = StampPoolManager(state_file=state_file)
+        with open(state_file, "w") as f:
+            json.dump(["a"], f)
+
+        with patch("app.services.swarm_api.get_all_stamps_processed",
+                   new=AsyncMock(return_value=[self._stamp("a", amount=None)])):
+            synced = await manager.sync_from_bee_node()
+
+        assert synced == 1
+        assert manager._pool["a"].amount == 0
+        assert manager._pool["a"].depth == 17
+
+
+class TestCoerceInt:
+    """The shared coercion helper behind the fix."""
+
+    @pytest.mark.parametrize("value,expected", [
+        (None, 0), ("", 0), ("123", 123), (456, 456), ("nonsense", 0), (0, 0),
+    ])
+    def test_coerces_or_falls_back(self, value, expected):
+        from app.services.swarm_api import coerce_int
+        assert coerce_int(value, 0) == expected
+
+    def test_plain_int_call_would_have_raised(self):
+        """Documents precisely what was wrong with the original expression."""
+        with pytest.raises((TypeError, ValueError)):
+            int({"amount": None}.get("amount", 0))
+        with pytest.raises(ValueError):
+            int({"amount": ""}.get("amount", 0))

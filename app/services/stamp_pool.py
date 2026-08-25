@@ -26,6 +26,7 @@ from threading import Lock
 from app.core.atomic_io import atomic_write_json
 from app.core.config import settings
 from app.services import swarm_api
+from app.services.swarm_api import coerce_int
 from app.services.stamp_ownership import stamp_ownership_manager
 
 logger = logging.getLogger(__name__)
@@ -401,15 +402,33 @@ class StampPoolManager:
                         continue
 
                     usable = stamp_data.get("usable", False)
-                    ttl = stamp_data.get("batchTTL", 0)
+                    ttl = coerce_int(stamp_data.get("batchTTL"), 0)
 
                     if not usable or ttl <= 0:
                         logger.info(f"Known stamp {batch_id[:16]}... is expired/unusable, removing from state")
                         continue
 
-                    # Re-import this known stamp
-                    depth = stamp_data.get("depth")
-                    amount = int(stamp_data.get("amount", 0))
+                    # Re-import this known stamp. Parsing is per-record: Bee returns
+                    # `amount` as null on /batches entries (verified on a live node:
+                    # every batch), and the merged view only fills it in from /stamps,
+                    # which can be incomplete while the node is starting. A record we
+                    # cannot read is skipped and kept in state for the next attempt —
+                    # it must not discard the rest of the sync, because an unreadable
+                    # pool previously read as an empty one and triggered purchasing.
+                    try:
+                        depth = stamp_data.get("depth")
+                        if depth is None:
+                            raise ValueError("missing depth")
+                        depth = int(depth)
+                        amount = coerce_int(stamp_data.get("amount"), 0)
+                    except (TypeError, ValueError) as e:
+                        logger.warning(
+                            f"Known stamp {batch_id[:16]}... has unreadable data "
+                            f"({e}); skipping it this cycle, keeping it in state"
+                        )
+                        valid_ids.add(batch_id)
+                        continue
+
                     label = stamp_data.get("label", "")
                     stamp = PoolStamp(
                         batch_id=batch_id,
