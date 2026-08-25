@@ -104,3 +104,44 @@ class TestPricingMatchesWhatIsBuilt:
                           new=AsyncMock(return_value={"price_usd": 0.0})):
             result = await dependency._calculate_price_for_request(request)
         assert "price_usd" in result
+
+
+class TestCapsRejectRatherThanClamp:
+    """The endpoint's caps must refuse an over-cap request, not shrink it.
+
+    Pricing quotes the batch the model describes. If a cap silently clamped
+    depth or duration down instead of rejecting, the endpoint would build
+    something smaller than was quoted and the caller would overpay — the same
+    divergence this PR removes, reintroduced one layer further down.
+    """
+
+    def test_depth_cap_raises(self):
+        import inspect
+        from app.api.endpoints import stamps_for_owner
+
+        src = inspect.getsource(stamps_for_owner.create_batch_for_owner)
+        assert "DEPTH_TOO_HIGH" in src
+        # A clamp would look like min(...) or an assignment back onto depth.
+        assert "depth = min(" not in src, "cap must reject, not clamp"
+
+    def test_duration_cap_raises(self):
+        import inspect
+        from app.api.endpoints import stamps_for_owner
+
+        src = inspect.getsource(stamps_for_owner.create_batch_for_owner)
+        assert "duration" in src and "exceeds max" in src
+        assert "duration_hours = min(" not in src, "cap must reject, not clamp"
+
+    @pytest.mark.asyncio
+    async def test_over_cap_body_is_still_priced_as_requested(self):
+        """Pricing does not apply the caps, and should not.
+
+        The request is refused at the endpoint, so the quote is never charged.
+        Quoting the requested batch keeps the two paths describing the same
+        thing; applying caps only in pricing would recreate the mismatch.
+        """
+        body = {"owner": OWNER, "depth": 32, "duration_hours": 8760}
+        priced = await _priced(body)
+        built = StampForOwnerRequest.model_validate(body)
+        assert priced["depth"] == built.get_effective_depth() == 32
+        assert priced["duration_hours"] == built.duration_hours == 8760
