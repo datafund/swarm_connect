@@ -99,8 +99,8 @@ unset and the stack behaves as it always has.
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `SWARM_BEE_API_URL` | external node | Bee endpoint for the production gateway |
-| `SWARM_BEE_API_URL_DEV` | external node | Bee endpoint for the staging gateway |
+| `SWARM_BEE_API_URL` | **required** | Bee endpoint for the production gateway |
+| `SWARM_BEE_API_URL_DEV` | **required** | Bee endpoint for the staging gateway |
 | `COMPOSE_PROFILES` | *(unset)* | set to `bee` to also run the bundled Bee nodes |
 | `BEE_VERSION` | `2.8.1` | Bee image tag |
 | `BEE_RPC_ENDPOINT` | *(unset)* | Gnosis RPC endpoint (required with the `bee` profile) |
@@ -110,6 +110,10 @@ unset and the stack behaves as it always has.
 | `BEE_FULL_NODE` / `BEE_DEV_FULL_NODE` | `false` | run as a full node instead of light |
 | `GATEWAY_BIND` | `0.0.0.0` | host interface the gateways bind to; set `127.0.0.1` behind a local reverse proxy |
 | `HOST_LABEL` | *(empty)* | value of the `host` label on metrics; set when more than one host runs the stack |
+
+Both Bee endpoints are **required** — compose refuses to start without them, naming
+the variable it needs. A default was previously baked in, which silently became
+wrong on any host that did not share that one node.
 
 **Running the gateway and its Bee node on one host** — set `COMPOSE_PROFILES=bee`
 and point each gateway at its own node (`http://bee:1633`, `http://bee-dev:1633`).

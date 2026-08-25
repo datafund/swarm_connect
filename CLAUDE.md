@@ -592,6 +592,11 @@ If the remote gateway (provenance-gateway.datafund.io) returns 503 or appears br
 
 1. **Test locally with Docker** to verify the build works:
    ```bash
+   # SWARM_BEE_API_URL and SWARM_BEE_API_URL_DEV are required — compose refuses
+   # to start without them and names the one it needs. Point them at any Bee
+   # node you can reach (a local node, or http://bee:1633 with the `bee` profile).
+   SWARM_BEE_API_URL=http://localhost:1633 \
+   SWARM_BEE_API_URL_DEV=http://localhost:1633 \
    docker-compose up --build
    ```
 
