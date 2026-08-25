@@ -104,6 +104,7 @@ unset and the stack behaves as it always has.
 | `COMPOSE_PROFILES` | *(unset)* | set to `bee` to also run the bundled Bee nodes |
 | `BEE_VERSION` | `2.8.1` | Bee image tag |
 | `BEE_RPC_ENDPOINT` | *(unset)* | Gnosis RPC endpoint (required with the `bee` profile) |
+| `BEE_DEV_RPC_ENDPOINT` | falls back to `BEE_RPC_ENDPOINT` | Separate RPC for the staging node, so its chain load cannot rate-limit production |
 | `BEE_PASSWORD` / `BEE_DEV_PASSWORD` | *(unset)* | keystore passwords |
 | `BEE_NAT_ADDR` / `BEE_DEV_NAT_ADDR` | *(unset)* | public `host:port` each node advertises |
 | `BEE_P2P_PORT` / `BEE_DEV_P2P_PORT` | `1634` / `1734` | host p2p ports |

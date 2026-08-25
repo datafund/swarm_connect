@@ -89,7 +89,12 @@ services:
       - BEE_PASSWORD=${BEE_DEV_PASSWORD:-}
       - BEE_DATA_DIR=/home/bee/.bee
       - BEE_VERBOSITY=${BEE_VERBOSITY:-3}
-    command: start --blockchain-rpc-endpoint=${BEE_RPC_ENDPOINT:-}
+    # Its own RPC endpoint, so staging chain load cannot rate-limit production.
+    # Both nodes previously shared one free endpoint and one rate limit: a busy
+    # staging node produced 429s that broke chainstate, wallet and batch
+    # creation on BOTH. Falls back to the shared value when unset, so a host
+    # that has not split them behaves exactly as before.
+    command: start --blockchain-rpc-endpoint=${BEE_DEV_RPC_ENDPOINT:-${BEE_RPC_ENDPOINT:-}}
     ports:
       - "${BEE_DEV_P2P_PORT:-1734}:${BEE_DEV_P2P_PORT:-1734}/tcp"
       - "${BEE_DEV_P2P_PORT:-1734}:${BEE_DEV_P2P_PORT:-1734}/udp"
