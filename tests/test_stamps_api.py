@@ -190,7 +190,7 @@ class TestStampsAPI:
     def test_purchase_stamp_with_duration(self, mock_purchase, mock_chainstate, mock_calc_amount, mock_calc_cost, mock_funds):
         """Test stamp purchase with duration_hours."""
         mock_purchase.return_value = "new_batch_id_duration"
-        mock_chainstate.return_value = {"currentPrice": "100000"}
+        mock_chainstate.return_value = {"currentPrice": "100000", "minimumValidityBlocks": 17280}
         mock_calc_amount.return_value = 1800000000  # 25 hours worth
         mock_calc_cost.return_value = 235929600000000  # total cost
         mock_funds.return_value = {"sufficient": True, "wallet_balance_bzz": 10.0, "required_bzz": 0.024, "shortfall_bzz": 0.0}
@@ -208,7 +208,9 @@ class TestStampsAPI:
         # Verify chainstate was called to get current price
         mock_chainstate.assert_called_once()
         # Verify amount was calculated from duration
-        mock_calc_amount.assert_called_once_with(25, 100000)
+        mock_calc_amount.assert_called_once_with(
+            25, 100000, minimum_validity_blocks=17280
+        )
 
     @patch('app.services.swarm_api.check_sufficient_funds')
     @patch('app.services.swarm_api.calculate_stamp_total_cost')
@@ -218,7 +220,7 @@ class TestStampsAPI:
     def test_purchase_stamp_with_defaults(self, mock_purchase, mock_chainstate, mock_calc_amount, mock_calc_cost, mock_funds):
         """Test stamp purchase with empty body uses defaults (25 hours, depth 17)."""
         mock_purchase.return_value = "new_batch_id_defaults"
-        mock_chainstate.return_value = {"currentPrice": "100000"}
+        mock_chainstate.return_value = {"currentPrice": "100000", "minimumValidityBlocks": 17280}
         mock_calc_amount.return_value = 1800000000
         mock_calc_cost.return_value = 235929600000000
         mock_funds.return_value = {"sufficient": True, "wallet_balance_bzz": 10.0, "required_bzz": 0.024, "shortfall_bzz": 0.0}
@@ -230,7 +232,9 @@ class TestStampsAPI:
         assert data["batchID"] == "new_batch_id_defaults"
 
         # Verify default duration of 25 hours was used
-        mock_calc_amount.assert_called_once_with(25, 100000)
+        mock_calc_amount.assert_called_once_with(
+            25, 100000, minimum_validity_blocks=17280
+        )
         # Verify default depth of 17 was used (small size default)
         mock_purchase.assert_called_once_with(amount=1800000000, depth=17, label=None)
 
@@ -242,7 +246,7 @@ class TestStampsAPI:
     def test_purchase_stamp_with_size_small(self, mock_purchase, mock_chainstate, mock_calc_amount, mock_calc_cost, mock_funds):
         """Test stamp purchase with size='small' uses depth 17."""
         mock_purchase.return_value = "new_batch_id_small"
-        mock_chainstate.return_value = {"currentPrice": "100000"}
+        mock_chainstate.return_value = {"currentPrice": "100000", "minimumValidityBlocks": 17280}
         mock_calc_amount.return_value = 1800000000
         mock_calc_cost.return_value = 235929600000000
         mock_funds.return_value = {"sufficient": True, "wallet_balance_bzz": 10.0, "required_bzz": 0.024, "shortfall_bzz": 0.0}
@@ -260,7 +264,7 @@ class TestStampsAPI:
     def test_purchase_stamp_with_size_medium(self, mock_purchase, mock_chainstate, mock_calc_amount, mock_calc_cost, mock_funds):
         """Test stamp purchase with size='medium' uses depth 20."""
         mock_purchase.return_value = "new_batch_id_medium"
-        mock_chainstate.return_value = {"currentPrice": "100000"}
+        mock_chainstate.return_value = {"currentPrice": "100000", "minimumValidityBlocks": 17280}
         mock_calc_amount.return_value = 1800000000
         mock_calc_cost.return_value = 1887436800000000
         mock_funds.return_value = {"sufficient": True, "wallet_balance_bzz": 10.0, "required_bzz": 0.19, "shortfall_bzz": 0.0}
@@ -278,7 +282,7 @@ class TestStampsAPI:
     def test_purchase_stamp_with_size_large(self, mock_purchase, mock_chainstate, mock_calc_amount, mock_calc_cost, mock_funds):
         """Test stamp purchase with size='large' uses depth 22."""
         mock_purchase.return_value = "new_batch_id_large"
-        mock_chainstate.return_value = {"currentPrice": "100000"}
+        mock_chainstate.return_value = {"currentPrice": "100000", "minimumValidityBlocks": 17280}
         mock_calc_amount.return_value = 1800000000
         mock_calc_cost.return_value = 7549747200000000
         mock_funds.return_value = {"sufficient": True, "wallet_balance_bzz": 10.0, "required_bzz": 0.75, "shortfall_bzz": 0.0}
@@ -296,7 +300,7 @@ class TestStampsAPI:
     def test_purchase_stamp_size_overrides_depth(self, mock_purchase, mock_chainstate, mock_calc_amount, mock_calc_cost, mock_funds):
         """Test that size parameter overrides explicit depth."""
         mock_purchase.return_value = "new_batch_id_override"
-        mock_chainstate.return_value = {"currentPrice": "100000"}
+        mock_chainstate.return_value = {"currentPrice": "100000", "minimumValidityBlocks": 17280}
         mock_calc_amount.return_value = 1800000000
         mock_calc_cost.return_value = 1887436800000000
         mock_funds.return_value = {"sufficient": True, "wallet_balance_bzz": 10.0, "required_bzz": 0.19, "shortfall_bzz": 0.0}
@@ -411,7 +415,7 @@ class TestStampsAPI:
             {"batchID": VALID_STAMP_ID, "depth": 17, "amount": "1000000000", "batchTTL": 3600,
              "bucketDepth": 16, "expectedExpiration": "2024-12-01-15-30", "local": True, "immutableFlag": False}
         ]
-        mock_chainstate.return_value = {"currentPrice": "100000"}
+        mock_chainstate.return_value = {"currentPrice": "100000", "minimumValidityBlocks": 17280}
         mock_calc_amount.return_value = 1800000000
         mock_calc_cost.return_value = 235929600000000
         mock_funds.return_value = {"sufficient": True, "wallet_balance_bzz": 10.0, "required_bzz": 0.024, "shortfall_bzz": 0.0}
@@ -427,7 +431,9 @@ class TestStampsAPI:
         assert data["batchID"] == VALID_STAMP_ID
 
         # Verify amount was calculated from duration
-        mock_calc_amount.assert_called_once_with(25, 100000)
+        mock_calc_amount.assert_called_once_with(
+            25, 100000, minimum_validity_blocks=17280
+        )
 
     @patch('app.services.swarm_api.check_sufficient_funds')
     @patch('app.services.swarm_api.calculate_stamp_total_cost')
@@ -442,7 +448,7 @@ class TestStampsAPI:
             {"batchID": VALID_STAMP_ID, "depth": 17, "amount": "1000000000", "batchTTL": 3600,
              "bucketDepth": 16, "expectedExpiration": "2024-12-01-15-30", "local": True, "immutableFlag": False}
         ]
-        mock_chainstate.return_value = {"currentPrice": "100000"}
+        mock_chainstate.return_value = {"currentPrice": "100000", "minimumValidityBlocks": 17280}
         mock_calc_amount.return_value = 1800000000
         mock_calc_cost.return_value = 235929600000000
         mock_funds.return_value = {"sufficient": True, "wallet_balance_bzz": 10.0, "required_bzz": 0.024, "shortfall_bzz": 0.0}
@@ -452,7 +458,9 @@ class TestStampsAPI:
         assert response.status_code == 200
 
         # Verify default duration of 25 hours was used
-        mock_calc_amount.assert_called_once_with(25, 100000)
+        mock_calc_amount.assert_called_once_with(
+            25, 100000, minimum_validity_blocks=17280
+        )
 
     @patch('app.services.swarm_api.get_all_stamps_processed')
     def test_extend_stamp_not_found(self, mock_get_stamps):

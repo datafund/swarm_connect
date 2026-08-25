@@ -40,6 +40,21 @@ class StampDetails(BaseModel):
         description="Human-readable warning message when stamp utilization is elevated. Null when status is 'ok' or unknown."
     )
     usable: Optional[bool] = Field(None, description="Stamp usability status. False when stamp is expired, invalid, or at 100% utilization.")
+    unusableReason: Optional[str] = Field(
+        None,
+        description=(
+            "Machine-readable cause when usable is false: 'expired', 'expiring_soon', "
+            "'full', 'invalid_depth', 'not_found', 'unreadable'. Null when usable, "
+            "and null in the rare case where the node reports a stamp unusable but "
+            "no specific cause can be determined. "
+            "The correct response differs per cause — a full batch will never become "
+            "usable, while an expiring one can be topped up — so do not render every "
+            "unusable stamp as expired."
+        ),
+    )
+    unusableMessage: Optional[str] = Field(
+        None, description="Human-readable explanation matching unusableReason. Null when usable."
+    )
     label: Optional[str] = Field(None, description="User-defined label (from local /stamps endpoint when available).")
 
     # --- Propagation Timing Fields ---

@@ -8,7 +8,9 @@ from fastapi import APIRouter, Header, HTTPException, Query, Request, status
 
 from app.api.models.chunk import ChunkUploadResponse, CreditTopUpResponse
 from app.core.config import settings
-from app.services.bandwidth_credit import bandwidth_credit_manager
+from app.services.bandwidth_credit import (
+    BYTES_PER_MB, bandwidth_credit_manager, parse_topup_mb,
+)
 from app.services.bandwidth_free_tier import free_tier_tracker
 from app.services.metrics import (
     bandwidth_topup_bytes_total,
@@ -32,7 +34,8 @@ _HEX_RE = re.compile(r"^[A-Fa-f0-9]+$")
 CREDIT_TOKEN_HEADER = "X-Bandwidth-Credit-Token"
 
 # 1 MB = 10^6 bytes (consistent with the per-GB bandwidth pricing).
-BYTES_PER_MB = 1_000_000
+# Imported rather than redefined: pricing and crediting must convert MB to
+# bytes identically, and two copies of this constant is how they stop doing so.
 
 
 def _validate_marshaled_stamp(stamp: str) -> str:
@@ -74,7 +77,16 @@ def _topup_info() -> dict:
 )
 async def top_up_credit(
     request: Request,
-    mb: int = Query(..., ge=1, description="Amount of bandwidth credit to add, in MB (1 MB = 10^6 bytes)."),
+    mb: str = Query(
+        ...,
+        description=(
+            "Amount of bandwidth credit to add, as a whole number of megabytes "
+            "(1 MB = 10^6 bytes). Accepted as a string and parsed by the same "
+            "function the payment is priced from, so the amount charged and the "
+            "amount credited cannot diverge. Values such as '100.0' are rejected."
+        ),
+        example="100",
+    ),
 ) -> CreditTopUpResponse:
     """
     Add prepaid bandwidth credit with a single x402 payment.
@@ -84,6 +96,20 @@ async def top_up_credit(
     token to present (via the `X-Bandwidth-Credit-Token` header) on chunk uploads. One
     top-up funds many uploads, so per-chunk requests never hit the minimum-price floor.
     """
+    # Taken as a string and parsed here rather than by Pydantic: Pydantic's int
+    # coercion accepts "1000000.0", the x402 pricing dependency's int() does not,
+    # and that disagreement let a caller be charged for the minimum while being
+    # credited a thousand times more. Both now use parse_topup_mb.
+    parsed_mb = parse_topup_mb(mb)
+    if parsed_mb is None or parsed_mb < 1:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"'mb' must be a whole number of megabytes, got {mb!r}",
+        )
+    mb = parsed_mb
+    # Note: a value below BANDWIDTH_CREDIT_MIN_TOPUP_MB is rejected further down
+    # with TOPUP_TOO_SMALL rather than floored. The pricing dependency floors it
+    # instead, which is harmless precisely because the request is refused here.
     if not settings.CHUNK_UPLOAD_ENABLED:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
                             detail="Chunk upload is not enabled on this gateway.")
