@@ -19,12 +19,16 @@ def client():
     return TestClient(app)
 
 
-def _enabled_settings(max_bytes=4104, x402=True, min_topup_mb=100):
+def _enabled_settings(max_bytes=4104, x402=True, min_topup_mb=100,
+                      max_topup_mb=1_000_000):
     ms = MagicMock()
     ms.CHUNK_UPLOAD_ENABLED = True
     ms.CHUNK_UPLOAD_MAX_BYTES_PER_REQUEST = max_bytes
     ms.X402_ENABLED = x402
     ms.BANDWIDTH_CREDIT_MIN_TOPUP_MB = min_topup_mb
+    # Must be set explicitly: a MagicMock attribute compares truthy, so an
+    # unset ceiling would make every top-up look too large.
+    ms.BANDWIDTH_CREDIT_MAX_TOPUP_MB = max_topup_mb
     ms.X402_BANDWIDTH_USD_PER_GB = 0.10
     return ms
 

@@ -134,6 +134,21 @@ async def top_up_credit(
             },
         )
 
+    # Mirrors the minimum. Without a ceiling a single request can credit an
+    # unbounded amount; the payment is priced first, so economics discourage it,
+    # but that rests on pricing and crediting agreeing about the number — which
+    # is precisely what could not be assumed before they shared one parser.
+    max_mb = settings.BANDWIDTH_CREDIT_MAX_TOPUP_MB
+    if mb > max_mb:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "code": "TOPUP_TOO_LARGE",
+                "message": f"Maximum single top-up is {max_mb} MB.",
+                "max_topup_mb": max_mb,
+            },
+        )
+
     # The x402 dependency must have settled a paid request for this to be a real top-up.
     x402_mode = getattr(request.state, "x402_mode", None)
     payer = getattr(request.state, "x402_payer", None)
