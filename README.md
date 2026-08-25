@@ -115,6 +115,12 @@ Both Bee endpoints are **required** — compose refuses to start without them, n
 the variable it needs. A default was previously baked in, which silently became
 wrong on any host that did not share that one node.
 
+`docker-compose.yml` defines the gateways, deployed per branch.
+`docker-compose.host.yml` defines the host-level services — the bundled Bee
+nodes and the metrics agent — which are not branch-specific and are applied
+with `docker compose -f docker-compose.host.yml up -d`. Both use the same
+`COMPOSE_PROJECT_NAME`, so they share one network and one set of volumes.
+
 **Running the gateway and its Bee node on one host** — set `COMPOSE_PROFILES=bee`
 and point each gateway at its own node (`http://bee:1633`, `http://bee-dev:1633`).
 The Bee API is never published to the host: it has no authentication, so it must
