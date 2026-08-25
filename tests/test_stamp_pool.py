@@ -885,3 +885,60 @@ class TestPoolResizeBehavior:
         # Should not purchase anything AND should not remove stamps
         assert purchase_count == 0
         assert len(manager._pool) == 2  # Both stamps kept
+
+
+class TestReplenishGuardOnUnreadableNode:
+    """The pool must not treat an unreadable Bee node as an empty pool.
+
+    Regression: on restart the Bee node answers /batches with 503 until it has
+    finished syncing. sync_from_bee_node() swallowed that, returned 0, and
+    check_and_replenish() read the empty in-memory pool as a real deficit and
+    bought a full reserve. Because the gateway and Bee restart together on every
+    deploy, this fired on essentially every deploy — one observed node had
+    accumulated 77 stamps against a reserve of 5.
+    """
+
+    @pytest.fixture
+    def state_file(self, tmp_path):
+        return str(tmp_path / "pool_state.json")
+
+    @pytest.mark.asyncio
+    async def test_bee_unreachable_skips_purchasing(self, state_file):
+        """A failed sync must skip replenishment, not buy a full reserve."""
+        manager = StampPoolManager(state_file=state_file)
+        # Known stamps exist in state, so this is not a legitimate cold start.
+        with open(state_file, "w") as f:
+            json.dump(["batch_aaa", "batch_bbb"], f)
+
+        purchase = AsyncMock()
+        with patch("app.services.stamp_pool.settings.STAMP_POOL_ENABLED", True), \
+             patch("app.services.swarm_api.get_all_stamps_processed",
+                   new=AsyncMock(side_effect=Exception("503 Service Unavailable"))), \
+             patch.object(manager, "_purchase_stamp", purchase):
+            results = await manager.check_and_replenish()
+
+        purchase.assert_not_called()
+        assert results.get("skipped") is True
+        assert manager._last_sync_ok is False
+        assert any("could not read stamp state" in e for e in results["errors"])
+
+    @pytest.mark.asyncio
+    async def test_successful_sync_allows_purchasing(self, state_file):
+        """A genuine cold start (readable node, no known stamps) still buys."""
+        manager = StampPoolManager(state_file=state_file)  # no state file written
+
+        purchase = AsyncMock(return_value=None)
+        with patch("app.services.stamp_pool.settings.STAMP_POOL_ENABLED", True), \
+             patch("app.services.swarm_api.get_all_stamps_processed",
+                   new=AsyncMock(return_value=[])), \
+             patch.object(manager, "_update_stamp_ttls", new=AsyncMock()), \
+             patch.object(manager, "_purchase_stamp", purchase):
+            results = await manager.check_and_replenish()
+
+        assert manager._last_sync_ok is True
+        assert results.get("skipped") is not True
+        assert purchase.called
+
+    def test_sync_flag_starts_false(self, state_file):
+        """Before any sync the pool contents are unverified, so no purchasing."""
+        assert StampPoolManager(state_file=state_file)._last_sync_ok is False

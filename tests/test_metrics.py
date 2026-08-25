@@ -78,6 +78,49 @@ class TestMetricsEndpoint:
         text = response.text
         assert "gateway_uptime_seconds" in text
         assert "gateway_stamps_total" in text
+        assert "gateway_node_stamps_total" in text
+        assert "gateway_node_stamp_min_ttl_seconds" in text
+
+    def test_network_and_node_stamp_gauges_are_distinct(self):
+        """The network-wide and node-owned stamp gauges must not be conflated.
+
+        gateway_stamps_total counts every batch on Swarm (Bee /batches);
+        gateway_node_stamps_total counts only this node's (Bee /stamps). They
+        differ by orders of magnitude in practice, and the help text is the only
+        thing telling an operator which is which.
+        """
+        from app.services import metrics as m
+
+        network_help = m.stamps_total._documentation
+        node_help = m.node_stamps_total._documentation
+
+        assert "network" in network_help.lower()
+        assert "/batches" in network_help
+        assert "this bee node" in node_help.lower()
+        assert "/stamps" in node_help
+
+    @pytest.mark.asyncio
+    async def test_node_stamp_gauges_read_from_local_stamps(self):
+        """The node-owned gauges come from Bee /stamps, not /batches."""
+        from app.services import metrics as m
+
+        node_stamps = [{"batchTTL": 9000}, {"batchTTL": 3600}, {"batchTTL": 0}]
+        with patch("app.services.swarm_api.get_local_stamps",
+                   new=AsyncMock(return_value=node_stamps)):
+            await m.update_node_stamp_metrics()
+
+        assert m.node_stamps_total._value.get() == 3
+        # lowest positive TTL among node stamps; the 0 is ignored
+        assert m.node_stamp_min_ttl_seconds._value.get() == 3600
+
+    @pytest.mark.asyncio
+    async def test_node_stamp_metrics_never_raise(self):
+        """A Bee failure must not propagate out of the collector."""
+        from app.services import metrics as m
+
+        with patch("app.services.swarm_api.get_local_stamps",
+                   new=AsyncMock(side_effect=Exception("bee down"))):
+            await m.update_node_stamp_metrics()  # must not raise
 
 
 class TestMetricsExemptFromRateLimit:

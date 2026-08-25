@@ -81,7 +81,11 @@ services:
     environment:
       - BEE_MAINNET=true
       - BEE_API_ADDR=:1633
-      - BEE_P2P_ADDR=:1634
+      # Listen on the same port that is published, so the address advertised
+      # via BEE_NAT_ADDR matches the port peers actually reach. A mismatch
+      # leaves the node reporting reachability "Private" even when the port is
+      # open, because its own reachability probe cannot dial itself back.
+      - BEE_P2P_ADDR=:${BEE_P2P_PORT:-1634}
       - BEE_NAT_ADDR=${BEE_NAT_ADDR:-}
       - BEE_SWAP_ENABLE=true          # required to push chunks
       - BEE_FULL_NODE=${BEE_FULL_NODE:-false}
@@ -92,8 +96,8 @@ services:
     # env var as empty (multi-dash key quirk), but the flag works.
     command: start --blockchain-rpc-endpoint=${BEE_RPC_ENDPOINT:-}
     ports:
-      - "${BEE_P2P_PORT:-1634}:1634/tcp"
-      - "${BEE_P2P_PORT:-1634}:1634/udp"
+      - "${BEE_P2P_PORT:-1634}:${BEE_P2P_PORT:-1634}/tcp"
+      - "${BEE_P2P_PORT:-1634}:${BEE_P2P_PORT:-1634}/udp"
     volumes:
       - bee-data:/home/bee/.bee
     restart: unless-stopped
@@ -104,7 +108,7 @@ services:
     environment:
       - BEE_MAINNET=true
       - BEE_API_ADDR=:1633
-      - BEE_P2P_ADDR=:1634
+      - BEE_P2P_ADDR=:${BEE_DEV_P2P_PORT:-1734}
       - BEE_NAT_ADDR=${BEE_DEV_NAT_ADDR:-}
       - BEE_SWAP_ENABLE=true
       - BEE_FULL_NODE=${BEE_DEV_FULL_NODE:-false}
@@ -113,8 +117,8 @@ services:
       - BEE_VERBOSITY=${BEE_VERBOSITY:-3}
     command: start --blockchain-rpc-endpoint=${BEE_RPC_ENDPOINT:-}
     ports:
-      - "${BEE_DEV_P2P_PORT:-1734}:1634/tcp"
-      - "${BEE_DEV_P2P_PORT:-1734}:1634/udp"
+      - "${BEE_DEV_P2P_PORT:-1734}:${BEE_DEV_P2P_PORT:-1734}/tcp"
+      - "${BEE_DEV_P2P_PORT:-1734}:${BEE_DEV_P2P_PORT:-1734}/udp"
     volumes:
       - bee-dev-data:/home/bee/.bee
     restart: unless-stopped
