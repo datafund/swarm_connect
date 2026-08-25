@@ -12,10 +12,12 @@ services:
     env_file:
       - /opt/swarm_connect.env
     environment:
-      # Host-overridable: set SWARM_BEE_API_URL in the host env file to point at a
-      # different Bee node (e.g. the bundled `bee` profile below, http://bee:1633).
-      # Unset -> the existing external node, so hosts need no configuration.
-      - SWARM_BEE_API_URL=${SWARM_BEE_API_URL:-http://192.168.45.30:1633}
+      # Required. Previously defaulted to one specific node, which silently
+      # became wrong once a second host existed and would point at a dead
+      # endpoint once that node is retired — the gateway would start, report
+      # itself up, and fail every Swarm operation. Failing to start with a clear
+      # message is better than running misconfigured.
+      - SWARM_BEE_API_URL=${SWARM_BEE_API_URL:?set SWARM_BEE_API_URL (e.g. http://bee:1633 for the bundled node, or your Bee node URL)}
     volumes:
       - /opt/swarm_connect_data:/app/data
     restart: unless-stopped
@@ -33,9 +35,9 @@ services:
     env_file:
       - /opt/swarm_connect_dev.env
     environment:
-      # Separate override from production so the two environments can be pointed at
-      # different Bee nodes on the same host (e.g. http://bee-dev:1633).
-      - SWARM_BEE_API_URL=${SWARM_BEE_API_URL_DEV:-http://192.168.45.30:1633}
+      # Separate from production so the two environments can use different Bee
+      # nodes on one host. Required for the same reason as above.
+      - SWARM_BEE_API_URL=${SWARM_BEE_API_URL_DEV:?set SWARM_BEE_API_URL_DEV (e.g. http://bee-dev:1633 for the bundled node)}
     volumes:
       - /opt/swarm_connect_dev_data:/app/data
     restart: unless-stopped
