@@ -1,0 +1,61 @@
+---
+# Start or stop the gateway stack on one deployment host.
+#
+# Deployment hosts are reached through their self-hosted runner rather than
+# directly, so this is the supported way to act on a host an operator has no
+# shell access to — for example when retiring one.
+#
+# Manual trigger only. It never runs on push.
+name: host service control
+
+on:
+  workflow_dispatch:
+    inputs:
+      runner_label:
+        description: 'Runner label identifying the host to act on'
+        required: true
+        type: string
+      action:
+        description: 'stop = stop containers but keep them (reversible); start = bring them back up'
+        required: true
+        type: choice
+        options:
+          - stop
+          - start
+        default: stop
+
+jobs:
+  control:
+    name: ${{ inputs.action }} on ${{ inputs.runner_label }}
+    runs-on: [self-hosted, "${{ inputs.runner_label }}"]
+
+    steps:
+      - name: show current state
+        run: |
+          echo "=== containers before ==="
+          docker ps -a --filter "name=swarm_connect" \
+            --format "table {{.Names}}\t{{.Status}}" || true
+
+      - name: stop services
+        if: inputs.action == 'stop'
+        working-directory: /opt/swarm_connect
+        run: |
+          # `stop`, not `down`: containers and volumes are kept, so bringing the
+          # host back is a single start with no state lost.
+          docker compose stop
+          echo "=== containers after stop ==="
+          docker ps -a --filter "name=swarm_connect" \
+            --format "table {{.Names}}\t{{.Status}}"
+
+      - name: start services
+        if: inputs.action == 'start'
+        working-directory: /opt/swarm_connect
+        run: |
+          docker compose start
+          echo "=== containers after start ==="
+          docker ps -a --filter "name=swarm_connect" \
+            --format "table {{.Names}}\t{{.Status}}"
+
+      - name: confirm
+        run: |
+          echo "Action '${{ inputs.action }}' completed on runner '${{ inputs.runner_label }}'."
