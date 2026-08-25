@@ -155,6 +155,13 @@ class Settings(BaseSettings):
     X402_BANDWIDTH_USD_PER_GB: float = 0.10  # USD per GB of upload bandwidth (1 GB = 10^9 bytes)
     # Minimum top-up so a single x402 payment clears the per-request price floor.
     BANDWIDTH_CREDIT_MIN_TOPUP_MB: int = 100  # Minimum credit top-up in MB (1 MB = 10^6 bytes)
+    # Upper bound on a single top-up. The amount is priced before it is credited,
+    # so economics already discourage an absurd request — but that guarantee
+    # depends on the pricing and crediting paths agreeing about the number, which
+    # is exactly what could not be assumed before they were made to share one
+    # parser. A ceiling makes any future divergence bounded rather than unbounded.
+    # 1 TB, far above any legitimate top-up.
+    BANDWIDTH_CREDIT_MAX_TOPUP_MB: int = 1_000_000
 
     # === JSON Body Limits ===
     MAX_JSON_BODY_BYTES: int = 1_048_576  # Maximum JSON body size (1 MB)

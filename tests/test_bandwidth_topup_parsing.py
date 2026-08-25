@@ -107,3 +107,37 @@ class TestSingleSourceOfTruth:
         source = inspect.getsource(dependency._calculate_price_for_request)
         assert "BYTES_PER_MB" in source, "pricing must not hardcode the conversion"
         assert "1_000_000" not in source and "1000000" not in source
+
+
+class TestTopUpCeiling:
+    """A single top-up must be bounded (#283).
+
+    The minimum was enforced; the maximum was not, so one request could credit
+    an unbounded amount. Pricing happens first, so economics discourage it — but
+    that guarantee depends on pricing and crediting agreeing about the number,
+    which is exactly what #260 showed cannot be assumed.
+    """
+
+    @pytest.mark.asyncio
+    async def test_above_maximum_is_refused(self):
+        from types import SimpleNamespace
+        from unittest.mock import MagicMock
+        from fastapi import HTTPException
+        from app.api.endpoints import chunks
+
+        from tests.test_chunks_billing import _enabled_settings
+
+        req = SimpleNamespace(state=SimpleNamespace(x402_mode="paid", x402_payer="0xP"))
+        over = 1_000_001
+        with patch("app.api.endpoints.chunks.settings", _enabled_settings()), \
+             patch("app.api.endpoints.chunks.bandwidth_credit_manager", MagicMock()):
+            with pytest.raises(HTTPException) as exc:
+                await chunks.top_up_credit(req, mb=str(over))
+
+        assert exc.value.status_code == 400
+        assert exc.value.detail["code"] == "TOPUP_TOO_LARGE"
+        assert exc.value.detail["max_topup_mb"] == 1_000_000
+
+    def test_maximum_is_above_the_minimum(self):
+        """A misconfiguration inverting them would refuse every request."""
+        assert settings.BANDWIDTH_CREDIT_MAX_TOPUP_MB > settings.BANDWIDTH_CREDIT_MIN_TOPUP_MB
