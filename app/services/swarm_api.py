@@ -14,6 +14,14 @@ from app.services.metrics import bee_api_errors_total
 
 logger = logging.getLogger(__name__)
 
+# Gnosis produces a block roughly every 5 seconds.
+BLOCKS_PER_HOUR = 720
+
+# Safety margin applied when converting a duration to a postage amount. See
+# calculate_stamp_amount() for why an exact calculation is reliably rejected.
+AMOUNT_MARGIN_FRACTION = 0.05
+
+
 
 def _record_bee_error(endpoint: str):
     """Increment Bee API error counter for the given endpoint."""
@@ -1074,7 +1082,8 @@ async def get_chainstate() -> Dict[str, Any]:
         raise ValueError(f"Could not parse chainstate response: {e}") from e
 
 
-def calculate_stamp_amount(duration_hours: int, current_price) -> int:
+def calculate_stamp_amount(duration_hours: int, current_price,
+                           minimum_validity_blocks=None) -> int:
     """
     Calculates the amount needed for a stamp based on desired duration.
 
@@ -1085,6 +1094,9 @@ def calculate_stamp_amount(duration_hours: int, current_price) -> int:
         duration_hours: Desired stamp duration in hours
         current_price: Current price per chunk per block (from chainstate).
                        Accepts int or str since the Bee API returns this as a string.
+        minimum_validity_blocks: Bee's minimumValidityBlocks from /chainstate,
+                       when known. Used to guarantee the amount clears the floor
+                       Bee actually enforces rather than one inferred here.
 
     Returns:
         The amount in PLUR needed for the stamp
@@ -1096,9 +1108,23 @@ def calculate_stamp_amount(duration_hours: int, current_price) -> int:
     if price <= 0:
         raise ValueError(f"Current price must be positive, got {price}")
 
-    blocks_per_hour = 720  # 3600 seconds / 5 seconds per block
-    duration_blocks = duration_hours * blocks_per_hour
-    return price * duration_blocks
+    duration_blocks = duration_hours * BLOCKS_PER_HOUR
+
+    # Bee re-evaluates currentPrice when it executes the purchase, and the price
+    # moves (observed 41516 -> 77610 within an hour). An amount calculated at one
+    # price can be short by the time Bee validates it, so carry a margin.
+    amount = int(price * duration_blocks * (1 + AMOUNT_MARGIN_FRACTION))
+
+    # Bee also enforces a hard floor of currentPrice * minimumValidityBlocks and
+    # requires the amount to be STRICTLY greater. minimumValidityBlocks is 17280,
+    # exactly 24 * 720, so an exact calculation for the documented 24h minimum
+    # lands precisely on the floor and is always rejected. Derive the floor from
+    # the value Bee reports rather than assuming our own constants match it.
+    if minimum_validity_blocks:
+        floor = price * int(minimum_validity_blocks)
+        amount = max(amount, int(floor * (1 + AMOUNT_MARGIN_FRACTION)))
+
+    return amount
 
 
 def calculate_stamp_total_cost(amount: int, depth: int) -> int:
