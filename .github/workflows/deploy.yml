@@ -174,7 +174,31 @@ jobs:
             echo "Applying host overrides from /opt/swarm_connect_host.env"
             cat /opt/swarm_connect_host.env >> .env
           fi
-          docker compose up -d --force-recreate
+
+          # Recreate ONLY the service this branch owns. `docker compose up -d
+          # --force-recreate` with no argument recreates every service, so a push
+          # to dev restarted production and vice versa. That is not free: the
+          # stamp pool buys a reserve on startup, and one such restart cost about
+          # 0.7 BZZ for nothing.
+          #
+          # --no-deps keeps it from dragging the other environment's containers
+          # in through depends_on.
+          if [ "$GITHUB_REF_NAME" = "dev" ]; then
+            BRANCH_SERVICE=provenance_gateway_dev
+          else
+            BRANCH_SERVICE=provenance_gateway
+          fi
+          echo "Recreating $BRANCH_SERVICE (branch $GITHUB_REF_NAME)"
+          docker compose up -d --force-recreate --no-deps "$BRANCH_SERVICE"
+
+          # Start host-level services (monitoring, and the bundled Bee nodes when
+          # the profile is active) if they are not already running. No
+          # --force-recreate: anything already up is left alone, including the
+          # other environment's gateway.
+          #
+          # This also covers alloy, which declares depends_on the staging gateway
+          # and so would otherwise never be started by a main-branch deploy.
+          docker compose up -d
 
       - name: post-deploy diagnostics
         run: |
