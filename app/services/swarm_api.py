@@ -23,6 +23,24 @@ AMOUNT_MARGIN_FRACTION = 0.05
 
 
 
+def coerce_int(value, default: int = 0) -> int:
+    """Coerce a Bee API field to int, falling back to `default`.
+
+    Bee returns numeric fields as ints, as decimal strings, and as null or ""
+    depending on the endpoint and on how far through startup the node is.
+    `int(d.get(k, default))` is not enough: the default only applies when the
+    key is ABSENT, so a present-but-null or empty value raises instead. That
+    exception propagates out of whatever is reading the response and can fail
+    an entire operation over one malformed field.
+    """
+    if value is None or value == "":
+        return default
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
 def _record_bee_error(endpoint: str):
     """Increment Bee API error counter for the given endpoint."""
     try:
@@ -240,7 +258,7 @@ def calculate_usable_status(stamp: Dict[str, Any], utilization_percent: Optional
             return False
 
         # Check TTL - if TTL is very low, stamp is likely expired or about to expire
-        batch_ttl = int(stamp.get("batchTTL", 0))
+        batch_ttl = coerce_int(stamp.get("batchTTL"), 0)
         if batch_ttl <= 0:
             return False
 
@@ -502,7 +520,7 @@ async def get_all_stamps_processed() -> List[Dict[str, Any]]:
             merged_stamp = merge_stamp_data(global_stamp, local_stamp)
 
             # Calculate expiration time
-            batch_ttl = int(merged_stamp.get("batchTTL", 0))
+            batch_ttl = coerce_int(merged_stamp.get("batchTTL"), 0)
             if batch_ttl < 0:
                 logger.warning(f"Stamp {batch_id} has negative TTL: {batch_ttl}. Treating as 0.")
                 batch_ttl = 0
@@ -865,7 +883,22 @@ async def get_node_status_summary(use_cache: bool = True) -> Dict[str, Any]:
 
     warnings = []
     if not topo and not status:
-        warnings.append("could not query the Bee node (topology/status unavailable)")
+        # /topology and /status are gated behind Bee's startup: it answers them
+        # with 503 "Node is syncing" until it has replayed the postage snapshot,
+        # which takes minutes on a cold start. /health and /addresses answer
+        # immediately. So "these two are empty" means one of two very different
+        # things, and reporting the wrong one sends an operator to debug
+        # connectivity that is fine.
+        reachable = bool(bee_status or summary.get("overlay"))
+        if reachable:
+            warnings.append(
+                "Bee node is still starting up — it is reachable but not yet "
+                "serving topology/status"
+            )
+        else:
+            warnings.append("could not query the Bee node (topology/status unavailable)")
+        # Unchanged either way: a node that cannot report its topology must not
+        # be asserted healthy, whichever of the two reasons applies.
         summary["healthy"] = False
     else:
         if na is not None and na != "Available":
