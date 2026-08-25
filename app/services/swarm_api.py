@@ -15,6 +15,24 @@ from app.services.metrics import bee_api_errors_total
 logger = logging.getLogger(__name__)
 
 
+def coerce_int(value, default: int = 0) -> int:
+    """Coerce a Bee API field to int, falling back to `default`.
+
+    Bee returns numeric fields as ints, as decimal strings, and as null or ""
+    depending on the endpoint and on how far through startup the node is.
+    `int(d.get(k, default))` is not enough: the default only applies when the
+    key is ABSENT, so a present-but-null or empty value raises instead. That
+    exception propagates out of whatever is reading the response and can fail
+    an entire operation over one malformed field.
+    """
+    if value is None or value == "":
+        return default
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
 def _record_bee_error(endpoint: str):
     """Increment Bee API error counter for the given endpoint."""
     try:
@@ -232,7 +250,7 @@ def calculate_usable_status(stamp: Dict[str, Any], utilization_percent: Optional
             return False
 
         # Check TTL - if TTL is very low, stamp is likely expired or about to expire
-        batch_ttl = int(stamp.get("batchTTL", 0))
+        batch_ttl = coerce_int(stamp.get("batchTTL"), 0)
         if batch_ttl <= 0:
             return False
 
@@ -494,7 +512,7 @@ async def get_all_stamps_processed() -> List[Dict[str, Any]]:
             merged_stamp = merge_stamp_data(global_stamp, local_stamp)
 
             # Calculate expiration time
-            batch_ttl = int(merged_stamp.get("batchTTL", 0))
+            batch_ttl = coerce_int(merged_stamp.get("batchTTL"), 0)
             if batch_ttl < 0:
                 logger.warning(f"Stamp {batch_id} has negative TTL: {batch_ttl}. Treating as 0.")
                 batch_ttl = 0
