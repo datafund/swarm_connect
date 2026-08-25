@@ -38,7 +38,7 @@ chequebook_available_balance = Gauge(
     "gateway_chequebook_available_balance", "Chequebook available BZZ balance"
 )
 base_eth_balance = Gauge(
-    "gateway_base_eth_balance", "Base chain ETH balance for x402 gas"
+    "gateway_base_eth_balance", "Base chain ETH balance for x402 gas", ["wallet"]
 )
 stamp_pool_available = Gauge(
     "gateway_stamp_pool_available", "Available stamps in pool by size", ["size"]
@@ -215,7 +215,9 @@ async def _poll_balances():
                     from app.x402.base_balance import check_base_eth_balance
                     base = await check_base_eth_balance()
                     if base.get("ok") or base.get("balance_eth", 0) > 0:
-                        base_eth_balance.set(base["balance_eth"])
+                        base_eth_balance.labels(
+                            wallet=base.get("address") or "unknown"
+                        ).set(base["balance_eth"])
                 except Exception as e:
                     logger.debug(f"Metrics: failed to get base ETH balance: {e}")
 

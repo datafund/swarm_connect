@@ -52,3 +52,23 @@ class TestWalletLabel:
         """A balance with no known wallet must still be reported, not lost."""
         m.wallet_bzz_balance.labels(wallet="unknown").set(1.0)
         assert _sample("gateway_wallet_bzz_balance", "unknown") == 1.0
+
+
+class TestBaseEthCarriesItsWalletToo:
+    """The Base wallet had the last remaining hardcoded address in an alert.
+
+    It is currently correct, unlike the Bee wallet — but it is the same latent
+    trap: a literal in alert text that nothing keeps in step with the running
+    configuration. Labelling the metric is what lets the alert stop hardcoding it.
+    """
+
+    def test_gauge_declares_the_wallet_label(self):
+        assert "wallet" in m.base_eth_balance._labelnames
+
+    def test_balance_is_recorded_against_its_wallet(self):
+        m.base_eth_balance.labels(wallet="0xbase").set(0.2)
+        assert _sample("gateway_base_eth_balance", "0xbase") == 0.2
+
+    def test_missing_address_is_labelled_rather_than_dropped(self):
+        m.base_eth_balance.labels(wallet="unknown").set(0.1)
+        assert _sample("gateway_base_eth_balance", "unknown") == 0.1
