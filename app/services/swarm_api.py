@@ -210,58 +210,83 @@ async def extend_postage_stamp(stamp_id: str, amount: int) -> str:
         raise ValueError(f"Could not parse stamp extension response: {e}") from e
 
 
-def calculate_usable_status(stamp: Dict[str, Any], utilization_percent: Optional[float] = None) -> bool:
-    """
-    Calculates if a stamp is usable based on available data.
-    A stamp is considered usable if:
-    1. It has a positive TTL (not expired)
-    2. It exists
-    3. It's not immutable or has reasonable depth for uploads
-    4. It's not at 100% utilization (completely full)
+# Why a stamp cannot be used. A bare boolean forced every consumer to invent a
+# label for it, and they chose "Expired" — which is wrong for five of the six
+# causes, and actively misleading when a longer-lived stamp is shown as expired
+# next to shorter-lived usable ones (issue #252).
+UNUSABLE_NOT_FOUND = "not_found"
+UNUSABLE_EXPIRED = "expired"
+UNUSABLE_EXPIRING_SOON = "expiring_soon"
+UNUSABLE_FULL = "full"
+UNUSABLE_INVALID_DEPTH = "invalid_depth"
+UNUSABLE_UNREADABLE = "unreadable"
 
-    Args:
-        stamp: The stamp data from /batches endpoint
-        utilization_percent: Pre-calculated utilization percentage (0-100), or None
+_UNUSABLE_MESSAGES = {
+    UNUSABLE_NOT_FOUND: "the batch does not exist on this node",
+    UNUSABLE_EXPIRED: "the batch has expired",
+    UNUSABLE_EXPIRING_SOON: "the batch expires too soon to rely on",
+    UNUSABLE_FULL: "the batch is full — no capacity remains, regardless of TTL",
+    UNUSABLE_INVALID_DEPTH: "the batch depth is outside the usable range (16-32)",
+    UNUSABLE_UNREADABLE: "the batch data could not be read",
+}
 
-    Returns:
-        Boolean indicating if the stamp is usable
+
+def get_unusable_reason(stamp: Dict[str, Any],
+                        utilization_percent: Optional[float] = None) -> Optional[Dict[str, str]]:
+    """Return why a stamp cannot be used, or None when it can.
+
+    The caller's correct response differs per cause — wait, re-purchase, or pick
+    a different stamp — so the cause has to survive as far as the caller rather
+    than being flattened into one boolean.
+
+    Returns a dict with `code` and `message`, or None if the stamp is usable.
     """
+    def reason(code):
+        return {"code": code, "message": _UNUSABLE_MESSAGES[code]}
+
     try:
-        # Check if stamp exists
         if not stamp.get("exists", True):
-            return False
+            return reason(UNUSABLE_NOT_FOUND)
 
-        # Check TTL - if TTL is very low, stamp is likely expired or about to expire
-        batch_ttl = int(stamp.get("batchTTL", 0))
+        # A non-numeric value raises here and is caught below as "unreadable",
+        # which is the honest answer for data we cannot interpret.
+        batch_ttl = int(stamp.get("batchTTL", 0) or 0)
         if batch_ttl <= 0:
-            return False
+            return reason(UNUSABLE_EXPIRED)
 
-        # Check if it's immutable - immutable stamps may have restrictions
+        # Immutable batches cannot be topped up, so they need more headroom
+        # before the remaining TTL stops being dependable.
         is_immutable = stamp.get("immutableFlag", False) or stamp.get("immutable", False)
-
-        # For immutable stamps, require higher TTL threshold for safety
-        min_ttl = 3600 if is_immutable else 60  # 1 hour for immutable, 1 minute for regular
-
+        min_ttl = 3600 if is_immutable else 60
         if batch_ttl < min_ttl:
-            return False
+            # Distinct from expired: it still has time left, just not enough.
+            return reason(UNUSABLE_EXPIRING_SOON)
 
-        # Additional checks could include:
-        # - Depth validation (reasonable depth for uploads)
-        # - Amount validation (sufficient balance)
-        depth = stamp.get("depth", 0)
-        if depth < 16 or depth > 32:  # Reasonable depth range
-            return False
+        depth = int(stamp.get("depth", 0) or 0)
+        if depth < 16 or depth > 32:
+            return reason(UNUSABLE_INVALID_DEPTH)
 
-        # Check if stamp is at 100% utilization (completely full)
-        # A full stamp cannot accept any more data
+        # A full batch is unusable no matter how long it lives. This is the case
+        # that produced the contradiction in #252: a longer-lived batch reported
+        # as "Expired" beside shorter-lived usable ones.
         if utilization_percent is not None and utilization_percent >= UTILIZATION_THRESHOLD_FULL:
-            return False
+            return reason(UNUSABLE_FULL)
 
-        return True
+        return None
 
     except (ValueError, TypeError) as e:
         logger.warning(f"Error calculating usable status for stamp: {e}")
-        return False
+        return reason(UNUSABLE_UNREADABLE)
+
+
+def calculate_usable_status(stamp: Dict[str, Any], utilization_percent: Optional[float] = None) -> bool:
+    """
+    Calculates if a stamp is usable based on available data.
+
+    Thin wrapper over get_unusable_reason(), kept for callers that only need the
+    boolean. Prefer get_unusable_reason() where the reason matters.
+    """
+    return get_unusable_reason(stamp, utilization_percent) is None
 
 
 def merge_stamp_data(global_stamp: Dict[str, Any], local_stamp: Optional[Dict[str, Any]]) -> Dict[str, Any]:
@@ -518,7 +543,10 @@ async def get_all_stamps_processed() -> List[Dict[str, Any]]:
             # Note: We always recalculate if utilization is 100% to ensure usable=false
             usable = merged_stamp.get("usable")
             if usable is None or (utilization_percent is not None and utilization_percent >= UTILIZATION_THRESHOLD_FULL):
-                usable = calculate_usable_status(merged_stamp, utilization_percent)
+                unusable = get_unusable_reason(merged_stamp, utilization_percent)
+                usable = unusable is None
+                merged_stamp["unusableReason"] = unusable["code"] if unusable else None
+                merged_stamp["unusableMessage"] = unusable["message"] if unusable else None
 
             # Calculate propagation signals
             propagation = calculate_propagation_signals(batch_id, usable)
