@@ -14,6 +14,32 @@ from app.services.metrics import bee_api_errors_total
 
 logger = logging.getLogger(__name__)
 
+# Gnosis produces a block roughly every 5 seconds.
+BLOCKS_PER_HOUR = 720
+
+# Safety margin applied when converting a duration to a postage amount. See
+# calculate_stamp_amount() for why an exact calculation is reliably rejected.
+AMOUNT_MARGIN_FRACTION = 0.05
+
+
+
+def coerce_int(value, default: int = 0) -> int:
+    """Coerce a Bee API field to int, falling back to `default`.
+
+    Bee returns numeric fields as ints, as decimal strings, and as null or ""
+    depending on the endpoint and on how far through startup the node is.
+    `int(d.get(k, default))` is not enough: the default only applies when the
+    key is ABSENT, so a present-but-null or empty value raises instead. That
+    exception propagates out of whatever is reading the response and can fail
+    an entire operation over one malformed field.
+    """
+    if value is None or value == "":
+        return default
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
 
 def _record_bee_error(endpoint: str):
     """Increment Bee API error counter for the given endpoint."""
@@ -232,7 +258,7 @@ def calculate_usable_status(stamp: Dict[str, Any], utilization_percent: Optional
             return False
 
         # Check TTL - if TTL is very low, stamp is likely expired or about to expire
-        batch_ttl = int(stamp.get("batchTTL", 0))
+        batch_ttl = coerce_int(stamp.get("batchTTL"), 0)
         if batch_ttl <= 0:
             return False
 
@@ -494,7 +520,7 @@ async def get_all_stamps_processed() -> List[Dict[str, Any]]:
             merged_stamp = merge_stamp_data(global_stamp, local_stamp)
 
             # Calculate expiration time
-            batch_ttl = int(merged_stamp.get("batchTTL", 0))
+            batch_ttl = coerce_int(merged_stamp.get("batchTTL"), 0)
             if batch_ttl < 0:
                 logger.warning(f"Stamp {batch_id} has negative TTL: {batch_ttl}. Treating as 0.")
                 batch_ttl = 0
@@ -857,7 +883,22 @@ async def get_node_status_summary(use_cache: bool = True) -> Dict[str, Any]:
 
     warnings = []
     if not topo and not status:
-        warnings.append("could not query the Bee node (topology/status unavailable)")
+        # /topology and /status are gated behind Bee's startup: it answers them
+        # with 503 "Node is syncing" until it has replayed the postage snapshot,
+        # which takes minutes on a cold start. /health and /addresses answer
+        # immediately. So "these two are empty" means one of two very different
+        # things, and reporting the wrong one sends an operator to debug
+        # connectivity that is fine.
+        reachable = bool(bee_status or summary.get("overlay"))
+        if reachable:
+            warnings.append(
+                "Bee node is still starting up — it is reachable but not yet "
+                "serving topology/status"
+            )
+        else:
+            warnings.append("could not query the Bee node (topology/status unavailable)")
+        # Unchanged either way: a node that cannot report its topology must not
+        # be asserted healthy, whichever of the two reasons applies.
         summary["healthy"] = False
     else:
         if na is not None and na != "Available":
@@ -1074,7 +1115,8 @@ async def get_chainstate() -> Dict[str, Any]:
         raise ValueError(f"Could not parse chainstate response: {e}") from e
 
 
-def calculate_stamp_amount(duration_hours: int, current_price) -> int:
+def calculate_stamp_amount(duration_hours: int, current_price,
+                           minimum_validity_blocks=None) -> int:
     """
     Calculates the amount needed for a stamp based on desired duration.
 
@@ -1085,6 +1127,9 @@ def calculate_stamp_amount(duration_hours: int, current_price) -> int:
         duration_hours: Desired stamp duration in hours
         current_price: Current price per chunk per block (from chainstate).
                        Accepts int or str since the Bee API returns this as a string.
+        minimum_validity_blocks: Bee's minimumValidityBlocks from /chainstate,
+                       when known. Used to guarantee the amount clears the floor
+                       Bee actually enforces rather than one inferred here.
 
     Returns:
         The amount in PLUR needed for the stamp
@@ -1096,9 +1141,23 @@ def calculate_stamp_amount(duration_hours: int, current_price) -> int:
     if price <= 0:
         raise ValueError(f"Current price must be positive, got {price}")
 
-    blocks_per_hour = 720  # 3600 seconds / 5 seconds per block
-    duration_blocks = duration_hours * blocks_per_hour
-    return price * duration_blocks
+    duration_blocks = duration_hours * BLOCKS_PER_HOUR
+
+    # Bee re-evaluates currentPrice when it executes the purchase, and the price
+    # moves (observed 41516 -> 77610 within an hour). An amount calculated at one
+    # price can be short by the time Bee validates it, so carry a margin.
+    amount = int(price * duration_blocks * (1 + AMOUNT_MARGIN_FRACTION))
+
+    # Bee also enforces a hard floor of currentPrice * minimumValidityBlocks and
+    # requires the amount to be STRICTLY greater. minimumValidityBlocks is 17280,
+    # exactly 24 * 720, so an exact calculation for the documented 24h minimum
+    # lands precisely on the floor and is always rejected. Derive the floor from
+    # the value Bee reports rather than assuming our own constants match it.
+    if minimum_validity_blocks:
+        floor = price * int(minimum_validity_blocks)
+        amount = max(amount, int(floor * (1 + AMOUNT_MARGIN_FRACTION)))
+
+    return amount
 
 
 def calculate_stamp_total_cost(amount: int, depth: int) -> int:

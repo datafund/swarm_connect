@@ -25,6 +25,32 @@ from app.api.models.stamp import (
 router = APIRouter()
 logger = logging.getLogger(__name__)
 
+
+def _bee_error_detail(exc: httpx.HTTPError):
+    """Extract (status_code, message) from a failed Bee request.
+
+    Bee reports refusals as JSON like {"code": 400, "message": "insufficient
+    amount for 24h minimum validity"}. That message names the problem exactly,
+    so it is worth surfacing rather than replacing with a generic one.
+
+    Returns (None, str(exc)) when there is no response to read — a timeout or a
+    connection failure, which genuinely is the node being unreachable.
+    """
+    response = getattr(exc, "response", None)
+    if response is None:
+        return None, str(exc)
+    message = None
+    try:
+        body = response.json()
+        if isinstance(body, dict):
+            message = body.get("message") or body.get("detail")
+    except Exception:
+        pass
+    if not message:
+        message = (response.text or "").strip()[:200] or str(exc)
+    return response.status_code, message
+
+
 def _is_owned_by(batch_id: str, wallet: str) -> bool:
     """Check if a stamp is owned by the given wallet address."""
     info = stamp_ownership_manager.get_stamp_info(batch_id)
@@ -365,7 +391,10 @@ async def purchase_stamp(
             duration_hours = stamp_request.duration_hours or 25
             chainstate = await swarm_api.get_chainstate()
             current_price = int(chainstate["currentPrice"])
-            amount = swarm_api.calculate_stamp_amount(duration_hours, current_price)
+            amount = swarm_api.calculate_stamp_amount(
+                duration_hours, current_price,
+                minimum_validity_blocks=chainstate.get("minimumValidityBlocks"),
+            )
             logger.info(f"Calculated amount {amount} for {duration_hours} hours at price {current_price}")
 
         # Calculate total cost and check funds
@@ -425,6 +454,16 @@ async def purchase_stamp(
     except httpx.HTTPError as e:
         stamp_purchases_total.labels(size=stamp_request.size or "custom", status="error").inc()
         logger.error(f"Failed to purchase stamp from Swarm API: {e}")
+        # A 4xx from Bee is the caller's request being wrong (an amount below the
+        # minimum validity, a bad depth), not the node being unavailable. Masking
+        # it as 502 tells the caller to go and check node health for a problem
+        # they can fix in their own request, and hides the reason entirely.
+        bee_status_code, bee_message = _bee_error_detail(e)
+        if bee_status_code is not None and 400 <= bee_status_code < 500:
+            raise HTTPException(
+                status_code=bee_status_code,
+                detail=f"Bee rejected the stamp purchase: {bee_message}"
+            ) from e
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail="Could not purchase stamp. The Bee node may be unavailable."
@@ -501,7 +540,10 @@ async def extend_stamp(
             duration_hours = extension_request.duration_hours or 25
             chainstate = await swarm_api.get_chainstate()
             current_price = int(chainstate["currentPrice"])
-            amount = swarm_api.calculate_stamp_amount(duration_hours, current_price)
+            amount = swarm_api.calculate_stamp_amount(
+                duration_hours, current_price,
+                minimum_validity_blocks=chainstate.get("minimumValidityBlocks"),
+            )
             logger.info(f"Calculated extension amount {amount} for {duration_hours} hours at price {current_price}")
 
         # Calculate total cost and check funds
@@ -533,6 +575,14 @@ async def extend_stamp(
         raise  # Re-raise HTTP exceptions as-is
     except httpx.HTTPError as e:
         logger.error(f"Failed to extend stamp {stamp_id} from Swarm API: {e}")
+        # Same reasoning as the purchase path: a 4xx from Bee describes the
+        # request, not the node's availability, and its message names the cause.
+        bee_status_code, bee_message = _bee_error_detail(e)
+        if bee_status_code is not None and 400 <= bee_status_code < 500:
+            raise HTTPException(
+                status_code=bee_status_code,
+                detail=f"Bee rejected the stamp extension: {bee_message}"
+            ) from e
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail="Could not extend stamp. The Bee node may be unavailable."
