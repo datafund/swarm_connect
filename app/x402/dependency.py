@@ -58,14 +58,19 @@ async def _calculate_price_for_request(request: Request) -> dict:
     path = request.url.path
 
     if "/chunks/credit" in path:
+        from app.services.bandwidth_credit import (
+            BYTES_PER_MB, effective_topup_mb, parse_topup_mb,
+        )
         qp = request.query_params
-        try:
-            mb = int(qp.get("mb", settings.BANDWIDTH_CREDIT_MIN_TOPUP_MB))
-        except (TypeError, ValueError):
+        # Parsed by the same function the endpoint uses, so the amount priced
+        # here and the amount credited there cannot diverge. A value this cannot
+        # parse is rejected by the endpoint, so pricing it at the minimum is
+        # safe: the request never completes.
+        mb = parse_topup_mb(qp.get("mb"))
+        if mb is None:
             mb = settings.BANDWIDTH_CREDIT_MIN_TOPUP_MB
-        if mb < settings.BANDWIDTH_CREDIT_MIN_TOPUP_MB:
-            mb = settings.BANDWIDTH_CREDIT_MIN_TOPUP_MB
-        size_bytes = mb * 1_000_000  # 1 MB = 10^6 bytes
+        mb = effective_topup_mb(mb)
+        size_bytes = mb * BYTES_PER_MB
         quote = await get_price_quote(operation="bandwidth", size_bytes=size_bytes)
         return {
             "price_usd": quote["price_usd"],
@@ -73,24 +78,32 @@ async def _calculate_price_for_request(request: Request) -> dict:
         }
 
     if "/stamps/for-owner" in path:
-        # Price the actual requested batch (Flow B). Read the JSON body — Starlette
-        # caches it, so the endpoint's Pydantic model still re-parses it afterwards.
-        from app.api.models.stamp import SIZE_PRESETS
+        # Price the actual requested batch (Flow B). Validate the body with the
+        # SAME model the endpoint uses, so the quote and the batch cannot describe
+        # different things. Starlette caches the body, so the endpoint still
+        # re-parses it afterwards as before.
+        #
+        # This previously inspected the raw JSON with isinstance checks, which
+        # disagreed with Pydantic's lax coercion: isinstance("22", int) is False,
+        # so a string-formatted depth priced as the depth-17 default while the
+        # endpoint built the depth-22 batch that was asked for. Cost scales as
+        # amount(duration) * 2^depth, so the quote could be a fraction of the
+        # batch actually created, and the difference came out of the gateway's
+        # own wallet.
+        from app.api.models.stamp import StampForOwnerRequest
         try:
             b = await request.json()
         except Exception:
             b = {}
-        size = b.get("size")
-        depth = b.get("depth")
-        if isinstance(size, str) and size in SIZE_PRESETS:
-            d = SIZE_PRESETS[size]
-        elif isinstance(depth, int):
-            d = depth
-        else:
-            d = 17
-        dur = b.get("duration_hours")
-        if not isinstance(dur, int):
-            dur = 24
+        try:
+            parsed = StampForOwnerRequest.model_validate(b)
+            d = parsed.get_effective_depth()
+            dur = parsed.duration_hours
+        except Exception:
+            # Not a body the endpoint will accept either; it is rejected there
+            # with a validation error, so this quote is never charged. Price at
+            # the smallest defaults rather than guessing.
+            d, dur = 17, 24
         quote = await get_price_quote(operation="stamp_purchase", duration_hours=dur, depth=d)
         return {
             "price_usd": quote["price_usd"],

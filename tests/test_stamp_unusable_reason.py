@@ -95,3 +95,52 @@ class TestBooleanWrapperUnchanged:
     def test_matches_reason_presence(self, stamp, util, expected):
         assert calculate_usable_status(stamp, util) is expected
         assert (get_unusable_reason(stamp, util) is None) is expected
+
+
+class TestReasonReachesTheApiResponse:
+    """A field on the model that nothing populates is a silent no-op.
+
+    The value of this change is entirely in the reason reaching the caller, so
+    assert it survives serialisation rather than only that the model declares it.
+    """
+
+    def _base(self, **over):
+        d = {"batchID": "a" * 64, "amount": "1", "depth": 17, "bucketDepth": 16,
+             "batchTTL": 0, "expectedExpiration": "2026-08-26-00-00", "local": True}
+        d.update(over)
+        return d
+
+    def test_reason_is_serialised(self):
+        from app.api.models.stamp import StampDetails
+
+        m = StampDetails(**self._base(usable=False, unusableReason="expired",
+                                      unusableMessage="the batch has expired"))
+        dump = m.model_dump()
+        assert dump["unusableReason"] == "expired"
+        assert dump["unusableMessage"] == "the batch has expired"
+
+    def test_usable_stamp_carries_no_reason(self):
+        from app.api.models.stamp import StampDetails
+
+        m = StampDetails(**self._base(usable=True))
+        assert m.model_dump()["unusableReason"] is None
+        assert m.model_dump()["unusableMessage"] is None
+
+    @pytest.mark.asyncio
+    async def test_processing_populates_the_reason_for_a_full_batch(self):
+        """End to end through get_all_stamps_processed, not just the model."""
+        from unittest.mock import AsyncMock, patch
+        from app.services import swarm_api as api
+
+        batch = {"batchID": "b" * 64, "amount": "1", "depth": 20, "bucketDepth": 16,
+                 "batchTTL": 86400, "immutable": False}
+        local = {"batchID": "b" * 64, "utilization": 2 ** (20 - 16), "usable": True}
+
+        with patch.object(api, "get_all_stamps", new=AsyncMock(return_value=[batch])), \
+             patch.object(api, "get_local_stamps", new=AsyncMock(return_value=[local])):
+            processed = await api.get_all_stamps_processed()
+
+        row = processed[0]
+        assert row["usable"] is False
+        assert row["unusableReason"] == UNUSABLE_FULL
+        assert "expire" not in row["unusableMessage"].lower()

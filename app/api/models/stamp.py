@@ -44,7 +44,9 @@ class StampDetails(BaseModel):
         None,
         description=(
             "Machine-readable cause when usable is false: 'expired', 'expiring_soon', "
-            "'full', 'invalid_depth', 'not_found', 'unreadable'. Null when usable. "
+            "'full', 'invalid_depth', 'not_found', 'unreadable'. Null when usable, "
+            "and null in the rare case where the node reports a stamp unusable but "
+            "no specific cause can be determined. "
             "The correct response differs per cause — a full batch will never become "
             "usable, while an expiring one can be topped up — so do not render every "
             "unusable stamp as expired."
