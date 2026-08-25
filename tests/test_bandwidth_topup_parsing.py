@@ -83,3 +83,27 @@ class TestPricingAndCreditingAgree:
 
     def test_effective_mb_never_lowers_a_large_request(self):
         assert effective_topup_mb(5000) == 5000
+
+
+class TestSingleSourceOfTruth:
+    """The MB-to-bytes constant must exist once.
+
+    Two copies is precisely how pricing and crediting drifted apart in the first
+    place. If one were changed to 1024*1024 and the other left at 10^6, the same
+    class of divergence returns under a different name.
+    """
+
+    def test_endpoint_uses_the_same_constant_as_the_credit_module(self):
+        from app.api.endpoints import chunks
+        from app.services import bandwidth_credit
+
+        assert chunks.BYTES_PER_MB is bandwidth_credit.BYTES_PER_MB
+
+    def test_pricing_uses_it_too(self):
+        """The x402 dependency converts with the same constant."""
+        import inspect
+        from app.x402 import dependency
+
+        source = inspect.getsource(dependency._calculate_price_for_request)
+        assert "BYTES_PER_MB" in source, "pricing must not hardcode the conversion"
+        assert "1_000_000" not in source and "1000000" not in source
