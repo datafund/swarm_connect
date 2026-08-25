@@ -6,7 +6,7 @@ import json
 import os
 import tempfile
 import pytest
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from unittest.mock import patch, MagicMock, AsyncMock
 from fastapi.testclient import TestClient
 
@@ -1051,3 +1051,100 @@ class TestCoerceInt:
             int({"amount": None}.get("amount", 0))
         with pytest.raises(ValueError):
             int({"amount": ""}.get("amount", 0))
+
+
+class TestPurchaseFailureBackoff:
+    """A failed purchase must not be retried every cycle.
+
+    An underfunded pool retried an unaffordable purchase on every check —
+    observed making the same depth-20 attempt over and over, each one holding a
+    request handler for as long as Bee took to refuse it. The failure is usually
+    persistent (out of funds; an amount below Bee's minimum validity), so
+    immediate retry achieves nothing.
+    """
+
+    @pytest.fixture
+    def manager(self, tmp_path):
+        return StampPoolManager(state_file=str(tmp_path / "pool_state.json"))
+
+    def test_not_backing_off_initially(self, manager):
+        assert manager._is_backing_off(17) is False
+
+    def test_backoff_grows_and_is_capped(self, manager):
+        waits = [manager._backoff_seconds(17) for _ in range(8)]
+        assert waits[0] == 60
+        assert waits == sorted(waits), "backoff must not shrink"
+        assert max(waits) <= 3600, "backoff must be capped"
+
+    def test_backoff_is_per_depth(self, manager):
+        """A depth-20 failure must not stop depth-17 being replenished."""
+        manager._backoff_seconds(20)
+        manager._backoff[20] = datetime.now(timezone.utc) + timedelta(seconds=600)
+        assert manager._is_backing_off(20) is True
+        assert manager._is_backing_off(17) is False
+
+    def test_expired_backoff_allows_retry(self, manager):
+        manager._backoff[17] = datetime.now(timezone.utc) - timedelta(seconds=1)
+        assert manager._is_backing_off(17) is False
+
+    @pytest.mark.asyncio
+    async def test_failed_purchase_records_backoff_and_stops_retrying(self, manager):
+        """One failure, one attempt — not one attempt per stamp needed."""
+        with open(manager._get_state_file_path(), "w") as f:
+            json.dump([], f)
+
+        purchase = AsyncMock(side_effect=Exception("out of funds"))
+        with patch("app.services.stamp_pool.settings.STAMP_POOL_ENABLED", True), \
+             patch("app.services.swarm_api.get_all_stamps_processed",
+                   new=AsyncMock(return_value=[])), \
+             patch.object(manager, "_update_stamp_ttls", new=AsyncMock()), \
+             patch.object(manager, "_purchase_stamp", purchase):
+            await manager.check_and_replenish()
+
+        assert manager._is_backing_off(17) or manager._is_backing_off(20)
+        # Reserve is several stamps per depth; a failure must break out rather
+        # than attempt each one in turn.
+        assert purchase.call_count <= 2, (
+            f"kept trying after a failure: {purchase.call_count} attempts"
+        )
+
+    @pytest.mark.asyncio
+    async def test_backed_off_depth_is_skipped_next_cycle(self, manager):
+        with open(manager._get_state_file_path(), "w") as f:
+            json.dump([], f)
+        for depth in manager.get_reserve_config():
+            manager._backoff[depth] = datetime.now(timezone.utc) + timedelta(seconds=600)
+
+        purchase = AsyncMock()
+        with patch("app.services.stamp_pool.settings.STAMP_POOL_ENABLED", True), \
+             patch("app.services.swarm_api.get_all_stamps_processed",
+                   new=AsyncMock(return_value=[])), \
+             patch.object(manager, "_update_stamp_ttls", new=AsyncMock()), \
+             patch.object(manager, "_purchase_stamp", purchase):
+            results = await manager.check_and_replenish()
+
+        purchase.assert_not_called()
+        assert any("not retrying until" in e for e in results["errors"]), (
+            "a skipped depth must say why, not fail silently"
+        )
+
+
+class TestBeeErrorSurfaced:
+    """Bee's own message must reach the log and the response."""
+
+    def test_extracts_message_from_json_body(self):
+        import httpx
+        from app.services.stamp_pool import _bee_error_message
+
+        request = httpx.Request("POST", "http://bee:1633/stamps/1/20")
+        response = httpx.Response(400, json={"code": 400, "message": "out of funds"},
+                                  request=request)
+        exc = httpx.HTTPStatusError("err", request=request, response=response)
+        assert _bee_error_message(exc) == "out of funds"
+
+    def test_returns_none_without_a_response(self):
+        import httpx
+        from app.services.stamp_pool import _bee_error_message
+
+        request = httpx.Request("POST", "http://bee:1633/stamps/1/20")
+        assert _bee_error_message(httpx.ConnectError("refused", request=request)) is None

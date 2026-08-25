@@ -18,7 +18,7 @@ import asyncio
 import json
 import logging
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import Dict, List, Optional, Set
 from threading import Lock
@@ -30,6 +30,28 @@ from app.services.swarm_api import coerce_int
 from app.services.stamp_ownership import stamp_ownership_manager
 
 logger = logging.getLogger(__name__)
+
+
+def _bee_error_message(exc) -> Optional[str]:
+    """Extract Bee's own error text from a failed request, if there is one.
+
+    Bee reports refusals as JSON like {"code":400,"message":"out of funds"}.
+    That message names the problem exactly; the exception string does not.
+    """
+    response = getattr(exc, "response", None)
+    if response is None:
+        return None
+    try:
+        body = response.json()
+        if isinstance(body, dict):
+            message = body.get("message") or body.get("detail")
+            if message:
+                return str(message)[:200]
+    except Exception:
+        pass
+    text = (getattr(response, "text", "") or "").strip()
+    return text[:200] or None
+
 
 
 class PoolStampStatus(str, Enum):
@@ -88,6 +110,23 @@ class StampPoolManager:
         # False until a sync has actually read the node. Starts False so the very
         # first check cannot purchase against an unverified (empty) pool.
         self._last_sync_ok: bool = False
+        # Per-depth backoff after a failed purchase. A failure is usually
+        # persistent — out of funds, an amount below Bee's minimum validity —
+        # and retrying it every cycle achieves nothing while blocking a request
+        # handler for as long as Bee takes to refuse.
+        self._backoff: Dict[int, datetime] = {}
+        self._backoff_count: Dict[int, int] = {}
+
+    def _is_backing_off(self, depth: int) -> bool:
+        """Whether this depth is still waiting out a previous failure."""
+        until = self._backoff.get(depth)
+        return until is not None and datetime.now(timezone.utc) < until
+
+    def _backoff_seconds(self, depth: int) -> int:
+        """Exponential, capped. Repeated failures wait progressively longer."""
+        n = self._backoff_count.get(depth, 0) + 1
+        self._backoff_count[depth] = n
+        return min(60 * (2 ** (n - 1)), 3600)
 
     @property
     def is_enabled(self) -> bool:
@@ -528,7 +567,13 @@ class StampPoolManager:
 
                 # Purchase new stamps if below target
                 needed = target_count - current_count
-                if needed > 0:
+                if needed > 0 and self._is_backing_off(depth):
+                    until = self._backoff[depth].isoformat()
+                    msg = (f"Pool depth {depth}: {needed} short, but the last purchase "
+                           f"failed — not retrying until {until}")
+                    logger.info(msg)
+                    results["errors"].append(msg)
+                elif needed > 0:
                     logger.info(f"Pool depth {depth}: need {needed} stamps (have {current_count}, target {target_count})")
                     for i in range(needed):
                         try:
@@ -538,10 +583,26 @@ class StampPoolManager:
                             batch_id = await self._purchase_stamp(depth)
                             if batch_id:
                                 results["stamps_purchased"] += 1
+                                # Working again: forget the previous failure.
+                                self._backoff.pop(depth, None)
+                                self._backoff_count.pop(depth, None)
                         except Exception as e:
+                            detail = _bee_error_message(e)
                             error_msg = f"Failed to purchase depth-{depth} stamp: {e}"
+                            if detail:
+                                error_msg += f" — Bee said: {detail}"
                             logger.error(error_msg)
                             results["errors"].append(error_msg)
+                            # Back off this depth. Without this the next check
+                            # tries again immediately and keeps failing: an
+                            # underfunded pool retried an unaffordable purchase
+                            # every cycle indefinitely, each attempt holding a
+                            # request handler for as long as Bee took to refuse.
+                            self._backoff[depth] = (
+                                datetime.now(timezone.utc)
+                                + timedelta(seconds=self._backoff_seconds(depth))
+                            )
+                            break
 
             # Top up stamps with low TTL
             min_ttl_seconds = settings.STAMP_POOL_MIN_TTL_HOURS * 3600
@@ -651,7 +712,15 @@ class StampPoolManager:
                 return batch_id
 
         except Exception as e:
-            logger.error(f"Failed to purchase stamp for pool (depth={depth}): {e}")
+            # Surface Bee's own message. httpx's str(e) is only the status line
+            # ("Client error '400 Bad Request' for url ..."), so the actual cause
+            # — "out of funds", "insufficient amount for 24h minimum validity" —
+            # was discarded and had to be obtained by calling Bee by hand.
+            detail = _bee_error_message(e)
+            logger.error(
+                f"Failed to purchase stamp for pool (depth={depth}): {e}"
+                + (f" — Bee said: {detail}" if detail else "")
+            )
             raise
 
     async def _wait_for_stamp_usable(self, batch_id: str, timeout: int = 90) -> bool:
