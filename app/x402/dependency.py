@@ -58,14 +58,19 @@ async def _calculate_price_for_request(request: Request) -> dict:
     path = request.url.path
 
     if "/chunks/credit" in path:
+        from app.services.bandwidth_credit import (
+            BYTES_PER_MB, effective_topup_mb, parse_topup_mb,
+        )
         qp = request.query_params
-        try:
-            mb = int(qp.get("mb", settings.BANDWIDTH_CREDIT_MIN_TOPUP_MB))
-        except (TypeError, ValueError):
+        # Parsed by the same function the endpoint uses, so the amount priced
+        # here and the amount credited there cannot diverge. A value this cannot
+        # parse is rejected by the endpoint, so pricing it at the minimum is
+        # safe: the request never completes.
+        mb = parse_topup_mb(qp.get("mb"))
+        if mb is None:
             mb = settings.BANDWIDTH_CREDIT_MIN_TOPUP_MB
-        if mb < settings.BANDWIDTH_CREDIT_MIN_TOPUP_MB:
-            mb = settings.BANDWIDTH_CREDIT_MIN_TOPUP_MB
-        size_bytes = mb * 1_000_000  # 1 MB = 10^6 bytes
+        mb = effective_topup_mb(mb)
+        size_bytes = mb * BYTES_PER_MB
         quote = await get_price_quote(operation="bandwidth", size_bytes=size_bytes)
         return {
             "price_usd": quote["price_usd"],
