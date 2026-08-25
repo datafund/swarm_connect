@@ -39,11 +39,22 @@ stamp_pool_available = Gauge(
 stamp_pool_target = Gauge(
     "gateway_stamp_pool_target", "Target reserve by size", ["size"]
 )
+# NOTE: these two come from Bee /batches, which is the network-wide postage
+# contract view — every batch on Swarm, not this node's. Their names are kept
+# for metric history; the help text is what was wrong. For this node's own
+# stamps see the gateway_node_stamp_* metrics below.
 stamps_total = Gauge(
-    "gateway_stamps_total", "Total stamps on Bee node"
+    "gateway_stamps_total", "Total postage batches on the Swarm network (Bee /batches)"
 )
 stamp_min_ttl_seconds = Gauge(
-    "gateway_stamp_min_ttl_seconds", "Lowest TTL among active stamps"
+    "gateway_stamp_min_ttl_seconds",
+    "Lowest TTL among all postage batches on the Swarm network (not this node's)"
+)
+node_stamps_total = Gauge(
+    "gateway_node_stamps_total", "Postage stamps owned by this Bee node (Bee /stamps)"
+)
+node_stamp_min_ttl_seconds = Gauge(
+    "gateway_node_stamp_min_ttl_seconds", "Lowest TTL among stamps owned by this Bee node"
 )
 pool_stamp_min_ttl_seconds = Gauge(
     "gateway_pool_stamp_min_ttl_seconds", "Lowest TTL among pooled stamps"
@@ -126,6 +137,32 @@ _background_task = None
 _start_time = None
 
 
+async def update_node_stamp_metrics():
+    """Update the gauges describing stamps owned by THIS Bee node (Bee /stamps).
+
+    Kept separate from the network-wide /batches gauges so that a failure in
+    either source cannot blank the other, and so the node-owned view is testable
+    without driving the polling loop.
+
+    Never raises.
+    """
+    try:
+        from app.services.swarm_api import get_local_stamps
+        node_stamps = await get_local_stamps()
+        node_stamps_total.set(len(node_stamps))
+
+        node_min_ttl = float("inf")
+        for s in node_stamps:
+            ttl = s.get("batchTTL", 0)
+            if isinstance(ttl, (int, float)) and ttl > 0:
+                node_min_ttl = min(node_min_ttl, ttl)
+        node_stamp_min_ttl_seconds.set(
+            node_min_ttl if node_min_ttl < float("inf") else 0
+        )
+    except Exception as e:
+        logger.debug(f"Metrics: failed to get node-owned stamp info: {e}")
+
+
 async def _poll_balances():
     """Periodically poll wallet balances and update Prometheus gauges."""
     while True:
@@ -171,7 +208,10 @@ async def _poll_balances():
                 except Exception as e:
                     logger.debug(f"Metrics: failed to get base ETH balance: {e}")
 
-            # Stamp counts and min TTL
+            # Network-wide batch count and min TTL (Bee /batches — every batch on
+            # Swarm, so the minimum TTL is almost always someone else's batch about
+            # to expire). Kept for continuity; see the node-owned metrics below for
+            # anything describing THIS node.
             try:
                 from app.services.swarm_api import get_all_stamps
                 all_stamps = await get_all_stamps()
@@ -189,6 +229,8 @@ async def _poll_balances():
                     stamp_min_ttl_seconds.set(0)
             except Exception as e:
                 logger.debug(f"Metrics: failed to get stamp info: {e}")
+
+            await update_node_stamp_metrics()
 
             # Stamp pool state
             if settings.STAMP_POOL_ENABLED:
