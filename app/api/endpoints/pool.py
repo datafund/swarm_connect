@@ -115,16 +115,6 @@ class ManualCheckAcceptedResponse(BaseModel):
     message: str = Field(..., description="Where to look for the result")
 
 
-class ManualCheckResponse(BaseModel):
-    """Response from manual pool maintenance check."""
-    checked_at: str = Field(..., description="Timestamp of check (ISO format)")
-    stamps_purchased: int = Field(..., description="Number of stamps purchased")
-    stamps_topped_up: int = Field(..., description="Number of stamps topped up")
-    stamps_synced: int = Field(0, description="Number of existing stamps synced to pool")
-    errors: List[str] = Field(default_factory=list, description="Errors encountered")
-    topup_debug: Optional[List[Dict]] = Field(None, description="Debug info for topup decisions")
-
-
 # === Helper Functions ===
 
 def depth_to_size_name(depth: int) -> str:

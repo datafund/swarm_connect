@@ -104,7 +104,7 @@ class StampPoolManager:
         self._running = False
         # Single-flight guard for check_and_replenish. See its docstring:
         # overlapping runs each buy to cover the same shortfall.
-        self._replenish_lock = asyncio.Lock()
+        self._replenishing = False
         self._task: Optional[asyncio.Task] = None
         self._last_check: Optional[datetime] = None
         self._errors: List[str] = []
@@ -543,13 +543,22 @@ class StampPoolManager:
         if not self.is_enabled:
             return results
 
-        if self._replenish_lock.locked():
+        # A plain flag rather than an asyncio.Lock. With a lock, the check and
+        # the acquire are two steps: a second caller can pass `locked()` while
+        # the first has not acquired yet, and then WAIT on the acquire instead of
+        # skipping — running a redundant replenish afterwards and holding a task
+        # for the duration. There is no await between the test and the set here,
+        # and asyncio is single-threaded, so this cannot interleave.
+        if self._replenishing:
             logger.info("Pool maintenance already in progress — skipping this run")
             results["skipped"] = True
             return results
 
-        async with self._replenish_lock:
+        self._replenishing = True
+        try:
             return await self._check_and_replenish_locked(results)
+        finally:
+            self._replenishing = False
 
     async def _check_and_replenish_locked(self, results: Dict[str, any]) -> Dict[str, any]:
         """The body of check_and_replenish, with the single-flight guard held."""
