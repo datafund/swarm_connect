@@ -95,6 +95,15 @@ class Settings(BaseSettings):
     DEBUG_ALLOWED_ADDRESSES: str = ""
     DEBUG_SIG_MAX_AGE_SECONDS: int = 300  # signature freshness window (replay guard)
 
+    # Addresses permitted to trigger POST /api/v1/pool/check, which SPENDS BZZ
+    # by purchasing postage batches. Deliberately a separate list from
+    # DEBUG_ALLOWED_ADDRESSES: reading the node's diagnostics and spending the
+    # gateway's money are different privileges, and an operator trusted with the
+    # former is not automatically trusted with the latter.
+    # Empty => the endpoint answers 404. That is the safe default, and it closes
+    # the exposure on any deployment that has not configured it.
+    POOL_ADMIN_ADDRESSES: str = ""
+
     # === Flow B: Gnosis chain client (buy postage batches for an external owner) ===
     # Signs/sends approve + createBatch on Gnosis so a batch can be owned by an
     # arbitrary address. The signing key is SENSITIVE — handle like NOTARY_PRIVATE_KEY
@@ -220,6 +229,12 @@ class Settings(BaseSettings):
         if not self.DEBUG_ALLOWED_ADDRESSES:
             return []
         return [a.strip().lower() for a in self.DEBUG_ALLOWED_ADDRESSES.split(",") if a.strip()]
+
+    def get_pool_admin_addresses(self) -> List[str]:
+        """Parse the pool-admin allow-list into lowercased 0x addresses."""
+        if not self.POOL_ADMIN_ADDRESSES:
+            return []
+        return [a.strip().lower() for a in self.POOL_ADMIN_ADDRESSES.split(",") if a.strip()]
 
     def get_stamp_pool_reserve_config(self) -> dict:
         """Get stamp pool reserve configuration as {depth: count} dict.

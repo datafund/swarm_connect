@@ -102,6 +102,9 @@ class StampPoolManager:
         self._pool: Dict[str, PoolStamp] = {}  # batch_id -> PoolStamp
         self._lock = Lock()
         self._running = False
+        # Single-flight guard for check_and_replenish. See its docstring:
+        # overlapping runs each buy to cover the same shortfall.
+        self._replenish_lock = asyncio.Lock()
         self._task: Optional[asyncio.Task] = None
         self._last_check: Optional[datetime] = None
         self._errors: List[str] = []
@@ -518,6 +521,15 @@ class StampPoolManager:
 
         This is the main maintenance function called by the background task.
 
+        Only one runs at a time. Two overlapping checks each see the same
+        shortfall and each buy to cover it, so the pool ends up with twice the
+        reserve and the wallet pays for it. The timer alone could not overlap,
+        but POST /api/v1/pool/check now schedules this too, and an operator can
+        trigger it while a scheduled run is already in flight.
+
+        A second caller returns immediately with skipped=True rather than
+        waiting, because waiting for a purchase is the behaviour #292 removed.
+
         Returns:
             Dict with results of the check
         """
@@ -531,6 +543,16 @@ class StampPoolManager:
         if not self.is_enabled:
             return results
 
+        if self._replenish_lock.locked():
+            logger.info("Pool maintenance already in progress — skipping this run")
+            results["skipped"] = True
+            return results
+
+        async with self._replenish_lock:
+            return await self._check_and_replenish_locked(results)
+
+    async def _check_and_replenish_locked(self, results: Dict[str, any]) -> Dict[str, any]:
+        """The body of check_and_replenish, with the single-flight guard held."""
         try:
             self._last_check = datetime.now(timezone.utc)
             reserve_config = self.get_reserve_config()

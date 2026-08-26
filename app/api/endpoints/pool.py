@@ -7,16 +7,17 @@ Provides endpoints for:
 - Acquiring/releasing stamps from the pool
 - Manual pool maintenance
 """
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, BackgroundTasks, Header, HTTPException, Request, status
 from pydantic import BaseModel, Field
 from typing import Dict, List, Optional, Literal
-from datetime import datetime
+from datetime import datetime, timezone
 import logging
 
 from app.core.config import settings
 from app.services.stamp_pool import stamp_pool_manager, PoolStampStatus
 from app.services.stamp_ownership import stamp_ownership_manager
 from app.services.metrics import pool_acquires_total
+from app.services.signed_auth import POOL_CHECK_PREFIX, authorize_signed_request
 from app.api.models.stamp import SIZE_PRESETS
 
 router = APIRouter()
@@ -101,6 +102,17 @@ class AcquireStampResponse(BaseModel):
                 "fallback_used": False
             }
         }
+
+
+class ManualCheckAcceptedResponse(BaseModel):
+    """Acknowledgement that maintenance was scheduled.
+
+    Deliberately carries no results. The check purchases stamps and can take
+    well over a minute, and awaiting it was half of #292 — a caller could hold a
+    worker for the duration. `GET /api/v1/pool/status` reports the outcome.
+    """
+    scheduled_at: str = Field(..., description="When the check was scheduled (ISO 8601)")
+    message: str = Field(..., description="Where to look for the result")
 
 
 class ManualCheckResponse(BaseModel):
@@ -310,29 +322,60 @@ async def list_available_stamps():
 
 @router.post(
     "/check",
-    response_model=ManualCheckResponse,
-    summary="Trigger Pool Maintenance",
+    status_code=status.HTTP_202_ACCEPTED,
+    response_model=ManualCheckAcceptedResponse,
+    summary="Trigger Pool Maintenance (operator only)",
     description=(
-        "Manually trigger a pool maintenance check. "
-        "This will sync existing stamps, purchase new ones if needed, and top up low-TTL stamps. "
-        "Normally runs automatically in the background."
-    )
+        "Schedule a pool maintenance check: sync existing stamps, purchase new ones "
+        "if the reserve is short, and top up low-TTL stamps. Normally runs "
+        "automatically in the background; this is the manual trigger.\n\n"
+        "**This spends BZZ**, so it requires a signature from an address in "
+        "POOL_ADMIN_ADDRESSES. Sign `swarm-connect-pool-check:<unix_ts>` with "
+        "EIP-191 personal_sign and send it as X-Debug-Signature with "
+        "X-Debug-Timestamp. Returns 404 when no allow-list is configured.\n\n"
+        "Returns 202 immediately; poll `GET /api/v1/pool/status` for the outcome."
+    ),
 )
-async def trigger_pool_check():
-    """Manually trigger pool maintenance check."""
+async def trigger_pool_check(
+    background_tasks: BackgroundTasks,
+    x_debug_timestamp: Optional[str] = Header(None, alias="X-Debug-Timestamp"),
+    x_debug_signature: Optional[str] = Header(None, alias="X-Debug-Signature"),
+):
+    """Schedule pool maintenance. Operator-only, because it spends money.
+
+    This endpoint was unauthenticated (#292). It calls check_and_replenish(),
+    which buys postage batches with the gateway's own funds, so anyone able to
+    resolve the hostname could spend them — against a production wallet holding
+    real BZZ. It was also awaited in full, and a purchase takes about sixteen
+    seconds, so repeated calls were a cheap way to tie up workers.
+
+    Both halves are closed here: a signature from POOL_ADMIN_ADDRESSES over a
+    prefix distinct from the diagnostics one, and a 202 that schedules the work
+    instead of holding the connection for it.
+    """
     if not settings.STAMP_POOL_ENABLED:
         raise HTTPException(
             status_code=404,
             detail="Stamp pool feature is not enabled on this gateway. Use POST /api/v1/stamps/ to purchase stamps directly."
         )
 
-    result = await stamp_pool_manager.check_and_replenish()
+    # Ordered so an unconfigured gateway answers 404 for both reasons alike, and
+    # an unauthorised caller learns nothing about pool state.
+    signer = authorize_signed_request(
+        prefix=POOL_CHECK_PREFIX,
+        allowed=settings.get_pool_admin_addresses(),
+        timestamp=x_debug_timestamp,
+        signature=x_debug_signature,
+        operation="pool maintenance (spends BZZ)",
+    )
 
-    return ManualCheckResponse(
-        checked_at=result.get("checked_at", datetime.now().isoformat()),
-        stamps_purchased=result.get("stamps_purchased", 0),
-        stamps_topped_up=result.get("stamps_topped_up", 0),
-        stamps_synced=result.get("stamps_synced", 0),
-        errors=result.get("errors", []),
-        topup_debug=result.get("topup_debug"),
+    background_tasks.add_task(stamp_pool_manager.check_and_replenish)
+    logger.info("Pool maintenance scheduled by %s", signer)
+
+    return ManualCheckAcceptedResponse(
+        scheduled_at=datetime.now(timezone.utc).isoformat(),
+        message=(
+            "Pool maintenance scheduled. Poll GET /api/v1/pool/status for the "
+            "result; `last_check` advances and `errors` reports any failure."
+        ),
     )
