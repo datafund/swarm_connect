@@ -62,3 +62,49 @@ to fund, and a conditional on `{{ $labels.environment }}` for the health URL.
 Both come from labels on the underlying metric, so they cannot go stale the way a
 hardcoded value did. A label that does not exist renders empty, so each template
 carries a fallback branch rather than assuming the label is present.
+
+## Chain-backend rules and their deploy order
+
+Two rules watch Bee's Gnosis RPC connection. They depend on Alloy scraping the
+Bee nodes, which is configured in `monitoring/alloy/config.alloy` — the metrics
+do not exist until that is deployed.
+
+| rule | fires on | `noDataState` | ships |
+|---|---|---|---|
+| Gnosis RPC Errors | error rate above 5% for 15m | `OK` | unpaused |
+| Bee Node Not Scraped | `up < 1` for 10m | `Alerting` | **paused** |
+
+The two `noDataState` values differ on purpose, and both differ from the rest of
+this file, which uses `NoData` (see #263, still open).
+
+**Gnosis RPC Errors is `OK` on no data** so it does not double-report. If the
+metrics stop arriving, that is a scrape problem, not an RPC error rate, and the
+second rule already covers it. Leaving this one on `NoData` would produce two
+notifications for one fault.
+
+**Bee Node Not Scraped ships paused** because its whole purpose is to treat
+absence as failure. Before Alloy is deployed with the Bee targets,
+`up{instance=~"bee.*:1633"}` does not exist, so provisioning it live would fire
+it immediately — before anything is wrong. The order is:
+
+1. Merge and deploy, so Alloy picks up the Bee scrape targets.
+2. Confirm the series exists: query `up{instance=~"bee.*:1633"}` in Grafana and
+   check both `environment="main"` and `environment="development"` are present.
+3. Unpause the rule.
+
+Skipping step 2 and unpausing early gives a false alert on a working system,
+which is the fastest way to teach people to ignore this channel.
+
+## Threshold, and why 5%
+
+Set from measurement, not a guess. Production sat at roughly 1.1% cumulative
+over 19 hours of uptime, and both nodes measured 0 errors across several hundred
+calls in steady state. The floor is not zero, so a threshold at 0 would be noise.
+
+The number that is *not* covered by 5% is a restart: a Bee node catching up
+after starting hammers its RPC endpoint and one produced 5,462 errors in its
+first forty minutes, then none at all afterwards. The 15-minute `for` window
+absorbs a short burst; a restart storm longer than that will alert, and should.
+
+Revisit the threshold once there is a week of baseline on the dashboard rather
+than the few hours it was set from.
