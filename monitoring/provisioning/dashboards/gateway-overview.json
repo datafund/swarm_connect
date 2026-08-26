@@ -304,6 +304,42 @@
           { "expr": "gateway_uptime_seconds{environment=~\"$environment\"} / 3600", "legendFormat": "{{environment}}" }
         ],
         "fieldConfig": { "defaults": { "unit": "h", "custom": { "drawStyle": "line", "fillOpacity": 10 }, "color": { "fixedColor": "green", "mode": "fixed" } } }
+      },
+      {
+        "id": 80, "title": "Gnosis RPC Error Rate", "type": "timeseries",
+        "description": "Share of Bee's calls to its Gnosis RPC endpoint that fail, per environment. This is the signal that was missing when #296 went unnoticed for a day: the two Bee nodes shared one free endpoint and it rate-limited them, breaking /wallet, /chequebook/balance and /chainstate while everything else stayed green. A burst right after a node restarts is normal \u2014 it hammers the endpoint catching up. Sustained error rate is not.",
+        "gridPos": { "h": 8, "w": 12, "x": 0, "y": 68 },
+        "targets": [
+          { "expr": "sum(rate(bee_eth_backend_total_rpc_errors{environment=~\"$environment\"}[5m])) by (environment) / sum(rate(bee_eth_backend_total_rpc_calls{environment=~\"$environment\"}[5m])) by (environment)", "legendFormat": "{{environment}}" }
+        ],
+        "fieldConfig": { "defaults": { "unit": "percentunit", "custom": { "drawStyle": "line", "lineInterpolation": "smooth", "fillOpacity": 20 }, "color": { "fixedColor": "red", "mode": "fixed" } } }
+      },
+      {
+        "id": 81, "title": "Gnosis RPC Calls by Method", "type": "timeseries",
+        "description": "What is driving RPC load, broken down by JSON-RPC method. Bee exports each as its own counter rather than a label, hence the __name__ matcher. eth_getLogs (filter_logs) and the block-number polling are the heavy ones and the usual cause of hitting a free endpoint's rate limit.",
+        "gridPos": { "h": 8, "w": 12, "x": 12, "y": 68 },
+        "targets": [
+          { "expr": "sum(rate({__name__=~\"bee_eth_backend_calls_.*\", environment=~\"$environment\"}[5m])) by (__name__)", "legendFormat": "{{__name__}}" }
+        ],
+        "fieldConfig": { "defaults": { "unit": "reqps", "custom": { "drawStyle": "line", "lineInterpolation": "smooth", "fillOpacity": 20 } } }
+      },
+      {
+        "id": 82, "title": "Block Number Cache Load Errors", "type": "timeseries",
+        "description": "Failures refreshing Bee's cached chain tip. This is the specific failure behind a broken /chainstate and a chain sync lag that will not close, so it is worth watching separately from the overall error rate \u2014 it can climb while the aggregate still looks small.",
+        "gridPos": { "h": 8, "w": 12, "x": 0, "y": 76 },
+        "targets": [
+          { "expr": "sum(rate(bee_eth_backend_cache_block_number_load_errors{environment=~\"$environment\"}[5m])) by (environment)", "legendFormat": "{{environment}}" }
+        ],
+        "fieldConfig": { "defaults": { "unit": "reqps", "custom": { "drawStyle": "line", "lineInterpolation": "smooth", "fillOpacity": 20 }, "color": { "fixedColor": "orange", "mode": "fixed" } } }
+      },
+      {
+        "id": 83, "title": "Observed Gnosis Block Time", "type": "timeseries",
+        "description": "Average block time as Bee actually observes it, refreshed on each block-number cache reload. Gnosis targets ~5s. A value drifting well above that means the node is seeing the chain late \u2014 either the endpoint is serving stale results or calls are being dropped \u2014 and it moves before the error rate does.",
+        "gridPos": { "h": 8, "w": 12, "x": 12, "y": 76 },
+        "targets": [
+          { "expr": "bee_eth_backend_average_block_time_seconds{environment=~\"$environment\"}", "legendFormat": "{{environment}}" }
+        ],
+        "fieldConfig": { "defaults": { "unit": "s", "custom": { "drawStyle": "line", "lineInterpolation": "smooth", "fillOpacity": 20 } } }
       }
     ],
     "schemaVersion": 39

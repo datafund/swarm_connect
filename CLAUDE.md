@@ -380,13 +380,23 @@ The gateway exposes a `/metrics` endpoint (Prometheus text format) when `METRICS
 
 **Info**: `gateway_info{version, environment, x402_enabled, pool_enabled, notary_enabled, chunk_upload_enabled}`
 
+**Bee chain-backend metrics** (scraped from the bundled Bee nodes, not produced by the gateway):
+- `bee_eth_backend_total_rpc_calls` / `bee_eth_backend_total_rpc_errors` — Gnosis RPC volume and failures
+- `bee_eth_backend_cache_block_number_load_errors` — failures refreshing the cached chain tip, the specific cause of a broken `/chainstate`
+- `bee_eth_backend_calls_*` — per JSON-RPC method (`filter_logs`, `send_transaction`, `eth_call`, `balance`, …), each its own counter rather than a label
+- `bee_eth_backend_average_block_time_seconds` — block time as the node observes it
+
+> Alloy keeps only `bee_eth_backend_*` and `up` from Bee's `/metrics`. Bee exposes 874 series per node; forwarding all of them would multiply Grafana Cloud ingest for no benefit. The API port is not published, so this is reachable only on the compose network.
+
 > New metrics are scraped by Grafana Alloy and remote-written to Grafana Cloud automatically once deployed (no extra wiring). Adding them as **panels** on `monitoring/provisioning/dashboards/gateway-overview.json` is a separate, deliberate step (tracked in its own issue).
 
 ### Production Monitoring Stack
 
 ```
 Gateway containers ──/metrics──> Alloy ──remote write──> Grafana Cloud
-  (port 8000)                   (Docker)                 (dashboards + alerts)
+  (port 8000)                     │                      (dashboards + alerts)
+Bee nodes ────────/metrics────────┘
+  (port 1633, bee_eth_backend_* only)
 ```
 
 **How it works:**

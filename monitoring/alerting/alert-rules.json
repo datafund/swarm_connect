@@ -537,5 +537,159 @@
     "noDataState": "NoData",
     "ruleGroup": "warning",
     "title": "Stamp Pool Exhausted"
+  },
+  {
+    "annotations": {
+      "description": "Bee's calls to its Gnosis RPC endpoint are failing at a sustained rate. The chain-reading endpoints degrade first \u2014 /api/v1/wallet, /api/v1/chequebook/balance and /chainstate start returning \"Failed to fetch ... from Swarm API\" \u2014 while the rest of the gateway keeps working, so overall status stays green.\n\nWhat to check, in order:\n1. Which endpoint this node uses: BEE_RPC_ENDPOINT (main) or BEE_DEV_RPC_ENDPOINT (development) in /opt/swarm_connect_host.env on the host.\n2. Whether both nodes point at the same endpoint. They share a public IP, so one endpoint means one rate limit, and staging load will break production. That was swarm_connect#296.\n3. The node's log for the actual refusal: docker logs --since 1h <container> | grep -E '429|502|503|504'\n\nIgnore this if the node restarted in the last few minutes \u2014 it hammers the endpoint catching up and a burst of errors then is expected.\n\nFull status: {{ if eq $labels.environment \"main\" }}https://provenance-gateway.datafund.io/health{{ else if eq $labels.environment \"development\" }}https://provenance-gateway.dev.datafund.io/health{{ else }}https://provenance-gateway.datafund.io/health (or the .dev. host \u2014 environment label was \"{{ $labels.environment }}\"){{ end }}",
+      "summary": "Gnosis RPC error rate {{ printf \"%.1f\" $values.C.Value }}% on {{ $labels.environment }} (sustained over 15m)"
+    },
+    "condition": "D",
+    "data": [
+      {
+        "datasourceUid": "grafanacloud-prom",
+        "model": {
+          "expr": "100 * sum(rate(bee_eth_backend_total_rpc_errors[10m])) by (environment) / sum(rate(bee_eth_backend_total_rpc_calls[10m])) by (environment)",
+          "instant": true,
+          "intervalMs": 1000,
+          "maxDataPoints": 43200,
+          "refId": "A"
+        },
+        "queryType": "",
+        "refId": "A",
+        "relativeTimeRange": {
+          "from": 900,
+          "to": 0
+        }
+      },
+      {
+        "datasourceUid": "__expr__",
+        "model": {
+          "expression": "A",
+          "intervalMs": 1000,
+          "maxDataPoints": 43200,
+          "reducer": "last",
+          "refId": "C",
+          "type": "reduce"
+        },
+        "queryType": "",
+        "refId": "C",
+        "relativeTimeRange": {
+          "from": 0,
+          "to": 0
+        }
+      },
+      {
+        "datasourceUid": "__expr__",
+        "model": {
+          "conditions": [
+            {
+              "evaluator": {
+                "params": [
+                  5
+                ],
+                "type": "gt"
+              }
+            }
+          ],
+          "expression": "C",
+          "intervalMs": 1000,
+          "maxDataPoints": 43200,
+          "refId": "D",
+          "type": "threshold"
+        },
+        "queryType": "",
+        "refId": "D",
+        "relativeTimeRange": {
+          "from": 0,
+          "to": 0
+        }
+      }
+    ],
+    "execErrState": "Error",
+    "for": "15m",
+    "isPaused": false,
+    "labels": {
+      "severity": "warning"
+    },
+    "noDataState": "OK",
+    "ruleGroup": "warning",
+    "title": "Gnosis RPC Errors"
+  },
+  {
+    "annotations": {
+      "description": "Alloy has not scraped this Bee node's /metrics for 10 minutes. Without it, the Gnosis RPC error rate cannot be measured at all \u2014 and an unscraped node and a perfectly healthy one look identical on a rate() graph, both being flat at nothing.\n\nUsually means the container is down, or the host is not running the `bee` compose profile.\nCheck: docker compose -f docker-compose.host.yml ps\n\nFull status: {{ if eq $labels.environment \"main\" }}https://provenance-gateway.datafund.io/health{{ else if eq $labels.environment \"development\" }}https://provenance-gateway.dev.datafund.io/health{{ else }}https://provenance-gateway.datafund.io/health (or the .dev. host \u2014 environment label was \"{{ $labels.environment }}\"){{ end }}\n\nShipped paused on purpose. Before Alloy is deployed with the Bee scrape targets, bee_up does not exist at all, and a rule that treats absence as failure would fire the moment it is provisioned \u2014 before there is anything wrong. Unpause once the series is present in Grafana Cloud. See also #263 on NoData handling.",
+      "summary": "Bee node metrics not being scraped on {{ $labels.environment }}"
+    },
+    "condition": "C",
+    "data": [
+      {
+        "datasourceUid": "grafanacloud-prom",
+        "model": {
+          "expr": "max(bee_up) by (environment)",
+          "instant": true,
+          "intervalMs": 1000,
+          "maxDataPoints": 43200,
+          "refId": "A"
+        },
+        "queryType": "",
+        "refId": "A",
+        "relativeTimeRange": {
+          "from": 600,
+          "to": 0
+        }
+      },
+      {
+        "datasourceUid": "__expr__",
+        "model": {
+          "expression": "A",
+          "intervalMs": 1000,
+          "maxDataPoints": 43200,
+          "reducer": "last",
+          "refId": "B",
+          "type": "reduce"
+        },
+        "queryType": "",
+        "refId": "B",
+        "relativeTimeRange": {
+          "from": 0,
+          "to": 0
+        }
+      },
+      {
+        "datasourceUid": "__expr__",
+        "model": {
+          "conditions": [
+            {
+              "evaluator": {
+                "params": [
+                  1
+                ],
+                "type": "lt"
+              }
+            }
+          ],
+          "expression": "B",
+          "intervalMs": 1000,
+          "maxDataPoints": 43200,
+          "refId": "C",
+          "type": "threshold"
+        },
+        "queryType": "",
+        "refId": "C",
+        "relativeTimeRange": {
+          "from": 0,
+          "to": 0
+        }
+      }
+    ],
+    "execErrState": "Error",
+    "for": "10m",
+    "isPaused": true,
+    "labels": {
+      "severity": "warning"
+    },
+    "noDataState": "Alerting",
+    "ruleGroup": "warning",
+    "title": "Bee Node Not Scraped"
   }
 ]
