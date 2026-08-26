@@ -206,9 +206,31 @@ jobs:
           # Host-level services (the bundled Bee nodes and the metrics agent) live
           # in their own file because they are not branch-specific. Same project
           # name, so they share the gateways' network and keep their existing
-          # container and volume names. No --force-recreate: anything already
-          # running is left alone.
+          # container and volume names. No --force-recreate here: the Bee nodes
+          # are stateful and restarting them costs peer connections and sync
+          # progress, so anything already running is left alone.
           docker compose -f docker-compose.host.yml up -d
+
+          # Alloy is recreated every deploy, and it has to be.
+          #
+          # Its config is bind-mounted as a single FILE. A file bind mount pins
+          # the inode, and `git pull` replaces the file rather than editing it
+          # in place — so the container goes on reading the old inode forever.
+          # Compose will not help: the service definition is unchanged, so
+          # `up -d` sees nothing to do.
+          #
+          # The result was silent. Every edit to config.alloy since
+          # 2026-08-25 deployed successfully and changed nothing, because the
+          # running Alloy had never seen any of them. The host label and the
+          # env() -> sys.env() migration were both dead on arrival, and the Bee
+          # scrape targets would have been too.
+          #
+          # Alloy holds no state worth keeping and starts in about a second, so
+          # recreating it unconditionally is cheap and removes the whole class
+          # of problem. The alternative — mounting the directory — fixes the
+          # inode issue but still needs a restart, because Alloy reads its
+          # config at startup.
+          docker compose -f docker-compose.host.yml up -d --force-recreate --no-deps alloy
 
       - name: post-deploy diagnostics
         run: |
