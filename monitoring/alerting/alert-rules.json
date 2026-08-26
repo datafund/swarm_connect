@@ -617,7 +617,7 @@
   },
   {
     "annotations": {
-      "description": "Alloy has not scraped this Bee node's /metrics for 10 minutes. Without it, the Gnosis RPC error rate cannot be measured at all \u2014 and an unscraped node and a perfectly healthy one look identical on a rate() graph, both being flat at nothing.\n\nUsually means the container is down, or the host is not running the `bee` compose profile.\nCheck: docker compose -f docker-compose.host.yml ps\n\nFull status: {{ if eq $labels.environment \"main\" }}https://provenance-gateway.datafund.io/health{{ else if eq $labels.environment \"development\" }}https://provenance-gateway.dev.datafund.io/health{{ else }}https://provenance-gateway.datafund.io/health (or the .dev. host \u2014 environment label was \"{{ $labels.environment }}\"){{ end }}\n\nShipped paused on purpose. Before Alloy is deployed with the Bee scrape targets, up{instance=~\"bee.*:1633\"} does not exist at all, and a rule that treats absence as failure would fire the moment it is provisioned \u2014 before there is anything wrong. Unpause once the series is present in Grafana Cloud. See also #263 on NoData handling.",
+      "description": "Alloy has not scraped this Bee node's /metrics for 10 minutes. Without it, the Gnosis RPC error rate cannot be measured at all \u2014 and an unscraped node and a perfectly healthy one look identical on a rate() graph, both being flat at nothing.\n\nUsually means the container is down, or the host is not running the `bee` compose profile.\nCheck: docker compose -f docker-compose.host.yml ps\n\nFull status: {{ if eq $labels.environment \"main\" }}https://provenance-gateway.datafund.io/health{{ else if eq $labels.environment \"development\" }}https://provenance-gateway.dev.datafund.io/health{{ else }}https://provenance-gateway.datafund.io/health (or the .dev. host \u2014 environment label was \"{{ $labels.environment }}\"){{ end }}\n\nShipped paused on purpose. Before Alloy is deployed with the Bee scrape targets, bee_up does not exist at all, and a rule that treats absence as failure would fire the moment it is provisioned \u2014 before there is anything wrong. Unpause once the series is present in Grafana Cloud. See also #263 on NoData handling.",
       "summary": "Bee node metrics not being scraped on {{ $labels.environment }}"
     },
     "condition": "C",
@@ -625,7 +625,7 @@
       {
         "datasourceUid": "grafanacloud-prom",
         "model": {
-          "expr": "max(up{instance=~\"bee.*:1633\"}) by (environment)",
+          "expr": "max(bee_up) by (environment)",
           "instant": true,
           "intervalMs": 1000,
           "maxDataPoints": 43200,

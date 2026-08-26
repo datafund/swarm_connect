@@ -72,7 +72,7 @@ do not exist until that is deployed.
 | rule | fires on | `noDataState` | ships |
 |---|---|---|---|
 | Gnosis RPC Errors | error rate above 5% for 15m | `OK` | unpaused |
-| Bee Node Not Scraped | `up < 1` for 10m | `Alerting` | **paused** |
+| Bee Node Not Scraped | `bee_up < 1` for 10m | `Alerting` | **paused** |
 
 The two `noDataState` values differ on purpose, and both differ from the rest of
 this file, which uses `NoData` (see #263, still open).
@@ -84,11 +84,11 @@ notifications for one fault.
 
 **Bee Node Not Scraped ships paused** because its whole purpose is to treat
 absence as failure. Before Alloy is deployed with the Bee targets,
-`up{instance=~"bee.*:1633"}` does not exist, so provisioning it live would fire
+`bee_up` does not exist, so provisioning it live would fire
 it immediately — before anything is wrong. The order is:
 
 1. Merge and deploy, so Alloy picks up the Bee scrape targets.
-2. Confirm the series exists: query `up{instance=~"bee.*:1633"}` in Grafana and
+2. Confirm the series exists: query `bee_up` in Grafana and
    check both `environment="main"` and `environment="development"` are present.
 3. Unpause the rule.
 

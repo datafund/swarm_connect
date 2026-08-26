@@ -62,9 +62,16 @@ prometheus.relabel "add_environment_main" {
 //
 // Only the bee_eth_backend_* series are kept. Bee exposes 874 series per node
 // and almost none of them are about the chain backend; forwarding all of them
-// would multiply Grafana Cloud ingest for no benefit. `up` is kept too, so a
-// node that stops being scraped at all is distinguishable from one reporting
-// zero errors — those look identical on a rate() graph otherwise.
+// would multiply Grafana Cloud ingest for no benefit.
+//
+// `up` is kept too, so a node that stops being scraped at all is
+// distinguishable from one reporting zero errors — those look identical on a
+// rate() graph otherwise. It is RENAMED to bee_up before being forwarded.
+// Leaving it as `up` would have put Bee under labels that already mean
+// "gateway": the Gateway Down alert matches up{job=~"prometheus.scrape.*"},
+// which these components satisfy, so a stopped Bee node would have paged as a
+// downed gateway. The Gateway Status panel would likewise have shown four
+// series instead of two.
 //
 // Both nodes sit behind the `bee` compose profile. A host that does not run
 // them will log scrape failures against these targets and report up == 0,
@@ -82,6 +89,13 @@ prometheus.relabel "bee_main" {
     action        = "keep"
     source_labels = ["__name__"]
     regex         = "bee_eth_backend_.*|up"
+  }
+  rule {
+    action        = "replace"
+    source_labels = ["__name__"]
+    regex         = "up"
+    target_label  = "__name__"
+    replacement   = "bee_up"
   }
   rule {
     action       = "replace"
@@ -108,6 +122,13 @@ prometheus.relabel "bee_development" {
     action        = "keep"
     source_labels = ["__name__"]
     regex         = "bee_eth_backend_.*|up"
+  }
+  rule {
+    action        = "replace"
+    source_labels = ["__name__"]
+    regex         = "up"
+    target_label  = "__name__"
+    replacement   = "bee_up"
   }
   rule {
     action       = "replace"
