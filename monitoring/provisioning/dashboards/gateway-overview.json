@@ -316,10 +316,10 @@
       },
       {
         "id": 81, "title": "Gnosis RPC Calls by Method", "type": "timeseries",
-        "description": "What is driving RPC load, broken down by JSON-RPC method. Bee exports each as its own counter rather than a label, hence the __name__ matcher. eth_getLogs (filter_logs) and the block-number polling are the heavy ones and the usual cause of hitting a free endpoint's rate limit.",
+        "description": "What is driving RPC load, broken down by JSON-RPC method. Bee exports each as its own counter rather than a label. rate() strips __name__, so grouping by it collapses all 28 series into one label set and the query fails outright with 'vector cannot contain metrics with the same labelset' \u2014 which is what this panel did on first deploy. The name is copied into a real 'method' label before the rate is taken. eth_getLogs (filter_logs) and the block-number polling are the heavy ones and the usual cause of hitting a free endpoint's rate limit.",
         "gridPos": { "h": 8, "w": 12, "x": 12, "y": 68 },
         "targets": [
-          { "expr": "sum(rate({__name__=~\"bee_eth_backend_calls_.*\", environment=~\"$environment\"}[5m])) by (__name__)", "legendFormat": "{{__name__}}" }
+          { "expr": "sum by (method, environment) (rate(label_replace({__name__=~\"bee_eth_backend_calls_.*\", environment=~\"$environment\"}, \"method\", \"$1\", \"__name__\", \"bee_eth_backend_calls_(.*)\")[10m:1m]))", "legendFormat": "{{environment}} {{method}}" }
         ],
         "fieldConfig": { "defaults": { "unit": "reqps", "custom": { "drawStyle": "line", "lineInterpolation": "smooth", "fillOpacity": 20 } } }
       },
