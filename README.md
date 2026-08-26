@@ -99,17 +99,28 @@ unset and the stack behaves as it always has.
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `SWARM_BEE_API_URL` | external node | Bee endpoint for the production gateway |
-| `SWARM_BEE_API_URL_DEV` | external node | Bee endpoint for the staging gateway |
+| `SWARM_BEE_API_URL` | **required** | Bee endpoint for the production gateway |
+| `SWARM_BEE_API_URL_DEV` | **required** | Bee endpoint for the staging gateway |
 | `COMPOSE_PROFILES` | *(unset)* | set to `bee` to also run the bundled Bee nodes |
 | `BEE_VERSION` | `2.8.1` | Bee image tag |
 | `BEE_RPC_ENDPOINT` | *(unset)* | Gnosis RPC endpoint (required with the `bee` profile) |
+| `BEE_DEV_RPC_ENDPOINT` | falls back to `BEE_RPC_ENDPOINT` | Separate RPC for the staging node, so its chain load cannot rate-limit production |
 | `BEE_PASSWORD` / `BEE_DEV_PASSWORD` | *(unset)* | keystore passwords |
 | `BEE_NAT_ADDR` / `BEE_DEV_NAT_ADDR` | *(unset)* | public `host:port` each node advertises |
 | `BEE_P2P_PORT` / `BEE_DEV_P2P_PORT` | `1634` / `1734` | host p2p ports |
 | `BEE_FULL_NODE` / `BEE_DEV_FULL_NODE` | `false` | run as a full node instead of light |
 | `GATEWAY_BIND` | `0.0.0.0` | host interface the gateways bind to; set `127.0.0.1` behind a local reverse proxy |
 | `HOST_LABEL` | *(empty)* | value of the `host` label on metrics; set when more than one host runs the stack |
+
+Both Bee endpoints are **required** — compose refuses to start without them, naming
+the variable it needs. A default was previously baked in, which silently became
+wrong on any host that did not share that one node.
+
+`docker-compose.yml` defines the gateways, deployed per branch.
+`docker-compose.host.yml` defines the host-level services — the bundled Bee
+nodes and the metrics agent — which are not branch-specific and are applied
+with `docker compose -f docker-compose.host.yml up -d`. Both use the same
+`COMPOSE_PROJECT_NAME`, so they share one network and one set of volumes.
 
 **Running the gateway and its Bee node on one host** — set `COMPOSE_PROFILES=bee`
 and point each gateway at its own node (`http://bee:1633`, `http://bee-dev:1633`).

@@ -386,7 +386,8 @@ class TestMetricsBackgroundTask:
             mock_settings.STAMP_POOL_ENABLED = False
             mock_settings.METRICS_BALANCE_POLL_SECONDS = 0.1
 
-            mock_wallet.return_value = {"bzzBalance": str(5 * 10**16)}  # 5 BZZ
+            mock_wallet.return_value = {"bzzBalance": str(5 * 10**16),  # 5 BZZ
+                                        "walletAddress": "0xWALLET"}
             mock_cheque.return_value = {"availableBalance": str(3 * 10**16)}
             mock_stamps.return_value = [{"batchTTL": 86400}, {"batchTTL": 3600}]
 
@@ -406,5 +407,7 @@ class TestMetricsBackgroundTask:
                 except asyncio.CancelledError:
                     pass
 
-            assert wallet_bzz_balance._value.get() == 5.0
+            # The gauge carries a `wallet` label now, so the balance is recorded
+            # against the address it belongs to rather than as a bare number.
+            assert wallet_bzz_balance.labels(wallet="0xWALLET")._value.get() == 5.0
             assert stamps_total._value.get() == 2.0

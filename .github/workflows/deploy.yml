@@ -74,6 +74,7 @@ jobs:
           CHUNK_UPLOAD_FREE_TIER_MB_PER_DAY=${{ vars.CHUNK_UPLOAD_FREE_TIER_MB_PER_DAY || '100' }}
           X402_BANDWIDTH_USD_PER_GB=${{ vars.X402_BANDWIDTH_USD_PER_GB || '0.10' }}
           BANDWIDTH_CREDIT_MIN_TOPUP_MB=${{ vars.BANDWIDTH_CREDIT_MIN_TOPUP_MB || '100' }}
+          BANDWIDTH_CREDIT_MAX_TOPUP_MB=${{ vars.BANDWIDTH_CREDIT_MAX_TOPUP_MB || '1000000' }}
           BANDWIDTH_CREDIT_STATE_FILE=${{ vars.BANDWIDTH_CREDIT_STATE_FILE || 'data/bandwidth_credit.json' }}
           DEBUG_ALLOWED_ADDRESSES=${{ vars.DEBUG_ALLOWED_ADDRESSES || '' }}
           DEBUG_SIG_MAX_AGE_SECONDS=${{ vars.DEBUG_SIG_MAX_AGE_SECONDS || '300' }}
@@ -131,6 +132,7 @@ jobs:
           CHUNK_UPLOAD_FREE_TIER_MB_PER_DAY=${{ vars.CHUNK_UPLOAD_FREE_TIER_MB_PER_DAY || '100' }}
           X402_BANDWIDTH_USD_PER_GB=${{ vars.X402_BANDWIDTH_USD_PER_GB || '0.10' }}
           BANDWIDTH_CREDIT_MIN_TOPUP_MB=${{ vars.BANDWIDTH_CREDIT_MIN_TOPUP_MB || '100' }}
+          BANDWIDTH_CREDIT_MAX_TOPUP_MB=${{ vars.BANDWIDTH_CREDIT_MAX_TOPUP_MB || '1000000' }}
           BANDWIDTH_CREDIT_STATE_FILE=${{ vars.BANDWIDTH_CREDIT_STATE_FILE || 'data/bandwidth_credit.json' }}
           DEBUG_ALLOWED_ADDRESSES=${{ vars.DEBUG_ALLOWED_ADDRESSES || '' }}
           DEBUG_SIG_MAX_AGE_SECONDS=${{ vars.DEBUG_SIG_MAX_AGE_SECONDS || '300' }}
@@ -172,7 +174,63 @@ jobs:
             echo "Applying host overrides from /opt/swarm_connect_host.env"
             cat /opt/swarm_connect_host.env >> .env
           fi
-          docker compose up -d --force-recreate
+
+          # Pin the compose project name. By default it is derived from the
+          # directory name, which makes container AND VOLUME names depend on a
+          # filesystem path: the Bee volumes are swarm_connect_bee-data and
+          # swarm_connect_bee-dev-data. Deploying from a different directory
+          # would therefore look for volumes that do not exist, create empty
+          # ones, and start Bee with no keystore — a new wallet, with the funded
+          # ones orphaned.
+          #
+          # Pinning it makes the path irrelevant to identity. Written last so
+          # nothing in the host env file can override it.
+          echo "COMPOSE_PROJECT_NAME=swarm_connect" >> .env
+
+          # Recreate ONLY the service this branch owns. `docker compose up -d
+          # --force-recreate` with no argument recreates every service, so a push
+          # to dev restarted production and vice versa. That is not free: the
+          # stamp pool buys a reserve on startup, and one such restart cost about
+          # 0.7 BZZ for nothing.
+          #
+          # --no-deps keeps it from dragging the other environment's containers
+          # in through depends_on.
+          if [ "$GITHUB_REF_NAME" = "dev" ]; then
+            BRANCH_SERVICE=provenance_gateway_dev
+          else
+            BRANCH_SERVICE=provenance_gateway
+          fi
+          echo "Recreating $BRANCH_SERVICE (branch $GITHUB_REF_NAME)"
+          docker compose up -d --force-recreate --no-deps "$BRANCH_SERVICE"
+
+          # Host-level services (the bundled Bee nodes and the metrics agent) live
+          # in their own file because they are not branch-specific. Same project
+          # name, so they share the gateways' network and keep their existing
+          # container and volume names. No --force-recreate here: the Bee nodes
+          # are stateful and restarting them costs peer connections and sync
+          # progress, so anything already running is left alone.
+          docker compose -f docker-compose.host.yml up -d
+
+          # Alloy is recreated every deploy, and it has to be.
+          #
+          # Its config is bind-mounted as a single FILE. A file bind mount pins
+          # the inode, and `git pull` replaces the file rather than editing it
+          # in place — so the container goes on reading the old inode forever.
+          # Compose will not help: the service definition is unchanged, so
+          # `up -d` sees nothing to do.
+          #
+          # The result was silent. Every edit to config.alloy since
+          # 2026-08-25 deployed successfully and changed nothing, because the
+          # running Alloy had never seen any of them. The host label and the
+          # env() -> sys.env() migration were both dead on arrival, and the Bee
+          # scrape targets would have been too.
+          #
+          # Alloy holds no state worth keeping and starts in about a second, so
+          # recreating it unconditionally is cheap and removes the whole class
+          # of problem. The alternative — mounting the directory — fixes the
+          # inode issue but still needs a restart, because Alloy reads its
+          # config at startup.
+          docker compose -f docker-compose.host.yml up -d --force-recreate --no-deps alloy
 
       - name: post-deploy diagnostics
         run: |

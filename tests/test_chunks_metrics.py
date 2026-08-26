@@ -31,6 +31,9 @@ def _settings(x402=False):
     ms.CHUNK_UPLOAD_MAX_BYTES_PER_REQUEST = 4104
     ms.X402_ENABLED = x402
     ms.BANDWIDTH_CREDIT_MIN_TOPUP_MB = 100
+    # Explicit: an unset MagicMock attribute compares truthy, so the
+    # ceiling check would refuse every top-up.
+    ms.BANDWIDTH_CREDIT_MAX_TOPUP_MB = 1_000_000
     ms.X402_BANDWIDTH_USD_PER_GB = 0.10
     return ms
 

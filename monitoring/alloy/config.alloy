@@ -51,6 +51,98 @@ prometheus.relabel "add_environment_main" {
   forward_to = [prometheus.remote_write.grafana_cloud.receiver]
 }
 
+// ── Scrape the bundled Bee nodes' chain-backend metrics ─────────────────────
+//
+// Nothing watched the Gnosis RPC connection until this was added. When an
+// endpoint started refusing calls, the first sign was a user getting
+// "Failed to fetch wallet information from Swarm API" — the chain-reading
+// endpoints (/wallet, /chequebook/balance, /chainstate) fail while everything
+// else looks fine, so overall health stays green and nobody looks. Finding
+// swarm_connect#296 meant reading Bee's logs by hand, per container.
+//
+// Only the bee_eth_backend_* series are kept. Bee exposes 874 series per node
+// and almost none of them are about the chain backend; forwarding all of them
+// would multiply Grafana Cloud ingest for no benefit.
+//
+// `up` is kept too, so a node that stops being scraped at all is
+// distinguishable from one reporting zero errors — those look identical on a
+// rate() graph otherwise. It is RENAMED to bee_up before being forwarded.
+// Leaving it as `up` would have put Bee under labels that already mean
+// "gateway": the Gateway Down alert matches up{job=~"prometheus.scrape.*"},
+// which these components satisfy, so a stopped Bee node would have paged as a
+// downed gateway. The Gateway Status panel would likewise have shown four
+// series instead of two.
+//
+// Both nodes sit behind the `bee` compose profile. A host that does not run
+// them will log scrape failures against these targets and report up == 0,
+// which is the correct signal rather than silence.
+
+prometheus.scrape "bee_main" {
+  targets = [{"__address__" = "bee:1633"}]
+  metrics_path = "/metrics"
+  scrape_interval = "30s"
+  forward_to = [prometheus.relabel.bee_main.receiver]
+}
+
+prometheus.relabel "bee_main" {
+  rule {
+    action        = "keep"
+    source_labels = ["__name__"]
+    regex         = "bee_eth_backend_.*|up"
+  }
+  rule {
+    action        = "replace"
+    source_labels = ["__name__"]
+    regex         = "up"
+    target_label  = "__name__"
+    replacement   = "bee_up"
+  }
+  rule {
+    action       = "replace"
+    target_label = "environment"
+    replacement  = "main"
+  }
+  rule {
+    action       = "replace"
+    target_label = "host"
+    replacement  = sys.env("HOST_LABEL")
+  }
+  forward_to = [prometheus.remote_write.grafana_cloud.receiver]
+}
+
+prometheus.scrape "bee_development" {
+  targets = [{"__address__" = "bee-dev:1633"}]
+  metrics_path = "/metrics"
+  scrape_interval = "30s"
+  forward_to = [prometheus.relabel.bee_development.receiver]
+}
+
+prometheus.relabel "bee_development" {
+  rule {
+    action        = "keep"
+    source_labels = ["__name__"]
+    regex         = "bee_eth_backend_.*|up"
+  }
+  rule {
+    action        = "replace"
+    source_labels = ["__name__"]
+    regex         = "up"
+    target_label  = "__name__"
+    replacement   = "bee_up"
+  }
+  rule {
+    action       = "replace"
+    target_label = "environment"
+    replacement  = "development"
+  }
+  rule {
+    action       = "replace"
+    target_label = "host"
+    replacement  = sys.env("HOST_LABEL")
+  }
+  forward_to = [prometheus.remote_write.grafana_cloud.receiver]
+}
+
 // ── Push to Grafana Cloud ───────────────────────────────────────────────────
 
 prometheus.remote_write "grafana_cloud" {

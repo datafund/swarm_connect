@@ -6,7 +6,7 @@ import json
 import os
 import tempfile
 import pytest
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from unittest.mock import patch, MagicMock, AsyncMock
 from fastapi.testclient import TestClient
 
@@ -942,3 +942,209 @@ class TestReplenishGuardOnUnreadableNode:
     def test_sync_flag_starts_false(self, state_file):
         """Before any sync the pool contents are unverified, so no purchasing."""
         assert StampPoolManager(state_file=state_file)._last_sync_ok is False
+
+
+class TestSyncSurvivesMalformedRecords:
+    """One unreadable record must not abort the whole sync.
+
+    Regression: `int(stamp_data.get("amount", 0))` raises on a present-but-null
+    or empty value, because the default only applies when the key is ABSENT.
+    Bee returns `amount: null` on every /batches entry, and the merged view only
+    fills it from /stamps, which is incomplete while the node is starting. The
+    try/except wrapped the entire loop, so one bad record discarded every other
+    known stamp. Observed in production as:
+
+        ERROR Error syncing stamps from Bee node:
+              invalid literal for int() with base 10: ''
+
+    Before the replenish guard (see TestReplenishGuardOnUnreadableNode) that
+    read as an empty pool and bought a full reserve on every check interval.
+    """
+
+    @pytest.fixture
+    def state_file(self, tmp_path):
+        return str(tmp_path / "pool_state.json")
+
+    def _stamp(self, batch_id, **over):
+        d = {"batchID": batch_id, "depth": 17, "amount": "1000000",
+             "usable": True, "batchTTL": 86400, "label": "x"}
+        d.update(over)
+        return d
+
+    @pytest.mark.asyncio
+    async def test_one_bad_record_does_not_lose_the_others(self, state_file):
+        manager = StampPoolManager(state_file=state_file)
+        with open(state_file, "w") as f:
+            json.dump(["good_a", "bad", "good_b"], f)
+
+        stamps = [
+            self._stamp("good_a"),
+            self._stamp("bad", amount="", depth=None),   # the production shape
+            self._stamp("good_b", depth=20),
+        ]
+        with patch("app.services.swarm_api.get_all_stamps_processed",
+                   new=AsyncMock(return_value=stamps)):
+            synced = await manager.sync_from_bee_node()
+
+        assert synced == 2, "the two readable stamps must still be imported"
+        assert "good_a" in manager._pool and "good_b" in manager._pool
+        assert "bad" not in manager._pool
+        # The sync read the node successfully, so replenishment stays allowed.
+        assert manager._last_sync_ok is True
+
+    @pytest.mark.asyncio
+    async def test_bad_record_survives_a_state_rewrite(self, state_file):
+        """A record we could not parse may be fine next cycle — don't drop it.
+
+        The state file is only rewritten when something was actually removed, so
+        this includes a stamp that is genuinely gone from the node. That forces
+        the rewrite and makes the assertion meaningful: without it the file is
+        never touched and the check passes whatever the code does.
+        """
+        manager = StampPoolManager(state_file=state_file)
+        with open(state_file, "w") as f:
+            json.dump(["unreadable", "gone", "good"], f)
+
+        # "gone" is absent from the node's response, so it is dropped and the
+        # state is rewritten. "unreadable" must survive that rewrite.
+        with patch("app.services.swarm_api.get_all_stamps_processed",
+                   new=AsyncMock(return_value=[
+                       self._stamp("unreadable", amount=None, depth=None),
+                       self._stamp("good"),
+                   ])):
+            await manager.sync_from_bee_node()
+
+        persisted = StampPoolManager(state_file=state_file)._load_state()
+        assert "unreadable" in persisted, "an unparseable record must be retried, not dropped"
+        assert "good" in persisted
+        assert "gone" not in persisted, "a stamp no longer on the node should be removed"
+
+    @pytest.mark.asyncio
+    async def test_null_amount_is_treated_as_zero_not_an_error(self, state_file):
+        """amount is null on every /batches entry; depth is what actually matters."""
+        manager = StampPoolManager(state_file=state_file)
+        with open(state_file, "w") as f:
+            json.dump(["a"], f)
+
+        with patch("app.services.swarm_api.get_all_stamps_processed",
+                   new=AsyncMock(return_value=[self._stamp("a", amount=None)])):
+            synced = await manager.sync_from_bee_node()
+
+        assert synced == 1
+        assert manager._pool["a"].amount == 0
+        assert manager._pool["a"].depth == 17
+
+
+class TestCoerceInt:
+    """The shared coercion helper behind the fix."""
+
+    @pytest.mark.parametrize("value,expected", [
+        (None, 0), ("", 0), ("123", 123), (456, 456), ("nonsense", 0), (0, 0),
+    ])
+    def test_coerces_or_falls_back(self, value, expected):
+        from app.services.swarm_api import coerce_int
+        assert coerce_int(value, 0) == expected
+
+    def test_plain_int_call_would_have_raised(self):
+        """Documents precisely what was wrong with the original expression."""
+        with pytest.raises((TypeError, ValueError)):
+            int({"amount": None}.get("amount", 0))
+        with pytest.raises(ValueError):
+            int({"amount": ""}.get("amount", 0))
+
+
+class TestPurchaseFailureBackoff:
+    """A failed purchase must not be retried every cycle.
+
+    An underfunded pool retried an unaffordable purchase on every check —
+    observed making the same depth-20 attempt over and over, each one holding a
+    request handler for as long as Bee took to refuse it. The failure is usually
+    persistent (out of funds; an amount below Bee's minimum validity), so
+    immediate retry achieves nothing.
+    """
+
+    @pytest.fixture
+    def manager(self, tmp_path):
+        return StampPoolManager(state_file=str(tmp_path / "pool_state.json"))
+
+    def test_not_backing_off_initially(self, manager):
+        assert manager._is_backing_off(17) is False
+
+    def test_backoff_grows_and_is_capped(self, manager):
+        waits = [manager._backoff_seconds(17) for _ in range(8)]
+        assert waits[0] == 60
+        assert waits == sorted(waits), "backoff must not shrink"
+        assert max(waits) <= 3600, "backoff must be capped"
+
+    def test_backoff_is_per_depth(self, manager):
+        """A depth-20 failure must not stop depth-17 being replenished."""
+        manager._backoff_seconds(20)
+        manager._backoff[20] = datetime.now(timezone.utc) + timedelta(seconds=600)
+        assert manager._is_backing_off(20) is True
+        assert manager._is_backing_off(17) is False
+
+    def test_expired_backoff_allows_retry(self, manager):
+        manager._backoff[17] = datetime.now(timezone.utc) - timedelta(seconds=1)
+        assert manager._is_backing_off(17) is False
+
+    @pytest.mark.asyncio
+    async def test_failed_purchase_records_backoff_and_stops_retrying(self, manager):
+        """One failure, one attempt — not one attempt per stamp needed."""
+        with open(manager._get_state_file_path(), "w") as f:
+            json.dump([], f)
+
+        purchase = AsyncMock(side_effect=Exception("out of funds"))
+        with patch("app.services.stamp_pool.settings.STAMP_POOL_ENABLED", True), \
+             patch("app.services.swarm_api.get_all_stamps_processed",
+                   new=AsyncMock(return_value=[])), \
+             patch.object(manager, "_update_stamp_ttls", new=AsyncMock()), \
+             patch.object(manager, "_purchase_stamp", purchase):
+            await manager.check_and_replenish()
+
+        assert manager._is_backing_off(17) or manager._is_backing_off(20)
+        # Reserve is several stamps per depth; a failure must break out rather
+        # than attempt each one in turn.
+        assert purchase.call_count <= 2, (
+            f"kept trying after a failure: {purchase.call_count} attempts"
+        )
+
+    @pytest.mark.asyncio
+    async def test_backed_off_depth_is_skipped_next_cycle(self, manager):
+        with open(manager._get_state_file_path(), "w") as f:
+            json.dump([], f)
+        for depth in manager.get_reserve_config():
+            manager._backoff[depth] = datetime.now(timezone.utc) + timedelta(seconds=600)
+
+        purchase = AsyncMock()
+        with patch("app.services.stamp_pool.settings.STAMP_POOL_ENABLED", True), \
+             patch("app.services.swarm_api.get_all_stamps_processed",
+                   new=AsyncMock(return_value=[])), \
+             patch.object(manager, "_update_stamp_ttls", new=AsyncMock()), \
+             patch.object(manager, "_purchase_stamp", purchase):
+            results = await manager.check_and_replenish()
+
+        purchase.assert_not_called()
+        assert any("not retrying until" in e for e in results["errors"]), (
+            "a skipped depth must say why, not fail silently"
+        )
+
+
+class TestBeeErrorSurfaced:
+    """Bee's own message must reach the log and the response."""
+
+    def test_extracts_message_from_json_body(self):
+        import httpx
+        from app.services.stamp_pool import _bee_error_message
+
+        request = httpx.Request("POST", "http://bee:1633/stamps/1/20")
+        response = httpx.Response(400, json={"code": 400, "message": "out of funds"},
+                                  request=request)
+        exc = httpx.HTTPStatusError("err", request=request, response=response)
+        assert _bee_error_message(exc) == "out of funds"
+
+    def test_returns_none_without_a_response(self):
+        import httpx
+        from app.services.stamp_pool import _bee_error_message
+
+        request = httpx.Request("POST", "http://bee:1633/stamps/1/20")
+        assert _bee_error_message(httpx.ConnectError("refused", request=request)) is None

@@ -329,23 +329,46 @@ class TestSwarmAPIFunctions:
 class TestStampCostCalculations:
     """Test suite for stamp cost calculation functions."""
 
+    # calculate_stamp_amount carries a deliberate 5% margin over the exact
+    # price * duration_blocks figure. Bee re-evaluates currentPrice when it
+    # executes the purchase and rejects an amount that has fallen short, and it
+    # separately refuses an amount that merely equals its minimum-validity
+    # floor. These tests assert the exact expected values including that margin,
+    # so a change to the margin has to be made deliberately rather than by
+    # loosening an assertion.
+
     def test_calculate_stamp_amount_basic(self):
-        """Test basic amount calculation from duration."""
-        # 25 hours at price 100000 = 25 * 720 * 100000 = 1,800,000,000
+        """25 hours at price 100000, plus the 5% margin."""
         result = calculate_stamp_amount(25, 100000)
-        assert result == 1800000000
+        assert result == int(25 * 720 * 100000 * 1.05) == 1890000000
 
     def test_calculate_stamp_amount_one_hour(self):
-        """Test amount calculation for 1 hour."""
-        # 1 hour at price 150000 = 1 * 720 * 150000 = 108,000,000
+        """1 hour at price 150000, plus the 5% margin."""
         result = calculate_stamp_amount(1, 150000)
-        assert result == 108000000
+        assert result == int(1 * 720 * 150000 * 1.05) == 113400000
 
     def test_calculate_stamp_amount_large_duration(self):
-        """Test amount calculation for longer duration (30 days)."""
-        # 720 hours (30 days) at price 100000 = 720 * 720 * 100000 = 51,840,000,000
+        """720 hours (30 days) at price 100000, plus the 5% margin."""
         result = calculate_stamp_amount(720, 100000)
-        assert result == 51840000000
+        assert result == int(720 * 720 * 100000 * 1.05) == 54432000000
+
+    def test_amount_never_falls_below_bees_reported_floor(self):
+        """When Bee reports minimumValidityBlocks, the floor wins.
+
+        Bee refuses an amount that only equals currentPrice *
+        minimumValidityBlocks, so a short duration must be lifted above it
+        rather than sent as calculated and rejected.
+        """
+        price, mvb = 77610, 17280
+        short = calculate_stamp_amount(1, price, minimum_validity_blocks=mvb)
+        assert short > price * mvb
+
+    def test_floor_does_not_shrink_a_longer_duration(self):
+        """A duration already above the floor is unaffected by it."""
+        price, mvb = 77610, 17280
+        without = calculate_stamp_amount(48, price)
+        with_floor = calculate_stamp_amount(48, price, minimum_validity_blocks=mvb)
+        assert with_floor == without > price * mvb
 
     def test_calculate_stamp_total_cost_depth_17(self):
         """Test total cost calculation at depth 17."""
@@ -465,9 +488,12 @@ class TestStampCostCalculations:
         """Bee API returns currentPrice as a string — must be handled correctly."""
         # String "24000" should be converted to int, not string-multiplied
         result = calculate_stamp_amount(25, "24000")
-        expected = 24000 * 25 * 720
+        expected = int(24000 * 25 * 720 * 1.05)  # includes the 5% margin
         assert result == expected
         assert isinstance(result, int)
+        # The point of the test: string-multiplication would give something
+        # astronomically larger, so guard against that specifically.
+        assert result < 24000 * 25 * 720 * 2
 
     def test_calculate_stamp_amount_negative_price(self):
         """Negative price should raise ValueError."""
