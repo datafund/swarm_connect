@@ -32,6 +32,40 @@ Then `git diff` shows what changed in Grafana since the last export. A non-empty
 diff means someone edited a rule without recording it — which is the situation
 this file exists to make visible.
 
+## Applying everything from this repo
+
+```bash
+GRAFANA_URL=https://<stack>.grafana.net \
+GRAFANA_SA_TOKEN=glsa_... \
+python3 scripts/apply_grafana.py
+```
+
+Applies the dashboard and every rule in `alert-rules.json`. Idempotent — rules
+are matched by title and updated in place, so running it twice does not create
+duplicates. `--dry-run` parses and reports without sending anything, and needs
+no credentials.
+
+A rule present in Grafana but absent from this repo is **reported, not
+deleted**. It may be a deliberate hand-made addition, and removing it silently
+during an unrelated run would be worse than mentioning it.
+
+The script also waits for the stack to wake before doing anything. A sleeping
+Grafana Cloud stack answers 404 or 503 with a body that reads exactly like a
+wrong hostname, which has cost time before.
+
+### The token
+
+`GRAFANA_SA_TOKEN` must be a **service-account** token for the Grafana instance
+— the `glsa_` prefix. The `GRAFANA_CLOUD_API_TOKEN` deployed on the gateway
+hosts is a *different credential*: a `glc_` Cloud Access Policy token scoped to
+Prometheus remote-write. It pushes metrics fine and returns
+`401 Invalid API key` here. Both are called "a Grafana Cloud token", which is
+how the confusion starts; the script checks the prefix and refuses early rather
+than letting it fail against the API.
+
+Create one at **Administration → Users and access → Service accounts**, with
+the Editor role, then add a token. Nothing in this repo stores it.
+
 ## Apply one rule
 
 Rules are updated individually by UID, and the update must carry the **same
