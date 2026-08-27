@@ -35,6 +35,14 @@ SSL_KEYFILE=./localhost+2-key.pem SSL_CERTFILE=./localhost+2.pem python run.py
 ```
 
 ### Testing
+> `pytest tests/` is hermetic — no live gateway is contacted. The live modules
+> (`test_integration_gateway.py`, `test_x402_live.py`) are opt-in via
+> `RUN_LIVE_TESTS=1`, target `localhost:8000` unless `GATEWAY_URL` says otherwise,
+> and will not purchase a postage batch without `ALLOW_LIVE_STAMP_PURCHASE=1`.
+> Before #233 they defaulted to **production** and skipped only when it was
+> unreachable, so the mandatory pre-PR run sent real traffic there — and could buy
+> a stamp with real BZZ. See TEST_STRATEGY.md.
+
 ```bash
 # Run all tests
 source venv/bin/activate && python -m pytest tests/ -v
