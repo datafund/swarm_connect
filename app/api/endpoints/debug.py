@@ -22,13 +22,12 @@ from typing import Optional
 from urllib.parse import urljoin
 
 import httpx
-from eth_account import Account
-from eth_account.messages import encode_defunct
 from fastapi import APIRouter, Header, HTTPException, Request, status
 from fastapi.responses import Response
 
 from app.core.config import settings
 from app.services.http_client import get_client
+from app.services.signed_auth import DEBUG_PREFIX, authorize_signed_request
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -40,42 +39,25 @@ ALLOWED_BEE_PATHS = {
     "batches", "chequebook", "wallet",
 }
 
-SIG_MESSAGE_PREFIX = "swarm-connect-debug:"
+# Kept as the module's own name for readability; defined once in signed_auth.
+SIG_MESSAGE_PREFIX = DEBUG_PREFIX
 
 
 def _authorize(timestamp: Optional[str], signature: Optional[str]) -> str:
     """Verify the request is signed by an allow-listed address over a fresh timestamp.
 
-    Returns the recovered address, or raises HTTPException.
+    Delegates to the shared helper. The message prefix stays exactly as it was,
+    so signatures already in use keep working — but it is now passed explicitly,
+    because the pool-maintenance endpoint uses the same mechanism with a
+    different prefix and the two must not authorise each other.
     """
-    allowed = settings.get_debug_allowed_addresses()
-    if not allowed:
-        # Hidden when not configured.
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
-
-    if not timestamp or not signature:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Missing X-Debug-Timestamp / X-Debug-Signature",
-        )
-
-    try:
-        ts = int(timestamp)
-    except (TypeError, ValueError):
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid timestamp")
-
-    if abs(int(time.time()) - ts) > settings.DEBUG_SIG_MAX_AGE_SECONDS:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Stale or future timestamp")
-
-    message = encode_defunct(text=f"{SIG_MESSAGE_PREFIX}{ts}")
-    try:
-        signer = Account.recover_message(message, signature=signature)
-    except Exception:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid signature")
-
-    if signer.lower() not in allowed:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Address not allow-listed")
-    return signer
+    return authorize_signed_request(
+        prefix=SIG_MESSAGE_PREFIX,
+        allowed=settings.get_debug_allowed_addresses(),
+        timestamp=timestamp,
+        signature=signature,
+        operation="Bee diagnostics",
+    )
 
 
 @router.get("/bee/{bee_path:path}", summary="Read-only proxy to allow-listed Bee diagnostic endpoints")
