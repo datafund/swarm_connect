@@ -72,7 +72,7 @@
     "labels": {
       "severity": "critical"
     },
-    "noDataState": "NoData",
+    "noDataState": "OK",
     "ruleGroup": "critical",
     "title": "Critical BZZ Balance"
   },
@@ -149,7 +149,7 @@
     "labels": {
       "severity": "critical"
     },
-    "noDataState": "NoData",
+    "noDataState": "OK",
     "ruleGroup": "critical",
     "title": "Gateway Down"
   },
@@ -226,7 +226,7 @@
     "labels": {
       "severity": "warning"
     },
-    "noDataState": "NoData",
+    "noDataState": "OK",
     "ruleGroup": "warning",
     "title": "Low BZZ Balance"
   },
@@ -303,7 +303,7 @@
     "labels": {
       "severity": "warning"
     },
-    "noDataState": "NoData",
+    "noDataState": "OK",
     "ruleGroup": "warning",
     "title": "Low Base ETH"
   },
@@ -380,7 +380,7 @@
     "labels": {
       "severity": "critical"
     },
-    "noDataState": "NoData",
+    "noDataState": "OK",
     "ruleGroup": "critical",
     "title": "Low xDAI Balance"
   },
@@ -457,7 +457,7 @@
     "labels": {
       "severity": "warning"
     },
-    "noDataState": "NoData",
+    "noDataState": "OK",
     "ruleGroup": "warning",
     "title": "Pool Stamp TTL Critical"
   },
@@ -534,7 +534,7 @@
     "labels": {
       "severity": "warning"
     },
-    "noDataState": "NoData",
+    "noDataState": "OK",
     "ruleGroup": "warning",
     "title": "Stamp Pool Exhausted"
   },
@@ -688,8 +688,85 @@
     "labels": {
       "severity": "warning"
     },
-    "noDataState": "Alerting",
+    "noDataState": "OK",
     "ruleGroup": "warning",
     "title": "Bee Node Not Scraped"
+  },
+  {
+    "annotations": {
+      "description": "No metrics have arrived from anything for 10 minutes \u2014 not the gateways, not the Bee nodes.\n\nThis means one of two things and does not distinguish them:\n  - the system really is down, or\n  - the system is fine and the monitoring pipeline broke.\n\nEither way you are flying blind. Balances, pool levels and node health are not bad \u2014 they are UNOBSERVED, which is why no other alert is firing. This is the single rule that watches for measurements stopping; every other rule stays silent when it has nothing to measure, so it cannot tell you something untrue.\n\nCheck in this order:\n1. Is the gateway actually serving? https://provenance-gateway.datafund.io/health\n   If that answers, the system is up and the problem is monitoring.\n2. Alloy container:  docker compose -f docker-compose.host.yml ps\n                     docker logs --since 30m swarm_connect-alloy-1\n3. Alloy's route to Grafana Cloud (credentials, egress).\n",
+      "summary": "NO DATA from any gateway or Bee node \u2014 the system may be down, or monitoring may have broken. Nothing else will alert while this is firing."
+    },
+    "condition": "C",
+    "data": [
+      {
+        "datasourceUid": "grafanacloud-prom",
+        "model": {
+          "expr": "count(up{job=~\"prometheus.scrape.*\"} or bee_up)",
+          "instant": true,
+          "intervalMs": 1000,
+          "maxDataPoints": 43200,
+          "refId": "A"
+        },
+        "queryType": "",
+        "refId": "A",
+        "relativeTimeRange": {
+          "from": 600,
+          "to": 0
+        }
+      },
+      {
+        "datasourceUid": "__expr__",
+        "model": {
+          "expression": "A",
+          "intervalMs": 1000,
+          "maxDataPoints": 43200,
+          "reducer": "last",
+          "refId": "B",
+          "type": "reduce"
+        },
+        "queryType": "",
+        "refId": "B",
+        "relativeTimeRange": {
+          "from": 0,
+          "to": 0
+        }
+      },
+      {
+        "datasourceUid": "__expr__",
+        "model": {
+          "conditions": [
+            {
+              "evaluator": {
+                "params": [
+                  1
+                ],
+                "type": "lt"
+              }
+            }
+          ],
+          "expression": "B",
+          "intervalMs": 1000,
+          "maxDataPoints": 43200,
+          "refId": "C",
+          "type": "threshold"
+        },
+        "queryType": "",
+        "refId": "C",
+        "relativeTimeRange": {
+          "from": 0,
+          "to": 0
+        }
+      }
+    ],
+    "execErrState": "Error",
+    "for": "10m",
+    "isPaused": false,
+    "labels": {
+      "severity": "critical"
+    },
+    "noDataState": "Alerting",
+    "ruleGroup": "critical",
+    "title": "No Data \u2014 System May Be Down"
   }
 ]
