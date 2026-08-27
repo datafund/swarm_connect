@@ -245,13 +245,27 @@ explicit opt-in, on three separate switches:
 | variable | effect | default |
 |---|---|---|
 | `RUN_LIVE_TESTS=1` | run the live modules at all | off |
-| `GATEWAY_URL=...` | which gateway to talk to | `http://localhost:8000` |
+| `GATEWAY_URL=...` | which gateway to talk to | staging (**never** production) |
 | `ALLOW_LIVE_STAMP_PURCHASE=1` | let a fixture buy a postage batch | off |
 
 ```bash
-RUN_LIVE_TESTS=1 GATEWAY_URL=https://provenance-gateway.dev.datafund.io \
-    pytest tests/test_integration_gateway.py -v -s
+RUN_LIVE_TESTS=1 pytest tests/test_integration_gateway.py -v -s          # staging
+RUN_LIVE_TESTS=1 GATEWAY_URL=http://localhost:8000 pytest ... -v -s      # a local gateway
 ```
+
+### Why staging, and why not the branch you are on
+
+Production is never a default and has to be named. That is the property that
+matters. Localhost was the wrong way to get it, though: someone opting in to live
+tests rarely has a gateway and a Bee node running locally, so the useful case
+needed configuration before it worked at all.
+
+Deriving the target from the current git branch was considered and rejected. Being
+on `main` locally would point these at production — the exact hazard this module
+already had once. And the branch carries no useful signal: these tests exercise a
+**deployed** gateway, and the branch in your working tree is by definition not
+deployed, so matching it would test the environment you are about to deploy into
+rather than the change you are making.
 
 ### Why three switches rather than one
 

@@ -21,12 +21,12 @@ run. It has been harmless only because production happens to hold usable stamps.
 So this module is now opt-in on three axes, each with its own switch:
 
     RUN_LIVE_TESTS=1              run these at all
-    GATEWAY_URL=...               which gateway (defaults to localhost, not production)
+    GATEWAY_URL=...               which gateway (defaults to STAGING, never production)
     ALLOW_LIVE_STAMP_PURCHASE=1   permit the fixture to spend
 
 Run with:
-    RUN_LIVE_TESTS=1 GATEWAY_URL=https://provenance-gateway.dev.datafund.io \
-        pytest tests/test_integration_gateway.py -v -s
+    RUN_LIVE_TESTS=1 pytest tests/test_integration_gateway.py -v -s          # staging
+    RUN_LIVE_TESTS=1 GATEWAY_URL=http://localhost:8000 pytest ... -v -s      # local
 """
 import pytest
 import requests
@@ -45,9 +45,19 @@ def _flag(name: str) -> bool:
 # touch it.
 RUN_LIVE_TESTS = _flag("RUN_LIVE_TESTS")
 
-# Defaults to localhost. A remote target must be named explicitly, so no one
-# reaches production by omission.
-GATEWAY_URL = os.environ.get("GATEWAY_URL", "http://localhost:8000")
+# Defaults to STAGING. Production is never a default and must be named
+# explicitly, which is the property #233 was about — but localhost was the wrong
+# alternative, because someone opting in to live tests rarely has a gateway and a
+# Bee node running locally, so the useful case needed configuration to work at all.
+#
+# Deliberately NOT derived from the current git branch. Being on `main` locally
+# would then point these at production, which is the hazard this module already
+# had once. And the branch says nothing useful anyway: these tests exercise a
+# DEPLOYED gateway, and the branch in your working tree is by definition not
+# deployed yet — so matching it would test the environment you are about to
+# deploy into, not the change you are making.
+STAGING_URL = "https://provenance-gateway.dev.datafund.io"
+GATEWAY_URL = os.environ.get("GATEWAY_URL", STAGING_URL)
 
 # Spending is a separate decision from running live tests. Opting in to live
 # tests should not silently opt in to buying postage batches.
