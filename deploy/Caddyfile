@@ -28,6 +28,23 @@
 	# implementations read it, and without it every caller collapses into one
 	# bucket — per-IP rate limiting and the x402 free-tier allowance would then
 	# be shared globally rather than per client.
+	# Prometheus metrics are NOT public (#188). The endpoint exposed 146 series to
+	# anyone who asked: wallet addresses, BZZ and xDAI balances, gateway version,
+	# which features are enabled, and request volumes — a funding position, in
+	# other words, readable by whoever is deciding whether draining it is worth
+	# attempting.
+	#
+	# Nothing legitimate is lost. Alloy scrapes the container directly over the
+	# compose network (provenance_gateway:8000) and never traverses this proxy, so
+	# Grafana is unaffected. An operator on the host still reaches the published
+	# loopback port. /health carries version and uptime_seconds for anything
+	# outside that needs to detect a redeploy.
+	#
+	# 404 rather than 403: a refusal confirms the endpoint is there.
+	handle /metrics {
+		respond 404
+	}
+
 	reverse_proxy 127.0.0.1:8899 {
 		# Swarm uploads can be slow; do not cut them off mid-transfer.
 		transport http {
@@ -49,6 +66,23 @@
 }
 
 {$GATEWAY_DEV_HOST} {
+	# Prometheus metrics are NOT public (#188). The endpoint exposed 146 series to
+	# anyone who asked: wallet addresses, BZZ and xDAI balances, gateway version,
+	# which features are enabled, and request volumes — a funding position, in
+	# other words, readable by whoever is deciding whether draining it is worth
+	# attempting.
+	#
+	# Nothing legitimate is lost. Alloy scrapes the container directly over the
+	# compose network (provenance_gateway:8000) and never traverses this proxy, so
+	# Grafana is unaffected. An operator on the host still reaches the published
+	# loopback port. /health carries version and uptime_seconds for anything
+	# outside that needs to detect a redeploy.
+	#
+	# 404 rather than 403: a refusal confirms the endpoint is there.
+	handle /metrics {
+		respond 404
+	}
+
 	reverse_proxy 127.0.0.1:8900 {
 		transport http {
 			read_timeout 300s
