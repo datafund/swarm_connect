@@ -7,10 +7,14 @@ from app.core.config import settings
 from app.core.version import VERSION
 from app.api.endpoints import stamps, data, wallet, pool, notary, chunks, debug, stamps_for_owner
 import logging
+import time
 
 # Configure basic logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# Captured at import so /health can report process age without reading /metrics.
+_STARTED_MONOTONIC = time.monotonic()
 
 
 @asynccontextmanager
@@ -154,6 +158,9 @@ async def read_root():
     **Response fields**:
     - `status`: "ok" | "degraded" | "critical"
     - `message`: Gateway name
+    - `version`: gateway build
+    - `uptime_seconds`: seconds since this process started — a drop means it was
+      restarted or redeployed
     - `bee_node`: the Bee node's identity and build (`overlay`, `version`, `api_version`,
       `bee_status`), connectivity (`mode`, `connected_peers`, `population`, `reachability`,
       `network_availability`), reserve/radius (`storage_radius`, `committed_depth`,
@@ -181,7 +188,22 @@ async def read_root():
 
     response_data = {
         "status": "ok",
-        "message": f"Welcome to {settings.PROJECT_NAME}"
+        "message": f"Welcome to {settings.PROJECT_NAME}",
+        # Build and process age. Both were previously only readable from /metrics,
+        # which is not public any more (#188) — and they are the two fields an
+        # external checker needs to tell whether the gateway was redeployed or
+        # restarted underneath it. provenance-smasher uses exactly this to
+        # distinguish a real test failure from a container that went away
+        # mid-run, which had already caused one false failure.
+        #
+        # Uptime falling is the reliable signal: redeploying the same commit
+        # leaves the version string unchanged.
+        #
+        # Neither is a disclosure this endpoint was not already making. It
+        # reports the Bee node's version, api_version and overlay in the same
+        # response.
+        "version": VERSION,
+        "uptime_seconds": round(time.monotonic() - _STARTED_MONOTONIC, 1),
     }
 
     # Bee node connectivity/health — surfaces whether the node can actually reach

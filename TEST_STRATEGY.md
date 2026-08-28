@@ -234,3 +234,54 @@ pytest tests/ -n auto
 This comprehensive testing strategy provides robust protection against regressions while ensuring the stamps API remains reliable, secure, and performant. The 90 tests cover all critical paths, edge cases, and potential failure scenarios, giving confidence in the API's stability and correctness.
 
 The testing framework is designed to be maintainable and extensible, allowing for easy addition of new tests as the API evolves.
+
+## Live gateway tests are opt-in
+
+`pytest tests/` is hermetic. Nothing in it reaches a live gateway unless you say so.
+
+`tests/test_integration_gateway.py` and `tests/test_x402_live.py` both require an
+explicit opt-in, on three separate switches:
+
+| variable | effect | default |
+|---|---|---|
+| `RUN_LIVE_TESTS=1` | run the live modules at all | off |
+| `GATEWAY_URL=...` | which gateway to talk to | staging (**never** production) |
+| `ALLOW_LIVE_STAMP_PURCHASE=1` | let a fixture buy a postage batch | off |
+
+```bash
+RUN_LIVE_TESTS=1 pytest tests/test_integration_gateway.py -v -s          # staging
+RUN_LIVE_TESTS=1 GATEWAY_URL=http://localhost:8000 pytest ... -v -s      # a local gateway
+```
+
+### Why staging, and why not the branch you are on
+
+Production is never a default and has to be named. That is the property that
+matters. Localhost was the wrong way to get it, though: someone opting in to live
+tests rarely has a gateway and a Bee node running locally, so the useful case
+needed configuration before it worked at all.
+
+Deriving the target from the current git branch was considered and rejected. Being
+on `main` locally would point these at production — the exact hazard this module
+already had once. And the branch carries no useful signal: these tests exercise a
+**deployed** gateway, and the branch in your working tree is by definition not
+deployed, so matching it would test the environment you are about to deploy into
+rather than the change you are making.
+
+### Why three switches rather than one
+
+`test_integration_gateway.py` used to default `GATEWAY_URL` to the **production**
+gateway and skip only when that host was unreachable. Production is normally up, so
+the mandatory pre-PR run fired real traffic at it every time (#233).
+
+That caused 429 failures — the free tier allows three writes a minute, and the
+built-in pacer does not fully absorb it when local timing shifts — which made the
+one gate everything else depends on fail for reasons unrelated to the change.
+
+It could also **spend money**. The `usable_stamp` fixture purchases a postage batch
+when it cannot find a usable local one. That is real BZZ, on production, from a
+routine local test run; it stayed harmless only because production happens to hold
+usable stamps.
+
+Reachability is not a gate. Whether production is up says nothing about whether this
+run intended to touch it. And opting in to live tests is not the same decision as
+opting in to spending, which is why the purchase has its own switch.

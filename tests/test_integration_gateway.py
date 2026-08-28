@@ -1,14 +1,32 @@
 # tests/test_integration_gateway.py
 """
-Integration tests for the production gateway.
+Integration tests against a LIVE gateway. Opt-in, and they do not default to production.
 
-These tests run against the live provenance gateway and require:
-1. Network connectivity to https://provenance-gateway.datafund.io
-2. A valid postage stamp (purchased or existing)
+These used to default GATEWAY_URL to https://provenance-gateway.datafund.io and skip
+only when that host was unreachable. Production is normally up, so a plain
+`pytest tests/` — the mandatory gate before any PR, per CLAUDE.md — fired real
+traffic at production on every run.
 
-Run with: pytest tests/test_integration_gateway.py -v -s
+Two consequences, one worse than the other.
 
-To skip these tests in CI, they are marked with @pytest.mark.integration
+The known one (#233): the free tier allows three writes a minute, the FreeTierPacer
+does not fully absorb it when local timing shifts, and tests failed with 429 instead
+of the status they asserted. So the gate that everything else depends on was
+non-deterministic for reasons unrelated to the change being tested.
+
+The one that was not in the issue: `usable_stamp` PURCHASES A STAMP when it cannot
+find a usable local one. That is real BZZ, on production, from a routine local test
+run. It has been harmless only because production happens to hold usable stamps.
+
+So this module is now opt-in on three axes, each with its own switch:
+
+    RUN_LIVE_TESTS=1              run these at all
+    GATEWAY_URL=...               which gateway (defaults to STAGING, never production)
+    ALLOW_LIVE_STAMP_PURCHASE=1   permit the fixture to spend
+
+Run with:
+    RUN_LIVE_TESTS=1 pytest tests/test_integration_gateway.py -v -s          # staging
+    RUN_LIVE_TESTS=1 GATEWAY_URL=http://localhost:8000 pytest ... -v -s      # local
 """
 import pytest
 import requests
@@ -17,8 +35,38 @@ import io
 import os
 import time
 
-# Production gateway URL
-GATEWAY_URL = os.environ.get("GATEWAY_URL", "https://provenance-gateway.datafund.io")
+
+def _flag(name: str) -> bool:
+    return os.environ.get(name, "").lower() in ("1", "true", "yes")
+
+
+# Opt-in, matching tests/test_x402_live.py. Reachability is NOT the gate: whether
+# production happens to be up says nothing about whether this run intended to
+# touch it.
+RUN_LIVE_TESTS = _flag("RUN_LIVE_TESTS")
+
+# Defaults to STAGING. Production is never a default and must be named
+# explicitly, which is the property #233 was about — but localhost was the wrong
+# alternative, because someone opting in to live tests rarely has a gateway and a
+# Bee node running locally, so the useful case needed configuration to work at all.
+#
+# Deliberately NOT derived from the current git branch. Being on `main` locally
+# would then point these at production, which is the hazard this module already
+# had once. And the branch says nothing useful anyway: these tests exercise a
+# DEPLOYED gateway, and the branch in your working tree is by definition not
+# deployed yet — so matching it would test the environment you are about to
+# deploy into, not the change you are making.
+STAGING_URL = "https://provenance-gateway.dev.datafund.io"
+GATEWAY_URL = os.environ.get("GATEWAY_URL", STAGING_URL)
+
+# Spending is a separate decision from running live tests. Opting in to live
+# tests should not silently opt in to buying postage batches.
+ALLOW_LIVE_STAMP_PURCHASE = _flag("ALLOW_LIVE_STAMP_PURCHASE")
+
+pytestmark = pytest.mark.skipif(
+    not RUN_LIVE_TESTS,
+    reason="Live gateway tests are opt-in: set RUN_LIVE_TESTS=1 (and GATEWAY_URL).",
+)
 
 # Minimum hours for stamp purchase (25h to avoid borderline 24h failures)
 MIN_STAMP_HOURS = 25
@@ -123,7 +171,15 @@ def usable_stamp(gateway_available):
     except requests.RequestException:
         pass
 
-    # No usable local stamp found, purchase a new one
+    # No usable local stamp found. Purchasing one costs real BZZ, so it needs its
+    # own opt-in — running live tests is not the same decision as spending money,
+    # and this fixture is reached by any test that needs a stamp.
+    if not ALLOW_LIVE_STAMP_PURCHASE:
+        pytest.skip(
+            f"No usable local stamp on {GATEWAY_URL} and purchasing is not enabled. "
+            "Set ALLOW_LIVE_STAMP_PURCHASE=1 to let this test buy one with real BZZ."
+        )
+
     print("\nNo usable local stamp found, purchasing new stamp...")
 
     # Get current price - try multiple sources

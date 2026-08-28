@@ -97,6 +97,47 @@ Both come from labels on the underlying metric, so they cannot go stale the way 
 hardcoded value did. A label that does not exist renders empty, so each template
 carries a fallback branch rather than assuming the label is present.
 
+## One rule fires on missing data; the others never do
+
+Every rule here answers a question about a measured value — is the balance low, is
+the pool empty, is the error rate high. None of them can answer anything when no
+measurement arrives, so none of them tries: they are all set to stay silent
+(`noDataState: OK`) when the query returns nothing.
+
+Exactly one rule watches for measurements stopping:
+
+| rule | fires when |
+|---|---|
+| **No Data — System May Be Down** | nothing has reported for 10 minutes |
+
+### Why this changed
+
+Every rule used to be set to Grafana's middle `NoData` option, and the notification
+policy has a single route with no filters — everything goes to Telegram. So when
+metrics stopped arriving, **seven alerts fired at once**: "Critical BZZ Balance",
+"Gateway Down", "Low xDAI" and four more, repeating every four hours until someone
+fixed it.
+
+Not one of them was true. The balance was not critical; it was unknown. Seven
+alarms for one fault, all of them saying the wrong thing, is how a channel becomes
+something people mute.
+
+Now one alarm fires and it says what is actually known: no data, the system may be
+down, or monitoring may have broken — and it does not pretend to know which.
+
+### The trade-off, stated plainly
+
+If the watchdog itself ever fails, the result is silence rather than noise. The old
+arrangement was noisy but hard to miss. This is a deliberate choice that one
+accurate alarm beats seven misleading ones.
+
+Two things reduce the risk. The watchdog's query, `count(up{job=~"prometheus.scrape.*"}
+or bee_up)`, returns a number whenever *anything* is reporting, so it only goes
+quiet when everything does. And its threshold (`< 1`) is unreachable while data
+exists — a count is at least 1 when anything reported — so the alert is driven
+entirely by the no-data path and cannot be suppressed by an unusual-but-healthy
+reading.
+
 ## Chain-backend rules and their deploy order
 
 Two rules watch Bee's Gnosis RPC connection. They depend on Alloy scraping the
