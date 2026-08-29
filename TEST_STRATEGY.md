@@ -285,3 +285,19 @@ usable stamps.
 Reachability is not a gate. Whether production is up says nothing about whether this
 run intended to touch it. And opting in to live tests is not the same decision as
 opting in to spending, which is why the purchase has its own switch.
+
+## Stamp ownership: test the lock AND the door
+
+`tests/test_stamp_ownership.py` covers enforcement — untracked batches refused,
+pool-owned batches refused to paid, free-tier and anonymous callers alike, and
+the `STAMP_OWNERSHIP_ALLOW_UNTRACKED` escape hatch not reaching pool inventory.
+
+`tests/test_stamp_pool.py::TestPoolInventoryIsRegisteredAsOwned` covers the other
+half: that the pool actually registers what it buys, that a registration failure
+does not lose a batch already paid for, and that sync adopts inventory bought
+before the change.
+
+Both halves are needed, and the second is the one easy to omit. Enforcement tests
+construct registry state by hand, so they pass whether or not any code registers
+anything. That asymmetry is how #312 stayed open: the check was fine, nothing
+was claiming ownership of the pool's own batches, and every test agreed.
