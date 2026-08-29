@@ -120,7 +120,11 @@ class TestSharedStampAccess:
 
 
 class TestBackwardCompatibility:
-    """Test backward compatibility for untracked stamps."""
+    """Untracked batches, and the gateway's own inventory.
+
+    Named for the behaviour it used to protect. That behaviour is now inverted
+    (#312) and these tests hold the line in the other direction.
+    """
 
     @pytest.fixture
     def state_file(self, tmp_path):
@@ -130,13 +134,66 @@ class TestBackwardCompatibility:
     def manager(self, state_file):
         return StampOwnershipManager(state_file=state_file)
 
-    def test_untracked_stamp_allowed(self, manager):
-        """Stamp not in registry is allowed (backward compat for pre-existing stamps)."""
+    def test_untracked_stamp_denied(self, manager):
+        """A batch nobody owns is refused, not waved through.
+
+        This asserted the opposite until #312. The permissive default was there
+        for batches predating the registry, but the set it actually covered was
+        the pool's own inventory: every path a caller can obtain a batch through
+        registers it, and the pool did not register what it bought. A production
+        pool batch reached 50% utilisation without ever being acquired.
+        """
         with patch('app.services.stamp_ownership.settings') as mock_settings:
             mock_settings.X402_ENABLED = True
+            mock_settings.STAMP_OWNERSHIP_ALLOW_UNTRACKED = False
+            allowed, reason = manager.check_access("unknown_stamp", "0xAnyWallet", "paid")
+            assert allowed is False, "an unowned batch was writable by an arbitrary wallet"
+            assert "not registered" in reason
+
+    def test_untracked_stamp_allowed_in_permissive_mode(self, manager):
+        """The escape hatch, for when the registry file is lost.
+
+        If STAMP_OWNERSHIP_FILE disappears, every batch becomes untracked at once
+        and failing closed would lock legitimate owners out of batches they paid
+        for. This exists to recover from that, not as a default.
+        """
+        with patch('app.services.stamp_ownership.settings') as mock_settings:
+            mock_settings.X402_ENABLED = True
+            mock_settings.STAMP_OWNERSHIP_ALLOW_UNTRACKED = True
             allowed, reason = manager.check_access("unknown_stamp", "0xAnyWallet", "paid")
             assert allowed is True
-            assert "backward compatibility" in reason
+            assert "permissive" in reason
+
+    def test_pool_owned_stamp_is_not_writable(self, manager):
+        """Gateway inventory is refused to everyone, including the free tier.
+
+        A caller receives a pool batch by acquiring it, which re-registers it to
+        them. Writing to one directly bypasses that and spends capacity the
+        gateway funded.
+        """
+        from app.services.stamp_ownership import POOL_OWNER
+        manager.register_stamp("pool_stamp", owner=POOL_OWNER, mode="pool", source="pool_purchase")
+        with patch('app.services.stamp_ownership.settings') as mock_settings:
+            mock_settings.X402_ENABLED = True
+            mock_settings.STAMP_OWNERSHIP_ALLOW_UNTRACKED = False
+            for wallet, mode in (("0xSomeone", "paid"), (None, "free-tier"), (None, None)):
+                allowed, reason = manager.check_access("pool_stamp", wallet, mode)
+                assert allowed is False, f"pool inventory was writable by {wallet or 'anonymous'} ({mode})"
+                assert "acquire it first" in reason
+
+    def test_permissive_mode_does_not_unlock_pool_inventory(self, manager):
+        """The escape hatch is for untracked batches, not for owned ones.
+
+        Pool inventory IS tracked, so permissive mode must not reach it —
+        otherwise recovering from a lost registry would reopen the hole.
+        """
+        from app.services.stamp_ownership import POOL_OWNER
+        manager.register_stamp("pool_stamp", owner=POOL_OWNER, mode="pool", source="pool_purchase")
+        with patch('app.services.stamp_ownership.settings') as mock_settings:
+            mock_settings.X402_ENABLED = True
+            mock_settings.STAMP_OWNERSHIP_ALLOW_UNTRACKED = True
+            allowed, _ = manager.check_access("pool_stamp", "0xSomeone", "paid")
+            assert allowed is False, "permissive mode unlocked gateway-owned inventory"
 
     def test_x402_disabled_skips_enforcement(self, manager):
         """No ownership checks when x402 is off."""
