@@ -85,6 +85,13 @@ class Settings(BaseSettings):
 
     # Stamp ownership: file path for persisting stamp ownership records
     STAMP_OWNERSHIP_FILE: str = "data/stamp_owners.json"
+    # When a batch is absent from the ownership registry, may any caller use it?
+    #
+    # False (the default) fails closed. True restores the pre-#312 behaviour and
+    # exists for one situation: the registry file is lost, every batch becomes
+    # untracked at once, and legitimate owners would be locked out of batches
+    # they paid for. Turn it on to recover, re-register, and turn it off again.
+    STAMP_OWNERSHIP_ALLOW_UNTRACKED: bool = False
 
     # === Debug Proxy (read-only Bee diagnostics, signature-gated) ===
     # Comma-separated 0x addresses allowed to read Bee diagnostics via

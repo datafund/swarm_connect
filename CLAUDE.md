@@ -160,6 +160,9 @@ CORS (browser access):
 - `estimatedReadyAt`: ISO 8601 timestamp when stamp should be usable (null for external stamps)
 - `propagationStatus`: `"ready"` / `"propagating"` / `"unknown"` (null if undetermined)
 
+**Stamp ownership enforcement** (`app/services/stamp_ownership.py`, when `X402_ENABLED`):
+Every batch a caller can obtain is registered to them — pool acquire, direct purchase, and for-owner all call `register_stamp`. Batches the pool buys for its own inventory are registered as `POOL_OWNER` (`"pool"`) at purchase and on sync, and `check_access` **refuses** them: a caller receives one by acquiring it, which re-registers it to them. A batch absent from the registry is also refused; `STAMP_OWNERSHIP_ALLOW_UNTRACKED=true` restores the old permissive default and exists solely to recover from a lost registry file. Before #312 the pool's inventory was untracked and the untracked default was *allow*, so anyone could store data on batches the gateway had paid for — one production batch reached 50% utilisation without ever being acquired.
+
 **Access mode field** (included in all stamp responses):
 - `accessMode`: `"owned"` (exclusive to a wallet via x402), `"shared"` (free tier), or `null` (not tracked)
 
