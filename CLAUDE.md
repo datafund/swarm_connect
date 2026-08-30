@@ -160,6 +160,9 @@ CORS (browser access):
 - `estimatedReadyAt`: ISO 8601 timestamp when stamp should be usable (null for external stamps)
 - `propagationStatus`: `"ready"` / `"propagating"` / `"unknown"` (null if undetermined)
 
+**Stamp ownership enforcement** (`app/services/stamp_ownership.py`, when `X402_ENABLED`):
+Every batch a caller can obtain is registered to them — pool acquire, direct purchase, and for-owner all call `register_stamp`. Batches the pool buys for its own inventory are registered as `POOL_OWNER` (`"pool"`) at purchase and on sync, and `check_access` **refuses** them: a caller receives one by acquiring it, which re-registers it to them. A batch absent from the registry is also refused; `STAMP_OWNERSHIP_ALLOW_UNTRACKED=true` restores the old permissive default and exists solely to recover from a lost registry file. Before #312 the pool's inventory was untracked and the untracked default was *allow*, so anyone could store data on batches the gateway had paid for — one production batch reached 50% utilisation without ever being acquired.
+
 **Access mode field** (included in all stamp responses):
 - `accessMode`: `"owned"` (exclusive to a wallet via x402), `"shared"` (free tier), or `null` (not tracked)
 
@@ -554,6 +557,69 @@ feature branches → dev → main
 - When creating PRs: `gh pr create --repo datafund/swarm_connect`
 - NEVER use `crtahlin/swarm_connect` - that is the upstream fork, not the main repo
 - Use `git remote -v` to verify remotes if unsure
+
+## Configuration: where it lives, and when a change actually takes effect
+
+Every one of these has bitten us. The pattern is always the same — a change is
+made, something reports success, and nothing happens.
+
+| what you change | reaches the running system when | overwritten by a deploy? |
+|---|---|---|
+| GitHub environment variable (`vars.*`) | next deploy writes it into the env file | n/a — this is the source of truth |
+| `/opt/swarm_connect.env`, `/opt/swarm_connect_dev.env` | **container is RECREATED** — not on restart | **yes**, rewritten from GitHub vars |
+| `/opt/swarm_connect_host.env` | next deploy appends it to `.env` | no — deploy only ever appends it |
+| `monitoring/alloy/config.alloy` | Alloy container is recreated | yes, but see below |
+| `deploy/Caddyfile` | **never automatically** — copy to `/etc/caddy/` and `systemctl reload caddy` | no |
+| `monitoring/alerting/*.json`, dashboards | **never automatically** — run `scripts/apply_grafana.py` | no |
+
+### `docker restart` does not reload `env_file`
+
+Docker reads `env_file` when it **creates** a container, not when it starts one.
+So editing `/opt/swarm_connect.env` and running `docker restart` changes nothing,
+and the container reports healthy while running the old configuration.
+
+```bash
+# WRONG — silently keeps the old values
+docker restart swarm_connect-provenance_gateway-1
+
+# RIGHT
+cd /opt/swarm_connect && docker compose up -d --force-recreate --no-deps provenance_gateway
+```
+
+This cost a real incident: the stamp pool target was lowered, the container was
+restarted, and it kept the old target of five while the pool held two — reporting
+`low_reserve_warning: true` and preparing to buy three replacements, the exact
+opposite of the change being made.
+
+### Changing a setting properly
+
+Both, in this order, or the change is temporary:
+
+1. `gh variable set NAME --repo datafund/swarm_connect --env production --body VALUE`
+   — so the next deploy keeps it.
+2. Edit `/opt/swarm_connect.env` and **force-recreate** the container — so it
+   applies now rather than at the next deploy.
+
+Doing only (2) means the next deploy reverts it. Doing only (1) means nothing
+changes until someone deploys.
+
+### A bind-mounted FILE pins its inode
+
+`config.alloy` is mounted as a single file. A file bind mount pins the inode, and
+`git pull` **replaces** the file rather than editing it, so the container goes on
+reading the old one indefinitely. Compose does not help: the service definition is
+unchanged, so `up -d` correctly does nothing.
+
+Changes to it were silently dead from 2026-08-25 until #301, which force-recreates
+Alloy on every deploy. If you add another single-file mount, it will need the same.
+
+### Not everything in the repo is deployed
+
+`deploy/Caddyfile` and `monitoring/alerting/alert-rules.json` are version
+controlled for review and history. Nothing applies them. They can drift from what
+is running, and have. Diff before assuming, and never overwrite the live
+`/etc/caddy/Caddyfile` from the repo without diffing first — doing that once
+reintroduced `tls internal` and broke TLS for two minutes.
 
 ## Deployment Workflow
 

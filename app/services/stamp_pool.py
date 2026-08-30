@@ -411,7 +411,55 @@ class StampPoolManager:
             self._pool[batch_id] = stamp
             logger.info(f"Added stamp {batch_id[:16]}... to pool (depth={depth})")
             self._save_state()
-            return stamp
+
+        # Register as gateway-owned, outside the lock — the ownership manager
+        # takes its own.
+        #
+        # Ownership used to be recorded only when a caller ACQUIRED a batch, so
+        # everything sitting in the pool was untracked, and check_access let any
+        # caller write to an untracked batch. A production pool batch reached 50%
+        # utilisation without ever being acquired: capacity the gateway had paid
+        # for, consumed by someone who never asked for it (#312).
+        #
+        # Registering at purchase closes the window entirely — the batch is owned
+        # from the moment it exists. Acquiring it re-registers it to the caller.
+        try:
+            from app.services.stamp_ownership import POOL_OWNER, stamp_ownership_manager
+            stamp_ownership_manager.register_stamp(
+                batch_id=batch_id,
+                owner=POOL_OWNER,
+                mode="pool",
+                source="pool_purchase",
+            )
+        except Exception as e:
+            # Never fail a purchase over bookkeeping — the batch exists and was
+            # paid for. Log loudly: until it is registered it is writable by
+            # anyone, which is the whole point of this change.
+            logger.error(
+                f"Failed to register pool ownership for {batch_id[:16]}...: {e}. "
+                "The batch is unprotected until registered."
+            )
+
+        return stamp
+
+    def _register_pool_ownership(self, batch_ids: Set[str]) -> None:
+        """Record pool-held batches as gateway-owned, so nobody may write to them."""
+        if not batch_ids:
+            return
+        try:
+            from app.services.stamp_ownership import POOL_OWNER, stamp_ownership_manager
+            for batch_id in batch_ids:
+                stamp_ownership_manager.register_stamp(
+                    batch_id=batch_id,
+                    owner=POOL_OWNER,
+                    mode="pool",
+                    source="pool_sync",
+                )
+        except Exception as e:
+            logger.error(
+                f"Failed to register pool ownership for {len(batch_ids)} batch(es): {e}. "
+                "They are unprotected until registered."
+            )
 
     async def sync_from_bee_node(self) -> int:
         """
@@ -503,6 +551,19 @@ class StampPoolManager:
             # this cycle — those are not in the pool but must not be forgotten).
             if valid_ids != known_ids:
                 self._save_state(extra_ids=unreadable_ids)
+
+            # Adopt everything in the pool as gateway-owned.
+            #
+            # Registering at purchase (add_stamp_to_pool) only protects batches
+            # bought from now on. Batches already held predate that and would
+            # stay untracked — and therefore writable by anyone — for as long as
+            # they live, which is exactly the state that let a production batch
+            # reach 50% utilisation unasked (#312).
+            #
+            # Idempotent, and does not disturb a batch already owned by someone:
+            # only AVAILABLE batches are in the pool, and one acquired by a caller
+            # was removed from it at release.
+            self._register_pool_ownership(valid_ids)
 
             self._last_sync_ok = True
             return synced_count

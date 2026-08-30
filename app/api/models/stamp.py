@@ -66,9 +66,14 @@ class StampDetails(BaseModel):
     )
 
     # --- Access Control Fields ---
-    accessMode: Optional[Literal["owned", "shared"]] = Field(
+    accessMode: Optional[Literal["owned", "shared", "pool"]] = Field(
         None,
-        description="Access mode: 'owned' (exclusive to a wallet via x402 payment), 'shared' (free tier, anyone can use), null (not in ownership registry)."
+        description=(
+            "Access mode: 'owned' (exclusive to a wallet via x402 payment), "
+            "'shared' (free tier, anyone can use), 'pool' (gateway inventory — "
+            "not usable directly; acquire it via POST /api/v1/pool/acquire, which "
+            "transfers ownership to you), null (not in ownership registry)."
+        )
     )
 
     # --- Calculated Fields ---

@@ -1148,3 +1148,85 @@ class TestBeeErrorSurfaced:
 
         request = httpx.Request("POST", "http://bee:1633/stamps/1/20")
         assert _bee_error_message(httpx.ConnectError("refused", request=request)) is None
+
+
+class TestPoolInventoryIsRegisteredAsOwned:
+    """The pool must claim ownership of what it buys.
+
+    check_access refuses batches owned by POOL_OWNER, and refuses untracked ones.
+    Both of those are enforcement — they hold only if the pool actually registers
+    its inventory. Without these tests the enforcement suite passes whether or not
+    the registration call exists, which is precisely how #312 stayed open: the
+    lock was fine, nothing locked the door.
+    """
+
+    @pytest.fixture
+    def state_file(self, tmp_path):
+        return str(tmp_path / "pool_state.json")
+
+    def test_purchased_stamp_is_registered_to_the_pool(self, state_file):
+        """A batch is owned from the moment it exists, not from when it is handed out."""
+        from app.services.stamp_ownership import POOL_OWNER
+
+        manager = StampPoolManager(state_file=state_file)
+        registered = []
+
+        with patch('app.services.stamp_ownership.stamp_ownership_manager.register_stamp',
+                   side_effect=lambda **kw: registered.append(kw)):
+            manager.add_stamp_to_pool("batch_new", 17, 1000000, 604800)
+
+        assert len(registered) == 1, "the pool bought a batch and claimed no ownership of it"
+        assert registered[0]["batch_id"] == "batch_new"
+        assert registered[0]["owner"] == POOL_OWNER
+        assert registered[0]["source"] == "pool_purchase"
+
+    def test_purchase_survives_a_registration_failure(self, state_file):
+        """Bookkeeping must not lose a batch that was already paid for.
+
+        The batch exists on chain regardless. Raising here would drop it from the
+        pool while the money is spent, which is worse than an unprotected batch —
+        so it is logged instead, and the log says it is unprotected.
+        """
+        manager = StampPoolManager(state_file=state_file)
+
+        with patch('app.services.stamp_ownership.stamp_ownership_manager.register_stamp',
+                   side_effect=RuntimeError("registry unavailable")):
+            stamp = manager.add_stamp_to_pool("batch_paid", 20, 1000000, 604800)
+
+        assert stamp is not None
+        assert "batch_paid" in manager._pool, "a paid-for batch was lost when registration failed"
+
+    @pytest.mark.asyncio
+    async def test_sync_adopts_pre_existing_inventory(self, state_file):
+        """Batches bought before this change must not stay open for their whole life.
+
+        Registering at purchase only protects what is bought from now on. Anything
+        already held predates it and would remain untracked — the exact state that
+        let a production batch reach 50% utilisation unasked.
+        """
+        from app.services.stamp_ownership import POOL_OWNER
+        import json
+
+        with open(state_file, "w") as f:
+            json.dump(["old_batch_1", "old_batch_2"], f)
+
+        manager = StampPoolManager(state_file=state_file)
+        bee_stamps = [
+            {"batchID": "old_batch_1", "depth": 17, "local": True, "usable": True,
+             "batchTTL": 604800, "amount": "1000000", "label": ""},
+            {"batchID": "old_batch_2", "depth": 20, "local": True, "usable": True,
+             "batchTTL": 604800, "amount": "1000000", "label": ""},
+        ]
+
+        registered = []
+        with patch('app.services.stamp_pool.swarm_api.get_all_stamps_processed', return_value=bee_stamps):
+            with patch('app.services.stamp_ownership.stamp_ownership_manager.register_stamp',
+                       side_effect=lambda **kw: registered.append(kw)):
+                synced = await manager.sync_from_bee_node()
+
+        assert synced == 2
+        adopted = {r["batch_id"] for r in registered if r["owner"] == POOL_OWNER}
+        assert adopted == {"old_batch_1", "old_batch_2"}, (
+            f"sync left pre-existing inventory unprotected: adopted {adopted}"
+        )
+        assert all(r["source"] == "pool_sync" for r in registered)

@@ -19,6 +19,12 @@ from app.core.config import settings
 logger = logging.getLogger(__name__)
 
 
+# Owner value for batches the gateway bought for its own pool and has not handed
+# out. Not a wallet address, and deliberately not a valid one, so it can never
+# collide with a real owner.
+POOL_OWNER = "pool"
+
+
 class StampOwnershipManager:
     """
     Tracks stamp ownership and enforces access control.
@@ -116,9 +122,34 @@ class StampOwnershipManager:
         with self._lock:
             entry = self._registry.get(batch_id)
 
-        # Stamp not in registry -> allowed (backward compatibility)
+        # Stamp not in registry.
+        #
+        # This used to return allowed, for backward compatibility with batches
+        # predating the registry. The set that default actually covered was not
+        # legacy callers: every path by which a caller obtains a batch —
+        # /pool/acquire, POST /stamps/, /stamps/for-owner — registers it. What it
+        # covered was the POOL'S OWN INVENTORY, bought and funded by the gateway
+        # and not yet handed to anyone, which is precisely what no caller should
+        # be writing to. A production pool batch reached 50% utilisation without
+        # ever being acquired (#312).
+        #
+        # Pool inventory is now registered at purchase time as POOL_OWNER, so the
+        # untracked set is empty in normal operation and denying it costs nothing.
+        #
+        # STAMP_OWNERSHIP_ALLOW_UNTRACKED restores the old behaviour. It exists
+        # for one specific situation: STAMP_OWNERSHIP_FILE is lost or reset, every
+        # batch becomes untracked at once, and legitimate owners would otherwise
+        # be locked out of batches they paid for. Failing closed is right by
+        # default; this is the deliberate escape hatch, not a shrug.
         if entry is None:
-            return True, "stamp not tracked, backward compatibility"
+            if settings.STAMP_OWNERSHIP_ALLOW_UNTRACKED:
+                return True, "stamp not tracked, permissive mode enabled"
+            return False, "stamp is not registered to any owner"
+
+        # Gateway-owned pool inventory. Nobody may write to it directly — a
+        # caller receives one by acquiring it, which re-registers it to them.
+        if entry["owner"] == POOL_OWNER:
+            return False, "stamp belongs to the gateway pool; acquire it first"
 
         # Shared stamps -> always allowed
         if entry["owner"] == "shared":
