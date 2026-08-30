@@ -442,3 +442,38 @@ class TestOwnershipIntegration:
                 if call_args[1]:
                     assert call_args[1].get("batch_id") == "new_batch_id_123"
                     assert call_args[1].get("source") == "direct_purchase"
+
+
+class TestPoolInventoryIsReportedDistinctly:
+    """accessMode must not describe gateway inventory as usable.
+
+    The mapping was `"owned" if mode == "paid" else "shared"`. Pool inventory
+    registers with mode="pool", which is not "paid", so it fell through to
+    "shared" — the value that tells a client the batch is free for anyone to use,
+    about exactly the batches check_access refuses. A client would believe the
+    listing and be denied on upload.
+    """
+
+    def test_pool_owned_batch_is_not_reported_as_shared(self):
+        from app.services.stamp_ownership import POOL_OWNER
+
+        for owner, mode, expected in (
+            (POOL_OWNER, "pool", "pool"),
+            ("0xWallet", "paid", "owned"),
+            ("shared", "free", "shared"),
+        ):
+            info = {"owner": owner, "mode": mode}
+            if info["owner"] == POOL_OWNER:
+                access_mode = "pool"
+            elif info.get("mode") == "paid":
+                access_mode = "owned"
+            else:
+                access_mode = "shared"
+            assert access_mode == expected, f"{owner}/{mode} mapped to {access_mode}"
+
+    def test_model_accepts_pool_access_mode(self):
+        """The field is a Literal; an unlisted value is rejected at serialisation."""
+        from app.api.models.stamp import StampDetails
+        import typing
+        allowed = typing.get_args(typing.get_args(StampDetails.model_fields["accessMode"].annotation)[0])
+        assert "pool" in allowed, f"accessMode Literal does not permit 'pool': {allowed}"

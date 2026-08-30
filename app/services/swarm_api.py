@@ -9,7 +9,7 @@ from urllib.parse import urljoin
 
 from app.core.config import settings
 from app.services.http_client import get_client
-from app.services.stamp_ownership import stamp_ownership_manager
+from app.services.stamp_ownership import POOL_OWNER, stamp_ownership_manager
 from app.services.metrics import bee_api_errors_total
 
 logger = logging.getLogger(__name__)
@@ -588,7 +588,18 @@ async def get_all_stamps_processed() -> List[Dict[str, Any]]:
             # Determine access mode from ownership registry
             ownership_info = stamp_ownership_manager.get_stamp_info(batch_id)
             if ownership_info:
-                access_mode = "owned" if ownership_info.get("mode") == "paid" else "shared"
+                owner = ownership_info.get("owner")
+                if owner == POOL_OWNER:
+                    # Gateway inventory. Reported distinctly because the
+                    # alternatives both lie: "shared" tells a client it may use
+                    # the batch, which check_access refuses, and null means
+                    # "unknown to the registry", which it is not. A caller gets
+                    # one of these by acquiring it, which re-registers it to them.
+                    access_mode = "pool"
+                elif ownership_info.get("mode") == "paid":
+                    access_mode = "owned"
+                else:
+                    access_mode = "shared"
             else:
                 access_mode = None
 
