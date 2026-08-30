@@ -56,6 +56,12 @@ swarm_connect/
 
 ### Setup and Installation
 
+> Standing up a **host** from scratch — VM, Bee nodes, gateway, TLS, CI/CD — is a
+> different job from running the app locally. See the
+> [Install Runbook](docs/install-runbook.md).
+
+
+
 ```bash
 # Create virtual environment
 python3 -m venv venv
