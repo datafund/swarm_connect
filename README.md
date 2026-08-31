@@ -56,9 +56,10 @@ swarm_connect/
 
 ### Setup and Installation
 
-> Standing up a **host** from scratch — VM, Bee nodes, gateway, TLS, CI/CD — is a
-> different job from running the app locally. See the
-> [Install Runbook](docs/install-runbook.md).
+> Running this on a server rather than locally? See the
+> [Deployment Guide](docs/deployment-guide.md) for requirements, funding,
+> firewalling and the failure modes worth knowing about.
+
 
 
 
