@@ -56,6 +56,12 @@ swarm_connect/
 
 ### Setup and Installation
 
+> Running this on a server rather than locally? See the
+> [Deployment Guide](docs/deployment-guide.md) for requirements, funding,
+> firewalling and the failure modes worth knowing about.
+
+
+
 
 ```bash
 # Create virtual environment
