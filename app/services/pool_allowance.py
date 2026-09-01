@@ -45,6 +45,18 @@ def _today() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
 
+def _key(origin: Optional[str], size: str) -> str:
+    """Budget key: one bucket per origin AND per size.
+
+    Sizes differ in cost by powers of two — a depth-20 batch costs eight times a
+    depth-17 one. A single count per origin would therefore let a caller spend
+    eight times its intended budget simply by asking for a larger batch, without
+    exceeding any limit. Counting per size makes the allowance mean the same
+    thing whichever size is requested.
+    """
+    return f"{_normalise(origin)}|{size}"
+
+
 def _normalise(origin: Optional[str]) -> str:
     """Reduce an Origin header to scheme://host, lowercased.
 
@@ -120,27 +132,31 @@ class PoolAllowanceTracker:
             self._save()
 
     def allowance_for(self, origin: Optional[str]) -> int:
-        """Configured daily allowance for an origin, or the default."""
-        key = _normalise(origin)
+        """Configured daily allowance for an origin, or the default.
+
+        The limit is per size, not shared across sizes — see _key().
+        """
+        origin_key = _normalise(origin)
         configured = settings.get_pool_daily_allowances()
-        if key in configured:
-            return configured[key]
+        if origin_key in configured:
+            return configured[origin_key]
         return settings.POOL_DEFAULT_DAILY_ALLOWANCE
 
-    def check(self, origin: Optional[str]) -> Tuple[bool, dict]:
+    def check(self, origin: Optional[str], size: str = "small") -> Tuple[bool, dict]:
         """Whether this origin may take another batch, and the numbers behind it.
 
         Does not consume. Call `consume` only once a batch has actually been
         handed over, so a failed acquire does not spend someone's allowance.
         """
-        key = _normalise(origin)
+        key = _key(origin, size)
         limit = self.allowance_for(origin)
         with self._lock:
             self._roll_day()
             used = self._used.get(key, 0)
 
         info = {
-            "origin": key or "(none)",
+            "origin": _normalise(origin) or "(none)",
+            "size": size,
             "allowance": limit,
             "used": used,
             "remaining": UNLIMITED if limit == UNLIMITED else max(0, limit - used),
@@ -150,8 +166,8 @@ class PoolAllowanceTracker:
             return True, info
         return used < limit, info
 
-    def consume(self, origin: Optional[str]) -> None:
-        key = _normalise(origin)
+    def consume(self, origin: Optional[str], size: str = "small") -> None:
+        key = _key(origin, size)
         with self._lock:
             self._roll_day()
             self._used[key] = self._used.get(key, 0) + 1

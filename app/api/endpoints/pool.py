@@ -199,7 +199,18 @@ async def acquire_stamp(
     # site's, but anything that is not a browser can claim any origin it likes.
     # The budget is what protects the pool; the origin only selects which budget.
     origin = http_request.headers.get("origin")
-    allowed_by_budget, budget = pool_allowance_tracker.check(origin)
+    # Resolve the size first: the budget is per size, because a depth-20 batch
+    # costs eight times a depth-17 one and a shared count would let a caller
+    # spend eight times its allowance by asking for a larger one.
+    if request.depth is not None:
+        requested_depth = request.depth
+    elif request.size is not None:
+        requested_depth = SIZE_PRESETS.get(request.size, 17)
+    else:
+        requested_depth = 17  # Default to small
+    requested_size = depth_to_size_name(requested_depth)
+
+    allowed_by_budget, budget = pool_allowance_tracker.check(origin, requested_size)
     if not allowed_by_budget:
         logger.info(
             "Pool allowance exhausted for origin %s (%s/%s today)",
@@ -221,12 +232,13 @@ async def acquire_stamp(
                 # every current caller. Paid pool access is tracked in #67 and is
                 # blocked on dataprovenance-app#126.
                 "message": (
-                    f"The daily free allowance of {budget['allowance']} stamps for this "
+                    f"The daily free allowance of {budget['allowance']} {requested_size} stamps for this "
                     f"application has been used up. It resets at {budget['resets_at']}. "
                     "To continue now, pay with x402: POST /api/v1/stamps/ with an "
                     "X-PAYMENT header buys a stamp outright. It takes about a minute "
                     "to become usable, unlike a pooled one."
                 ),
+                "size": requested_size,
                 "allowance": budget["allowance"],
                 "used": budget["used"],
                 "resets_at": budget["resets_at"],
@@ -237,14 +249,6 @@ async def acquire_stamp(
                 },
             },
         )
-
-    # Determine requested depth
-    if request.depth is not None:
-        requested_depth = request.depth
-    elif request.size is not None:
-        requested_depth = SIZE_PRESETS.get(request.size, 17)
-    else:
-        requested_depth = 17  # Default to small
 
     # Try to get exact match first
     stamp = stamp_pool_manager.get_available_stamp(requested_depth)
@@ -304,7 +308,7 @@ async def acquire_stamp(
 
     # Consumed only now: the batch has been released to the caller, so the
     # allowance has genuinely been spent.
-    pool_allowance_tracker.consume(origin)
+    pool_allowance_tracker.consume(origin, requested_size)
 
     # Trigger immediate replenishment if pool is below target
     # This runs in the background and doesn't affect the response
