@@ -69,6 +69,18 @@ class Settings(BaseSettings):
 
     # Pool monitoring settings
     STAMP_POOL_CHECK_INTERVAL_SECONDS: int = 900  # How often to check pool (15 minutes)
+    # Hard ceiling on how many batches the pool may buy in a rolling hour,
+    # across every depth and every code path.
+    #
+    # This is not a tuning knob, it is a blast radius. A staging node once bought
+    # 82 batches against a target of 5 and spent ~8.9 BZZ; one mechanism was found
+    # and fixed, and it accounts for five per restart, not seventy. The rest was
+    # never identified (#271). A ceiling makes the cause irrelevant: whatever the
+    # defect, it cannot spend past this.
+    #
+    # 10/hour is far above any legitimate need — a target of five, fully drained
+    # and rebought, is five — and far below what an unbounded loop costs.
+    STAMP_POOL_MAX_PURCHASES_PER_HOUR: int = 10
     STAMP_POOL_MIN_TTL_HOURS: int = 24  # Top up if TTL below this
     STAMP_POOL_TOPUP_HOURS: int = 168   # How much TTL to add (1 week)
     STAMP_POOL_LOW_RESERVE_THRESHOLD: int = 1  # Alert when reserve drops to this level
