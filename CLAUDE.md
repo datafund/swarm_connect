@@ -186,6 +186,8 @@ Every batch a caller can obtain is registered to them — pool acquire, direct p
 - `GET /api/v1/pool/status`: Get pool status and reserve levels
 - `POST /api/v1/pool/acquire`: Acquire stamp from pool instantly (<5 seconds vs >1 minute)
 - `GET /api/v1/pool/available`: List available stamps in pool
+> **Purchase ceiling**: the pool refuses to buy more than `STAMP_POOL_MAX_PURCHASES_PER_HOUR` (default 10) batches in a rolling hour, across every depth and every code path — the scheduled check, the immediate replenishment after an acquire, and anything added later. Enforced inside `_purchase_stamp` rather than in the replenish loop so no caller can miss it, and counted when Bee accepts the batch rather than when it becomes usable, since that is when the money is spent. Refusals are reported in `GET /api/v1/pool/status` errors. This exists because a staging node once bought 82 batches against a target of 5 (#271) and the bulk of it was never explained — a ceiling does not need the cause.
+
 - `POST /api/v1/pool/check`: Schedule manual pool maintenance. **Operator-only — it spends BZZ.** Requires an EIP-191 signature over `swarm-connect-pool-check:<unix_ts>` from an address in `POOL_ADMIN_ADDRESSES` (headers `X-Debug-Timestamp` + `X-Debug-Signature`), a deliberately separate allow-list from `DEBUG_ALLOWED_ADDRESSES` so a diagnostics signature cannot authorise spending. 404 when the list is empty (the default). Returns `202` and schedules the work — poll `GET /api/v1/pool/status` for the outcome, since a purchase takes ~16s and awaiting it held the caller's connection (#292).
 
 #### Notary Signing (Provenance)
