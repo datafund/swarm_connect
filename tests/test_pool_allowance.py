@@ -153,3 +153,42 @@ class TestEndpointBehaviour:
         assert resp.status_code == 409, resp.text
         _, info = tracker.check(APP)
         assert info["used"] == 0, "an empty pool consumed the caller's allowance"
+
+
+class TestAllowanceIsPerSize:
+    """Sizes differ in cost by powers of two, so budgets must not be shared.
+
+    A depth-20 batch costs eight times a depth-17 one. With a single count per
+    origin, a caller could spend eight times its intended budget just by asking
+    for a larger size, without ever exceeding a limit.
+    """
+
+    def test_sizes_have_separate_budgets(self, tracker):
+        for _ in range(3):
+            tracker.consume(APP, "small")
+        assert not tracker.check(APP, "small")[0], "small budget should be spent"
+        ok, info = tracker.check(APP, "medium")
+        assert ok, "spending the small budget also blocked medium"
+        assert info["size"] == "medium"
+
+    def test_a_larger_size_cannot_borrow_the_smaller_budget(self, tracker):
+        for _ in range(3):
+            tracker.consume(APP, "medium")
+        assert not tracker.check(APP, "medium")[0]
+        assert tracker.check(APP, "small")[0], "medium spending consumed the small budget"
+
+    def test_the_limit_applies_to_each_size(self, tracker):
+        """An allowance of 3 means 3 of each size, not 3 in total."""
+        for _ in range(3):
+            assert tracker.check(APP, "small")[0]
+            tracker.consume(APP, "small")
+        for _ in range(3):
+            assert tracker.check(APP, "medium")[0], "the second size got no budget of its own"
+            tracker.consume(APP, "medium")
+        assert not tracker.check(APP, "small")[0]
+        assert not tracker.check(APP, "medium")[0]
+
+    def test_the_message_names_the_size(self, tracker):
+        _, info = tracker.check(APP, "medium")
+        assert info["size"] == "medium"
+        assert info["origin"] == APP, "origin and size must both be reported, not conflated"
