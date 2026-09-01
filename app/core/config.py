@@ -69,6 +69,29 @@ class Settings(BaseSettings):
 
     # Pool monitoring settings
     STAMP_POOL_CHECK_INTERVAL_SECONDS: int = 900  # How often to check pool (15 minutes)
+
+    # Daily allowance of pooled batches per calling origin.
+    # Format: "https://app.example=50,https://dev.app.example=20"
+    #
+    # The pool pre-buys batches and pays to keep them alive, and /pool/acquire had
+    # no gate at all — 3,866 acquire calls in a day drove 40 replacement purchases
+    # on staging. The main consumer is a static browser app with no backend and no
+    # identity of its own, so there is no address to allow-list and no key it could
+    # sign with; an origin with a budget is the control that fits.
+    #
+    # Origin is attribution, not authentication. A browser will not let one site
+    # forge another's, so this does stop other WEBSITES spending your postage. Any
+    # non-browser client can claim any origin, so the BUDGET is what protects you —
+    # a forged origin consumes that origin's allowance and no more.
+    POOL_DAILY_ALLOWANCES: str = ""
+    # Allowance for origins not listed above, including callers that send no
+    # Origin at all: CLIs, SDKs, server-to-server.
+    #
+    # -1 means unlimited, which is the behaviour before this existed, and is the
+    # default so that deploying changes nothing until allowances are deliberately
+    # configured. A limit that arrives unannounced breaks callers.
+    POOL_DEFAULT_DAILY_ALLOWANCE: int = -1
+    POOL_ALLOWANCE_STATE_FILE: str = "data/pool_allowance.json"
     STAMP_POOL_MIN_TTL_HOURS: int = 24  # Top up if TTL below this
     STAMP_POOL_TOPUP_HOURS: int = 168   # How much TTL to add (1 week)
     STAMP_POOL_LOW_RESERVE_THRESHOLD: int = 1  # Alert when reserve drops to this level
@@ -236,6 +259,26 @@ class Settings(BaseSettings):
         if not self.DEBUG_ALLOWED_ADDRESSES:
             return []
         return [a.strip().lower() for a in self.DEBUG_ALLOWED_ADDRESSES.split(",") if a.strip()]
+
+    def get_pool_daily_allowances(self) -> dict:
+        """Parse POOL_DAILY_ALLOWANCES into {normalised_origin: limit}."""
+        out = {}
+        if not self.POOL_DAILY_ALLOWANCES:
+            return out
+        from urllib.parse import urlparse
+        for entry in self.POOL_DAILY_ALLOWANCES.split(","):
+            entry = entry.strip()
+            if not entry or "=" not in entry:
+                continue
+            origin, _, raw = entry.rpartition("=")
+            try:
+                limit = int(raw.strip())
+            except ValueError:
+                continue
+            p = urlparse(origin.strip())
+            if p.scheme and p.hostname:
+                out[f"{p.scheme.lower()}://{p.hostname.lower()}"] = limit
+        return out
 
     def get_pool_admin_addresses(self) -> List[str]:
         """Parse the pool-admin allow-list into lowercased 0x addresses."""

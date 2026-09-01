@@ -17,6 +17,7 @@ from app.core.config import settings
 from app.services.stamp_pool import stamp_pool_manager, PoolStampStatus
 from app.services.stamp_ownership import stamp_ownership_manager
 from app.services.metrics import pool_acquires_total
+from app.services.pool_allowance import pool_allowance_tracker
 from app.services.signed_auth import POOL_CHECK_PREFIX, authorize_signed_request
 from app.api.models.stamp import SIZE_PRESETS
 
@@ -190,6 +191,39 @@ async def acquire_stamp(
             detail="Stamp pool feature is not enabled on this gateway. Use POST /api/v1/stamps/ to purchase stamps directly."
         )
 
+    # Daily allowance for this origin. Checked before any batch is taken, and
+    # only consumed once one has actually been handed over — a failed acquire
+    # must not spend somebody's budget.
+    #
+    # Origin is attribution, not authentication: a browser cannot forge another
+    # site's, but anything that is not a browser can claim any origin it likes.
+    # The budget is what protects the pool; the origin only selects which budget.
+    origin = http_request.headers.get("origin")
+    allowed_by_budget, budget = pool_allowance_tracker.check(origin)
+    if not allowed_by_budget:
+        logger.info(
+            "Pool allowance exhausted for origin %s (%s/%s today)",
+            budget["origin"], budget["used"], budget["allowance"],
+        )
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail={
+                "code": "DAILY_STAMP_ALLOWANCE_EXHAUSTED",
+                # Written to be shown to a person, not just logged. The caller is
+                # a browser app whose user has no idea what a postage batch is.
+                "message": (
+                    f"The daily free allowance of {budget['allowance']} stamps for this "
+                    "application has been used up. It resets at midnight UTC. "
+                    "You can still upload by purchasing a stamp directly, which takes "
+                    "about a minute."
+                ),
+                "allowance": budget["allowance"],
+                "used": budget["used"],
+                "resets_at": budget["resets_at"],
+                "alternative": "POST /api/v1/stamps/ purchases a stamp directly.",
+            },
+        )
+
     # Determine requested depth
     if request.depth is not None:
         requested_depth = request.depth
@@ -253,6 +287,10 @@ async def acquire_stamp(
             mode="free",
             source="pool_acquire"
         )
+
+    # Consumed only now: the batch has been released to the caller, so the
+    # allowance has genuinely been spent.
+    pool_allowance_tracker.consume(origin)
 
     # Trigger immediate replenishment if pool is below target
     # This runs in the background and doesn't affect the response
