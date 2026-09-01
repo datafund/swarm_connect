@@ -130,7 +130,9 @@ class TestEndpointBehaviour:
         d = resp.json()["detail"]
         assert d["code"] == "DAILY_STAMP_ALLOWANCE_EXHAUSTED"
         assert "resets" in d["message"].lower()
-        assert "alternative" in d, "no route forward was offered"
+        assert "x402" in d["message"], "the paid route was not offered"
+        assert d["alternative"]["payment"] == "x402"
+        assert str(d["allowance"]) in d["message"], "the allowance number is not taken from config"
         assert d["resets_at"]
 
     def test_a_refused_acquire_does_not_spend_the_allowance(self, tmp_path, monkeypatch):

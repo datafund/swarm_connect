@@ -211,16 +211,30 @@ async def acquire_stamp(
                 "code": "DAILY_STAMP_ALLOWANCE_EXHAUSTED",
                 # Written to be shown to a person, not just logged. The caller is
                 # a browser app whose user has no idea what a postage batch is.
+                # Written to be shown to a person. The caller is a browser app
+                # whose user has never heard of a postage batch, so it says what
+                # they can do rather than only what failed.
+                #
+                # It deliberately does NOT offer to sell pool access: that is not
+                # payable yet. Adding the payment dependency to this endpoint
+                # returns 402 to any caller sending no payment header, which is
+                # every current caller. Paid pool access is tracked in #67 and is
+                # blocked on dataprovenance-app#126.
                 "message": (
                     f"The daily free allowance of {budget['allowance']} stamps for this "
-                    "application has been used up. It resets at midnight UTC. "
-                    "You can still upload by purchasing a stamp directly, which takes "
-                    "about a minute."
+                    f"application has been used up. It resets at {budget['resets_at']}. "
+                    "To continue now, pay with x402: POST /api/v1/stamps/ with an "
+                    "X-PAYMENT header buys a stamp outright. It takes about a minute "
+                    "to become usable, unlike a pooled one."
                 ),
                 "allowance": budget["allowance"],
                 "used": budget["used"],
                 "resets_at": budget["resets_at"],
-                "alternative": "POST /api/v1/stamps/ purchases a stamp directly.",
+                "alternative": {
+                    "endpoint": "POST /api/v1/stamps/",
+                    "payment": "x402",
+                    "note": "Paid, and usable after about a minute.",
+                },
             },
         )
 
