@@ -1230,3 +1230,97 @@ class TestPoolInventoryIsRegisteredAsOwned:
             f"sync left pre-existing inventory unprotected: adopted {adopted}"
         )
         assert all(r["source"] == "pool_sync" for r in registered)
+
+
+class TestPurchaseCeiling:
+    """A hard limit on how much the pool can spend, whatever is wrong with it.
+
+    A staging node bought 82 batches against a target of 5, spending about
+    8.9 BZZ. One mechanism was found and fixed; it accounts for five per restart,
+    not seventy, and the rest was never identified (#271).
+
+    The point of a ceiling is that it does not need the cause. These tests pin
+    that it holds regardless of which path is buying and regardless of whether
+    the purchase turns out to be usable.
+    """
+
+    @pytest.fixture
+    def state_file(self, tmp_path):
+        return str(tmp_path / "pool_state.json")
+
+    @pytest.mark.asyncio
+    async def test_purchases_stop_at_the_ceiling(self, state_file):
+        manager = StampPoolManager(state_file=state_file)
+        attempts = []
+
+        async def fake_buy(amount, depth, label):
+            attempts.append(depth)
+            return f"batch_{len(attempts)}"
+
+        with patch('app.services.stamp_pool.settings.STAMP_POOL_MAX_PURCHASES_PER_HOUR', 3):
+            with patch('app.services.stamp_pool.swarm_api.get_chainstate',
+                       return_value={"currentPrice": "24000"}):
+                with patch('app.services.stamp_pool.swarm_api.purchase_postage_stamp',
+                           side_effect=fake_buy):
+                    with patch.object(manager, '_wait_for_stamp_usable', return_value=False):
+                        for _ in range(8):
+                            await manager._purchase_stamp(17)
+
+        assert len(attempts) == 3, (
+            f"ceiling of 3 did not hold — {len(attempts)} purchases were attempted"
+        )
+
+    @pytest.mark.asyncio
+    async def test_an_unusable_purchase_still_counts(self, state_file):
+        """The money is spent when Bee accepts the batch, not when it becomes usable.
+
+        Counting only usable batches would let a run of unusable ones spend
+        without limit while appearing to buy nothing.
+        """
+        manager = StampPoolManager(state_file=state_file)
+        attempts = []
+
+        async def fake_buy(amount, depth, label):
+            attempts.append(depth)
+            return "batch_x"
+
+        with patch('app.services.stamp_pool.settings.STAMP_POOL_MAX_PURCHASES_PER_HOUR', 2):
+            with patch('app.services.stamp_pool.swarm_api.get_chainstate',
+                       return_value={"currentPrice": "24000"}):
+                with patch('app.services.stamp_pool.swarm_api.purchase_postage_stamp',
+                           side_effect=fake_buy):
+                    # Never becomes usable — the pool gains nothing, but pays.
+                    with patch.object(manager, '_wait_for_stamp_usable', return_value=False):
+                        for _ in range(5):
+                            await manager._purchase_stamp(17)
+
+        assert len(attempts) == 2, (
+            f"unusable purchases were not counted — {len(attempts)} attempted against a ceiling of 2"
+        )
+
+    @pytest.mark.asyncio
+    async def test_the_ceiling_is_reported_not_just_enforced(self, state_file):
+        """Silently refusing to buy looks identical to a pool that needs nothing."""
+        manager = StampPoolManager(state_file=state_file)
+
+        with patch('app.services.stamp_pool.settings.STAMP_POOL_MAX_PURCHASES_PER_HOUR', 0):
+            result = await manager._purchase_stamp(17)
+
+        assert result is None
+        assert any("ceiling" in e for e in manager._errors), (
+            f"the refusal was not surfaced in pool errors: {manager._errors}"
+        )
+
+    def test_the_window_rolls(self, state_file):
+        """Old purchases stop counting, or the pool jams permanently after a burst."""
+        from datetime import datetime, timezone, timedelta
+
+        manager = StampPoolManager(state_file=state_file)
+        with patch('app.services.stamp_pool.settings.STAMP_POOL_MAX_PURCHASES_PER_HOUR', 5):
+            manager._purchase_times = [
+                datetime.now(timezone.utc) - timedelta(hours=2) for _ in range(5)
+            ]
+            assert manager._purchase_budget_remaining() == 5, "an hour-old burst still blocked buying"
+
+            manager._purchase_times = [datetime.now(timezone.utc) for _ in range(5)]
+            assert manager._purchase_budget_remaining() == 0

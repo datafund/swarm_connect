@@ -105,6 +105,9 @@ class StampPoolManager:
         # Single-flight guard for check_and_replenish. See its docstring:
         # overlapping runs each buy to cover the same shortfall.
         self._replenishing = False
+        # Timestamps of recent purchases, for the hourly ceiling. See
+        # _purchase_budget_remaining().
+        self._purchase_times: List[datetime] = []
         self._task: Optional[asyncio.Task] = None
         self._last_check: Optional[datetime] = None
         self._errors: List[str] = []
@@ -741,8 +744,50 @@ class StampPoolManager:
 
         return results
 
+    def _purchase_budget_remaining(self) -> int:
+        """How many more batches may be bought in the current rolling hour.
+
+        A hard ceiling across every depth and every caller, not a per-cycle limit.
+        A staging node once bought 82 batches against a target of 5, spending
+        about 8.9 BZZ. One mechanism was found and fixed; it accounts for five per
+        restart, not seventy, and the rest was never identified (#271).
+
+        The point of a ceiling is that it does not need the cause. Whatever the
+        defect — a replenish path that miscounts, a restart loop, an external
+        caller draining the pool faster than it refills — it cannot spend past
+        this. Correctness bugs become expensive without one; with it they become
+        merely wrong.
+        """
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=1)
+        with self._lock:
+            self._purchase_times = [t for t in self._purchase_times if t > cutoff]
+            return max(0, settings.STAMP_POOL_MAX_PURCHASES_PER_HOUR - len(self._purchase_times))
+
+    def _record_purchase(self) -> None:
+        with self._lock:
+            self._purchase_times.append(datetime.now(timezone.utc))
+
     async def _purchase_stamp(self, depth: int, max_retries: int = 3) -> Optional[str]:
-        """Purchase a new stamp for the pool. Retries on 429 rate limiting."""
+        """Purchase a new stamp for the pool. Retries on 429 rate limiting.
+
+        Refuses once the hourly ceiling is reached. The check lives here rather
+        than in the replenish loop so that every path is covered — the scheduled
+        check, the immediate replenishment after an acquire, and anything added
+        later that forgets to ask.
+        """
+        remaining = self._purchase_budget_remaining()
+        if remaining <= 0:
+            msg = (
+                f"Refusing to buy a depth-{depth} batch: the pool has already "
+                f"bought {settings.STAMP_POOL_MAX_PURCHASES_PER_HOUR} in the last "
+                "hour, which is the configured ceiling. Something is wrong — a "
+                "healthy pool does not need this many. Raise "
+                "STAMP_POOL_MAX_PURCHASES_PER_HOUR only after understanding why."
+            )
+            logger.error(msg)
+            self._errors.append(msg)
+            return None
+
         try:
             # Get current price (Bee API returns currentPrice as a string)
             chainstate = await swarm_api.get_chainstate()
@@ -763,6 +808,12 @@ class StampPoolManager:
             for attempt in range(max_retries):
                 try:
                     batch_id = await swarm_api.purchase_postage_stamp(amount, depth, label)
+                    # Counted the moment Bee accepts it, before waiting for it to
+                    # become usable. The money is spent at that point, so a batch
+                    # that never becomes usable must still count against the
+                    # ceiling — otherwise a run of unusable purchases would spend
+                    # without limit while appearing to buy nothing.
+                    self._record_purchase()
                     break
                 except Exception as e:
                     if "429" in str(e) and attempt < max_retries - 1:
