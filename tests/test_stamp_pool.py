@@ -1324,3 +1324,68 @@ class TestPurchaseCeiling:
 
             manager._purchase_times = [datetime.now(timezone.utc) for _ in range(5)]
             assert manager._purchase_budget_remaining() == 0
+
+
+class TestTopUpRespectsTheReserveConfig:
+    """The pool must not pay to maintain depths it has stopped carrying.
+
+    Top-up used to take every batch in the pool regardless of depth. With a
+    depth's target set to zero the pool no longer REPLACES that depth when it is
+    handed out — so it was paying to keep alive inventory it had already decided
+    not to keep.
+
+    The cost is not marginal: a depth-20 batch costs eight times a depth-17 one,
+    so two unwanted mediums cost more per day than the entire intended pool.
+    """
+
+    @pytest.fixture
+    def state_file(self, tmp_path):
+        return str(tmp_path / "pool_state.json")
+
+    @pytest.mark.asyncio
+    async def test_a_dropped_depth_is_not_topped_up(self, state_file):
+        manager = StampPoolManager(state_file=state_file)
+        manager.add_stamp_to_pool("small_one", 17, 1000, 3600)
+        manager.add_stamp_to_pool("medium_one", 20, 1000, 3600)
+
+        topped = []
+
+        async def fake_topup(batch_id):
+            topped.append(batch_id)
+
+        manager._last_sync_ok = True
+        with patch('app.services.stamp_pool.settings.STAMP_POOL_ENABLED', True), \
+             patch.object(manager, 'get_reserve_config', return_value={17: 1}):
+            with patch.object(manager, 'sync_from_bee_node', return_value=2):
+                with patch.object(manager, '_get_stamp_ttl', return_value=60):
+                    with patch.object(manager, '_topup_stamp', side_effect=fake_topup):
+                        with patch.object(manager, '_purchase_stamp', return_value=None):
+                            await manager.check_and_replenish()
+
+        assert "small_one" in topped, "a wanted depth was not maintained"
+        assert "medium_one" not in topped, (
+            "paid to top up a depth with a target of zero, which will not be replaced when used"
+        )
+
+    @pytest.mark.asyncio
+    async def test_every_held_depth_is_topped_up_when_all_are_wanted(self, state_file):
+        """The filter must not become an excuse to stop maintaining the pool."""
+        manager = StampPoolManager(state_file=state_file)
+        manager.add_stamp_to_pool("small_one", 17, 1000, 3600)
+        manager.add_stamp_to_pool("medium_one", 20, 1000, 3600)
+
+        topped = []
+
+        async def fake_topup(batch_id):
+            topped.append(batch_id)
+
+        manager._last_sync_ok = True
+        with patch('app.services.stamp_pool.settings.STAMP_POOL_ENABLED', True), \
+             patch.object(manager, 'get_reserve_config', return_value={17: 1, 20: 1}):
+            with patch.object(manager, 'sync_from_bee_node', return_value=2):
+                with patch.object(manager, '_get_stamp_ttl', return_value=60):
+                    with patch.object(manager, '_topup_stamp', side_effect=fake_topup):
+                        with patch.object(manager, '_purchase_stamp', return_value=None):
+                            await manager.check_and_replenish()
+
+        assert set(topped) == {"small_one", "medium_one"}

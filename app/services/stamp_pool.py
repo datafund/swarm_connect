@@ -699,13 +699,40 @@ class StampPoolManager:
                             )
                             break
 
-            # Top up stamps with low TTL
+            # Top up stamps with low TTL — but only at depths the pool still
+            # wants to hold.
+            #
+            # This used to top up every batch in the pool regardless of depth,
+            # which meant paying to keep alive inventory the configuration had
+            # explicitly stopped carrying. The incoherence shows on acquisition:
+            # a depth with a target of zero is NOT replaced when handed out, so
+            # the pool was maintaining something it had already decided not to
+            # keep.
+            #
+            # It is not a small amount. A depth-20 batch costs eight times a
+            # depth-17 one, so two unwanted mediums cost more per day than the
+            # entire intended pool.
+            #
+            # Batches at a dropped depth are left to expire. They stay usable
+            # until they do, and sync removes them once they are gone, so
+            # nothing is thrown away — the pool simply stops paying for them.
             min_ttl_seconds = settings.STAMP_POOL_MIN_TTL_HOURS * 3600
+            wanted_depths = set(reserve_config.keys())
             with self._lock:
                 stamps_to_topup = [
                     s for s in self._pool.values()
-                    if s.status == PoolStampStatus.AVAILABLE
+                    if s.status == PoolStampStatus.AVAILABLE and s.depth in wanted_depths
                 ]
+                retired = [
+                    s for s in self._pool.values()
+                    if s.status == PoolStampStatus.AVAILABLE and s.depth not in wanted_depths
+                ]
+            for s in retired:
+                logger.info(
+                    "Not topping up %s... (depth=%d): that depth is no longer in the "
+                    "reserve config, so it will not be replaced when used. Letting it expire.",
+                    s.batch_id[:16], s.depth,
+                )
 
             results["topup_debug"] = []
             for stamp in stamps_to_topup:
