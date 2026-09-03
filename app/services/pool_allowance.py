@@ -45,16 +45,30 @@ def _today() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
 
-def _key(origin: Optional[str], size: str) -> str:
-    """Budget key: one bucket per origin AND per size.
+# Every caller not named in the configuration shares this one bucket.
+UNLISTED = "(unlisted)"
 
-    Sizes differ in cost by powers of two — a depth-20 batch costs eight times a
-    depth-17 one. A single count per origin would therefore let a caller spend
-    eight times its intended budget simply by asking for a larger batch, without
-    exceeding any limit. Counting per size makes the allowance mean the same
-    thing whichever size is requested.
+
+def _key(origin: Optional[str], size: str) -> str:
+    """Budget key: one bucket per CONFIGURED origin, one shared bucket for the rest.
+
+    Per size in both cases. Sizes differ in cost by powers of two — a depth-20
+    batch costs eight times a depth-17 one — so a count shared across sizes would
+    let a caller spend eight times its budget by asking for a larger batch.
+
+    Unlisted origins share a single bucket rather than each receiving one. Giving
+    every distinct Origin its own allowance makes the budget decorative: a caller
+    sends a header nobody has ever seen, gets a fresh allowance, and repeats. The
+    header is attacker-controlled, so the number of buckets would be unbounded
+    and so would the spend.
+
+    Only origins the operator has named in POOL_DAILY_ALLOWANCES get a bucket of
+    their own, which is the point of naming them.
     """
-    return f"{_normalise(origin)}|{size}"
+    key = _normalise(origin)
+    if key not in settings.get_pool_daily_allowances():
+        key = UNLISTED
+    return f"{key}|{size}"
 
 
 def _normalise(origin: Optional[str]) -> str:
@@ -154,8 +168,13 @@ class PoolAllowanceTracker:
             self._roll_day()
             used = self._used.get(key, 0)
 
+        is_named = _normalise(origin) in settings.get_pool_daily_allowances()
         info = {
             "origin": _normalise(origin) or "(none)",
+            # Says which bucket was actually charged. An unlisted caller sharing
+            # the common budget may find it already spent by someone else, and
+            # that is far less confusing when the response says so.
+            "bucket": _normalise(origin) if is_named else UNLISTED,
             "size": size,
             "allowance": limit,
             "used": used,

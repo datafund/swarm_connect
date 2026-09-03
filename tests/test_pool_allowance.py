@@ -192,3 +192,49 @@ class TestAllowanceIsPerSize:
         _, info = tracker.check(APP, "medium")
         assert info["size"] == "medium"
         assert info["origin"] == APP, "origin and size must both be reported, not conflated"
+
+
+class TestRotatingOriginsCannotMintAllowances:
+    """A caller must not be able to invent budgets by changing a header.
+
+    The Origin header is supplied by the caller and, for anything that is not a
+    browser, entirely attacker-controlled. Giving each distinct value its own
+    allowance makes the budget decorative: send a header nobody has seen, get a
+    fresh allowance, repeat. The number of buckets is unbounded and so is the
+    spend.
+
+    Only origins the operator has NAMED get a bucket of their own.
+    """
+
+    def test_unlisted_origins_share_one_budget(self, tracker):
+        """Three unknown origins draw on the same allowance, not three of them."""
+        for i in range(1):
+            tracker.consume(f"https://rotate-{i}.example", "small")
+        # tracker fixture: APP=3, default=1 — so the shared bucket holds 1.
+        ok, info = tracker.check("https://rotate-99.example", "small")
+        assert not ok, (
+            "a previously unseen origin received a fresh allowance; rotating the "
+            "header would grant unlimited budgets"
+        )
+        assert info["bucket"] == "(unlisted)"
+
+    def test_a_named_origin_keeps_its_own_budget(self, tracker):
+        """The shared bucket must not swallow the origins that were configured."""
+        tracker.consume("https://rotate-0.example", "small")
+        ok, info = tracker.check(APP, "small")
+        assert ok, "an unlisted caller consumed the named origin's allowance"
+        assert info["bucket"] == APP
+
+    def test_callers_with_no_origin_join_the_shared_bucket(self, tracker):
+        """CLIs and SDKs are not privileged over an unknown website."""
+        tracker.consume(None, "small")
+        ok, info = tracker.check("https://someone.example", "small")
+        assert not ok
+        assert info["bucket"] == "(unlisted)"
+
+    def test_the_shared_bucket_is_still_per_size(self, tracker):
+        tracker.consume("https://x.example", "small")
+        assert not tracker.check("https://y.example", "small")[0]
+        assert tracker.check("https://y.example", "medium")[0], (
+            "the shared bucket collapsed sizes together"
+        )
