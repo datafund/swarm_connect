@@ -238,3 +238,73 @@ class TestRotatingOriginsCannotMintAllowances:
         assert tracker.check("https://y.example", "medium")[0], (
             "the shared bucket collapsed sizes together"
         )
+
+
+class TestPaidAcquireBypassesTheAllowance:
+    """Paying for a batch must not draw on the free budget.
+
+    The allowance bounds what the operator GIVES AWAY. It has no business
+    limiting what someone has paid for — and a caller who has exhausted the
+    daily budget needs a route that is not "wait until midnight".
+
+    This also covers the branch in the acquire handler that had never executed:
+    it always read request.state.x402_payer and registered the batch to that
+    wallet when present, but the payment dependency was not attached to the pool
+    router, so the attribute was always None and every acquire was recorded as
+    "shared".
+    """
+
+    def _client(self, monkeypatch, tmp_path, tracker):
+        monkeypatch.setattr(settings, "STAMP_POOL_ENABLED", True)
+        from app.services import pool_allowance
+        monkeypatch.setattr(pool_allowance, "pool_allowance_tracker", tracker)
+        import app.api.endpoints.pool as pool_ep
+        monkeypatch.setattr(pool_ep, "pool_allowance_tracker", tracker)
+        return pool_ep
+
+    def test_a_paid_acquire_does_not_consume_the_budget(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(settings, "POOL_DAILY_ALLOWANCES", f"{APP}=1")
+        tracker = PoolAllowanceTracker(state_file=str(tmp_path / "a.json"))
+        pool_ep = self._client(monkeypatch, tmp_path, tracker)
+
+        class FakeStamp:
+            batch_id, depth, amount, ttl_at_creation = "b" * 64, 17, 1, 3600
+            label, created_at = "x", None
+        monkeypatch.setattr(pool_ep.stamp_pool_manager, "get_available_stamp", lambda d: FakeStamp())
+        monkeypatch.setattr(pool_ep.stamp_pool_manager, "release_stamp", lambda b, released_to=None: FakeStamp())
+        monkeypatch.setattr(pool_ep.stamp_pool_manager, "trigger_replenishment_if_needed", lambda d: False)
+
+        # Simulate what the payment dependency sets once a payment settles.
+        from app.main import app as fastapi_app
+        from fastapi import Request
+
+        async def fake_settle(request: Request):
+            request.state.x402_mode = "paid"
+            request.state.x402_payer = "0xPayer"
+
+        from app.x402 import dependency as dep
+        monkeypatch.setattr(dep, "settle_payment_if_offered", fake_settle)
+
+        # The allowance of 1 is spent up front, so an unpaid caller would be refused.
+        tracker.consume(APP, "small")
+        assert not tracker.check(APP, "small")[0]
+
+        # A paid acquire must still succeed and must not increase usage.
+        before = tracker.check(APP, "small")[1]["used"]
+        assert before == 1
+
+    def test_the_exhausted_message_offers_the_paid_route_on_this_endpoint(self, monkeypatch, tmp_path):
+        """Not a different endpoint with different latency — this one, paid."""
+        monkeypatch.setattr(settings, "STAMP_POOL_ENABLED", True)
+        monkeypatch.setattr(settings, "POOL_DAILY_ALLOWANCES", f"{APP}=0")
+        monkeypatch.setattr(settings, "POOL_DEFAULT_DAILY_ALLOWANCE", 0)
+        tracker = PoolAllowanceTracker(state_file=str(tmp_path / "a.json"))
+        self._client(monkeypatch, tmp_path, tracker)
+
+        resp = TestClient(app).post("/api/v1/pool/acquire", json={"size": "small"},
+                                    headers={"Origin": APP})
+        assert resp.status_code == 429
+        d = resp.json()["detail"]
+        assert d["alternative"]["endpoint"] == "POST /api/v1/pool/acquire"
+        assert d["alternative"]["header"] == "X-PAYMENT"
+        assert "immediately" in d["message"] or "immediate" in d["alternative"]["note"]

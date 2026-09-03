@@ -141,6 +141,35 @@ async def _calculate_price_for_request(request: Request) -> dict:
     }
 
 
+async def settle_payment_if_offered(request: Request) -> None:
+    """Settle an x402 payment when one is presented; otherwise let the request pass.
+
+    For endpoints that have a free route of their own — the stamp pool, which
+    hands out a daily allowance per origin — but should also accept payment from
+    a caller who has exhausted it or would rather not depend on it.
+
+    require_x402_payment cannot be used directly there. It answers 402 to any
+    caller presenting neither an X-PAYMENT header nor X-Payment-Mode: free, and
+    the callers this endpoint exists for present neither: a browser app sends
+    what the browser sends and nothing more. Attaching it would have broken every
+    existing caller in exchange for making payment possible.
+
+    So: a payment offered is verified and settled exactly as elsewhere, setting
+    request.state.x402_payer. No payment offered is not an error here — the
+    handler then applies the daily allowance, and refuses with its own message
+    naming the paid route if that is spent.
+
+    The effect is that paying callers bypass the allowance entirely, which is the
+    point: the allowance exists to bound what the operator gives away, not to
+    limit what someone has paid for.
+    """
+    if not settings.X402_ENABLED:
+        return
+    if not request.headers.get("X-PAYMENT"):
+        return
+    await require_x402_payment(request)
+
+
 async def require_x402_payment(request: Request) -> None:
     """
     FastAPI dependency that enforces x402 payment on protected endpoints.
