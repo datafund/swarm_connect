@@ -167,7 +167,31 @@ jobs:
 
       - name: deploy
         run: |
-          cd /opt/ && rm -rf swarm_connect && git clone -b $GITHUB_REF_NAME https://github.com/datafund/swarm_connect.git && cd swarm_connect
+          # Clone into a temporary directory and swap it in only on success.
+          #
+          # This used to be `rm -rf swarm_connect && git clone`, which destroys
+          # the working checkout BEFORE knowing whether the replacement can be
+          # obtained. On 2026-09-02 the clone failed and the host was left with
+          # no /opt/swarm_connect at all: the running containers were unaffected,
+          # but nothing could be deployed or recreated until it was restored by
+          # hand. A deploy failure should leave the previous state intact.
+          #
+          # Authenticated, because anonymous git operations are rate limited per
+          # IP and every deploy clones the full repository. When that limit is
+          # reached GitHub answers the upload-pack POST with 401 — ref discovery
+          # still returns 200, so the repo looks reachable right up to the point
+          # it fails, and git reports it as a missing username rather than as
+          # throttling. The token is the job's own, scoped to this repository.
+          cd /opt/
+          rm -rf swarm_connect.new
+          git clone -b "$GITHUB_REF_NAME" \
+            "https://x-access-token:${{ github.token }}@github.com/datafund/swarm_connect.git" \
+            swarm_connect.new
+          rm -rf swarm_connect.old
+          if [ -d swarm_connect ]; then mv swarm_connect swarm_connect.old; fi
+          mv swarm_connect.new swarm_connect
+          rm -rf swarm_connect.old
+          cd swarm_connect
           cat > .env << EOF
           GRAFANA_CLOUD_PROM_USERNAME=${{ secrets.GRAFANA_CLOUD_PROM_USERNAME }}
           GRAFANA_CLOUD_API_TOKEN=${{ secrets.GRAFANA_CLOUD_API_TOKEN }}
