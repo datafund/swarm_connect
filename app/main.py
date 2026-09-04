@@ -133,7 +133,18 @@ else:
 app.include_router(stamps.router, prefix=f"{settings.API_V1_STR}/stamps", tags=["stamps"], dependencies=x402_deps)
 app.include_router(data.router, prefix=f"{settings.API_V1_STR}/data", tags=["data"], dependencies=x402_deps)
 app.include_router(wallet.router, prefix=f"{settings.API_V1_STR}", tags=["wallet"])
-app.include_router(pool.router, prefix=f"{settings.API_V1_STR}/pool", tags=["pool"])
+# Pool: payment is OPTIONAL rather than required. A caller presenting an
+# X-PAYMENT header has it settled and bypasses the daily allowance; one
+# presenting none falls through to the allowance and is refused by the handler
+# with a message naming the paid route if it is spent. Using the mandatory
+# dependency here would answer 402 to every existing caller, none of which sends
+# a payment header.
+if settings.X402_ENABLED:
+    from app.x402.dependency import settle_payment_if_offered
+    pool_deps = [Depends(settle_payment_if_offered)]
+else:
+    pool_deps = []
+app.include_router(pool.router, prefix=f"{settings.API_V1_STR}/pool", tags=["pool"], dependencies=pool_deps)
 app.include_router(notary.router, prefix=f"{settings.API_V1_STR}/notary", tags=["notary"])
 # Chunk forwarding (Flow A). Router is always mounted; the handler guards on
 # CHUNK_UPLOAD_ENABLED (returns 404 when off). The x402 dependency gates only the

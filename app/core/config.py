@@ -104,6 +104,16 @@ class Settings(BaseSettings):
     # configured. A limit that arrives unannounced breaks callers.
     POOL_DEFAULT_DAILY_ALLOWANCE: int = -1
     POOL_ALLOWANCE_STATE_FILE: str = "data/pool_allowance.json"
+    # Premium charged for taking a pre-bought batch from the pool instead of
+    # buying one, as a percentage on top of what the batch itself costs.
+    # 0 = at cost, 100 = double.
+    #
+    # The pool is not the same product as a purchase. The operator has already
+    # spent the capital, is paying to keep the batch alive whether or not anyone
+    # takes it, and carries the risk of it expiring unused — in exchange the
+    # caller waits seconds instead of a minute. That convenience is the thing
+    # being sold, and it has a real cost behind it.
+    X402_POOL_MARKUP_PERCENT: int = 100
     STAMP_POOL_MIN_TTL_HOURS: int = 24  # Top up if TTL below this
     STAMP_POOL_TOPUP_HOURS: int = 168   # How much TTL to add (1 week)
     STAMP_POOL_LOW_RESERVE_THRESHOLD: int = 1  # Alert when reserve drops to this level

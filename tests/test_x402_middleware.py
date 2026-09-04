@@ -493,8 +493,34 @@ class TestProtectedEndpoints:
             ("POST", "/api/v1/data/"),
             ("POST", "/api/v1/data/manifest"),
             ("POST", "/api/v1/chunks/credit"),
+            ("POST", "/api/v1/pool/acquire"),
         ]
         assert PROTECTED_ENDPOINTS == expected
+
+    def test_pool_acquire_is_priced_but_payment_is_optional(self):
+        """Being in this list means "has a price", not "will 402 without payment".
+
+        The pool router attaches settle_payment_if_offered rather than
+        require_x402_payment: a caller presenting a payment has it settled and
+        bypasses the daily allowance, and a caller presenting none falls through
+        to that allowance instead of being refused. Using the mandatory
+        dependency would answer 402 to every existing caller, none of which sends
+        a payment header.
+        """
+        assert ("POST", "/api/v1/pool/acquire") in PROTECTED_ENDPOINTS
+
+        import inspect
+        import app.main as main_module
+        src = inspect.getsource(main_module)
+        pool_line = next(l for l in src.splitlines() if 'pool.router' in l and 'include_router' in l)
+        assert "pool_deps" in pool_line, (
+            "the pool router must use the optional-payment dependency; "
+            f"got: {pool_line.strip()}"
+        )
+        assert "x402_deps" not in pool_line, (
+            "the pool router carries the MANDATORY payment dependency, which "
+            "returns 402 to every caller that sends no payment header"
+        )
 
     def test_get_endpoints_not_protected(self):
         for method, path in PROTECTED_ENDPOINTS:
