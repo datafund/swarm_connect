@@ -110,6 +110,50 @@ async def _calculate_price_for_request(request: Request) -> dict:
             "description": f"Create batch for owner (depth {d}, {dur}h)",
         }
 
+    if "/pool/acquire" in path:
+        # Price the batch the caller will actually receive, then add the pool
+        # premium.
+        #
+        # This path previously fell through to the final return and was priced at
+        # X402_MIN_PRICE_USD with the description "Gateway operation" — the floor,
+        # regardless of size. A depth-20 batch costs eight times a depth-17 one,
+        # so the quote bore no relation to what was handed over. It was harmless
+        # only because paying for a pooled batch was not possible at all.
+        from app.api.models.stamp import SIZE_PRESETS
+        try:
+            b = await request.json()
+        except Exception:
+            b = {}
+        depth = b.get("depth")
+        if not isinstance(depth, int):
+            size = b.get("size")
+            depth = SIZE_PRESETS.get(size, 17) if isinstance(size, str) else 17
+        # Price from what the POOL PAID, not from what the caller receives.
+        #
+        # _purchase_stamp buys at STAMP_POOL_DEFAULT_DURATION_HOURS + 1 — the
+        # extra hour clears Bee's minimum-validity floor — so that is the
+        # operator's cost basis and the honest thing to charge a premium on.
+        #
+        # The caller actually receives whatever TTL remains, which is less,
+        # because the batch has been sitting in the pool being topped up. Pricing
+        # off the remaining TTL would be worse for both sides: it would fluctuate
+        # per request, and it would charge least for the batch that cost most to
+        # keep alive.
+        duration = settings.STAMP_POOL_DEFAULT_DURATION_HOURS + 1
+
+        quote = await get_price_quote(
+            operation="stamp_purchase", duration_hours=duration, depth=depth
+        )
+        markup = max(0, settings.X402_POOL_MARKUP_PERCENT)
+        price = quote["price_usd"] * (1 + markup / 100)
+        return {
+            "price_usd": round(price, 6),
+            "description": (
+                f"Pooled stamp, ready immediately (depth {depth}, {duration}h"
+                + (f", +{markup}% pool premium)" if markup else ")")
+            ),
+        }
+
     if "/stamps/" in path:
         quote = await get_price_quote(
             operation="stamp_purchase",
