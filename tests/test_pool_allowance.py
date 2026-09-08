@@ -114,6 +114,9 @@ class TestEndpointBehaviour:
     def test_exhausted_allowance_returns_a_message_a_person_can_read(self, monkeypatch, tmp_path):
         """The caller is a browser app whose user has never heard of a postage batch."""
         monkeypatch.setattr(settings, "STAMP_POOL_ENABLED", True)
+        # A mainnet network, because this test asserts the x402 route is offered
+        # and that offer is withheld where a payment would not buy a bypass.
+        monkeypatch.setattr(settings, "X402_NETWORK", "base")
         monkeypatch.setattr(settings, "POOL_DAILY_ALLOWANCES", f"{APP}=0")
         monkeypatch.setattr(settings, "POOL_DEFAULT_DAILY_ALLOWANCE", 0)
 
@@ -293,8 +296,8 @@ class TestPaidAcquireBypassesTheAllowance:
         before = tracker.check(APP, "small")[1]["used"]
         assert before == 1
 
-    def test_the_exhausted_message_offers_the_paid_route_on_this_endpoint(self, monkeypatch, tmp_path):
-        """Not a different endpoint with different latency — this one, paid."""
+    def _exhausted(self, monkeypatch, tmp_path):
+        """Drive an acquire into the 429 and hand back its detail block."""
         monkeypatch.setattr(settings, "STAMP_POOL_ENABLED", True)
         monkeypatch.setattr(settings, "POOL_DAILY_ALLOWANCES", f"{APP}=0")
         monkeypatch.setattr(settings, "POOL_DEFAULT_DAILY_ALLOWANCE", 0)
@@ -304,7 +307,98 @@ class TestPaidAcquireBypassesTheAllowance:
         resp = TestClient(app).post("/api/v1/pool/acquire", json={"size": "small"},
                                     headers={"Origin": APP})
         assert resp.status_code == 429
-        d = resp.json()["detail"]
+        return resp.json()["detail"]
+
+    def test_the_exhausted_message_offers_the_paid_route_on_this_endpoint(self, monkeypatch, tmp_path):
+        """Not a different endpoint with different latency — this one, paid."""
+        monkeypatch.setattr(settings, "X402_NETWORK", "base")
+        d = self._exhausted(monkeypatch, tmp_path)
         assert d["alternative"]["endpoint"] == "POST /api/v1/pool/acquire"
         assert d["alternative"]["header"] == "X-PAYMENT"
         assert "immediately" in d["message"] or "immediate" in d["alternative"]["note"]
+
+    def test_a_testnet_gateway_does_not_offer_a_payment_that_would_not_help(
+        self, monkeypatch, tmp_path
+    ):
+        """Sending someone to pay on a path that will still refuse them is worse
+        than not offering it. On a testnet the bypass is withheld, so the message
+        must point at direct purchase instead."""
+        monkeypatch.setattr(settings, "X402_NETWORK", "base-sepolia")
+        monkeypatch.setattr(settings, "X402_ALLOW_TESTNET_PAID_BYPASS", False)
+        d = self._exhausted(monkeypatch, tmp_path)
+        assert d["alternative"]["endpoint"] == "POST /api/v1/stamps/"
+        assert "X-PAYMENT" not in d["message"]
+        assert "header" not in d["alternative"]
+
+
+class TestTestnetPaymentsDoNotBuyABypass:
+    """Testnet USDC is free from a faucet.
+
+    Honouring a payment settled there would replace a bounded giveaway with an
+    unbounded one: any caller could top up for nothing and draw batches the
+    operator bought with real BZZ, capped only by the pool's hourly purchase
+    ceiling. Production ran X402_NETWORK=base-sepolia against the public
+    x402.org facilitator when the paid path was written, so this is not
+    hypothetical — shipping the bypass unguarded would have made the allowance
+    meaningless there.
+    """
+
+    def test_a_testnet_name_is_not_worth_a_bypass(self, monkeypatch):
+        monkeypatch.setattr(settings, "X402_ALLOW_TESTNET_PAID_BYPASS", False)
+        for network in ("base-sepolia", "base_sepolia", "sepolia", ""):
+            monkeypatch.setattr(settings, "X402_NETWORK", network)
+            assert not settings.paid_bypass_is_honoured(), network
+
+    def test_a_mainnet_name_is(self, monkeypatch):
+        monkeypatch.setattr(settings, "X402_ALLOW_TESTNET_PAID_BYPASS", False)
+        for network in ("base", "base-mainnet", "BASE"):
+            monkeypatch.setattr(settings, "X402_NETWORK", network)
+            assert settings.paid_bypass_is_honoured(), network
+
+    def test_an_unrecognised_network_is_treated_as_a_testnet(self, monkeypatch):
+        """Guessing wrong this way refuses a real payment, which is recoverable.
+        Guessing wrong the other way gives away batches, which is not."""
+        monkeypatch.setattr(settings, "X402_ALLOW_TESTNET_PAID_BYPASS", False)
+        monkeypatch.setattr(settings, "X402_NETWORK", "some-new-chain")
+        assert not settings.paid_bypass_is_honoured()
+
+    def test_the_operator_can_opt_in_to_exercise_the_path_on_staging(self, monkeypatch):
+        monkeypatch.setattr(settings, "X402_NETWORK", "base-sepolia")
+        monkeypatch.setattr(settings, "X402_ALLOW_TESTNET_PAID_BYPASS", True)
+        assert settings.paid_bypass_is_honoured()
+
+    def test_a_testnet_payment_still_draws_on_the_allowance(self, monkeypatch, tmp_path):
+        """The payment is settled and the batch registered to the payer either
+        way — only the bypass is withheld, so the caller keeps its allowance
+        rather than being refused outright."""
+        monkeypatch.setattr(settings, "STAMP_POOL_ENABLED", True)
+        monkeypatch.setattr(settings, "X402_NETWORK", "base-sepolia")
+        monkeypatch.setattr(settings, "X402_ALLOW_TESTNET_PAID_BYPASS", False)
+        monkeypatch.setattr(settings, "POOL_DAILY_ALLOWANCES", f"{APP}=0")
+        monkeypatch.setattr(settings, "POOL_DEFAULT_DAILY_ALLOWANCE", 0)
+
+        tracker = PoolAllowanceTracker(state_file=str(tmp_path / "a.json"))
+        from app.services import pool_allowance
+        monkeypatch.setattr(pool_allowance, "pool_allowance_tracker", tracker)
+        import app.api.endpoints.pool as pool_ep
+        monkeypatch.setattr(pool_ep, "pool_allowance_tracker", tracker)
+
+        class FakeStamp:
+            batch_id, depth, amount, ttl_at_creation = "b" * 64, 17, 1, 3600
+            label, created_at = "x", None
+
+        monkeypatch.setattr(pool_ep.stamp_pool_manager, "get_available_stamp", lambda d: FakeStamp())
+
+        from fastapi import Request
+
+        async def fake_settle(request: Request):
+            request.state.x402_mode = "paid"
+            request.state.x402_payer = "0xPayer"
+
+        from app.x402 import dependency as dep
+        monkeypatch.setattr(dep, "settle_payment_if_offered", fake_settle)
+
+        resp = TestClient(app).post("/api/v1/pool/acquire", json={"size": "small"},
+                                    headers={"Origin": APP, "X-PAYMENT": "anything"})
+        assert resp.status_code == 429, "a testnet payment must not buy a bypass"
+        assert resp.json()["detail"]["code"] == "DAILY_STAMP_ALLOWANCE_EXHAUSTED"
