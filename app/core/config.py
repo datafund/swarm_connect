@@ -10,6 +10,25 @@ from dotenv import load_dotenv
 load_dotenv()
 
 
+# Networks where the currency is free from a faucet, so a settled payment is
+# not evidence that value changed hands. Matched on a normalised name rather
+# than an exact list membership, because x402 network identifiers vary by
+# version ("base-sepolia", "base_sepolia", "sepolia") and a name we fail to
+# recognise must be treated as a testnet: guessing wrong in that direction
+# refuses a real payment, guessing wrong the other way gives batches away.
+_MAINNET_NETWORKS = {"base", "base-mainnet", "ethereum", "mainnet", "polygon", "avalanche"}
+
+
+def is_testnet_network(network: str) -> bool:
+    """Whether an x402 network identifier names a test network.
+
+    Anything not explicitly recognised as a mainnet counts as a testnet.
+    """
+    if not network:
+        return True
+    return network.strip().lower().replace("_", "-") not in _MAINNET_NETWORKS
+
+
 class Settings(BaseSettings):
     PROJECT_NAME: str = "Provenance Gateway"
     API_V1_STR: str = "/api/v1"
@@ -104,6 +123,32 @@ class Settings(BaseSettings):
     # configured. A limit that arrives unannounced breaks callers.
     POOL_DEFAULT_DAILY_ALLOWANCE: int = -1
     POOL_ALLOWANCE_STATE_FILE: str = "data/pool_allowance.json"
+    # Premium charged for taking a pre-bought batch from the pool instead of
+    # buying one, as a percentage on top of what the batch itself costs.
+    # 0 = at cost, 100 = double.
+    #
+    # The pool is not the same product as a purchase. The operator has already
+    # spent the capital, is paying to keep the batch alive whether or not anyone
+    # takes it, and carries the risk of it expiring unused — in exchange the
+    # caller waits seconds instead of a minute. That convenience is the thing
+    # being sold, and it has a real cost behind it.
+    X402_POOL_MARKUP_PERCENT: int = 100
+
+    # Whether a settled x402 payment is allowed to bypass the pool's daily
+    # allowance. A bypass is only defensible when the payment is worth
+    # something: on a testnet, USDC is free from a faucet, so honouring it
+    # would replace a bounded giveaway with an unbounded one.
+    #
+    # Production ran X402_NETWORK=base-sepolia against the public x402.org
+    # facilitator when paid pool access was written, so shipping the bypass
+    # unguarded would have made the allowance meaningless there — capped only
+    # by STAMP_POOL_MAX_PURCHASES_PER_HOUR, about 4 BZZ a day against a wallet
+    # holding 16.
+    #
+    # Set this true only where the paid path needs exercising against a testnet
+    # (staging). It has no effect on a mainnet network, where the bypass is
+    # always honoured.
+    X402_ALLOW_TESTNET_PAID_BYPASS: bool = False
     STAMP_POOL_MIN_TTL_HOURS: int = 24  # Top up if TTL below this
     STAMP_POOL_TOPUP_HOURS: int = 168   # How much TTL to add (1 week)
     STAMP_POOL_LOW_RESERVE_THRESHOLD: int = 1  # Alert when reserve drops to this level
@@ -291,6 +336,17 @@ class Settings(BaseSettings):
             if p.scheme and p.hostname:
                 out[f"{p.scheme.lower()}://{p.hostname.lower()}"] = limit
         return out
+
+    def paid_bypass_is_honoured(self) -> bool:
+        """Whether a settled x402 payment may bypass the pool daily allowance.
+
+        True on a mainnet network, or on a testnet when the operator has
+        explicitly opted in. Testnet USDC costs nothing to obtain, so a payment
+        settled there is not evidence that anyone paid for anything.
+        """
+        if self.X402_ALLOW_TESTNET_PAID_BYPASS:
+            return True
+        return not is_testnet_network(self.X402_NETWORK)
 
     def get_pool_admin_addresses(self) -> List[str]:
         """Parse the pool-admin allow-list into lowercased 0x addresses."""

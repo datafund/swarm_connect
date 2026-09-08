@@ -66,6 +66,11 @@ PROTECTED_ENDPOINTS = [
     # (POST /api/v1/chunks/) is NOT listed here — it spends prepaid credit via a
     # bearer token rather than a per-request payment.
     ("POST", "/api/v1/chunks/credit"),
+    # Pool acquire is priced here so a caller CAN pay for it, but the router
+    # attaches settle_payment_if_offered rather than require_x402_payment:
+    # payment is optional, and a caller presenting none falls through to the
+    # daily per-origin allowance instead of receiving a 402.
+    ("POST", "/api/v1/pool/acquire"),
 ]
 
 

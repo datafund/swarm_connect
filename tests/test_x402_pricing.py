@@ -415,3 +415,90 @@ class TestPricingFormulas:
         # Price should approximately double
         ratio = price_high["price_usd"] / price_low["price_usd"]
         assert 1.9 < ratio < 2.1  # Allow small rounding variance
+
+
+class TestPoolAcquirePricing:
+    """A pooled batch is a different product from a purchase, and priced as one.
+
+    The operator has already spent the capital, pays to keep the batch alive
+    whether or not anyone takes it, and carries the risk of it expiring unused.
+    What the caller buys is not the batch alone but the absence of the minute of
+    latency an on-chain purchase costs.
+    """
+
+    @pytest.mark.asyncio
+    async def test_price_scales_with_the_requested_size(self):
+        """It used to fall through to the minimum price for every size.
+
+        /pool/acquire matched no branch in the dispatcher and hit the final
+        return: X402_MIN_PRICE_USD, described as "Gateway operation", regardless
+        of depth. A depth-20 batch costs eight times a depth-17 one, so the quote
+        bore no relation to what was handed over.
+        """
+        from app.x402.dependency import _calculate_price_for_request
+        import app.x402.pricing as pricing
+
+        small = await _price(pricing, {"size": "small"})
+        medium = await _price(pricing, {"size": "medium"})
+        assert medium > small, "a larger batch was not priced higher"
+        assert medium / small == pytest.approx(8, rel=0.01), (
+            f"depth 20 should cost 8x depth 17, got {medium / small:.2f}x"
+        )
+
+    @pytest.mark.asyncio
+    async def test_the_markup_is_applied(self):
+        from app.core.config import settings
+        import app.x402.pricing as pricing
+
+        original = settings.X402_POOL_MARKUP_PERCENT
+        try:
+            settings.X402_POOL_MARKUP_PERCENT = 0
+            at_cost = await _price(pricing, {"size": "small"})
+            settings.X402_POOL_MARKUP_PERCENT = 100
+            doubled = await _price(pricing, {"size": "small"})
+            assert doubled / at_cost == pytest.approx(2.0, rel=0.001)
+        finally:
+            settings.X402_POOL_MARKUP_PERCENT = original
+
+    @pytest.mark.asyncio
+    async def test_a_negative_markup_cannot_discount_below_cost(self):
+        """Misconfiguration must not sell batches for less than they cost."""
+        from app.core.config import settings
+        import app.x402.pricing as pricing
+
+        original = settings.X402_POOL_MARKUP_PERCENT
+        try:
+            settings.X402_POOL_MARKUP_PERCENT = 0
+            at_cost = await _price(pricing, {"size": "small"})
+            settings.X402_POOL_MARKUP_PERCENT = -500
+            negative = await _price(pricing, {"size": "small"})
+            assert negative == at_cost, "a negative markup discounted below cost"
+        finally:
+            settings.X402_POOL_MARKUP_PERCENT = original
+
+    @pytest.mark.asyncio
+    async def test_priced_from_what_the_pool_pays_not_what_is_left(self):
+        """The cost basis is the purchase duration, plus the minimum-validity hour."""
+        from app.core.config import settings
+        import app.x402.pricing as pricing
+
+        quote = await _price(pricing, {"size": "small"}, full=True)
+        expected_hours = settings.STAMP_POOL_DEFAULT_DURATION_HOURS + 1
+        assert f"{expected_hours}h" in quote["description"], quote["description"]
+
+
+async def _price(pricing, body, full=False):
+    import types
+    from unittest.mock import patch, AsyncMock
+    from app.x402.dependency import _calculate_price_for_request
+
+    class Req:
+        def __init__(self):
+            self.url = types.SimpleNamespace(path="/api/v1/pool/acquire")
+            self.headers = {}
+            self.query_params = {}
+        async def json(self): return body
+
+    with patch.object(pricing, "get_chainstate", AsyncMock(return_value={"currentPrice": "78187"})):
+        q = await _calculate_price_for_request(Req())
+    return q if full else q["price_usd"]

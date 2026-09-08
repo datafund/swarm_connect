@@ -210,44 +210,84 @@ async def acquire_stamp(
         requested_depth = 17  # Default to small
     requested_size = depth_to_size_name(requested_depth)
 
+    # A settled payment bypasses the allowance. The allowance bounds what the
+    # operator GIVES AWAY; it has no business limiting what someone has paid for.
+    #
+    # This branch did not execute for a long time: the handler read
+    # request.state.x402_payer and registered the batch to that wallet when
+    # present, but the payment dependency was not attached to this router, so
+    # the attribute was always None and every acquire fell to the "shared" path.
+    x402_mode_pre = getattr(http_request.state, "x402_mode", None)
+    settled = x402_mode_pre == "paid"
+
+    # A settled payment only buys a bypass where the payment was worth
+    # something. On a testnet the currency is free from a faucet, so honouring
+    # it would hand anyone an unlimited supply of batches the operator paid real
+    # BZZ for — strictly worse than the allowance it replaces. The payment is
+    # still settled and the batch still registered to the payer; only the
+    # bypass is withheld, so the caller keeps its normal daily allowance.
+    paid = settled and settings.paid_bypass_is_honoured()
+    if settled and not paid:
+        logger.warning(
+            "Pool acquire settled on %s, which is a test network: allowance "
+            "still applies. Set X402_ALLOW_TESTNET_PAID_BYPASS to override.",
+            settings.X402_NETWORK,
+        )
+
     allowed_by_budget, budget = pool_allowance_tracker.check(origin, requested_size)
-    if not allowed_by_budget:
+    if paid:
+        logger.info("Pool acquire paid via x402, bypassing the daily allowance")
+    elif not allowed_by_budget:
         logger.info(
             "Pool allowance exhausted for origin %s (%s/%s today)",
             budget["origin"], budget["used"], budget["allowance"],
         )
+        # Written to be shown to a person, not just logged: the caller is a
+        # browser app whose user has never heard of a postage batch, so it says
+        # what they can do rather than only what failed.
+        #
+        # The offer to pay is conditional. Where a settled payment does not buy
+        # a bypass — a testnet, without the explicit override — telling the
+        # caller to pay would send them to a path that takes their payment and
+        # still refuses them, which is worse than not offering it at all.
+        message = (
+            f"The daily free allowance of {budget['allowance']} {requested_size} stamps for this "
+            f"application has been used up. It resets at {budget['resets_at']}. "
+        )
+        detail = {
+            "code": "DAILY_STAMP_ALLOWANCE_EXHAUSTED",
+            "size": requested_size,
+            "allowance": budget["allowance"],
+            "used": budget["used"],
+            "resets_at": budget["resets_at"],
+        }
+        if settings.paid_bypass_is_honoured():
+            message += (
+                "To continue now, pay with x402: send an X-PAYMENT header with "
+                "this same request and you get a pooled stamp immediately, "
+                "without drawing on the allowance."
+            )
+            detail["alternative"] = {
+                "endpoint": "POST /api/v1/pool/acquire",
+                "payment": "x402",
+                "header": "X-PAYMENT",
+                "note": "Paid acquires bypass the allowance and are immediate.",
+            }
+        else:
+            message += (
+                "To continue now, buy a stamp directly with POST /api/v1/stamps/ — "
+                "that is not drawn from the pool, so this limit does not apply. "
+                "It takes about a minute to become usable rather than seconds."
+            )
+            detail["alternative"] = {
+                "endpoint": "POST /api/v1/stamps/",
+                "note": "Direct purchase is not drawn from the pool, so the allowance does not apply.",
+            }
+        detail["message"] = message
+
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-            detail={
-                "code": "DAILY_STAMP_ALLOWANCE_EXHAUSTED",
-                # Written to be shown to a person, not just logged. The caller is
-                # a browser app whose user has no idea what a postage batch is.
-                # Written to be shown to a person. The caller is a browser app
-                # whose user has never heard of a postage batch, so it says what
-                # they can do rather than only what failed.
-                #
-                # It deliberately does NOT offer to sell pool access: that is not
-                # payable yet. Adding the payment dependency to this endpoint
-                # returns 402 to any caller sending no payment header, which is
-                # every current caller. Paid pool access is tracked in #67 and is
-                # blocked on dataprovenance-app#126.
-                "message": (
-                    f"The daily free allowance of {budget['allowance']} {requested_size} stamps for this "
-                    f"application has been used up. It resets at {budget['resets_at']}. "
-                    "To continue now, pay with x402: POST /api/v1/stamps/ with an "
-                    "X-PAYMENT header buys a stamp outright. It takes about a minute "
-                    "to become usable, unlike a pooled one."
-                ),
-                "size": requested_size,
-                "allowance": budget["allowance"],
-                "used": budget["used"],
-                "resets_at": budget["resets_at"],
-                "alternative": {
-                    "endpoint": "POST /api/v1/stamps/",
-                    "payment": "x402",
-                    "note": "Paid, and usable after about a minute.",
-                },
-            },
+            detail=detail,
         )
 
     # Try to get exact match first
@@ -307,8 +347,10 @@ async def acquire_stamp(
         )
 
     # Consumed only now: the batch has been released to the caller, so the
-    # allowance has genuinely been spent.
-    pool_allowance_tracker.consume(origin, requested_size)
+    # allowance has genuinely been spent. A paid acquire consumes nothing — the
+    # caller bought this batch rather than drawing on the free budget.
+    if not paid:
+        pool_allowance_tracker.consume(origin, requested_size)
 
     # Trigger immediate replenishment if pool is below target
     # This runs in the background and doesn't affect the response
