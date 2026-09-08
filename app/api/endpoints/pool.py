@@ -276,7 +276,8 @@ async def acquire_stamp(
         else:
             message += (
                 "To continue now, buy a stamp directly with POST /api/v1/stamps/ — "
-                "it costs the same but takes about a minute to become usable."
+                "that is not drawn from the pool, so this limit does not apply. "
+                "It takes about a minute to become usable rather than seconds."
             )
             detail["alternative"] = {
                 "endpoint": "POST /api/v1/stamps/",
