@@ -150,6 +150,96 @@ class TestManifestUploadSizeLimit:
         assert response.status_code == 200
 
 
+    @patch('app.api.endpoints.data.upload_collection_to_swarm', return_value="ref456")
+    @patch('app.api.endpoints.data.count_tar_files', return_value=1)
+    @patch('app.api.endpoints.data.validate_tar')
+    @patch('app.api.endpoints.data.settings')
+    def test_manifest_at_exact_limit_succeeds(self, mock_settings, mock_validate,
+                                              mock_count, mock_upload):
+        """The manifest endpoint carried the same defect as the data endpoint.
+
+        Both compare the request's Content-Length — which covers the multipart
+        envelope — against the limit that applies to the file itself. Only the
+        data endpoint had a boundary test, so the manifest side was fixed
+        without anything proving it. An archive at exactly the ceiling must be
+        accepted.
+        """
+        mock_settings.MAX_UPLOAD_SIZE_MB = 2
+        data = b"x" * (2 * 1024 * 1024)
+        response = client.post(
+            f"/api/v1/data/manifest?stamp_id={VALID_STAMP_ID}",
+            files={"file": ("exact.tar", io.BytesIO(data), "application/x-tar")}
+        )
+        assert response.status_code == 200, response.text
+
+    @patch('app.api.endpoints.data.upload_collection_to_swarm', return_value="ref456")
+    @patch('app.api.endpoints.data.count_tar_files', return_value=1)
+    @patch('app.api.endpoints.data.validate_tar')
+    @patch('app.api.endpoints.data.settings')
+    def test_manifest_one_byte_over_is_still_rejected(self, mock_settings, mock_validate,
+                                                      mock_count, mock_upload):
+        """The envelope allowance must not become slack in the limit."""
+        mock_settings.MAX_UPLOAD_SIZE_MB = 2
+        data = b"x" * (2 * 1024 * 1024 + 1)
+        response = client.post(
+            f"/api/v1/data/manifest?stamp_id={VALID_STAMP_ID}",
+            files={"file": ("over.tar", io.BytesIO(data), "application/x-tar")}
+        )
+        assert response.status_code == 413
+        assert response.json()["detail"]["code"] == "FILE_TOO_LARGE"
+
+    @patch('app.api.endpoints.data.settings')
+    def test_manifest_content_length_far_over_is_rejected(self, mock_settings):
+        """Declared length beyond the allowance short-circuits on Content-Length."""
+        mock_settings.MAX_UPLOAD_SIZE_MB = 1
+        response = client.post(
+            f"/api/v1/data/manifest?stamp_id={VALID_STAMP_ID}",
+            files={"file": ("t.tar", io.BytesIO(b"x" * 100), "application/x-tar")},
+            headers={"content-length": str(2 * 1024 * 1024)}
+        )
+        assert response.status_code == 413
+
+
+class TestEnvelopeAllowance:
+    """What the allowance is and is not.
+
+    It exists so the multipart wrapper does not count against the file. It must
+    not become slack in the limit itself, and it must not vary with anything the
+    caller controls.
+    """
+
+    @patch('app.api.endpoints.data.upload_data_to_swarm', return_value="ref123")
+    @patch('app.api.endpoints.data.settings')
+    def test_a_long_field_name_does_not_shrink_the_ceiling(self, mock_settings, mock_upload):
+        """The envelope grows with the field name as well as the filename."""
+        mock_settings.MAX_UPLOAD_SIZE_MB = 2
+        data = b"x" * (2 * 1024 * 1024)
+        response = client.post(
+            f"/api/v1/data/?stamp_id={VALID_STAMP_ID}",
+            files={"file": ("f" * 180 + ".bin", io.BytesIO(data), "application/octet-stream")},
+            data={"unused" * 20: "y" * 500},
+        )
+        assert response.status_code == 200, response.text
+
+    @patch('app.api.endpoints.data.upload_data_to_swarm', return_value="ref123")
+    @patch('app.api.endpoints.data.settings')
+    def test_the_allowance_is_not_extra_capacity(self, mock_settings, mock_upload):
+        """A file inside the 8 KB allowance but over the limit is still refused.
+
+        This is the failure mode of the fix: widening Content-Length by 8 KB
+        would raise the real ceiling by 8 KB if the exact check were not also
+        applied to the file's own length.
+        """
+        mock_settings.MAX_UPLOAD_SIZE_MB = 2
+        data = b"x" * (2 * 1024 * 1024 + 4096)
+        response = client.post(
+            f"/api/v1/data/?stamp_id={VALID_STAMP_ID}",
+            files={"file": ("over.bin", io.BytesIO(data), "application/octet-stream")}
+        )
+        assert response.status_code == 413
+        assert response.json()["detail"]["code"] == "FILE_TOO_LARGE"
+
+
 class TestConfigurableLimit:
     """Tests that the limit is configurable via settings."""
 
