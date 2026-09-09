@@ -51,7 +51,23 @@ class Settings(BaseSettings):
     X402_CHEQUEBOOK_WARN_THRESHOLD: float = 5.0  # Warn if chequebook < threshold
 
     # === x402 Limits ===
+    # Hard ceiling on what a single purchase or extend may cost the gateway.
+    #
+    # This setting existed from the start and was referenced nowhere — a cap
+    # that appears in configuration and enforces nothing, which is worse than an
+    # absent one because it reads as protection during review. It is enforced as
+    # of #102, on POST /stamps/ and PATCH /stamps/{id}/extend alike.
+    # Zero or negative disables it.
     X402_MAX_STAMP_BZZ: float = 5.0  # Max single stamp purchase in BZZ
+
+    # Daily BZZ a single caller may spend through the stamp endpoints, keyed on
+    # client IP. -1 disables the bound. See app/services/spend_budget.py for why
+    # this counts money rather than batches, and why the key is the IP.
+    #
+    # 0.5 BZZ is roughly 25 small 24-hour batches a day, which is far more than
+    # any observed legitimate caller and far less than the wallet.
+    STAMP_DAILY_BZZ_PER_CALLER: float = 0.5
+    STAMP_SPEND_BUDGET_STATE_FILE: str = "data/stamp_spend_budget.json"
     X402_RATE_LIMIT_PER_IP: int = 10  # Requests per minute per IP (for paying users)
 
     # === x402 Free Tier Settings ===
