@@ -840,7 +840,7 @@ Perform a comprehensive health check on a stamp to determine if it can be used f
 
 ### Upload Size Limits
 
-File uploads are limited to **10 MB** by default. This applies to both `/api/v1/data/` and `/api/v1/data/manifest` endpoints.
+File uploads are limited to **10 MB** by default. This applies to both `/api/v1/data/` and `/api/v1/data/manifest` endpoints, and a file of exactly the limit is accepted — the multipart envelope that wraps it does not count against the limit.
 
 ```bash
 # Configure in .env (value in megabytes)
