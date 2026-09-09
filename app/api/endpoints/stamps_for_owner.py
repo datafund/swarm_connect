@@ -30,7 +30,7 @@ from app.x402.middleware import get_client_ip
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
-PLUR_PER_BZZ = 10 ** 16
+from app.services.swarm_api import PLUR_PER_BZZ  # noqa: F401
 
 
 @router.post(

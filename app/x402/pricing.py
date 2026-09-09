@@ -26,13 +26,10 @@ from app.services.swarm_api import (
 logger = logging.getLogger(__name__)
 
 # Conversion constants
-PLUR_PER_BZZ = 10 ** 16  # 1 BZZ = 10^16 PLUR
+# Single source in app/services/swarm_api; re-exported here because callers
+# and tests import it from this module.
+from app.services.swarm_api import PLUR_PER_BZZ, plur_to_bzz  # noqa: F401
 BYTES_PER_GB = 10 ** 9   # 1 GB = 10^9 bytes (for bandwidth pricing)
-
-
-def plur_to_bzz(plur: int) -> float:
-    """Convert PLUR to BZZ."""
-    return plur / PLUR_PER_BZZ
 
 
 def bzz_to_usd(bzz: float, rate: Optional[float] = None) -> float:

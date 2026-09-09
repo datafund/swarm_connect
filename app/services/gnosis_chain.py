@@ -32,7 +32,7 @@ from app.core.config import settings
 logger = logging.getLogger(__name__)
 
 BUCKET_DEPTH = 16  # fixed by the Swarm protocol
-PLUR_PER_BZZ = 10 ** 16  # 1 BZZ = 10^16 PLUR
+from app.services.swarm_api import PLUR_PER_BZZ  # noqa: F401
 
 # Verified contract/token addresses per chain (ethersphere/go-storage-incentives-abi).
 CHAIN_DEFAULTS = {

@@ -115,6 +115,36 @@ bandwidth_topup_bytes_total = Counter(
     "gateway_bandwidth_topup_bytes_total", "Total bytes of bandwidth credit sold via top-ups"
 )
 
+# ── Spending limits (#102) ──────────────────────────────────────────────────
+#
+# Refusals are the signal that matters. The daily budget is a number chosen
+# without usage data, so the only way to tell "correctly bounding abuse" from
+# "turning away a legitimate integration" is to watch how often it fires and
+# whether it is always the same caller. Without these, we would learn about a
+# limit set too low from a complaint rather than a dashboard.
+#
+# No caller identity is exposed as a label: an IP is high-cardinality and would
+# multiply the series, and it is personal data going to a third-party metrics
+# store. The logs already name the caller for anyone diagnosing a specific case.
+stamp_spend_refusals_total = Counter(
+    "gateway_stamp_spend_refusals_total",
+    "Stamp purchases and extensions refused by a spending limit",
+    ["operation", "limit"],
+)
+stamp_spend_bzz_total = Counter(
+    "gateway_stamp_spend_bzz_total",
+    "BZZ committed through the stamp endpoints, by whether it was charged to a budget",
+    ["operation", "charged"],
+)
+stamp_spend_callers = Gauge(
+    "gateway_stamp_spend_callers",
+    "Distinct callers holding a non-zero spend balance today",
+)
+stamp_spend_bzz_today = Gauge(
+    "gateway_stamp_spend_bzz_today",
+    "Total BZZ charged to daily budgets today, across all callers",
+)
+
 # ── Bandwidth credit gauges (updated by background poller) ───────────────────
 
 bandwidth_credit_accounts = Gauge(
@@ -283,6 +313,19 @@ async def _poll_balances():
                     bandwidth_credit_bytes_total.set(bandwidth_credit_manager.total_outstanding_bytes())
                 except Exception as e:
                     logger.debug(f"Metrics: failed to get bandwidth credit state: {e}")
+
+            # Daily spend budgets on the stamp endpoints (#102).
+            #
+            # Polled from the tracker rather than incremented at the call site,
+            # because the day rolls over inside it: a counter would keep
+            # climbing while the underlying balances reset at midnight UTC.
+            try:
+                from app.services.spend_budget import spend_budget_tracker
+                spent = spend_budget_tracker.snapshot()["spent"]
+                stamp_spend_callers.set(len(spent))
+                stamp_spend_bzz_today.set(sum(spent.values()))
+            except Exception as e:
+                logger.debug(f"Metrics: failed to get spend budget state: {e}")
 
             # Gnosis signer wallet balances (buy-batch-for-owner feature)
             if settings.STAMP_PURCHASE_FOR_OTHERS_ENABLED:

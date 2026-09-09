@@ -7,9 +7,16 @@ import logging
 
 from app.core.config import settings
 from app.services import swarm_api
+from app.services.swarm_api import plur_to_bzz
 from app.services.stamp_ownership import stamp_ownership_manager
 from app.services.stamp_tracker import record_purchase
-from app.services.metrics import stamp_purchases_total
+from app.services.spend_budget import spend_budget_tracker
+from app.x402.middleware import get_client_ip
+from app.services.metrics import (
+    stamp_purchases_total,
+    stamp_spend_refusals_total,
+    stamp_spend_bzz_total,
+)
 from app.api.models.stamp import (
     StampDetails,
     StampPurchaseRequest,
@@ -24,6 +31,83 @@ from app.api.models.stamp import (
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
+
+
+def _enforce_spend_limits(request: Request, cost_bzz: float, operation: str) -> Optional[str]:
+    """Bound what one request, and one caller in a day, may spend.
+
+    Both stamp endpoints spend the gateway's BZZ for whoever asks. Two limits
+    apply, and they answer different questions:
+
+    - `X402_MAX_STAMP_BZZ` bounds a SINGLE request, so no one call can take a
+      large share of the wallet however it is shaped.
+    - `STAMP_DAILY_BZZ_PER_CALLER` bounds a caller over a day, so the first
+      limit cannot simply be applied repeatedly.
+
+    Returns the caller key to charge once the money is actually spent, or None
+    when the spend is not charged to anyone (a settled payment). Raises rather
+    than returning a failure, because every caller of this must stop.
+    """
+    max_single = settings.X402_MAX_STAMP_BZZ
+    if max_single > 0 and cost_bzz > max_single:
+        logger.warning(
+            "Refusing %s costing %.6f BZZ, above the per-request limit of %.6f",
+            operation, cost_bzz, max_single,
+        )
+        stamp_spend_refusals_total.labels(operation=operation, limit="per_request").inc()
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "code": "STAMP_COST_EXCEEDS_LIMIT",
+                "message": (
+                    f"This {operation} would cost {cost_bzz:.6f} BZZ, above the "
+                    f"per-request limit of {max_single:.6f} BZZ. Ask for a smaller "
+                    f"depth or a shorter duration."
+                ),
+                "cost_bzz": round(cost_bzz, 6),
+                "limit_bzz": max_single,
+            },
+        )
+
+    # A settled payment is not drawn from the giveaway budget — the caller has
+    # funded it. Withheld on a test network for the same reason as the pool:
+    # testnet currency is free from a faucet, so honouring it there would
+    # replace a bounded giveaway with an unbounded one.
+    if getattr(request.state, "x402_mode", None) == "paid":
+        if settings.paid_bypass_is_honoured():
+            stamp_spend_bzz_total.labels(operation=operation, charged="paid").inc(cost_bzz)
+            return None
+        logger.warning(
+            "Payment for %s settled on %s, which is a test network: the daily "
+            "spend budget still applies.", operation, settings.X402_NETWORK,
+        )
+
+    caller = get_client_ip(request)
+    allowed, info = spend_budget_tracker.check(caller, cost_bzz)
+    if not allowed:
+        logger.info(
+            "Daily spend budget exhausted for %s: %.6f of %.6f BZZ used, request needs %.6f",
+            caller, info["spent_bzz"], info["daily_budget_bzz"], cost_bzz,
+        )
+        stamp_spend_refusals_total.labels(operation=operation, limit="daily_budget").inc()
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail={
+                "code": "DAILY_SPEND_BUDGET_EXHAUSTED",
+                "message": (
+                    f"This {operation} would cost {cost_bzz:.6f} BZZ and only "
+                    f"{info['remaining_bzz']:.6f} BZZ remains of today's "
+                    f"{info['daily_budget_bzz']:.6f} BZZ allowance. It resets at "
+                    f"{info['resets_at']}. A smaller or shorter batch may still fit."
+                ),
+                "cost_bzz": info["request_cost_bzz"],
+                "daily_budget_bzz": info["daily_budget_bzz"],
+                "spent_bzz": info["spent_bzz"],
+                "remaining_bzz": info["remaining_bzz"],
+                "resets_at": info["resets_at"],
+            },
+        )
+    return caller
 
 
 def _bee_error_detail(exc: httpx.HTTPError):
@@ -401,6 +485,13 @@ async def purchase_stamp(
         total_cost = swarm_api.calculate_stamp_total_cost(amount, effective_depth)
         funds_check = await swarm_api.check_sufficient_funds(total_cost)
 
+        # Bound the spend BEFORE the funds check, so the answer does not depend
+        # on how much money happens to be left. Refusing a 243,074 BZZ request
+        # for "insufficient funds" told the caller the wallet was the only limit,
+        # which was true and is the defect this closes.
+        cost_bzz = plur_to_bzz(total_cost)
+        charge_to = _enforce_spend_limits(request, cost_bzz, "stamp purchase")
+
         if not funds_check["sufficient"]:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
@@ -417,6 +508,14 @@ async def purchase_stamp(
             depth=effective_depth,
             label=stamp_request.label
         )
+
+        # Charged only now: a purchase that failed downstream must not cost the
+        # caller their budget.
+        if charge_to is not None:
+            spend_budget_tracker.consume(charge_to, cost_bzz)
+            stamp_spend_bzz_total.labels(
+                operation="stamp purchase", charged="budget"
+            ).inc(cost_bzz)
 
         # Record purchase time for propagation tracking
         record_purchase(batch_id)
@@ -490,6 +589,7 @@ async def purchase_stamp(
     summary="Extend an Existing Swarm Postage Stamp"
 )
 async def extend_stamp(
+    request: Request,
     stamp_id: str = Path(..., description="The Batch ID of the stamp to extend.", example="a1b2c3d4e5f6...", pattern=r"^[a-fA-F0-9]{64}$"),
     extension_request: StampExtensionRequest = ...
 ) -> Any:
@@ -550,6 +650,14 @@ async def extend_stamp(
         total_cost = swarm_api.calculate_stamp_total_cost(amount, stamp_depth)
         funds_check = await swarm_api.check_sufficient_funds(total_cost)
 
+        # Extend is NOT in PROTECTED_ENDPOINTS — is_protected_endpoint matches on
+        # method, and this route is PATCH while only POST paths are listed — so
+        # there is no payment gate and no free-tier rate limit in front of it.
+        # It also tops up any batch on the node, including ones the caller does
+        # not own. The budget is therefore the only thing bounding it.
+        cost_bzz = plur_to_bzz(total_cost)
+        charge_to = _enforce_spend_limits(request, cost_bzz, "stamp extension")
+
         if not funds_check["sufficient"]:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
@@ -565,6 +673,12 @@ async def extend_stamp(
             stamp_id=stamp_id,
             amount=amount
         )
+
+        if charge_to is not None:
+            spend_budget_tracker.consume(charge_to, cost_bzz)
+            stamp_spend_bzz_total.labels(
+                operation="stamp extension", charged="budget"
+            ).inc(cost_bzz)
 
         return StampExtensionResponse(
             batchID=batch_id,

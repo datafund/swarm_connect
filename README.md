@@ -261,6 +261,7 @@ Swarm Connect is a FastAPI-based API gateway that provides comprehensive access 
 #### 🛡️ Security & Rate Limiting
 - **Upload Size Limits**: Configurable maximum upload size (default: 10 MB) with clear 413 errors
 - **Global Rate Limiting**: Per-IP sliding window rate limiter with burst capacity (default: 60 req/min + 10 burst)
+- **Spending Limits**: Stamp purchases and extensions are bounded per request and per caller per day, so no caller can drain the gateway's BZZ
 - **Input Validation**: Strict regex validation on stamp IDs (64-char hex) and references (64-128 char hex)
 - **Error Sanitization**: Internal details (IPs, ports, file paths) are never exposed in error responses
 - **Server Header Suppression**: `Server` header removed to prevent version fingerprinting
@@ -851,6 +852,35 @@ Uploads exceeding the limit receive a **413** response:
 ```json
 {"code": "FILE_TOO_LARGE", "message": "Upload exceeds maximum size of 10 MB.", "max_size_mb": 10}
 ```
+
+### Spending Limits
+
+`POST /api/v1/stamps/` and `PATCH /api/v1/stamps/{id}/extend` spend the gateway operator's BZZ on behalf of the caller. Two limits bound that, answering different questions:
+
+```bash
+# Configure in .env
+X402_MAX_STAMP_BZZ=5.0            # Most a single request may cost (0 disables)
+STAMP_DAILY_BZZ_PER_CALLER=0.5    # Most one caller may spend per day (-1 disables)
+```
+
+The first stops any one request taking a large share of the wallet however it is shaped — batch cost scales with `amount x 2^depth`, so the accepted depth and duration ranges span orders of magnitude. The second stops the first simply being applied repeatedly.
+
+A request over the per-request ceiling receives **400**:
+```json
+{"code": "STAMP_COST_EXCEEDS_LIMIT", "message": "...", "cost_bzz": 12.5, "limit_bzz": 5.0}
+```
+
+A caller who has spent their daily budget receives **429**, with the reset time and what remains:
+```json
+{"code": "DAILY_SPEND_BUDGET_EXHAUSTED", "message": "...", "remaining_bzz": 0.02,
+ "daily_budget_bzz": 0.5, "resets_at": "2026-09-09T24:00:00Z"}
+```
+
+Both are checked before the wallet balance, so the answer does not depend on how much money happens to be left, and charged only after the money is actually spent — a purchase the Swarm node refuses costs the caller nothing.
+
+The budget counts **BZZ rather than batches**, because these endpoints take a depth and a duration: a count would let a caller stay inside their allowance and still spend arbitrarily by asking for larger batches. It is keyed on the **client IP**, since the callers here are CLIs, SDKs and MCP clients that send no `Origin`. An IP is not an identity — it is shared behind NAT and cheap to change — so this bounds casual and accidental spending rather than preventing deliberate spending. A caller who needs more can pay: a settled x402 payment bypasses the daily budget, though not the per-request ceiling.
+
+Counters `gateway_stamp_spend_refusals_total` and `gateway_stamp_spend_bzz_total` make refusals and committed spend visible in Prometheus, so a limit set too low shows up on a dashboard rather than in a complaint.
 
 ### Rate Limiting
 
