@@ -404,3 +404,228 @@ class TestMetrics:
         for line in body.splitlines():
             if line.startswith("gateway_stamp_spend"):
                 assert "testclient" not in line, line
+
+
+class TestDayRollover:
+    """"Daily" is the whole contract.
+
+    If the reset failed, a caller would be locked out permanently after their
+    first day rather than for the rest of it — a limit that never releases is a
+    different product from one that resets, and nothing else in the suite
+    exercised a live rollover: the other test loads yesterday's file at startup,
+    which is a different code path.
+    """
+
+    def test_a_running_tracker_resets_when_the_day_turns(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(settings, "STAMP_DAILY_BZZ_PER_CALLER", 1.0)
+        t = SpendBudgetTracker(state_file=str(tmp_path / "spend.json"))
+        t.consume("1.2.3.4", 1.0)
+        assert not t.check("1.2.3.4", 0.5)[0]
+
+        from app.services import spend_budget
+        monkeypatch.setattr(spend_budget, "_today", lambda: "2099-01-01")
+
+        allowed, info = t.check("1.2.3.4", 1.0)
+        assert allowed, "the budget did not reset when the day turned"
+        assert info["spent_bzz"] == 0
+        assert info["resets_at"].startswith("2099-01-01")
+
+    def test_the_reset_is_persisted_not_just_in_memory(self, tmp_path, monkeypatch):
+        """Otherwise a restart just after midnight would reload yesterday's
+        spend and re-apply it to the new day."""
+        import json
+        monkeypatch.setattr(settings, "STAMP_DAILY_BZZ_PER_CALLER", 1.0)
+        path = tmp_path / "spend.json"
+        t = SpendBudgetTracker(state_file=str(path))
+        t.consume("1.2.3.4", 1.0)
+
+        from app.services import spend_budget
+        monkeypatch.setattr(spend_budget, "_today", lambda: "2099-01-01")
+        t.check("1.2.3.4", 0.1)
+
+        on_disk = json.loads(path.read_text())
+        assert on_disk["day"] == "2099-01-01"
+        assert on_disk["spent"] == {}
+
+    def test_snapshot_also_rolls_the_day(self, tmp_path, monkeypatch):
+        """The metrics gauges read through snapshot(); a stale day there would
+        report yesterday's total as today's."""
+        monkeypatch.setattr(settings, "STAMP_DAILY_BZZ_PER_CALLER", 1.0)
+        t = SpendBudgetTracker(state_file=str(tmp_path / "spend.json"))
+        t.consume("1.2.3.4", 0.5)
+
+        from app.services import spend_budget
+        monkeypatch.setattr(spend_budget, "_today", lambda: "2099-01-01")
+        assert t.snapshot() == {"day": "2099-01-01", "spent": {}}
+
+
+class TestDurability:
+    def test_a_request_survives_an_unwritable_state_file(self, tmp_path, monkeypatch):
+        """Losing the counter is recoverable; failing the request is not. A full
+        or read-only disk must not stop the gateway selling stamps."""
+        monkeypatch.setattr(settings, "STAMP_DAILY_BZZ_PER_CALLER", 1.0)
+        t = SpendBudgetTracker(state_file=str(tmp_path / "spend.json"))
+
+        def boom(*a, **k):
+            raise OSError("read-only file system")
+
+        monkeypatch.setattr("builtins.open", boom)
+        t.consume("1.2.3.4", 0.1)  # must not raise
+        monkeypatch.undo()
+
+        # The in-memory count still moved, so the budget holds for this process.
+        assert t.check("1.2.3.4", 0.95)[0] is False
+
+    def test_concurrent_requests_cannot_overspend(self, tmp_path, monkeypatch):
+        """This is a money path and the tracker is shared across threads.
+
+        Without the lock, interleaved read-modify-write on the same caller loses
+        updates, and the recorded spend comes out lower than what was actually
+        committed — which is the direction that costs money.
+        """
+        import threading
+        monkeypatch.setattr(settings, "STAMP_DAILY_BZZ_PER_CALLER", -1.0)
+        t = SpendBudgetTracker(state_file=str(tmp_path / "spend.json"))
+
+        def spend():
+            for _ in range(50):
+                t.consume("1.2.3.4", 0.01)
+
+        threads = [threading.Thread(target=spend) for _ in range(8)]
+        for th in threads:
+            th.start()
+        for th in threads:
+            th.join()
+
+        assert t.snapshot()["spent"]["1.2.3.4"] == pytest.approx(8 * 50 * 0.01)
+
+
+class TestBothLimitsApplyToBothEndpoints:
+    """The two endpoints were bounded in one change, so it is easy for a later
+    edit to fix or break one and not the other. These pin the symmetry."""
+
+    def _extend(self):
+        existing = [{"batchID": STAMP_ID, "depth": 17, "batchTTL": 86400}]
+        with patch("app.services.swarm_api.get_all_stamps_processed",
+                   new=AsyncMock(return_value=existing)), \
+             patch("app.services.swarm_api.get_chainstate",
+                   new=AsyncMock(return_value=CHAINSTATE)), \
+             patch("app.services.swarm_api.check_sufficient_funds",
+                   new=AsyncMock(return_value=FUNDS_OK)), \
+             patch("app.services.swarm_api.extend_postage_stamp",
+                   new=AsyncMock(return_value=STAMP_ID)):
+            return TestClient(app).patch(f"/api/v1/stamps/{STAMP_ID}/extend",
+                                         json={"duration_hours": 8760})
+
+    def test_the_per_request_ceiling_applies_to_extend(self, tracker, monkeypatch):
+        """Only the daily budget was covered on this endpoint before."""
+        monkeypatch.setattr(settings, "X402_MAX_STAMP_BZZ", 0.0000001)
+        monkeypatch.setattr(settings, "STAMP_DAILY_BZZ_PER_CALLER", UNLIMITED)
+        r = self._extend()
+        assert r.status_code == 400
+        assert r.json()["detail"]["code"] == "STAMP_COST_EXCEEDS_LIMIT"
+
+    def test_the_refusal_names_the_operation(self, tracker, monkeypatch):
+        """A caller seeing "stamp purchase" on an extend has been told the wrong
+        thing about what they just did."""
+        monkeypatch.setattr(settings, "X402_MAX_STAMP_BZZ", 0.0000001)
+        monkeypatch.setattr(settings, "STAMP_DAILY_BZZ_PER_CALLER", UNLIMITED)
+        assert "extension" in self._extend().json()["detail"]["message"]
+
+    def test_a_refused_extend_is_counted_under_its_own_operation(self, tracker, monkeypatch):
+        monkeypatch.setattr(settings, "X402_MAX_STAMP_BZZ", 0.0000001)
+        monkeypatch.setattr(settings, "STAMP_DAILY_BZZ_PER_CALLER", UNLIMITED)
+        before = _counter("gateway_stamp_spend_refusals_total",
+                          operation="stamp extension", limit="per_request")
+        self._extend()
+        after = _counter("gateway_stamp_spend_refusals_total",
+                         operation="stamp extension", limit="per_request")
+        assert after == before + 1
+
+
+class TestOnlyASettledPaymentBypasses:
+    """`paid` is one of several x402 modes. Treating anything non-None as paid
+    would hand the bypass to every free-tier caller, which is the population the
+    budget exists for."""
+
+    def _helper_with_mode(self, mode):
+        import app.api.endpoints.stamps as stamps_ep
+        from types import SimpleNamespace
+
+        class _Req:
+            def __init__(self):
+                self.state = SimpleNamespace(x402_mode=mode)
+                self.headers = {}
+                self.client = None
+
+        return stamps_ep, _Req()
+
+    @pytest.mark.parametrize("mode", ["free", "free-tier", "rejected", None])
+    def test_a_non_paid_mode_is_still_charged(self, tracker, monkeypatch, mode):
+        monkeypatch.setattr(settings, "X402_MAX_STAMP_BZZ", 0.0)
+        monkeypatch.setattr(settings, "STAMP_DAILY_BZZ_PER_CALLER", UNLIMITED)
+        monkeypatch.setattr(settings, "X402_NETWORK", "base")
+        stamps_ep, req = self._helper_with_mode(mode)
+        assert stamps_ep._enforce_spend_limits(req, 0.1, "stamp purchase") is not None, \
+            f"mode {mode!r} was treated as a settled payment"
+
+    def test_the_handler_passes_the_live_request_to_the_limits(self, tracker, monkeypatch):
+        """The other paid tests drive the helper with a stand-in request, so
+        they would still pass if the handler forgot to pass the real one and the
+        payment state never reached the check.
+
+        Mutating app middleware to simulate a settled payment was tried and
+        leaked into later tests in the same file. This wraps the real helper
+        instead: it sets the payment state on whatever request the handler
+        actually passed, then calls through, so both the wiring and the bypass
+        are exercised without touching global app state.
+        """
+        monkeypatch.setattr(settings, "X402_MAX_STAMP_BZZ", 0.0)
+        monkeypatch.setattr(settings, "STAMP_DAILY_BZZ_PER_CALLER", 0.001)
+        monkeypatch.setattr(settings, "X402_NETWORK", "base")
+        tracker.consume("testclient", 0.001)
+
+        import app.api.endpoints.stamps as stamps_ep
+        real = stamps_ep._enforce_spend_limits
+        seen = {}
+
+        def as_paid(request, cost_bzz, operation):
+            seen["request"] = request
+            request.state.x402_mode = "paid"
+            return real(request, cost_bzz, operation)
+
+        monkeypatch.setattr(stamps_ep, "_enforce_spend_limits", as_paid)
+
+        with patch("app.services.swarm_api.get_chainstate",
+                   new=AsyncMock(return_value=CHAINSTATE)), \
+             patch("app.services.swarm_api.check_sufficient_funds",
+                   new=AsyncMock(return_value=FUNDS_OK)), \
+             patch("app.services.swarm_api.purchase_postage_stamp",
+                   new=AsyncMock(return_value="b" * 64)):
+            r = TestClient(app).post("/api/v1/stamps/",
+                                     json={"depth": 17, "duration_hours": 24})
+
+        from starlette.requests import Request as StarletteRequest
+        assert isinstance(seen.get("request"), StarletteRequest), \
+            "the handler did not pass the live request to the spending check"
+        assert r.status_code == 201, r.text
+        assert tracker.snapshot()["spent"] == {"testclient": 0.001}, \
+            "a settled payment was charged to the giveaway budget"
+
+    def test_an_exhausted_budget_still_refuses_without_a_payment(self, tracker, monkeypatch):
+        """The control for the test above: same setup, no payment state set, so
+        a pass there cannot be the budget quietly failing to apply."""
+        monkeypatch.setattr(settings, "X402_MAX_STAMP_BZZ", 0.0)
+        monkeypatch.setattr(settings, "STAMP_DAILY_BZZ_PER_CALLER", 0.001)
+        monkeypatch.setattr(settings, "X402_NETWORK", "base")
+        tracker.consume("testclient", 0.001)
+
+        with patch("app.services.swarm_api.get_chainstate",
+                   new=AsyncMock(return_value=CHAINSTATE)), \
+             patch("app.services.swarm_api.check_sufficient_funds",
+                   new=AsyncMock(return_value=FUNDS_OK)), \
+             patch("app.services.swarm_api.purchase_postage_stamp",
+                   new=AsyncMock(return_value="b" * 64)):
+            r = TestClient(app).post("/api/v1/stamps/",
+                                     json={"depth": 17, "duration_hours": 24})
+        assert r.status_code == 429

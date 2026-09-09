@@ -1227,10 +1227,19 @@ def calculate_stamp_total_cost(amount: int, depth: int) -> int:
     return amount * (2 ** depth)
 
 
-# BZZ is denominated in PLUR on chain. Named so callers that need a cost in BZZ
-# can convert it themselves rather than reading it out of check_sufficient_funds'
-# response — a partial mock of that function omitting a key should not be able to
-# turn a spending limit into a 500.
+# BZZ is denominated in PLUR on chain.
+#
+# Defined here, in the lowest layer, and imported by everything else that needs
+# it. There were five separate copies of this constant and two of the function
+# before #102 — app/x402/pricing.py, app/x402/preflight.py,
+# app/services/gnosis_chain.py, app/api/endpoints/stamps_for_owner.py and this
+# module. They all agreed, but nothing made them agree, and a single one drifting
+# would have produced wrong money arithmetic in one place and not the others.
+#
+# Named rather than inlined so callers needing a cost in BZZ can convert it
+# themselves rather than reading it out of check_sufficient_funds' response: a
+# partial mock of that function omitting a key should not be able to turn a
+# spending limit into a 500.
 PLUR_PER_BZZ = 10 ** 16
 
 

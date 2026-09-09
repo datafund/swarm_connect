@@ -33,7 +33,7 @@ router = APIRouter()
 logger = logging.getLogger(__name__)
 
 
-def _enforce_spend_limits(request: Optional[Request], cost_bzz: float, operation: str) -> Optional[str]:
+def _enforce_spend_limits(request: Request, cost_bzz: float, operation: str) -> Optional[str]:
     """Bound what one request, and one caller in a day, may spend.
 
     Both stamp endpoints spend the gateway's BZZ for whoever asks. Two limits
@@ -73,7 +73,7 @@ def _enforce_spend_limits(request: Optional[Request], cost_bzz: float, operation
     # funded it. Withheld on a test network for the same reason as the pool:
     # testnet currency is free from a faucet, so honouring it there would
     # replace a bounded giveaway with an unbounded one.
-    if request is not None and getattr(request.state, "x402_mode", None) == "paid":
+    if getattr(request.state, "x402_mode", None) == "paid":
         if settings.paid_bypass_is_honoured():
             stamp_spend_bzz_total.labels(operation=operation, charged="paid").inc(cost_bzz)
             return None
@@ -82,7 +82,7 @@ def _enforce_spend_limits(request: Optional[Request], cost_bzz: float, operation
             "spend budget still applies.", operation, settings.X402_NETWORK,
         )
 
-    caller = get_client_ip(request) if request is not None else "unknown"
+    caller = get_client_ip(request)
     allowed, info = spend_budget_tracker.check(caller, cost_bzz)
     if not allowed:
         logger.info(
