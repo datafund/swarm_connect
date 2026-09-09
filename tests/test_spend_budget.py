@@ -23,6 +23,7 @@ from fastapi.testclient import TestClient
 from app.core.config import settings
 from app.main import app
 from app.services.spend_budget import SpendBudgetTracker, UNLIMITED
+from prometheus_client import REGISTRY
 
 STAMP_ID = "a" * 64
 
@@ -316,3 +317,90 @@ class TestPaidCallersBypass:
             stamps_ep._enforce_spend_limits(_Req(), 5.0, "stamp purchase")
         assert e.value.status_code == 400
         assert e.value.detail["code"] == "STAMP_COST_EXCEEDS_LIMIT"
+
+
+def _counter(name, **labels):
+    """Current value of a labelled counter, or 0 before it is first touched."""
+    v = REGISTRY.get_sample_value(name, labels)
+    return 0.0 if v is None else v
+
+
+class TestMetrics:
+    """The budget is a number chosen without usage data.
+
+    Refusals are how we tell "correctly bounding abuse" from "turning away a
+    legitimate integration", so they have to be visible somewhere other than the
+    logs. These pin that the counters actually move.
+    """
+
+    def _purchase(self):
+        with patch("app.services.swarm_api.get_chainstate",
+                   new=AsyncMock(return_value=CHAINSTATE)), \
+             patch("app.services.swarm_api.check_sufficient_funds",
+                   new=AsyncMock(return_value=FUNDS_OK)), \
+             patch("app.services.swarm_api.purchase_postage_stamp",
+                   new=AsyncMock(return_value="b" * 64)):
+            return TestClient(app).post("/api/v1/stamps/",
+                                        json={"depth": 17, "duration_hours": 24})
+
+    def test_a_budget_refusal_is_counted(self, tracker, monkeypatch):
+        monkeypatch.setattr(settings, "X402_MAX_STAMP_BZZ", 0.0)
+        monkeypatch.setattr(settings, "STAMP_DAILY_BZZ_PER_CALLER", 0.001)
+        tracker.consume("testclient", 0.001)
+
+        before = _counter("gateway_stamp_spend_refusals_total",
+                          operation="stamp purchase", limit="daily_budget")
+        assert self._purchase().status_code == 429
+        after = _counter("gateway_stamp_spend_refusals_total",
+                         operation="stamp purchase", limit="daily_budget")
+        assert after == before + 1
+
+    def test_a_ceiling_refusal_is_counted_separately(self, tracker, monkeypatch):
+        """The two limits mean different things — one number for both would not
+        say whether the cap is too low or the budget is."""
+        monkeypatch.setattr(settings, "X402_MAX_STAMP_BZZ", 0.0000001)
+        monkeypatch.setattr(settings, "STAMP_DAILY_BZZ_PER_CALLER", UNLIMITED)
+
+        before = _counter("gateway_stamp_spend_refusals_total",
+                          operation="stamp purchase", limit="per_request")
+        assert self._purchase().status_code == 400
+        after = _counter("gateway_stamp_spend_refusals_total",
+                         operation="stamp purchase", limit="per_request")
+        assert after == before + 1
+
+    def test_committed_bzz_is_counted(self, tracker, monkeypatch):
+        monkeypatch.setattr(settings, "X402_MAX_STAMP_BZZ", 0.0)
+        monkeypatch.setattr(settings, "STAMP_DAILY_BZZ_PER_CALLER", UNLIMITED)
+
+        before = _counter("gateway_stamp_spend_bzz_total",
+                          operation="stamp purchase", charged="budget")
+        assert self._purchase().status_code == 201
+        after = _counter("gateway_stamp_spend_bzz_total",
+                         operation="stamp purchase", charged="budget")
+        assert after > before, "the BZZ committed was not recorded"
+
+    def test_a_refused_purchase_records_no_spend(self, tracker, monkeypatch):
+        """A refusal must not look like money going out the door."""
+        monkeypatch.setattr(settings, "X402_MAX_STAMP_BZZ", 0.0000001)
+        monkeypatch.setattr(settings, "STAMP_DAILY_BZZ_PER_CALLER", UNLIMITED)
+
+        before = _counter("gateway_stamp_spend_bzz_total",
+                          operation="stamp purchase", charged="budget")
+        assert self._purchase().status_code == 400
+        after = _counter("gateway_stamp_spend_bzz_total",
+                         operation="stamp purchase", charged="budget")
+        assert after == before
+
+    def test_no_caller_identity_leaks_into_a_label(self, tracker, monkeypatch):
+        """An IP is high-cardinality and is personal data going to a
+        third-party metrics store. The logs name the caller; the metrics
+        must not."""
+        monkeypatch.setattr(settings, "X402_MAX_STAMP_BZZ", 0.0)
+        monkeypatch.setattr(settings, "STAMP_DAILY_BZZ_PER_CALLER", 0.001)
+        tracker.consume("testclient", 0.001)
+        self._purchase()
+
+        body = TestClient(app).get("/metrics").text
+        for line in body.splitlines():
+            if line.startswith("gateway_stamp_spend"):
+                assert "testclient" not in line, line

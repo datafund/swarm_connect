@@ -394,6 +394,8 @@ The gateway exposes a `/metrics` endpoint (Prometheus text format) when `METRICS
 - `gateway_downloads_total{status}`
 - `gateway_stamp_purchases_total{size, status}`
 - `gateway_pool_acquires_total{size, status}`
+- `gateway_stamp_spend_refusals_total{operation, limit}` — purchases and extends refused by a spending limit (`limit` = `per_request` or `daily_budget`)
+- `gateway_stamp_spend_bzz_total{operation, charged}` — BZZ committed through the stamp endpoints (`charged` = `budget` or `paid`)
 - `gateway_notary_signatures_total{status}`
 - `gateway_x402_payments_total{mode}` (paid/free/rejected)
 - `gateway_rate_limit_hits_total`
@@ -406,6 +408,7 @@ The gateway exposes a `/metrics` endpoint (Prometheus text format) when `METRICS
 - `gateway_stamp_pool_available{size}`, `gateway_stamps_total`
 - `gateway_stamp_min_ttl_seconds`, `gateway_uptime_seconds`
 - `gateway_bandwidth_credit_accounts`, `gateway_bandwidth_credit_bytes_total` (when `CHUNK_UPLOAD_ENABLED`)
+- `gateway_stamp_spend_callers`, `gateway_stamp_spend_bzz_today` — callers holding a spend balance today, and the BZZ charged to budgets so far. Polled rather than accumulated, because the day rolls over inside the tracker and a counter would keep climbing past midnight UTC.
 
 **Info**: `gateway_info{version, environment, x402_enabled, pool_enabled, notary_enabled, chunk_upload_enabled}`
 

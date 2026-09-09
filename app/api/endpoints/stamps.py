@@ -12,7 +12,11 @@ from app.services.stamp_ownership import stamp_ownership_manager
 from app.services.stamp_tracker import record_purchase
 from app.services.spend_budget import spend_budget_tracker
 from app.x402.middleware import get_client_ip
-from app.services.metrics import stamp_purchases_total
+from app.services.metrics import (
+    stamp_purchases_total,
+    stamp_spend_refusals_total,
+    stamp_spend_bzz_total,
+)
 from app.api.models.stamp import (
     StampDetails,
     StampPurchaseRequest,
@@ -50,6 +54,7 @@ def _enforce_spend_limits(request: Optional[Request], cost_bzz: float, operation
             "Refusing %s costing %.6f BZZ, above the per-request limit of %.6f",
             operation, cost_bzz, max_single,
         )
+        stamp_spend_refusals_total.labels(operation=operation, limit="per_request").inc()
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail={
@@ -70,6 +75,7 @@ def _enforce_spend_limits(request: Optional[Request], cost_bzz: float, operation
     # replace a bounded giveaway with an unbounded one.
     if request is not None and getattr(request.state, "x402_mode", None) == "paid":
         if settings.paid_bypass_is_honoured():
+            stamp_spend_bzz_total.labels(operation=operation, charged="paid").inc(cost_bzz)
             return None
         logger.warning(
             "Payment for %s settled on %s, which is a test network: the daily "
@@ -83,6 +89,7 @@ def _enforce_spend_limits(request: Optional[Request], cost_bzz: float, operation
             "Daily spend budget exhausted for %s: %.6f of %.6f BZZ used, request needs %.6f",
             caller, info["spent_bzz"], info["daily_budget_bzz"], cost_bzz,
         )
+        stamp_spend_refusals_total.labels(operation=operation, limit="daily_budget").inc()
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail={
@@ -506,6 +513,9 @@ async def purchase_stamp(
         # caller their budget.
         if charge_to is not None:
             spend_budget_tracker.consume(charge_to, cost_bzz)
+            stamp_spend_bzz_total.labels(
+                operation="stamp purchase", charged="budget"
+            ).inc(cost_bzz)
 
         # Record purchase time for propagation tracking
         record_purchase(batch_id)
@@ -666,6 +676,9 @@ async def extend_stamp(
 
         if charge_to is not None:
             spend_budget_tracker.consume(charge_to, cost_bzz)
+            stamp_spend_bzz_total.labels(
+                operation="stamp extension", charged="budget"
+            ).inc(cost_bzz)
 
         return StampExtensionResponse(
             batchID=batch_id,
