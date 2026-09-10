@@ -97,20 +97,11 @@ class SlidingWindowCounter:
 _counter = SlidingWindowCounter()
 
 
-def get_client_ip(request: Request) -> str:
-    """Extract client IP from request, handling proxies."""
-    forwarded_for = request.headers.get("X-Forwarded-For")
-    if forwarded_for:
-        return forwarded_for.split(",")[0].strip()
-
-    real_ip = request.headers.get("X-Real-IP")
-    if real_ip:
-        return real_ip.strip()
-
-    if request.client:
-        return request.client.host
-
-    return "unknown"
+# Single implementation in app/core/client_ip. Re-exported here because
+# callers and tests import it from this module. Both copies used to take the
+# FIRST X-Forwarded-For entry, which is the one furthest from us and is
+# caller-controlled if any proxy appends rather than replaces.
+from app.core.client_ip import get_client_ip  # noqa: F401,E402
 
 
 class RateLimitMiddleware(BaseHTTPMiddleware):

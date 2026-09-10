@@ -280,6 +280,19 @@ class Settings(BaseSettings):
     MAX_JSON_DEPTH: int = 20  # Maximum JSON nesting depth
 
     # === Global Rate Limiting ===
+    # Number of proxies between the internet and this application, used to
+    # locate the caller in X-Forwarded-For. See app/core/client_ip.py.
+    #
+    # 1 is correct for the standard deployment: Caddy terminates TLS and
+    # forwards to the gateway on loopback. Raise it if a CDN or load balancer is
+    # added in front, and set it to 0 if the application is exposed directly, in
+    # which case forwarding headers are ignored rather than half-trusted.
+    #
+    # Getting this too HIGH groups callers together, which over-limits and is
+    # visible as complaints. Too LOW lets a caller pick their own identity, which
+    # under-limits and is visible as nothing at all.
+    TRUSTED_PROXY_HOPS: int = 1
+
     RATE_LIMIT_ENABLED: bool = True  # Enable global rate limiting
     RATE_LIMIT_PER_MINUTE: int = 60  # Requests per minute per IP
     RATE_LIMIT_BURST: int = 10  # Extra burst capacity above per-minute limit
