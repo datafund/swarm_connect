@@ -24,10 +24,18 @@
 }
 
 {$GATEWAY_HOST} {
-	# Caddy sets X-Forwarded-For by default. Both get_client_ip()
-	# implementations read it, and without it every caller collapses into one
-	# bucket — per-IP rate limiting and the x402 free-tier allowance would then
-	# be shared globally rather than per client.
+	# Caddy sets X-Forwarded-For by default. The gateway reads it to identify
+	# the caller, and without it every caller collapses into one bucket —
+	# per-IP rate limiting, the x402 free-tier allowance and the daily spend
+	# budget would all be shared globally rather than per client.
+	#
+	# The gateway counts back from the RIGHT of that header by
+	# TRUSTED_PROXY_HOPS (default 1), so it is correct whether Caddy replaces
+	# the header or appends to it. IF YOU ADD A PROXY OR CDN IN FRONT OF THIS
+	# ONE, raise TRUSTED_PROXY_HOPS to match, or the gateway will read the new
+	# proxy's address as the caller and every request will share one budget.
+	# Lowering it below the real number of hops is worse: the caller then gets
+	# to pick their own identity by sending the header themselves.
 	# Prometheus metrics are NOT public (#188). The endpoint exposed 146 series to
 	# anyone who asked: wallet addresses, BZZ and xDAI balances, gateway version,
 	# which features are enabled, and request volumes — a funding position, in
@@ -66,6 +74,9 @@
 }
 
 {$GATEWAY_DEV_HOST} {
+	# The X-Forwarded-For note on the site above applies here too: the gateway
+	# identifies callers from that header, and TRUSTED_PROXY_HOPS must match the
+	# real number of proxies in front of it.
 	# Prometheus metrics are NOT public (#188). The endpoint exposed 146 series to
 	# anyone who asked: wallet addresses, BZZ and xDAI balances, gateway version,
 	# which features are enabled, and request volumes — a funding position, in

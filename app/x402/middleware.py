@@ -82,23 +82,11 @@ def is_protected_endpoint(method: str, path: str) -> bool:
     return False
 
 
-def get_client_ip(request: Request) -> str:
-    """Extract client IP from request, handling proxies."""
-    # Check for forwarded headers first
-    forwarded_for = request.headers.get("X-Forwarded-For")
-    if forwarded_for:
-        # Take the first IP in the chain
-        return forwarded_for.split(",")[0].strip()
-
-    real_ip = request.headers.get("X-Real-IP")
-    if real_ip:
-        return real_ip.strip()
-
-    # Fall back to direct connection
-    if request.client:
-        return request.client.host
-
-    return "unknown"
+# Single implementation in app/core/client_ip. Re-exported here because
+# callers and tests import it from this module. Both copies used to take the
+# FIRST X-Forwarded-For entry, which is the one furthest from us and is
+# caller-controlled if any proxy appends rather than replaces.
+from app.core.client_ip import get_client_ip  # noqa: F401,E402
 
 
 def create_payment_requirements(
