@@ -40,6 +40,11 @@ from app.services.metrics import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Slack allowed on Content-Length to cover the multipart envelope that wraps an
+# uploaded file. 8 KB is far more than a boundary plus part headers need, and
+# far less than any size that would matter for the limit itself.
+MULTIPART_ENVELOPE_ALLOWANCE = 8 * 1024
 router = APIRouter()
 
 
@@ -274,10 +279,25 @@ async def upload_data(
                     raise HTTPException(status_code=400, detail=detail)
             stamp_validate_ms = (time.perf_counter() - stamp_start) * 1000
 
-        # Check upload size limit
+        # Check upload size limit.
+        #
+        # Content-Length covers the whole multipart envelope — boundary, part
+        # headers, trailer — not just the file. Comparing it against the file
+        # limit put the real ceiling a few hundred bytes below the documented
+        # one, so a file of exactly MAX_UPLOAD_SIZE_MB was always rejected with
+        # 413 while the check below, which measures the file itself, would have
+        # accepted it. The two checks were applying one limit to two different
+        # quantities.
+        #
+        # The allowance is generous relative to a real envelope (a boundary and
+        # one set of part headers is a few hundred bytes) because this check is
+        # only a coarse guard: it cannot reject early, since FastAPI parses the
+        # multipart form during dependency resolution and the body is already
+        # in memory by the time this line runs. The exact limit is enforced on
+        # the file's own length below.
         max_size = settings.MAX_UPLOAD_SIZE_MB * 1024 * 1024
         content_length = request.headers.get("content-length")
-        if content_length and int(content_length) > max_size:
+        if content_length and int(content_length) > max_size + MULTIPART_ENVELOPE_ALLOWANCE:
             raise HTTPException(
                 status_code=413,
                 detail={
@@ -704,10 +724,25 @@ async def upload_manifest(
                     raise HTTPException(status_code=400, detail=detail)
             stamp_validate_ms = (time.perf_counter() - stamp_start) * 1000
 
-        # Check upload size limit
+        # Check upload size limit.
+        #
+        # Content-Length covers the whole multipart envelope — boundary, part
+        # headers, trailer — not just the file. Comparing it against the file
+        # limit put the real ceiling a few hundred bytes below the documented
+        # one, so a file of exactly MAX_UPLOAD_SIZE_MB was always rejected with
+        # 413 while the check below, which measures the file itself, would have
+        # accepted it. The two checks were applying one limit to two different
+        # quantities.
+        #
+        # The allowance is generous relative to a real envelope (a boundary and
+        # one set of part headers is a few hundred bytes) because this check is
+        # only a coarse guard: it cannot reject early, since FastAPI parses the
+        # multipart form during dependency resolution and the body is already
+        # in memory by the time this line runs. The exact limit is enforced on
+        # the file's own length below.
         max_size = settings.MAX_UPLOAD_SIZE_MB * 1024 * 1024
         content_length = request.headers.get("content-length")
-        if content_length and int(content_length) > max_size:
+        if content_length and int(content_length) > max_size + MULTIPART_ENVELOPE_ALLOWANCE:
             raise HTTPException(
                 status_code=413,
                 detail={

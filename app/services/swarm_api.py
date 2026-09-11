@@ -1227,6 +1227,27 @@ def calculate_stamp_total_cost(amount: int, depth: int) -> int:
     return amount * (2 ** depth)
 
 
+# BZZ is denominated in PLUR on chain.
+#
+# Defined here, in the lowest layer, and imported by everything else that needs
+# it. There were five separate copies of this constant and two of the function
+# before #102 — app/x402/pricing.py, app/x402/preflight.py,
+# app/services/gnosis_chain.py, app/api/endpoints/stamps_for_owner.py and this
+# module. They all agreed, but nothing made them agree, and a single one drifting
+# would have produced wrong money arithmetic in one place and not the others.
+#
+# Named rather than inlined so callers needing a cost in BZZ can convert it
+# themselves rather than reading it out of check_sufficient_funds' response: a
+# partial mock of that function omitting a key should not be able to turn a
+# spending limit into a 500.
+PLUR_PER_BZZ = 10 ** 16
+
+
+def plur_to_bzz(plur: int) -> float:
+    """Convert an on-chain PLUR amount to BZZ."""
+    return plur / PLUR_PER_BZZ
+
+
 async def check_sufficient_funds(required_plur: int) -> Dict[str, Any]:
     """
     Checks if the wallet has sufficient BZZ funds for a stamp purchase.
@@ -1249,9 +1270,8 @@ async def check_sufficient_funds(required_plur: int) -> Dict[str, Any]:
     wallet_info = await get_wallet_info()
     wallet_balance_plur = int(wallet_info.get("bzzBalance", 0))
 
-    plur_per_bzz = 10 ** 16
-    wallet_balance_bzz = wallet_balance_plur / plur_per_bzz
-    required_bzz = required_plur / plur_per_bzz
+    wallet_balance_bzz = plur_to_bzz(wallet_balance_plur)
+    required_bzz = plur_to_bzz(required_plur)
 
     sufficient = wallet_balance_plur >= required_plur
     shortfall_bzz = 0.0 if sufficient else required_bzz - wallet_balance_bzz

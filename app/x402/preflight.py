@@ -20,13 +20,10 @@ from app.services.swarm_api import get_wallet_info, get_chequebook_balance, get_
 logger = logging.getLogger(__name__)
 
 # Conversion constants
-PLUR_PER_BZZ = 10 ** 16  # 1 BZZ = 10^16 PLUR
+# Single source in app/services/swarm_api; re-exported here because callers
+# and tests import it from this module.
+from app.services.swarm_api import PLUR_PER_BZZ, plur_to_bzz  # noqa: F401
 WEI_PER_XDAI = 10 ** 18  # 1 xDAI = 10^18 wei
-
-
-def plur_to_bzz(plur: int) -> float:
-    """Convert PLUR to BZZ."""
-    return plur / PLUR_PER_BZZ
 
 
 def wei_to_xdai(wei: int) -> float:

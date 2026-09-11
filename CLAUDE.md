@@ -143,11 +143,11 @@ CORS (browser access):
 - `GET /` (and `/health`): Health check. Always includes a `bee_node` section (from Bee `/topology` + `/status` + `/health` + `/addresses` + `/chainstate`, fetched concurrently, 15s cached): identity/build `overlay`, `version`, `api_version`, `bee_status`; connectivity `mode`, `connected_peers`, `population`, `depth`, `reachability`, `network_availability` (Available/Unavailable/Unknown — Bee sets this from outbound-dial results; Unavailable = OS network/host-unreachable on dials); reserve/radius `storage_radius`, `committed_depth`, `reserve_size`, `reserve_size_within_radius`, `pullsync_rate`, `batch_commitment`; chain sync `last_synced_block`, `chain_tip`, `chain_sync_lag_blocks`; plus `warming_up`, `healthy`, `warnings`. Any endpoint that fails yields `null` for its fields rather than losing the whole section. Overall `status` → `degraded` when `network_availability` is `Unavailable` (node can't reach the storer network → uploads may 201 without propagating) — advisory warnings (low peer count `< LOW_PEER_WARN_THRESHOLD`, chain lag `> CHAIN_LAG_WARN_BLOCKS`, non-ok Bee status) never flip `healthy` or `status`. x402 wallet section added when `X402_ENABLED`.
 
 #### Stamp Management
-- `POST /api/v1/stamps/`: Purchase new postage stamps (records purchase time for propagation tracking)
+- `POST /api/v1/stamps/`: Purchase new postage stamps (records purchase time for propagation tracking). **Bounded** by `X402_MAX_STAMP_BZZ` per request and `STAMP_DAILY_BZZ_PER_CALLER` per caller per day — see below.
 - `GET /api/v1/stamps/`: List stamps (default: local only). Supports `?global=true` for all stamps, `?wallet=0x...` for wallet-filtered view (x402)
 - `GET /api/v1/stamps/{stamp_id}`: Retrieve specific stamp batch details including propagation timing
 - `GET /api/v1/stamps/{stamp_id}/check`: Check stamp health for uploads (errors, warnings, can_upload status, propagation status)
-- `PATCH /api/v1/stamps/{stamp_id}/extend`: Extend existing stamps with additional funds
+- `PATCH /api/v1/stamps/{stamp_id}/extend`: Extend existing stamps with additional funds. Subject to the same two bounds. Note this route is **not** payment-gated: `is_protected_endpoint` matches on method and `PROTECTED_ENDPOINTS` lists only POST paths, so a PATCH never sees x402 or the free-tier rate limit. It also tops up any batch on the node, including ones the caller does not own.
 - `POST /api/v1/stamps/for-owner` (Flow B #228/#230): create a postage batch owned by an arbitrary address via `GnosisChainClient.create_batch` (PostageStamp.createBatch on Gnosis), so the owner can sign its own stamps off-node. Body: `owner` (0x, never assumed = payer), `size`/`depth`, `duration_hours`, `immutable`. Returns `batchID` (64-hex, no 0x) + `txHash` + propagation info; records the batch in the ownership registry (`source="created_for_owner"`, informational — on-chain ownership is source of truth). **Spends the gateway's Gnosis funds**, so: OFF by default (`STAMP_PURCHASE_FOR_OTHERS_ENABLED`, router 404s when off); owner **allow-list** (`STAMP_FOR_OTHERS_REQUIRE_WHITELIST` + `_OWNER_WHITELIST`); hard caps `STAMP_FOR_OTHERS_MAX_DEPTH` / `_MAX_BZZ` / `_MAX_DURATION_HOURS` — ALL enforced before any on-chain spend. Plus a signer-wallet **preflight** (#231): refuses `503 SIGNER_INSUFFICIENT_FUNDS` if the gateway can't fund the batch (gas/xBZZ), checked after the caps and before createBatch. **x402 (#229):** mounted WITH the x402 dependency, so when `X402_ENABLED` the caller pays via the `/stamps/` protected prefix (priced from the actual depth/duration by reading the body in `_calculate_price_for_request`); free-tier creation is OFF by default (`STAMP_FOR_OTHERS_FREE_TIER_ENABLED`, else `402 FREE_TIER_DISABLED`). Payer (x402) ≠ owner (`body.owner`). Emits `gateway_for_owner_batches_total{status}` + `_bzz_spent_total` and audits each creation. See `docs/buy-batch-for-owner-guide.md`.
 
 **Stamp list query parameters**:
@@ -159,6 +159,22 @@ CORS (browser access):
 - `secondsSincePurchase`: Seconds elapsed since purchase through this gateway (null for external stamps)
 - `estimatedReadyAt`: ISO 8601 timestamp when stamp should be usable (null for external stamps)
 - `propagationStatus`: `"ready"` / `"propagating"` / `"unknown"` (null if undetermined)
+
+**Spending limits on the stamp endpoints** (`app/services/spend_budget.py`, #102):
+Both `POST /stamps/` and `PATCH /stamps/{id}/extend` spend the gateway's BZZ for whoever asks, and neither had a bound — the pool got a daily allowance and these did not, which made them the cheaper way to spend the operator's money. Measured on staging, an anonymous free-tier request reached the point of the gateway costing a **243,074 BZZ** batch and was refused only because the wallet could not cover it: the balance was the limit.
+
+Two bounds now apply, answering different questions:
+
+- `X402_MAX_STAMP_BZZ` (default 5.0, zero disables) caps a **single request**, so no one call takes a large share of the wallet however it is shaped. This setting existed from the start and was referenced nowhere — a cap that appears in configuration and enforces nothing, which is worse than an absent one because it reads as protection during review.
+- `STAMP_DAILY_BZZ_PER_CALLER` (default 0.5, `-1` disables) caps a **caller over a day**, so the first bound cannot simply be applied repeatedly.
+
+The budget counts **BZZ, not batches**, unlike the pool allowance. The pool hands out fixed inventory so counting batches per size bounds the spend; these endpoints take a depth and a duration and cost `amount × 2^depth`, so a count would let a caller stay inside its allowance and still spend arbitrarily by asking for bigger batches.
+
+The key is the **client IP**, not `Origin`. The callers here are CLIs, SDKs and the MCP plugin, which send no `Origin` at all and would collapse into one shared bucket. An IP is not an identity — shared behind NAT, cheap to change — and this is the same bargain `bandwidth_free_tier.py` already makes. It bounds casual and accidental spending, which is what actually happened twice, without pretending to prevent deliberate spending.
+
+Both limits are enforced **before** the wallet balance check, so the refusal does not depend on how much money happens to be left. Charged only after the money is actually spent, so a purchase Bee refuses costs the caller nothing. A settled x402 payment bypasses the daily budget but **not** the per-request ceiling — the gateway fronts the BZZ either way — and the bypass is withheld on a test network for the same reason as the pool's.
+
+`PLUR_PER_BZZ` and `plur_to_bzz` now live once, in `app/services/swarm_api.py`, and everything else imports them. There were five copies of the constant and two of the function — `app/x402/pricing.py`, `app/x402/preflight.py`, `app/services/gnosis_chain.py`, `app/api/endpoints/stamps_for_owner.py` and `swarm_api` itself. They all agreed, but nothing made them agree, and one drifting would have produced wrong money arithmetic in one place and not the others. The x402 modules re-export both, so existing imports and tests are unaffected.
 
 **Stamp ownership enforcement** (`app/services/stamp_ownership.py`, when `X402_ENABLED`):
 Every batch a caller can obtain is registered to them — pool acquire, direct purchase, and for-owner all call `register_stamp`. Batches the pool buys for its own inventory are registered as `POOL_OWNER` (`"pool"`) at purchase and on sync, and `check_access` **refuses** them: a caller receives one by acquiring it, which re-registers it to them. A batch absent from the registry is also refused; `STAMP_OWNERSHIP_ALLOW_UNTRACKED=true` restores the old permissive default and exists solely to recover from a lost registry file. Before #312 the pool's inventory was untracked and the untracked default was *allow*, so anyone could store data on batches the gateway had paid for — one production batch reached 50% utilisation without ever being acquired.
@@ -380,6 +396,8 @@ The gateway exposes a `/metrics` endpoint (Prometheus text format) when `METRICS
 - `gateway_downloads_total{status}`
 - `gateway_stamp_purchases_total{size, status}`
 - `gateway_pool_acquires_total{size, status}`
+- `gateway_stamp_spend_refusals_total{operation, limit}` — purchases and extends refused by a spending limit (`limit` = `per_request` or `daily_budget`)
+- `gateway_stamp_spend_bzz_total{operation, charged}` — BZZ committed through the stamp endpoints (`charged` = `budget` or `paid`)
 - `gateway_notary_signatures_total{status}`
 - `gateway_x402_payments_total{mode}` (paid/free/rejected)
 - `gateway_rate_limit_hits_total`
@@ -392,6 +410,7 @@ The gateway exposes a `/metrics` endpoint (Prometheus text format) when `METRICS
 - `gateway_stamp_pool_available{size}`, `gateway_stamps_total`
 - `gateway_stamp_min_ttl_seconds`, `gateway_uptime_seconds`
 - `gateway_bandwidth_credit_accounts`, `gateway_bandwidth_credit_bytes_total` (when `CHUNK_UPLOAD_ENABLED`)
+- `gateway_stamp_spend_callers`, `gateway_stamp_spend_bzz_today` — callers holding a spend balance today, and the BZZ charged to budgets so far. Polled rather than accumulated, because the day rolls over inside the tracker and a counter would keep climbing past midnight UTC.
 
 **Info**: `gateway_info{version, environment, x402_enabled, pool_enabled, notary_enabled, chunk_upload_enabled}`
 
