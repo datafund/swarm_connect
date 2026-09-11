@@ -106,8 +106,8 @@ class StampPoolManager:
         # overlapping runs each buy to cover the same shortfall.
         self._replenishing = False
         # Timestamps of recent purchases, for the hourly ceiling. See
-        # _purchase_budget_remaining().
-        self._purchase_times: List[datetime] = []
+        # _spend_budget_remaining().
+        self._spend_times: List[datetime] = []
         self._task: Optional[asyncio.Task] = None
         self._last_check: Optional[datetime] = None
         self._errors: List[str] = []
@@ -771,28 +771,41 @@ class StampPoolManager:
 
         return results
 
-    def _purchase_budget_remaining(self) -> int:
-        """How many more batches may be bought in the current rolling hour.
+    def _spend_budget_remaining(self) -> int:
+        """How many more BZZ-spending operations the pool may make this hour.
 
-        A hard ceiling across every depth and every caller, not a per-cycle limit.
-        A staging node once bought 82 batches against a target of 5, spending
-        about 8.9 BZZ. One mechanism was found and fixed; it accounts for five per
-        restart, not seventy, and the rest was never identified (#271).
+        A hard ceiling across every depth, every kind of spend and every caller,
+        not a per-cycle limit. A staging node once bought 82 batches against a
+        target of 5, spending about 8.9 BZZ. One mechanism was found and fixed; it
+        accounts for five per restart, not seventy, and the rest was never
+        identified (#271).
 
         The point of a ceiling is that it does not need the cause. Whatever the
         defect — a replenish path that miscounts, a restart loop, an external
         caller draining the pool faster than it refills — it cannot spend past
         this. Correctness bugs become expensive without one; with it they become
         merely wrong.
+
+        This counts BOTH buying a batch and topping one up, against one shared
+        limit. Topping up was previously uncounted (#334): it calls
+        extend_postage_stamp directly, which spends BZZ exactly as buying does,
+        so it was the only path in the gateway with no bound. Separate limits per
+        kind of spend would also be wrong — the combined spend would then be
+        twice the configured ceiling.
+
+        The name says "spend" rather than "purchase" deliberately. The previous
+        name is how the gap survived review: a reader sees _record_purchase, sees
+        that top-up is not a purchase, and concludes correctly that it is not
+        counted, without that reading the alarm it should.
         """
         cutoff = datetime.now(timezone.utc) - timedelta(hours=1)
         with self._lock:
-            self._purchase_times = [t for t in self._purchase_times if t > cutoff]
-            return max(0, settings.STAMP_POOL_MAX_PURCHASES_PER_HOUR - len(self._purchase_times))
+            self._spend_times = [t for t in self._spend_times if t > cutoff]
+            return max(0, settings.STAMP_POOL_MAX_PURCHASES_PER_HOUR - len(self._spend_times))
 
-    def _record_purchase(self) -> None:
+    def _record_spend(self) -> None:
         with self._lock:
-            self._purchase_times.append(datetime.now(timezone.utc))
+            self._spend_times.append(datetime.now(timezone.utc))
 
     async def _purchase_stamp(self, depth: int, max_retries: int = 3) -> Optional[str]:
         """Purchase a new stamp for the pool. Retries on 429 rate limiting.
@@ -802,7 +815,7 @@ class StampPoolManager:
         check, the immediate replenishment after an acquire, and anything added
         later that forgets to ask.
         """
-        remaining = self._purchase_budget_remaining()
+        remaining = self._spend_budget_remaining()
         if remaining <= 0:
             msg = (
                 f"Refusing to buy a depth-{depth} batch: the pool has already "
@@ -840,7 +853,7 @@ class StampPoolManager:
                     # that never becomes usable must still count against the
                     # ceiling — otherwise a run of unusable purchases would spend
                     # without limit while appearing to buy nothing.
-                    self._record_purchase()
+                    self._record_spend()
                     break
                 except Exception as e:
                     if "429" in str(e) and attempt < max_retries - 1:
@@ -961,7 +974,31 @@ class StampPoolManager:
             logger.warning(f"Error updating stamp TTLs: {e}")
 
     async def _topup_stamp(self, batch_id: str):
-        """Top up a stamp with additional TTL."""
+        """Top up a stamp with additional TTL.
+
+        Subject to the same hourly ceiling as buying a batch (#334). Extending
+        spends BZZ, so leaving it uncounted made this the only spending path in
+        the gateway with no bound — a scheduling or TTL-arithmetic error here
+        could extend every batch on every pass with nothing to stop it.
+
+        Checked before the price lookup so a refusal costs no Bee calls, and
+        recorded only once Bee has accepted the extension, because that is when
+        the money is spent.
+        """
+        remaining = self._spend_budget_remaining()
+        if remaining <= 0:
+            msg = (
+                f"Refusing to top up batch {batch_id[:16]}...: the pool has "
+                f"already made {settings.STAMP_POOL_MAX_PURCHASES_PER_HOUR} "
+                "BZZ-spending operations in the last hour, which is the "
+                "configured ceiling. Something is wrong — a healthy pool does "
+                "not need this many. Raise STAMP_POOL_MAX_PURCHASES_PER_HOUR "
+                "only after understanding why."
+            )
+            logger.error(msg)
+            self._errors.append(msg)
+            return
+
         try:
             # Get current price (Bee API returns currentPrice as a string)
             chainstate = await swarm_api.get_chainstate()
@@ -974,6 +1011,7 @@ class StampPoolManager:
             logger.info(f"Topping up stamp {batch_id[:16]}... with {topup_hours}h ({amount} PLUR)")
 
             await swarm_api.extend_postage_stamp(batch_id, amount)
+            self._record_spend()
 
         except Exception as e:
             logger.error(f"Failed to top up stamp {batch_id[:16]}...: {e}")
