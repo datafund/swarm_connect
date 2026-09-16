@@ -1312,18 +1312,18 @@ class TestPurchaseCeiling:
         )
 
     def test_the_window_rolls(self, state_file):
-        """Old purchases stop counting, or the pool jams permanently after a burst."""
+        """Old spends stop counting, or the pool jams permanently after a burst."""
         from datetime import datetime, timezone, timedelta
 
         manager = StampPoolManager(state_file=state_file)
         with patch('app.services.stamp_pool.settings.STAMP_POOL_MAX_PURCHASES_PER_HOUR', 5):
-            manager._purchase_times = [
+            manager._spend_times = [
                 datetime.now(timezone.utc) - timedelta(hours=2) for _ in range(5)
             ]
-            assert manager._purchase_budget_remaining() == 5, "an hour-old burst still blocked buying"
+            assert manager._spend_budget_remaining() == 5, "an hour-old burst still blocked spending"
 
-            manager._purchase_times = [datetime.now(timezone.utc) for _ in range(5)]
-            assert manager._purchase_budget_remaining() == 0
+            manager._spend_times = [datetime.now(timezone.utc) for _ in range(5)]
+            assert manager._spend_budget_remaining() == 0
 
 
 class TestTopUpRespectsTheReserveConfig:
@@ -1389,3 +1389,125 @@ class TestTopUpRespectsTheReserveConfig:
                             await manager.check_and_replenish()
 
         assert set(topped) == {"small_one", "medium_one"}
+
+
+class TestTopUpRespectsTheSpendCeiling:
+    """Extending a batch spends BZZ, so the hourly ceiling has to cover it (#334).
+
+    `STAMP_POOL_MAX_PURCHASES_PER_HOUR` was enforced inside `_purchase_stamp`
+    specifically so that no path could miss it. `_topup_stamp` missed it anyway:
+    it calls `extend_postage_stamp` directly, which made it the only path in the
+    gateway that spent BZZ with no bound of any kind.
+
+    It is driven by the scheduler rather than by callers, so nothing external can
+    provoke it. What it was exposed to is a configuration or arithmetic error — a
+    check interval that fires more often than intended, a TTL comparison that
+    thinks every batch needs extending on every pass, or a retry loop around a
+    failing extend.
+    """
+
+    @pytest.fixture
+    def state_file(self, tmp_path):
+        return str(tmp_path / "pool_state.json")
+
+    @pytest.mark.asyncio
+    async def test_topups_stop_at_the_ceiling(self, state_file):
+        manager = StampPoolManager(state_file=state_file)
+        extended = []
+
+        async def fake_extend(batch_id, amount):
+            extended.append(batch_id)
+
+        with patch('app.services.stamp_pool.settings.STAMP_POOL_MAX_PURCHASES_PER_HOUR', 3):
+            with patch('app.services.stamp_pool.swarm_api.get_chainstate',
+                       new=AsyncMock(return_value={"currentPrice": "24000"})):
+                with patch('app.services.stamp_pool.swarm_api.extend_postage_stamp',
+                           side_effect=fake_extend):
+                    for i in range(8):
+                        await manager._topup_stamp(f"{i:064x}")
+
+        assert len(extended) == 3, (
+            f"ceiling of 3 did not hold for top-ups — {len(extended)} were attempted"
+        )
+
+    @pytest.mark.asyncio
+    async def test_topups_and_purchases_share_one_ceiling(self, state_file):
+        """Separate limits per kind of spend would allow twice the configured total.
+
+        The ceiling bounds money leaving the wallet, not one particular way of
+        spending it.
+        """
+        manager = StampPoolManager(state_file=state_file)
+        bought, extended = [], []
+
+        async def fake_buy(amount, depth, label):
+            bought.append(depth)
+            return f"batch_{len(bought)}"
+
+        async def fake_extend(batch_id, amount):
+            extended.append(batch_id)
+
+        with patch('app.services.stamp_pool.settings.STAMP_POOL_MAX_PURCHASES_PER_HOUR', 4):
+            with patch('app.services.stamp_pool.swarm_api.get_chainstate',
+                       new=AsyncMock(return_value={"currentPrice": "24000"})):
+                with patch('app.services.stamp_pool.swarm_api.purchase_postage_stamp',
+                           side_effect=fake_buy):
+                    with patch('app.services.stamp_pool.swarm_api.extend_postage_stamp',
+                               side_effect=fake_extend):
+                        with patch.object(manager, '_wait_for_stamp_usable', return_value=False):
+                            await manager._purchase_stamp(17)
+                            await manager._purchase_stamp(17)
+                            for i in range(6):
+                                await manager._topup_stamp(f"{i:064x}")
+
+        assert len(bought) == 2
+        assert len(extended) == 2, (
+            f"two purchases should leave two spends of four; {len(extended)} top-ups ran"
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_failed_topup_does_not_consume_the_ceiling(self, state_file):
+        """Recorded when Bee accepts the extension, because that is when the
+        money is spent. Counting attempts would let a failing extend exhaust the
+        ceiling and block the purchases the pool actually needs."""
+        manager = StampPoolManager(state_file=state_file)
+
+        with patch('app.services.stamp_pool.settings.STAMP_POOL_MAX_PURCHASES_PER_HOUR', 3):
+            with patch('app.services.stamp_pool.swarm_api.get_chainstate',
+                       new=AsyncMock(return_value={"currentPrice": "24000"})):
+                with patch('app.services.stamp_pool.swarm_api.extend_postage_stamp',
+                           side_effect=RuntimeError("bee said no")):
+                    for i in range(3):
+                        with pytest.raises(RuntimeError):
+                            await manager._topup_stamp(f"{i:064x}")
+
+        # Asserted on the recorded spends rather than the remaining budget, which
+        # would read the real configured ceiling once the patch has exited.
+        assert manager._spend_times == [], "failed top-ups consumed the ceiling"
+
+    @pytest.mark.asyncio
+    async def test_a_refusal_is_reported_in_pool_status(self, state_file):
+        """Not only logged. A refusal means the pool is not maintaining its
+        batches, and the operator has to be able to see why without reading
+        container logs."""
+        manager = StampPoolManager(state_file=state_file)
+
+        with patch('app.services.stamp_pool.settings.STAMP_POOL_MAX_PURCHASES_PER_HOUR', 0):
+            with patch('app.services.stamp_pool.swarm_api.get_chainstate',
+                       new=AsyncMock(return_value={"currentPrice": "24000"})):
+                await manager._topup_stamp("a" * 64)
+
+        assert any("Refusing to top up" in e for e in manager._errors), manager._errors
+
+    @pytest.mark.asyncio
+    async def test_a_refusal_costs_no_bee_calls(self, state_file):
+        """Checked before the price lookup, so a pool already at its ceiling does
+        not keep querying the node for prices it will not use."""
+        manager = StampPoolManager(state_file=state_file)
+        chainstate = AsyncMock(return_value={"currentPrice": "24000"})
+
+        with patch('app.services.stamp_pool.settings.STAMP_POOL_MAX_PURCHASES_PER_HOUR', 0):
+            with patch('app.services.stamp_pool.swarm_api.get_chainstate', new=chainstate):
+                await manager._topup_stamp("a" * 64)
+
+        chainstate.assert_not_called()
