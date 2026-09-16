@@ -111,10 +111,18 @@ class TestGetClientIP:
     """Test client IP extraction."""
 
     def test_forwarded_for_header(self):
+        """The caller is counted from the RIGHT, by TRUSTED_PROXY_HOPS.
+
+        This test previously asserted "203.0.113.50" — the leftmost entry. That
+        is the one furthest from us, and it is whatever the client sent if any
+        proxy in the chain appends rather than replaces. With one proxy in front,
+        the rightmost entry is the one our own proxy added, and the entry it
+        added is the address it saw.
+        """
         request = MagicMock(spec=Request)
         request.headers = {"X-Forwarded-For": "203.0.113.50, 70.41.3.18"}
         request.client = None
-        assert get_client_ip(request) == "203.0.113.50"
+        assert get_client_ip(request) == "70.41.3.18"
 
     def test_real_ip_header(self):
         request = MagicMock(spec=Request)
