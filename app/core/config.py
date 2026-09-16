@@ -47,7 +47,11 @@ class Settings(BaseSettings):
 
     # === x402 Threshold Settings (Gnosis wallet - warnings) ===
     X402_XBZZ_WARN_THRESHOLD: float = 10.0  # Warn if xBZZ < threshold
-    X402_XDAI_WARN_THRESHOLD: float = 0.5  # Warn if xDAI < threshold
+    # xDAI pays Gnosis transaction gas. Advisory only — nothing is gated on it —
+    # but at zero the node cannot submit anything and stamp purchases fail with
+    # errors that do not mention funding, so it is worth warning well before
+    # that. 0.1 is many thousands of transactions' worth at Gnosis gas prices.
+    X402_XDAI_WARN_THRESHOLD: float = 0.1  # Warn if xDAI < threshold
     X402_CHEQUEBOOK_WARN_THRESHOLD: float = 5.0  # Warn if chequebook < threshold
 
     # === x402 Limits ===
