@@ -427,22 +427,41 @@ The gateway exposes a `/metrics` endpoint (Prometheus text format) when `METRICS
 ### Production Monitoring Stack
 
 ```
-Gateway containers ──/metrics──> Alloy ──remote write──> Grafana Cloud
-  (port 8000)                     │                      (dashboards + alerts)
-Bee nodes ────────/metrics────────┘
+Gateway containers ──/metrics──> Alloy ──remote write──> Grafana Cloud Prometheus
+  (port 8000)          └─logs──>   │   ──push──────────> Grafana Cloud Loki
+Bee nodes ────────/metrics────────┘                      (dashboards + alerts)
   (port 1633, bee_eth_backend_* only)
 ```
 
 **How it works:**
-- Grafana Alloy runs as a Docker container alongside the gateways (`docker-compose.yml`)
+- Grafana Alloy runs as a Docker container alongside the gateways (`docker-compose.host.yml`)
 - Alloy scrapes `/metrics` from both gateway containers every 15s via Docker network
 - Alloy pushes metrics to Grafana Cloud Prometheus (remote write)
+- Alloy also **tails both gateway containers' logs** via the Docker API and pushes them to Grafana Cloud Loki
 - Grafana Cloud stores metrics (14-day retention) and hosts dashboards
 - Environment labels: `development` (dev branch) and `main` (main branch)
 
+**Logs (#190).** Metrics say how many errors there were; they never say what the error was. Reading one meant SSH to the host and `docker logs` per container — how every investigation in this repository has started, including #299, where the answer was a single line in the reverse proxy's log.
+
+Everything the gateway containers emit is shipped, not only errors. Measured before enabling: production ~3,450 lines/hour (~211 MB/month), staging ~60 lines/hour (~3 MB/month), both well inside the included allowance. Filtering at the source is what you regret during an incident, because the line you need is always the one that looked like noise.
+
+Labels are deliberately few — `container`, `environment`, `host`, `level` — because Loki indexes by label and a high-cardinality one (a request id, an IP, a stamp id) multiplies the index and the bill. Everything else is a query-time filter. `level` is promoted from the start of each Python log line, so `{level="ERROR"}` is an index lookup rather than a substring scan.
+
+Query in Grafana Explore, or use the two dashboard panels:
+```
+{job="swarm_connect/gateway", environment="main", level=~"WARNING|ERROR|CRITICAL"}
+{job="swarm_connect/gateway"} |= "connection"
+```
+
 **Credentials** (stored in GitHub secrets, injected at deploy):
 - `GRAFANA_CLOUD_PROM_USERNAME` — Prometheus instance ID
-- `GRAFANA_CLOUD_API_TOKEN` — API token with `metrics:write` scope
+- `GRAFANA_CLOUD_API_TOKEN` — access policy token; needs **both** `metrics:write` and `logs:write`
+- `GRAFANA_CLOUD_LOKI_URL` — region-specific push URL, e.g. `https://logs-prod-NN.grafana.net/loki/api/v1/push`
+- `GRAFANA_CLOUD_LOKI_USERNAME` — Loki tenant id. **NOT the same number as the Prometheus one** — one stack has a different id per signal, and using the Prometheus id yields a 401 that reads like a bad token.
+
+If the two Loki secrets are absent the log pipeline reports unhealthy and drops logs; metrics are unaffected. Verified by running Alloy with the new config and no Loki credentials — the process stays up and all three log components evaluate cleanly.
+
+**The Docker socket.** Tailing container logs requires mounting `/var/run/docker.sock` into Alloy. That socket is a root-equivalent interface to the host, and `:ro` restricts writes to the socket *file*, not to the API reachable through it — anything able to execute inside that container can start a privileged one. Accepted here because Alloy is part of the same trusted stack running a config from this repository. Not a decision to copy elsewhere without re-making it.
 
 **Dashboard:** `datafund.grafana.net/d/gateway-overview`
 

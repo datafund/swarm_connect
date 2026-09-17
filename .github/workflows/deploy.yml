@@ -211,6 +211,8 @@ jobs:
           cat > .env << EOF
           GRAFANA_CLOUD_PROM_USERNAME=${{ secrets.GRAFANA_CLOUD_PROM_USERNAME }}
           GRAFANA_CLOUD_API_TOKEN=${{ secrets.GRAFANA_CLOUD_API_TOKEN }}
+          GRAFANA_CLOUD_LOKI_URL=${{ secrets.GRAFANA_CLOUD_LOKI_URL }}
+          GRAFANA_CLOUD_LOKI_USERNAME=${{ secrets.GRAFANA_CLOUD_LOKI_USERNAME }}
           EOF
           # Host-specific compose settings (Bee endpoints, COMPOSE_PROFILES, p2p
           # ports, ...). Lives outside the clone so it survives the rm -rf above.
