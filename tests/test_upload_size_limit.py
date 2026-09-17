@@ -255,3 +255,67 @@ class TestConfigurableLimit:
         )
         assert response.status_code == 413
         assert response.json()["detail"]["max_size_mb"] == 5
+
+
+class TestSizeIsDecidedBeforeOwnership:
+    """An over-sized body must answer 413, whoever is asking.
+
+    The size check used to run after the stamp ownership check, so an over-sized
+    upload with an unrecognised stamp answered 403 STAMP_OWNERSHIP_DENIED and the
+    documented 413 was unreachable for those callers. Measured against the
+    staging gateway on 2026-09-16, a 50 MB upload returned 403.
+
+    Nothing in the suite caught it because every size test used a stamp that
+    passed ownership, and every ownership test used a small body. The orderings
+    were each covered; their interaction was not.
+    """
+
+    @patch('app.api.endpoints.data.settings')
+    def test_an_oversized_upload_with_an_unowned_stamp_is_413(self, mock_settings):
+        mock_settings.MAX_UPLOAD_SIZE_MB = 1
+        mock_settings.X402_ENABLED = True
+
+        with patch('app.api.endpoints.data.stamp_ownership_manager.check_access',
+                   return_value=(False, "stamp is not registered to any owner")):
+            response = client.post(
+                f"/api/v1/data/?stamp_id={VALID_STAMP_ID}",
+                files={"file": ("big.bin", io.BytesIO(b"x" * (3 * 1024 * 1024)),
+                                "application/octet-stream")}
+            )
+
+        assert response.status_code == 413, response.text
+        assert response.json()["detail"]["code"] == "FILE_TOO_LARGE"
+
+    @patch('app.api.endpoints.data.settings')
+    def test_the_same_for_the_manifest_endpoint(self, mock_settings):
+        mock_settings.MAX_UPLOAD_SIZE_MB = 1
+        mock_settings.X402_ENABLED = True
+
+        with patch('app.api.endpoints.data.stamp_ownership_manager.check_access',
+                   return_value=(False, "stamp is not registered to any owner")):
+            response = client.post(
+                f"/api/v1/data/manifest?stamp_id={VALID_STAMP_ID}",
+                files={"file": ("big.tar", io.BytesIO(b"x" * (3 * 1024 * 1024)),
+                                "application/x-tar")}
+            )
+
+        assert response.status_code == 413, response.text
+        assert response.json()["detail"]["code"] == "FILE_TOO_LARGE"
+
+    @patch('app.api.endpoints.data.upload_data_to_swarm', return_value="ref123")
+    @patch('app.api.endpoints.data.settings')
+    def test_ownership_is_still_enforced_for_a_body_within_the_limit(self, mock_settings, mock_upload):
+        """Moving the size check first must not let anything past ownership."""
+        mock_settings.MAX_UPLOAD_SIZE_MB = 10
+        mock_settings.X402_ENABLED = True
+
+        with patch('app.api.endpoints.data.stamp_ownership_manager.check_access',
+                   return_value=(False, "stamp is not registered to any owner")):
+            response = client.post(
+                f"/api/v1/data/?stamp_id={VALID_STAMP_ID}",
+                files={"file": ("small.bin", io.BytesIO(b"x" * 1024),
+                                "application/octet-stream")}
+            )
+
+        assert response.status_code == 403
+        assert response.json()["detail"]["code"] == "STAMP_OWNERSHIP_DENIED"

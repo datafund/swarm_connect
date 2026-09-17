@@ -227,6 +227,38 @@ async def upload_data(
     bee_upload_ms = None
 
     try:
+        # Reject an over-sized body before anything else.
+        #
+        # This ran after the stamp ownership check, so an over-sized upload with
+        # an unrecognised stamp answered 403 STAMP_OWNERSHIP_DENIED and the
+        # documented 413 was unreachable — the caller was told the wrong thing
+        # about their request. Size does not depend on who is asking, and the
+        # check is a header comparison against a registry lookup, so it belongs
+        # first on both counts.
+        #
+        # Content-Length covers the whole multipart envelope — boundary, part
+        # headers, trailer — not just the file, so it is compared against the
+        # limit plus an allowance for that wrapper. Without it a file of exactly
+        # MAX_UPLOAD_SIZE_MB was always rejected, putting the real ceiling a few
+        # hundred bytes below the documented one and making it shrink as the
+        # filename grew.
+        #
+        # This cannot reject early despite reading like it should: FastAPI parses
+        # the multipart form during dependency resolution, so the body is already
+        # in memory by the time this line runs. It is a coarse guard, not a fast
+        # path. The exact limit is enforced on the file's own length further down.
+        max_size = settings.MAX_UPLOAD_SIZE_MB * 1024 * 1024
+        content_length = request.headers.get("content-length")
+        if content_length and int(content_length) > max_size + MULTIPART_ENVELOPE_ALLOWANCE:
+            raise HTTPException(
+                status_code=413,
+                detail={
+                    "code": "FILE_TOO_LARGE",
+                    "message": f"Upload exceeds maximum size of {settings.MAX_UPLOAD_SIZE_MB} MB.",
+                    "max_size_mb": settings.MAX_UPLOAD_SIZE_MB
+                }
+            )
+
         # Check stamp ownership
         if settings.X402_ENABLED:
             x402_payer = getattr(request.state, 'x402_payer', None)
@@ -279,33 +311,6 @@ async def upload_data(
                     raise HTTPException(status_code=400, detail=detail)
             stamp_validate_ms = (time.perf_counter() - stamp_start) * 1000
 
-        # Check upload size limit.
-        #
-        # Content-Length covers the whole multipart envelope — boundary, part
-        # headers, trailer — not just the file. Comparing it against the file
-        # limit put the real ceiling a few hundred bytes below the documented
-        # one, so a file of exactly MAX_UPLOAD_SIZE_MB was always rejected with
-        # 413 while the check below, which measures the file itself, would have
-        # accepted it. The two checks were applying one limit to two different
-        # quantities.
-        #
-        # The allowance is generous relative to a real envelope (a boundary and
-        # one set of part headers is a few hundred bytes) because this check is
-        # only a coarse guard: it cannot reject early, since FastAPI parses the
-        # multipart form during dependency resolution and the body is already
-        # in memory by the time this line runs. The exact limit is enforced on
-        # the file's own length below.
-        max_size = settings.MAX_UPLOAD_SIZE_MB * 1024 * 1024
-        content_length = request.headers.get("content-length")
-        if content_length and int(content_length) > max_size + MULTIPART_ENVELOPE_ALLOWANCE:
-            raise HTTPException(
-                status_code=413,
-                detail={
-                    "code": "FILE_TOO_LARGE",
-                    "message": f"Upload exceeds maximum size of {settings.MAX_UPLOAD_SIZE_MB} MB.",
-                    "max_size_mb": settings.MAX_UPLOAD_SIZE_MB
-                }
-            )
 
         # Read file content as bytes
         file_start = time.perf_counter()
@@ -672,6 +677,38 @@ async def upload_manifest(
     bee_upload_ms = None
 
     try:
+        # Reject an over-sized body before anything else.
+        #
+        # This ran after the stamp ownership check, so an over-sized upload with
+        # an unrecognised stamp answered 403 STAMP_OWNERSHIP_DENIED and the
+        # documented 413 was unreachable — the caller was told the wrong thing
+        # about their request. Size does not depend on who is asking, and the
+        # check is a header comparison against a registry lookup, so it belongs
+        # first on both counts.
+        #
+        # Content-Length covers the whole multipart envelope — boundary, part
+        # headers, trailer — not just the file, so it is compared against the
+        # limit plus an allowance for that wrapper. Without it a file of exactly
+        # MAX_UPLOAD_SIZE_MB was always rejected, putting the real ceiling a few
+        # hundred bytes below the documented one and making it shrink as the
+        # filename grew.
+        #
+        # This cannot reject early despite reading like it should: FastAPI parses
+        # the multipart form during dependency resolution, so the body is already
+        # in memory by the time this line runs. It is a coarse guard, not a fast
+        # path. The exact limit is enforced on the file's own length further down.
+        max_size = settings.MAX_UPLOAD_SIZE_MB * 1024 * 1024
+        content_length = request.headers.get("content-length")
+        if content_length and int(content_length) > max_size + MULTIPART_ENVELOPE_ALLOWANCE:
+            raise HTTPException(
+                status_code=413,
+                detail={
+                    "code": "FILE_TOO_LARGE",
+                    "message": f"Upload exceeds maximum size of {settings.MAX_UPLOAD_SIZE_MB} MB.",
+                    "max_size_mb": settings.MAX_UPLOAD_SIZE_MB
+                }
+            )
+
         # Check stamp ownership
         if settings.X402_ENABLED:
             x402_payer = getattr(request.state, 'x402_payer', None)
@@ -724,33 +761,6 @@ async def upload_manifest(
                     raise HTTPException(status_code=400, detail=detail)
             stamp_validate_ms = (time.perf_counter() - stamp_start) * 1000
 
-        # Check upload size limit.
-        #
-        # Content-Length covers the whole multipart envelope — boundary, part
-        # headers, trailer — not just the file. Comparing it against the file
-        # limit put the real ceiling a few hundred bytes below the documented
-        # one, so a file of exactly MAX_UPLOAD_SIZE_MB was always rejected with
-        # 413 while the check below, which measures the file itself, would have
-        # accepted it. The two checks were applying one limit to two different
-        # quantities.
-        #
-        # The allowance is generous relative to a real envelope (a boundary and
-        # one set of part headers is a few hundred bytes) because this check is
-        # only a coarse guard: it cannot reject early, since FastAPI parses the
-        # multipart form during dependency resolution and the body is already
-        # in memory by the time this line runs. The exact limit is enforced on
-        # the file's own length below.
-        max_size = settings.MAX_UPLOAD_SIZE_MB * 1024 * 1024
-        content_length = request.headers.get("content-length")
-        if content_length and int(content_length) > max_size + MULTIPART_ENVELOPE_ALLOWANCE:
-            raise HTTPException(
-                status_code=413,
-                detail={
-                    "code": "FILE_TOO_LARGE",
-                    "message": f"Upload exceeds maximum size of {settings.MAX_UPLOAD_SIZE_MB} MB.",
-                    "max_size_mb": settings.MAX_UPLOAD_SIZE_MB
-                }
-            )
 
         # Read TAR file content
         file_start = time.perf_counter()
