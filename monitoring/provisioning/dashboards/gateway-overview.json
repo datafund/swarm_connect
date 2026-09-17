@@ -340,6 +340,71 @@
           { "expr": "bee_eth_backend_average_block_time_seconds{environment=~\"$environment\"}", "legendFormat": "{{environment}}" }
         ],
         "fieldConfig": { "defaults": { "unit": "s", "custom": { "drawStyle": "line", "lineInterpolation": "smooth", "fillOpacity": 20 } } }
+      },
+      {
+        "id": 90, "title": "Chunk Forwarding Rate", "type": "timeseries",
+        "description": "Pre-stamped chunk uploads per second, split by billing mode and outcome. 'paid' spends prepaid bandwidth credit, 'free' draws on the per-IP daily byte quota, 'none' is a caller presenting neither. A rising 'error' line means Bee is rejecting forwards — most often an invalid or expired postage stamp, which the gateway does not verify itself.",
+        "gridPos": { "h": 8, "w": 12, "x": 0, "y": 84 },
+        "targets": [{ "expr": "sum by (mode, status) (rate(gateway_chunk_uploads_total{environment=~\"$environment\"}[5m]))", "legendFormat": "{{mode}} / {{status}}" }],
+        "fieldConfig": { "defaults": { "unit": "reqps", "custom": { "drawStyle": "line", "lineInterpolation": "smooth", "fillOpacity": 10 } } }
+      },
+      {
+        "id": 91, "title": "Chunk Forwarding Throughput", "type": "timeseries",
+        "description": "Bytes per second forwarded as pre-stamped chunks. Compare against the credit sold below: sustained throughput without matching top-ups means the free tier is carrying the traffic.",
+        "gridPos": { "h": 8, "w": 12, "x": 12, "y": 84 },
+        "targets": [{ "expr": "sum(rate(gateway_chunk_upload_bytes_total{environment=~\"$environment\"}[5m]))", "legendFormat": "forwarded" }],
+        "fieldConfig": { "defaults": { "unit": "Bps", "custom": { "drawStyle": "line", "lineInterpolation": "smooth", "fillOpacity": 10 } } }
+      },
+      {
+        "id": 92, "title": "Bandwidth Credit Sold", "type": "timeseries",
+        "description": "Prepaid bandwidth credit top-ups. The left axis counts top-up attempts by outcome; a persistent 'error' rate means x402 settlement is failing, so callers are trying to pay and cannot.",
+        "gridPos": { "h": 8, "w": 12, "x": 0, "y": 92 },
+        "targets": [
+          { "expr": "sum by (status) (rate(gateway_bandwidth_topups_total{environment=~\"$environment\"}[5m]) * 60)", "legendFormat": "top-ups/min {{status}}" },
+          { "expr": "sum(rate(gateway_bandwidth_topup_bytes_total{environment=~\"$environment\"}[5m]))", "legendFormat": "bytes/s sold" }
+        ],
+        "fieldConfig": { "defaults": { "custom": { "drawStyle": "line", "lineInterpolation": "smooth", "fillOpacity": 5 } } }
+      },
+      {
+        "id": 93, "title": "Outstanding Prepaid Bandwidth", "type": "timeseries",
+        "description": "Bandwidth callers have paid for and not yet used — a liability, not revenue. It should fall as traffic is served and rise on top-ups. Growing steadily with flat throughput means callers are buying credit they are not spending.",
+        "gridPos": { "h": 8, "w": 12, "x": 12, "y": 92 },
+        "targets": [
+          { "expr": "sum(gateway_bandwidth_credit_bytes_total{environment=~\"$environment\"})", "legendFormat": "bytes outstanding" },
+          { "expr": "sum(gateway_bandwidth_credit_accounts{environment=~\"$environment\"})", "legendFormat": "accounts" }
+        ],
+        "fieldConfig": { "defaults": { "custom": { "drawStyle": "line", "lineInterpolation": "smooth", "fillOpacity": 5 } } }
+      },
+      {
+        "id": 94, "title": "Spending Limit Refusals", "type": "timeseries",
+        "description": "Stamp purchases and extensions refused by a spending limit. 'per_request' is X402_MAX_STAMP_BZZ, a single request costing more than the ceiling. 'daily_budget' is STAMP_DAILY_BZZ_PER_CALLER, a caller exhausting its day. The daily budget was set without usage data, so a steady refusal rate from one caller is the signal that it is too low for a legitimate integration rather than that abuse is being blocked.",
+        "gridPos": { "h": 8, "w": 12, "x": 0, "y": 100 },
+        "targets": [{ "expr": "sum by (operation, limit) (rate(gateway_stamp_spend_refusals_total{environment=~\"$environment\"}[30m]) * 3600)", "legendFormat": "{{operation}} / {{limit}}" }],
+        "fieldConfig": { "defaults": { "unit": "short", "custom": { "drawStyle": "line", "lineInterpolation": "smooth", "fillOpacity": 10 } } }
+      },
+      {
+        "id": 95, "title": "BZZ Committed via Stamp Endpoints", "type": "timeseries",
+        "description": "BZZ committed through POST /stamps/ and PATCH /stamps/{id}/extend, split by whether it was given away against a daily budget or funded by a settled x402 payment. 'budget' is the operator's cost; 'paid' is covered by the caller. On a testnet network the paid bypass is withheld, so everything appears as 'budget'.",
+        "gridPos": { "h": 8, "w": 12, "x": 12, "y": 100 },
+        "targets": [{ "expr": "sum by (charged) (rate(gateway_stamp_spend_bzz_total{environment=~\"$environment\"}[30m]) * 3600)", "legendFormat": "{{charged}} BZZ/h" }],
+        "fieldConfig": { "defaults": { "unit": "short", "custom": { "drawStyle": "line", "lineInterpolation": "smooth", "fillOpacity": 10 } } }
+      },
+      {
+        "id": 96, "title": "Daily Spend Budgets in Use", "type": "timeseries",
+        "description": "Callers holding a spend balance today, and the total BZZ charged to daily budgets so far. Both reset at midnight UTC. A single caller consuming most of the total is the case worth looking at — either an integration that needs its own allowance, or one caller absorbing the budget everyone else shares.",
+        "gridPos": { "h": 8, "w": 12, "x": 0, "y": 108 },
+        "targets": [
+          { "expr": "sum(gateway_stamp_spend_bzz_today{environment=~\"$environment\"})", "legendFormat": "BZZ charged today" },
+          { "expr": "sum(gateway_stamp_spend_callers{environment=~\"$environment\"})", "legendFormat": "callers" }
+        ],
+        "fieldConfig": { "defaults": { "custom": { "drawStyle": "line", "lineInterpolation": "smooth", "fillOpacity": 5 } } }
+      },
+      {
+        "id": 97, "title": "Pool Daily Allowance Refusals", "type": "timeseries",
+        "description": "Pooled batch requests refused because the caller's daily allowance was spent, by size. The main consumer is a browser app, so a refusal here is a user being told to come back tomorrow — worth acting on rather than watching.",
+        "gridPos": { "h": 8, "w": 12, "x": 12, "y": 108 },
+        "targets": [{ "expr": "sum by (size) (rate(gateway_pool_acquires_total{environment=~\"$environment\",status=\"error\"}[30m]) * 3600)", "legendFormat": "{{size}}" }],
+        "fieldConfig": { "defaults": { "unit": "short", "custom": { "drawStyle": "line", "lineInterpolation": "smooth", "fillOpacity": 10 } } }
       }
     ],
     "schemaVersion": 39
