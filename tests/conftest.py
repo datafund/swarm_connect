@@ -4,12 +4,46 @@ Shared test configuration.
 Sets environment variables before any app modules are imported,
 ensuring test-friendly defaults (e.g., rate limiting disabled).
 """
+import atexit
 import os
+import shutil
+import tempfile
 
 # Disable global rate limiting during tests to prevent 429 responses
 # from interfering with test assertions. Rate limiter unit tests
 # test the component directly without relying on middleware.
 os.environ["RATE_LIMIT_ENABLED"] = "false"
+
+# Send every persisted state file to a temporary directory for the run.
+#
+# Five services keep state in module-level singletons that write to paths under
+# data/ by default: the stamp pool inventory, the pool daily allowance, the stamp
+# ownership registry, the bandwidth credit ledger and the daily spend budget. A
+# test run wrote to all of them (#335).
+#
+# On a machine also running a local gateway, that means a test run overwrites the
+# state the running instance is using. The ownership registry is the damaging
+# one: check_access denies batches it has no record of, so a clobbered registry
+# makes uploads that worked a minute ago start failing with no visible cause.
+# It also let state leak between runs, so a suite that passed on a clean checkout
+# could behave differently the second time.
+#
+# Set here rather than in a fixture because the singletons are constructed at
+# import time, and pydantic-settings reads the environment when Settings is first
+# built. A fixture would run too late. Every one of these services resolves its
+# path lazily from settings when no explicit file is given, so redirecting the
+# settings redirects all of them.
+_STATE_DIR = tempfile.mkdtemp(prefix="swarm_connect_test_state_")
+atexit.register(shutil.rmtree, _STATE_DIR, True)
+
+for _var, _name in (
+    ("STAMP_POOL_STATE_FILE", "pool_state.json"),
+    ("POOL_ALLOWANCE_STATE_FILE", "pool_allowance.json"),
+    ("STAMP_OWNERSHIP_FILE", "stamp_owners.json"),
+    ("BANDWIDTH_CREDIT_STATE_FILE", "bandwidth_credit.json"),
+    ("STAMP_SPEND_BUDGET_STATE_FILE", "stamp_spend_budget.json"),
+):
+    os.environ[_var] = os.path.join(_STATE_DIR, _name)
 
 # The daily spend budget lives in a module-level singleton with persisted state,
 # so without this every purchase and extend in the suite charges the same caller
