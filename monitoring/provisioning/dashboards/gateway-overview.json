@@ -405,6 +405,26 @@
         "gridPos": { "h": 8, "w": 12, "x": 12, "y": 108 },
         "targets": [{ "expr": "sum by (size) (rate(gateway_pool_acquires_total{environment=~\"$environment\",status=\"error\"}[30m]) * 3600)", "legendFormat": "{{size}}" }],
         "fieldConfig": { "defaults": { "unit": "short", "custom": { "drawStyle": "line", "lineInterpolation": "smooth", "fillOpacity": 10 } } }
+      },
+      {
+        "id": 98, "title": "Recent Errors and Warnings", "type": "logs",
+        "datasource": { "type": "loki", "uid": "grafanacloud-logs" },
+        "description": "Actual log lines at WARNING and above from both gateway containers, filtered by the Environment selector. Metrics above say how many errors there were; this says what they were. Level is a Loki label, so this is an index lookup rather than a substring search over every line. Widen it by editing the level filter — everything the containers emit is shipped, not only errors.",
+        "gridPos": { "h": 11, "w": 24, "x": 0, "y": 116 },
+        "targets": [
+          { "datasource": { "type": "loki", "uid": "grafanacloud-logs" }, "expr": "{job=\"swarm_connect/gateway\", environment=~\"$environment\", level=~\"WARNING|ERROR|CRITICAL\"}", "queryType": "range" }
+        ],
+        "options": { "showTime": true, "wrapLogMessage": true, "sortOrder": "Descending", "enableLogDetails": true, "dedupStrategy": "none" }
+      },
+      {
+        "id": 99, "title": "Log Volume by Level", "type": "timeseries",
+        "datasource": { "type": "loki", "uid": "grafanacloud-logs" },
+        "description": "Lines per second by level. Useful for spotting a change in shape rather than reading individual lines — a step in WARNING that never becomes an ERROR is the kind of thing metrics miss entirely, because nothing failed.",
+        "gridPos": { "h": 8, "w": 24, "x": 0, "y": 127 },
+        "targets": [
+          { "datasource": { "type": "loki", "uid": "grafanacloud-logs" }, "expr": "sum by (level) (rate({job=\"swarm_connect/gateway\", environment=~\"$environment\"}[5m]))", "queryType": "range", "legendFormat": "{{level}}" }
+        ],
+        "fieldConfig": { "defaults": { "unit": "logs/s", "custom": { "drawStyle": "line", "lineInterpolation": "smooth", "fillOpacity": 10 } } }
       }
     ],
     "schemaVersion": 39
