@@ -96,6 +96,18 @@ if settings.X402_ENABLED:
     app.add_middleware(X402Middleware)
     logger.info("x402 middleware enabled")
 
+# Record which client types we serve and whether we serve them (#347).
+#
+# Added AFTER the rate limiter and x402 so that it WRAPS them. Starlette runs the
+# most recently added middleware outermost, so this sees the final response —
+# including the 429 from the rate limiter and the 402 from x402, which are the
+# two outcomes the counter exists to surface. Added before it, it would only ever
+# see responses those two allowed through.
+if settings.METRICS_ENABLED:
+    from app.middleware.client_metrics import ClientMetricsMiddleware
+    app.add_middleware(ClientMetricsMiddleware)
+    logger.info("Client-type metrics enabled")
+
 # Add CORS middleware for browser-based SDK usage
 # IMPORTANT: Add CORS last so it wraps all other middleware.
 # This ensures CORS headers are added to ALL responses, including 402s from x402.
