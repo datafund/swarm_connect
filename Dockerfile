@@ -17,5 +17,16 @@ COPY . .
 ARG VERSION=0.0.0-unknown
 RUN echo "${VERSION}" > VERSION
 
+# Run as an unprivileged user rather than root. The UID/GID are fixed so a host
+# directory bind-mounted over /app/data can be given to this user by number
+# (the deploy workflow chowns /opt/swarm_connect*_data to 10001). The code stays
+# root-owned and therefore read-only to the process; only the state and log
+# directories are writable.
+RUN groupadd --system --gid 10001 app \
+    && useradd --system --uid 10001 --gid app --home-dir /app --no-create-home app \
+    && mkdir -p /app/data /app/logs \
+    && chown app:app /app/data /app/logs
+USER app
+
 # Command to run the application
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--no-server-header"]

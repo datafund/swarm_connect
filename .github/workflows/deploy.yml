@@ -47,6 +47,13 @@ jobs:
         if: github.ref == 'refs/heads/dev'
         run: |
           mkdir -p /opt/swarm_connect_dev_data
+          # The container runs as UID 10001 (see Dockerfile), not root. Hand it
+          # the state dir, including files written by earlier root containers.
+          # Done through the image so it works whatever user the runner is.
+          docker run --rm --user 0 --entrypoint chown -v /opt/swarm_connect_dev_data:/app/data swarm_connect:dev -R 10001:10001 /app/data
+          # This file holds signing keys: make it owner-only BEFORE writing.
+          # umask alone would not narrow a file that already exists as 0644.
+          touch /opt/swarm_connect_dev.env && chmod 600 /opt/swarm_connect_dev.env
           cat > /opt/swarm_connect_dev.env << 'EOF'
           X402_ENABLED=${{ vars.X402_ENABLED || 'false' }}
           X402_PAY_TO_ADDRESS=${{ vars.X402_PAY_TO_ADDRESS || '' }}
@@ -116,6 +123,13 @@ jobs:
         if: github.ref == 'refs/heads/main'
         run: |
           mkdir -p /opt/swarm_connect_data
+          # The container runs as UID 10001 (see Dockerfile), not root. Hand it
+          # the state dir, including files written by earlier root containers.
+          # Done through the image so it works whatever user the runner is.
+          docker run --rm --user 0 --entrypoint chown -v /opt/swarm_connect_data:/app/data swarm_connect:main -R 10001:10001 /app/data
+          # This file holds signing keys: make it owner-only BEFORE writing.
+          # umask alone would not narrow a file that already exists as 0644.
+          touch /opt/swarm_connect.env && chmod 600 /opt/swarm_connect.env
           cat > /opt/swarm_connect.env << 'EOF'
           X402_ENABLED=${{ vars.X402_ENABLED || 'false' }}
           X402_PAY_TO_ADDRESS=${{ vars.X402_PAY_TO_ADDRESS || '' }}
@@ -208,6 +222,8 @@ jobs:
           mv swarm_connect.new swarm_connect
           rm -rf swarm_connect.old
           cd swarm_connect
+          # Monitoring credentials: owner-only, like the gateway env files.
+          touch .env && chmod 600 .env
           cat > .env << EOF
           GRAFANA_CLOUD_PROM_USERNAME=${{ secrets.GRAFANA_CLOUD_PROM_USERNAME }}
           GRAFANA_CLOUD_API_TOKEN=${{ secrets.GRAFANA_CLOUD_API_TOKEN }}
