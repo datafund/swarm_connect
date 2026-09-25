@@ -375,7 +375,15 @@ async def require_x402_payment(request: Request) -> None:
                 "accepts": [payment_requirements.model_dump(by_alias=True)],
             },
         )
+    # A retry of a request already paid for (#359). Checked only now that the
+    # facilitator has verified this payment's signature for its payer, and
+    # before it is reserved or settled: a repeat is answered from the stored
+    # result and its new payment is never charged.
+    from app.x402.idempotency import begin_idempotent_request, idempotency_store
+    idempotency_id = await begin_idempotent_request(request, payer=auth_key[0])
+
     if not replay_guard.reserve(auth_key):
+        idempotency_store.abandon(idempotency_id)
         logger.warning(f"x402: Payment authorization reused by {client_ip}")
         raise HTTPException(
             status_code=402,
@@ -395,3 +403,4 @@ async def require_x402_payment(request: Request) -> None:
     request.state.x402_payment = payment_payload
     request.state.x402_requirements = payment_requirements
     request.state.x402_auth_key = auth_key
+    request.state.x402_idempotency_id = idempotency_id

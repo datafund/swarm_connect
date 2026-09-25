@@ -80,7 +80,7 @@ Refunds are manual USDC transfers from the pay-to wallet to the payer address in
 
 ## 4. Backups and restore
 
-`scripts/backup_state.sh` archives `/opt/swarm_connect_data` and `/opt/swarm_connect_dev_data`. They hold the ownership registry, prepaid bandwidth credit, pool state, allowance and spend counters, and the audit log.
+`scripts/backup_state.sh` archives `/opt/swarm_connect_data` and `/opt/swarm_connect_dev_data`. They hold the ownership registry, prepaid bandwidth credit, pool state, allowance and spend counters, stored Idempotency-Key results, and the audit log.
 
 **The archives contain bearer credit tokens.** Treat every copy, including the off-host one, as secret, and set retention on the remote side as well: the script only prunes locally.
 

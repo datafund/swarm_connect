@@ -301,6 +301,10 @@ X402_FREE_TIER_RATE_LIMIT=3  # Requests/minute for free tier (default: 3)
 - `POST /api/v1/data/manifest` - Requires payment OR free tier
 - `GET /api/v1/data/{ref}` - FREE (no payment required)
 
+### Idempotency-Key (paid requests, #359)
+
+Paid POSTs accept an `Idempotency-Key` header (`app/x402/idempotency.py`). Scoped to (payer, method, path, key); a 2xx result is stored for 24 h in `X402_IDEMPOTENCY_STATE_FILE` (`data/x402_idempotency.json`, atomic writes). The check runs in `require_x402_payment` **after** the facilitator verifies the new payment (the verified signature is what makes `from` the payer; an unverified claim never sees a stored result) and **before** the replay guard reserves it. A repeat returns the stored response with `Idempotent-Replayed: true` and the new payment is never settled; the dependency raises `IdempotentReplay`, which `X402Middleware` turns into the response. Same key while the first request runs → `409 IDEMPOTENCY_KEY_IN_PROGRESS`; same key with a different query/body (hash stored; multipart forms hashed field by field) → `422 IDEMPOTENCY_KEY_REUSED`; non-2xx outcomes are not stored and release the key. In-flight markers are in memory (15 min cap). Free-tier requests ignore the header.
+
 ### Free Tier Behavior
 
 When `X402_FREE_TIER_ENABLED=true` (default):

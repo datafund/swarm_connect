@@ -98,6 +98,10 @@ class Settings(BaseSettings):
     # inside the container and lost on every deploy (#375).
     X402_AUDIT_LOG_PATH: str = "data/x402_audit.jsonl"
 
+    # Stored results of paid requests sent with an Idempotency-Key, kept 24 h
+    # so a retry after a client timeout is not charged again (#359).
+    X402_IDEMPOTENCY_STATE_FILE: str = "data/x402_idempotency.json"
+
     # === Base Chain Settings (for monitoring USDC receipts) ===
     BASE_RPC_URL: str = "https://sepolia.base.org"
 

@@ -444,6 +444,27 @@ Use Base Sepolia for integration testing:
 - Free testnet USDC from [Circle Faucet](https://faucet.circle.com/)
 - No real money involved
 
+## Retries and Idempotency-Key
+
+A paid stamp purchase can take a minute or more (Bee buys the batch on-chain, then the payment settles). A client that times out earlier and retries with a new payment can pay twice and get two batches. To retry safely:
+
+1. Generate a unique `Idempotency-Key` (a UUID) per logical operation and send it on every paid POST (`/api/v1/stamps/`, `/api/v1/stamps/for-owner`, `/api/v1/data/`, `/api/v1/data/manifest`, `/api/v1/chunks/credit`, `/api/v1/pool/acquire`).
+2. On a timeout, retry with the **same key and the same request**, signing a fresh `X-PAYMENT` as usual.
+3. Set client timeouts well above the gateway's worst case (at least 120 s for stamp purchases).
+
+What the gateway does with the key (payments with `X-PAYMENT` only; the free tier ignores it):
+
+| Situation | Response |
+|-----------|----------|
+| First request with the key | Processed and paid as normal; a 2xx result is stored for 24 h |
+| Same key, same payer, same request, first one finished | The stored response, with `Idempotent-Replayed: true`. The new payment is verified (to prove it is the same payer) but **never settled** |
+| Same key while the first is still running | `409` `IDEMPOTENCY_KEY_IN_PROGRESS`, `Retry-After: 5`. Not charged; retry with the same key |
+| Same key, different body or query | `422` `IDEMPOTENCY_KEY_REUSED`. Not charged |
+| Key longer than 255 characters or not printable ASCII | `400` `IDEMPOTENCY_KEY_INVALID`. Not charged |
+| First request failed (non-2xx) | Nothing stored; a retry is a new, paid attempt |
+
+Keys are scoped to the payer (the verified signer of `X-PAYMENT`), the method and the path, so another wallet's request with the same key is unaffected.
+
 ## Error Handling
 
 | Error | Cause | Resolution |
@@ -453,6 +474,8 @@ Use Base Sepolia for integration testing:
 | "Insufficient balance" | Wallet lacks USDC | Fund wallet |
 | "Invalid signature" | Wrong private key or network | Check configuration |
 | "Payment verification failed" | Facilitator rejected | Check payment amount |
+| 409 `IDEMPOTENCY_KEY_IN_PROGRESS` | Retry of a paid request still running | Retry with the same key after `Retry-After` |
+| 422 `IDEMPOTENCY_KEY_REUSED` | Same `Idempotency-Key` for a different request | Use a new key |
 
 ## References
 

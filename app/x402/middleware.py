@@ -338,10 +338,18 @@ class X402Middleware(BaseHTTPMiddleware):
             return await call_next(request)
 
         # Let the request through — the dependency handles pre-request checks
+        from app.x402.idempotency import IdempotentReplay, finish_idempotent_request
         try:
             response = await call_next(request)
-        except Exception:
-            if getattr(request.state, "x402_mode", None) != "paid":
+        except IdempotentReplay as replay:
+            # A repeat of a completed paid request (idempotency.py): the stored
+            # response, and nothing settled.
+            return replay.response
+        except BaseException as exc:
+            # Also on cancellation (client gone), so the key is not left
+            # blocked as in progress.
+            finish_idempotent_request(request, None)
+            if not isinstance(exc, Exception) or getattr(request.state, "x402_mode", None) != "paid":
                 raise
             return self._paid_request_crashed(request)
 
@@ -372,7 +380,14 @@ class X402Middleware(BaseHTTPMiddleware):
             return new_response
 
         if x402_mode == "paid":
-            return await self._finish_paid(request, response)
+            try:
+                out = await self._finish_paid(request, response)
+            except BaseException:
+                finish_idempotent_request(request, None)
+                raise
+            # Stores a 2xx result for the request's Idempotency-Key, if any.
+            finish_idempotent_request(request, out)
+            return out
 
         return response
 
