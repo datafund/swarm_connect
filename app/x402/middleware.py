@@ -26,6 +26,7 @@ from x402.encoding import safe_base64_decode, safe_base64_encode
 
 from app.core.config import settings
 from app.x402.ratelimit import get_rate_limit_headers
+from app.services.metrics import x402_settlements_total
 
 logger = logging.getLogger(__name__)
 
@@ -169,6 +170,41 @@ def create_402_response(
         status_code=402,
         content=response_body,
         headers={"Content-Type": "application/json"}
+    )
+
+
+# Fields that identify what a paid request delivered. Never the credit token:
+# it is a bearer secret.
+_RESOURCE_FIELDS = ("batchID", "batch_id", "reference", "credited_bytes")
+
+
+def _log_delivery(request: Request, settlement, body: bytes, client_ip: str, payer: Optional[str]) -> None:
+    """One audit line linking a settlement to what it paid for (#375).
+
+    With payment_settled (the transaction) and this (the delivered resource),
+    a "paid but got nothing" question can be answered from the audit log.
+    """
+    from app.x402.audit import AuditEventType, log_audit_event
+    resource = {}
+    try:
+        parsed = json.loads(body)
+        if isinstance(parsed, dict):
+            resource = {k: parsed[k] for k in _RESOURCE_FIELDS if k in parsed}
+    except Exception:
+        pass
+    requirements = getattr(request.state, "x402_requirements", None)
+    log_audit_event(
+        event_type=AuditEventType.PAYMENT_DELIVERED,
+        data={
+            "transaction_hash": getattr(settlement, "transaction", None),
+            "method": request.method,
+            "path": request.url.path,
+            "amount": getattr(requirements, "max_amount_required", None),
+            "network": settings.X402_NETWORK,
+            "resource": resource,
+        },
+        client_ip=client_ip,
+        wallet_address=payer,
     )
 
 
@@ -378,6 +414,7 @@ class X402Middleware(BaseHTTPMiddleware):
                 logger.error(f"x402: settlement failed after delivery on {request.url.path}: {failure}")
                 log_payment_settled(client_ip=client_ip, payer=payer, transaction_hash=None,
                                     network=settings.X402_NETWORK, success=False, error_reason=failure)
+                x402_settlements_total.labels(result="refused").inc()
                 return JSONResponse(
                     status_code=402,
                     content={
@@ -390,6 +427,7 @@ class X402Middleware(BaseHTTPMiddleware):
             log_payment_settled(client_ip=client_ip, payer=payer,
                                 transaction_hash=getattr(settlement, "transaction", None),
                                 network=settings.X402_NETWORK, success=True)
+            x402_settlements_total.labels(result="settled").inc()
 
         tx_hash = getattr(settlement, "transaction", None) or "unknown"
         if not ok:
@@ -400,10 +438,13 @@ class X402Middleware(BaseHTTPMiddleware):
             log_payment_failed(client_ip=client_ip,
                                reason=f"HTTP {response.status_code} after settlement; tx={tx_hash}",
                                stage="delivery_after_settlement", wallet_address=payer)
+            x402_settlements_total.labels(result="settled_not_delivered").inc()
 
         body = b""
         async for chunk in response.body_iterator:
             body += chunk
+        if ok:
+            _log_delivery(request, settlement, body, client_ip, payer)
         new_response = Response(
             content=body,
             status_code=response.status_code,
@@ -434,6 +475,7 @@ class X402Middleware(BaseHTTPMiddleware):
             return JSONResponse(status_code=500, content={"detail": "Internal server error. You were not charged."})
 
         tx_hash = getattr(settlement, "transaction", None) or "unknown"
+        x402_settlements_total.labels(result="settled_not_delivered").inc()
         logger.error(f"x402: payment {tx_hash} settled but {request.url.path} raised; refund needed", exc_info=True)
         log_payment_failed(client_ip=get_client_ip(request),
                            reason=f"exception after settlement; tx={tx_hash}",

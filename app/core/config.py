@@ -94,7 +94,9 @@ class Settings(BaseSettings):
     X402_WHITELIST_IPS: str = ""  # Comma-separated free-access IPs
 
     # === x402 Audit Settings ===
-    X402_AUDIT_LOG_PATH: str = "logs/x402_audit.jsonl"
+    # Under data/, which is the persistent volume in docker-compose: logs/ was
+    # inside the container and lost on every deploy (#375).
+    X402_AUDIT_LOG_PATH: str = "data/x402_audit.jsonl"
 
     # === Base Chain Settings (for monitoring USDC receipts) ===
     BASE_RPC_URL: str = "https://sepolia.base.org"

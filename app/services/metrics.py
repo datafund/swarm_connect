@@ -90,6 +90,12 @@ pool_acquires_total = Counter(
 notary_signatures_total = Counter(
     "gateway_notary_signatures_total", "Notary signing operations", ["status"]
 )
+x402_settlements_total = Counter(
+    "gateway_x402_settlements_total",
+    "x402 settlement outcomes (#375): settled, refused (nothing delivered), error "
+    "(outcome unknown, nothing delivered), settled_not_delivered (refund needed)",
+    ["result"],
+)
 x402_payments_total = Counter(
     "gateway_x402_payments_total", "x402 payment mode breakdown", ["mode"]
 )

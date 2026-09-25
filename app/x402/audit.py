@@ -44,6 +44,7 @@ class AuditEventType(Enum):
     PAYMENT_RECEIVED = "payment_received"
     PAYMENT_VERIFIED = "payment_verified"
     PAYMENT_SETTLED = "payment_settled"
+    PAYMENT_DELIVERED = "payment_delivered"
     PAYMENT_FAILED = "payment_failed"
     ACCESS_BLOCKED = "access_blocked"
     ACCESS_WHITELISTED = "access_whitelisted"

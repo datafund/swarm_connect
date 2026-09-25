@@ -32,6 +32,7 @@ from fastapi import HTTPException, Request
 from app.core.config import settings
 from app.core.client_ip import get_client_ip
 from app.x402.audit import log_payment_failed, log_payment_settled
+from app.services.metrics import x402_settlements_total
 
 logger = logging.getLogger(__name__)
 
@@ -119,6 +120,7 @@ async def settle_payment(request: Request) -> None:
         logger.error(f"x402: settlement error before delivery: {type(e).__name__}: {e}", exc_info=True)
         log_payment_failed(client_ip=client_ip, reason=f"{type(e).__name__}: {e}",
                            stage="settle", wallet_address=payer)
+        x402_settlements_total.labels(result="error").inc()
         raise HTTPException(
             status_code=502,
             detail={
@@ -137,6 +139,7 @@ async def settle_payment(request: Request) -> None:
         logger.warning(f"x402: settlement refused before delivery: {reason}")
         log_payment_settled(client_ip=client_ip, payer=payer, transaction_hash=None,
                             network=settings.X402_NETWORK, success=False, error_reason=reason)
+        x402_settlements_total.labels(result="refused").inc()
         message = f"The payment could not be settled ({reason}). Nothing was delivered."
         detail = {
             "code": "PAYMENT_SETTLEMENT_FAILED",
@@ -159,3 +162,4 @@ async def settle_payment(request: Request) -> None:
     logger.info(f"x402: payment settled before delivery, tx={tx}")
     log_payment_settled(client_ip=client_ip, payer=payer, transaction_hash=tx,
                         network=settings.X402_NETWORK, success=True)
+    x402_settlements_total.labels(result="settled").inc()
