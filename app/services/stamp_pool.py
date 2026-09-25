@@ -803,10 +803,6 @@ class StampPoolManager:
             self._spend_times = [t for t in self._spend_times if t > cutoff]
             return max(0, settings.STAMP_POOL_MAX_PURCHASES_PER_HOUR - len(self._spend_times))
 
-    def _record_spend(self) -> None:
-        with self._lock:
-            self._spend_times.append(datetime.now(timezone.utc))
-
     def _reserve_spend_slot(self) -> Optional[datetime]:
         """Take one slot of the hourly ceiling now, before the Bee call (#363).
 
@@ -832,20 +828,31 @@ class StampPoolManager:
             except ValueError:
                 pass
 
-    def _reserve_gateway_spend(self, cost_bzz: float, what: str) -> bool:
-        """Charge the gateway-wide daily ceiling for a pool spend (#363)."""
+    def _reserve_gateway_spend(self, cost_bzz: float, what: str, operation: str):
+        """Charge the gateway-wide daily ceiling for a pool spend (#363).
+
+        Returns the hold, or None (and records why) if the ceiling is reached.
+        """
         from app.services.spend_budget import spend_budget_tracker
-        ok, info = spend_budget_tracker.reserve_gateway(cost_bzz)
-        if not ok:
+        from app.services.metrics import stamp_spend_refusals_total
+        hold, info = spend_budget_tracker.reserve_gateway(cost_bzz)
+        if hold is None:
             msg = (f"Refusing to {what}: the gateway's daily spending ceiling "
                    f"({info['daily_budget_bzz']} BZZ) is reached; it resets at {info['resets_at']}.")
             logger.error(msg)
             self._errors.append(msg)
-        return ok
+            stamp_spend_refusals_total.labels(operation=operation, limit="gateway_daily").inc()
+        return hold
 
-    def _release_gateway_spend(self, cost_bzz: float) -> None:
-        from app.services.spend_budget import spend_budget_tracker
-        spend_budget_tracker.release_gateway(cost_bzz)
+    def _release_if_unspent(self, slot, hold, exc: BaseException) -> None:
+        """Give back the hourly slot and the ceiling hold only if nothing was spent."""
+        from app.services.spend_budget import spend_budget_tracker, spend_certainly_did_not_happen
+        if spend_certainly_did_not_happen(exc):
+            self._release_spend_slot(slot)
+            spend_budget_tracker.release_hold(hold)
+        else:
+            logger.warning(f"Pool spend failed with {type(exc).__name__}; the outcome is uncertain, "
+                           "so it stays counted against the hourly and daily ceilings")
 
     async def _purchase_stamp(self, depth: int, max_retries: int = 3) -> Optional[str]:
         """Purchase a new stamp for the pool. Retries on 429 rate limiting.
@@ -869,6 +876,7 @@ class StampPoolManager:
             return None
 
         batch_id = None
+        hold = None
         try:
             # Get current price (Bee API returns currentPrice as a string)
             chainstate = await swarm_api.get_chainstate()
@@ -885,35 +893,30 @@ class StampPoolManager:
             logger.info(f"Purchasing stamp for pool: depth={depth}, amount={amount}, duration={duration_hours}h")
 
             cost_bzz = swarm_api.plur_to_bzz(swarm_api.calculate_stamp_total_cost(amount, depth))
-            if not self._reserve_gateway_spend(cost_bzz, f"buy a depth-{depth} pool batch"):
+            hold = self._reserve_gateway_spend(cost_bzz, f"buy a depth-{depth} pool batch", "pool purchase")
+            if hold is None:
                 self._release_spend_slot(slot)
                 return None
 
-            # Purchase the stamp with retry on 429
-            batch_id = None
-            try:
-                for attempt in range(max_retries):
-                    try:
-                        batch_id = await swarm_api.purchase_postage_stamp(amount, depth, label)
-                        # The hourly slot was taken before the call and is kept
-                        # the moment Bee accepts it, before waiting for it to
-                        # become usable. The money is spent at that point, so a
-                        # batch that never becomes usable still counts.
-                        break
-                    except Exception as e:
-                        if "429" in str(e) and attempt < max_retries - 1:
-                            wait_time = 15 * (attempt + 1)
-                            logger.warning(f"Bee node rate limited (429), retrying in {wait_time}s (attempt {attempt + 1}/{max_retries})")
-                            await asyncio.sleep(wait_time)
-                        else:
-                            raise
-            finally:
-                if not batch_id:
-                    self._release_spend_slot(slot)
-                    self._release_gateway_spend(cost_bzz)
+            # Purchase the stamp with retry on 429. The hourly slot and the
+            # ceiling hold were taken before the call; they are kept once Bee
+            # accepts it, before waiting for it to become usable, because the
+            # money is spent at that point.
+            for attempt in range(max_retries):
+                try:
+                    batch_id = await swarm_api.purchase_postage_stamp(amount, depth, label)
+                    break
+                except Exception as e:
+                    if "429" in str(e) and attempt < max_retries - 1:
+                        wait_time = 15 * (attempt + 1)
+                        logger.warning(f"Bee node rate limited (429), retrying in {wait_time}s (attempt {attempt + 1}/{max_retries})")
+                        await asyncio.sleep(wait_time)
+                    else:
+                        raise
 
             if not batch_id:
-                return None
+                from fastapi import HTTPException
+                raise HTTPException(status_code=502, detail="Bee returned no batch ID")
 
             # Wait for stamp to become usable (up to 90 seconds)
             usable = await self._wait_for_stamp_usable(batch_id, timeout=90)
@@ -943,20 +946,25 @@ class StampPoolManager:
                 )
                 return batch_id
 
-        except Exception as e:
+        except BaseException as e:
             # Surface Bee's own message. httpx's str(e) is only the status line
             # ("Client error '400 Bad Request' for url ..."), so the actual cause
             # — "out of funds", "insufficient amount for 24h minimum validity" —
             # was discarded and had to be obtained by calling Bee by hand.
-            detail = _bee_error_message(e)
-            logger.error(
-                f"Failed to purchase stamp for pool (depth={depth}): {e}"
-                + (f" — Bee said: {detail}" if detail else "")
-            )
             if not batch_id:
-                # Failed before anything was bought (e.g. the price lookup):
-                # the hourly slot taken up front goes back.
-                self._release_spend_slot(slot)
+                # Nothing confirmed bought. Give the slot and the hold back only
+                # if the purchase certainly did not happen; a price lookup that
+                # failed before the call always counts as that.
+                if hold is None:
+                    self._release_spend_slot(slot)
+                else:
+                    self._release_if_unspent(slot, hold, e)
+            if isinstance(e, Exception):
+                detail = _bee_error_message(e)
+                logger.error(
+                    f"Failed to purchase stamp for pool (depth={depth}): {e}"
+                    + (f" — Bee said: {detail}" if detail else "")
+                )
             raise
 
     async def _wait_for_stamp_usable(self, batch_id: str, timeout: int = 90) -> bool:
@@ -1063,19 +1071,29 @@ class StampPoolManager:
 
             logger.info(f"Topping up stamp {batch_id[:16]}... with {topup_hours}h ({amount} PLUR)")
 
-            depth = self._pool[batch_id].depth if batch_id in self._pool else 17
+            if batch_id not in self._pool:
+                # Only pool inventory is topped up here; without its depth the
+                # cost cannot be charged correctly against the ceiling.
+                logger.error(f"Not topping up {batch_id[:16]}...: not in the pool")
+                self._release_spend_slot(slot)
+                return
+            depth = self._pool[batch_id].depth
             cost_bzz = swarm_api.plur_to_bzz(swarm_api.calculate_stamp_total_cost(amount, depth))
-            if not self._reserve_gateway_spend(cost_bzz, f"top up batch {batch_id[:16]}..."):
+            hold = self._reserve_gateway_spend(cost_bzz, f"top up batch {batch_id[:16]}...", "pool top-up")
+            if hold is None:
                 self._release_spend_slot(slot)
                 return
             try:
                 await swarm_api.extend_postage_stamp(batch_id, amount)
-            except BaseException:
-                self._release_gateway_spend(cost_bzz)
+            except BaseException as e:
+                self._release_if_unspent(slot, hold, e)
+                slot = None  # handled
                 raise
 
         except BaseException as e:
-            self._release_spend_slot(slot)
+            if slot is not None and not isinstance(e, asyncio.CancelledError):
+                # Failed before the top-up call (e.g. the price lookup).
+                self._release_spend_slot(slot)
             logger.error(f"Failed to top up stamp {batch_id[:16]}...: {e}")
             raise
 

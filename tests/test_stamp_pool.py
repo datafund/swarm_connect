@@ -1410,9 +1410,16 @@ class TestTopUpRespectsTheSpendCeiling:
     def state_file(self, tmp_path):
         return str(tmp_path / "pool_state.json")
 
+    @staticmethod
+    def _in_pool(manager, n):
+        # Only pool inventory is topped up (its depth prices the ceiling hold).
+        for i in range(n):
+            manager.add_stamp_to_pool(f"{i:064x}", 17, 1_000_000, 604800)
+
     @pytest.mark.asyncio
     async def test_topups_stop_at_the_ceiling(self, state_file):
         manager = StampPoolManager(state_file=state_file)
+        self._in_pool(manager, 8)
         extended = []
 
         async def fake_extend(batch_id, amount):
@@ -1438,6 +1445,7 @@ class TestTopUpRespectsTheSpendCeiling:
         spending it.
         """
         manager = StampPoolManager(state_file=state_file)
+        self._in_pool(manager, 6)
         bought, extended = [], []
 
         async def fake_buy(amount, depth, label):
@@ -1470,20 +1478,40 @@ class TestTopUpRespectsTheSpendCeiling:
         """Recorded when Bee accepts the extension, because that is when the
         money is spent. Counting attempts would let a failing extend exhaust the
         ceiling and block the purchases the pool actually needs."""
+        import httpx
         manager = StampPoolManager(state_file=state_file)
+        self._in_pool(manager, 3)
+        refused = httpx.HTTPStatusError(
+            "400", request=httpx.Request("PATCH", "http://bee/stamps/topup"),
+            response=httpx.Response(400, json={"message": "insufficient funds"}))
 
         with patch('app.services.stamp_pool.settings.STAMP_POOL_MAX_PURCHASES_PER_HOUR', 3):
             with patch('app.services.stamp_pool.swarm_api.get_chainstate',
                        new=AsyncMock(return_value={"currentPrice": "24000"})):
                 with patch('app.services.stamp_pool.swarm_api.extend_postage_stamp',
-                           side_effect=RuntimeError("bee said no")):
+                           side_effect=refused):
                     for i in range(3):
-                        with pytest.raises(RuntimeError):
+                        with pytest.raises(httpx.HTTPStatusError):
                             await manager._topup_stamp(f"{i:064x}")
 
         # Asserted on the recorded spends rather than the remaining budget, which
         # would read the real configured ceiling once the patch has exited.
-        assert manager._spend_times == [], "failed top-ups consumed the ceiling"
+        assert manager._spend_times == [], "refused top-ups consumed the ceiling"
+
+    @pytest.mark.asyncio
+    async def test_an_uncertain_topup_failure_stays_counted(self, state_file):
+        """A timeout after the call was sent may have spent money: fail closed."""
+        import httpx
+        manager = StampPoolManager(state_file=state_file)
+        self._in_pool(manager, 1)
+        with patch('app.services.stamp_pool.settings.STAMP_POOL_MAX_PURCHASES_PER_HOUR', 3):
+            with patch('app.services.stamp_pool.swarm_api.get_chainstate',
+                       new=AsyncMock(return_value={"currentPrice": "24000"})):
+                with patch('app.services.stamp_pool.swarm_api.extend_postage_stamp',
+                           side_effect=httpx.ReadTimeout("waiting for the transaction")):
+                    with pytest.raises(httpx.ReadTimeout):
+                        await manager._topup_stamp(f"{0:064x}")
+        assert len(manager._spend_times) == 1
 
     @pytest.mark.asyncio
     async def test_a_refusal_is_reported_in_pool_status(self, state_file):
@@ -1545,13 +1573,21 @@ class TestSpendReservation:
         from app.core.config import settings as real
         monkeypatch.setattr(real, "STAMP_POOL_MAX_PURCHASES_PER_HOUR", 1)
         mgr = StampPoolManager(state_file=str(tmp_path / "pool.json"))
+        import httpx
+        from app.services import spend_budget
+        tracker = spend_budget.SpendBudgetTracker(state_file=str(tmp_path / "s.json"))
+        monkeypatch.setattr(spend_budget, "spend_budget_tracker", tracker)
+        monkeypatch.setattr(real, "GATEWAY_DAILY_BZZ_CEILING", 1.0)
+        refused = httpx.HTTPStatusError(
+            "400", request=httpx.Request("POST", "http://bee/stamps"),
+            response=httpx.Response(400, json={"message": "insufficient funds"}))
         with patch("app.services.swarm_api.get_chainstate",
                    new=AsyncMock(return_value={"currentPrice": "24000"})), \
-             patch("app.services.swarm_api.purchase_postage_stamp",
-                   new=AsyncMock(side_effect=RuntimeError("bee said no"))):
-            with pytest.raises(RuntimeError):
+             patch("app.services.swarm_api.purchase_postage_stamp", new=AsyncMock(side_effect=refused)):
+            with pytest.raises(httpx.HTTPStatusError):
                 asyncio.run(mgr._purchase_stamp(17))
         assert mgr._spend_budget_remaining() == 1
+        assert tracker.snapshot()["gateway_spent"] == 0.0
 
     def test_gateway_ceiling_stops_pool_purchases(self, tmp_path, monkeypatch):
         import asyncio

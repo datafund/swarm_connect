@@ -48,9 +48,45 @@ from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
-# Key under which the gateway-wide total is kept, alongside per-caller keys.
-# Not a valid IP, so it cannot collide with a caller.
+# Keys for the gateway-wide totals, kept alongside per-caller keys. Not valid
+# IPs, so they cannot collide with a caller.
 GLOBAL_KEY = "(gateway total)"
+GIVEAWAY_KEY = "(gateway giveaway)"
+TOTAL_KEYS = (GLOBAL_KEY, GIVEAWAY_KEY)
+
+
+class Hold:
+    """Amounts reserved together for one spend, on one UTC day (#363).
+
+    Released only if the spend certainly did not happen, and only on the day it
+    was taken: after midnight the day's counters have been reset, and taking a
+    stale hold off them would erase real spend of the new day.
+    """
+
+    def __init__(self, day: str, charges):
+        self.day = day
+        self.charges = list(charges)  # [(key, cost_bzz)]
+        self.released = False
+
+
+def spend_certainly_did_not_happen(exc: BaseException) -> bool:
+    """Whether a failed spend definitely spent nothing, so its hold can go back.
+
+    Only when the refusal came before the money moved: a check of our own
+    (HTTPException), a connection that was never made, or Bee answering with a
+    4xx refusal. A timeout after the request was sent, a cancellation, a 5xx or
+    anything unrecognised may have spent money, so the hold is kept and the
+    limits fail closed.
+    """
+    import httpx
+    from fastapi import HTTPException
+    if isinstance(exc, HTTPException):
+        return True
+    if isinstance(exc, (httpx.ConnectError, httpx.ConnectTimeout)):
+        return True
+    if isinstance(exc, httpx.HTTPStatusError):
+        return 400 <= exc.response.status_code < 500
+    return False
 
 # Sentinel for "no limit", matching pool_allowance so the two read alike.
 UNLIMITED = -1.0
@@ -148,6 +184,55 @@ class SpendBudgetTracker:
             return True, info
         return (spent + cost_bzz) <= limit, info
 
+    def reserve_all(self, charges) -> Tuple[Optional[Hold], Optional[str], dict]:
+        """Reserve several (key, cost, limit) charges atomically: all or none.
+
+        One lock and one write for the whole set, so a request that will be
+        refused on one limit never holds another in the meantime. Returns
+        (hold, None, {}) on success, or (None, refusing_key, info) on refusal.
+        """
+        with self._lock:
+            self._roll_day()
+            for key, cost, limit in charges:
+                spent = self._spent.get(key, 0.0)
+                if limit != UNLIMITED and spent + cost > limit:
+                    remaining = max(0.0, limit - spent)
+                    return None, key, {
+                        "caller": key,
+                        "daily_budget_bzz": limit,
+                        "spent_bzz": round(spent, 6),
+                        "remaining_bzz": round(remaining, 6),
+                        "request_cost_bzz": round(cost, 6),
+                        "resets_at": f"{self._day}T24:00:00Z",
+                    }
+            for key, cost, _ in charges:
+                self._spent[key] = self._spent.get(key, 0.0) + cost
+            self._save()
+            return Hold(self._day, [(k, c) for k, c, _ in charges]), None, {}
+
+    def release_hold(self, hold: Optional[Hold]) -> None:
+        """Give back a hold whose spend certainly did not happen (see Hold)."""
+        if hold is None or hold.released:
+            return
+        with self._lock:
+            self._roll_day()
+            hold.released = True
+            if hold.day != self._day:
+                return
+            for key, cost in hold.charges:
+                if key in self._spent:
+                    left = self._spent[key] - cost
+                    if left <= 1e-12:
+                        del self._spent[key]
+                    else:
+                        self._spent[key] = left
+            self._save()
+
+    def reserve_gateway(self, cost_bzz: float) -> Tuple[Optional[Hold], dict]:
+        """Reserve against GATEWAY_DAILY_BZZ_CEILING only (pool, for-owner)."""
+        hold, _, info = self.reserve_all([(GLOBAL_KEY, cost_bzz, settings.GATEWAY_DAILY_BZZ_CEILING)])
+        return hold, info
+
     def reserve(self, caller: str, cost_bzz: float, limit: Optional[float] = None) -> Tuple[bool, dict]:
         """Check and charge in one step (#363).
 
@@ -186,13 +271,6 @@ class SpendBudgetTracker:
                     self._spent[caller] = left
                 self._save()
 
-    def reserve_gateway(self, cost_bzz: float) -> Tuple[bool, dict]:
-        """Reserve against GATEWAY_DAILY_BZZ_CEILING, the gateway-wide total."""
-        return self.reserve(GLOBAL_KEY, cost_bzz, limit=settings.GATEWAY_DAILY_BZZ_CEILING)
-
-    def release_gateway(self, cost_bzz: float) -> None:
-        self.release(GLOBAL_KEY, cost_bzz)
-
     def consume(self, caller: str, cost_bzz: float) -> None:
         with self._lock:
             self._roll_day()
@@ -204,8 +282,9 @@ class SpendBudgetTracker:
             self._roll_day()
             return {
                 "day": self._day,
-                "spent": {k: v for k, v in self._spent.items() if k != GLOBAL_KEY},
+                "spent": {k: v for k, v in self._spent.items() if k not in TOTAL_KEYS},
                 "gateway_spent": self._spent.get(GLOBAL_KEY, 0.0),
+                "giveaway_spent": self._spent.get(GIVEAWAY_KEY, 0.0),
             }
 
 

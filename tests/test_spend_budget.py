@@ -27,6 +27,13 @@ from prometheus_client import REGISTRY
 
 STAMP_ID = "a" * 64
 
+
+def _bee_refusal():
+    import httpx
+    return httpx.HTTPStatusError(
+        "400", request=httpx.Request("POST", "http://bee/stamps"),
+        response=httpx.Response(400, json={"message": "insufficient amount"}))
+
 # depth 17 at this price is a fraction of a BZZ; the tests set costs explicitly
 # via the chainstate price where the exact figure matters.
 CHAINSTATE = {"currentPrice": "24000", "block": 1, "chainTip": 1, "totalAmount": "1"}
@@ -207,10 +214,25 @@ class TestPurchaseEndpoint:
              patch("app.services.swarm_api.check_sufficient_funds",
                    new=AsyncMock(return_value=FUNDS_OK)), \
              patch("app.services.swarm_api.purchase_postage_stamp",
-                   new=AsyncMock(side_effect=RuntimeError("bee said no"))):
+                   new=AsyncMock(side_effect=_bee_refusal())):
             TestClient(app).post("/api/v1/stamps/",
                                  json={"depth": 17, "duration_hours": 24})
-        assert tracker.snapshot()["spent"] == {}, "a failed purchase charged the caller"
+        assert tracker.snapshot()["spent"] == {}, "a refused purchase charged the caller"
+
+    def test_an_uncertain_failure_stays_charged(self, tracker, monkeypatch):
+        """A timeout after the request was sent may have bought the batch:
+        the limits fail closed rather than hand the budget back."""
+        import httpx
+        monkeypatch.setattr(settings, "X402_MAX_STAMP_BZZ", 0.0)
+        monkeypatch.setattr(settings, "STAMP_DAILY_BZZ_PER_CALLER", 10.0)
+        with patch("app.services.swarm_api.get_chainstate",
+                   new=AsyncMock(return_value=CHAINSTATE)), \
+             patch("app.services.swarm_api.check_sufficient_funds",
+                   new=AsyncMock(return_value=FUNDS_OK)), \
+             patch("app.services.swarm_api.purchase_postage_stamp",
+                   new=AsyncMock(side_effect=httpx.ReadTimeout("mining"))):
+            TestClient(app).post("/api/v1/stamps/", json={"depth": 17, "duration_hours": 24})
+        assert tracker.snapshot()["spent"] != {}
 
 
 class TestExtendEndpoint:
@@ -459,7 +481,7 @@ class TestDayRollover:
 
         from app.services import spend_budget
         monkeypatch.setattr(spend_budget, "_today", lambda: "2099-01-01")
-        assert t.snapshot() == {"day": "2099-01-01", "spent": {}, "gateway_spent": 0.0}
+        assert t.snapshot() == {"day": "2099-01-01", "spent": {}, "gateway_spent": 0.0, "giveaway_spent": 0.0}
 
 
 class TestDurability:
@@ -700,5 +722,76 @@ class TestReservation:
                    new=AsyncMock(return_value={**FUNDS_OK, "sufficient": False, "shortfall_bzz": 1.0})):
             r = TestClient(app).post("/api/v1/stamps/", json={"depth": 17, "duration_hours": 24})
         assert r.status_code == 400
-        assert tracker.snapshot() ["gateway_spent"] == 0.0
+        assert tracker.snapshot()["gateway_spent"] == 0.0
         assert tracker.snapshot()["spent"] == {}
+
+
+
+class TestHolds:
+    def test_a_hold_from_yesterday_is_not_taken_off_today(self, tmp_path, monkeypatch):
+        from app.services import spend_budget
+        from app.services.spend_budget import GLOBAL_KEY
+        t = SpendBudgetTracker(state_file=str(tmp_path / "s.json"))
+        monkeypatch.setattr(spend_budget, "_today", lambda: "2099-01-01")
+        t._day = "2099-01-01"
+        hold, _, _ = t.reserve_all([(GLOBAL_KEY, 0.8, 1.0)])
+        monkeypatch.setattr(spend_budget, "_today", lambda: "2099-01-02")
+        t.reserve_all([(GLOBAL_KEY, 0.9, 1.0)])      # real spend of the new day
+        t.release_hold(hold)                          # yesterday's failure
+        assert t.snapshot()["gateway_spent"] == 0.9
+
+    def test_reserve_all_is_all_or_nothing(self, tmp_path):
+        t = SpendBudgetTracker(state_file=str(tmp_path / "s.json"))
+        hold, refused, _ = t.reserve_all([("a", 0.5, 1.0), ("b", 0.5, 0.4)])
+        assert hold is None and refused == "b"
+        assert t.snapshot()["spent"] == {}
+
+    def test_free_ceiling_keeps_headroom_for_paid_and_pool(self, tracker, monkeypatch):
+        monkeypatch.setattr(settings, "X402_MAX_STAMP_BZZ", 0.0)
+        monkeypatch.setattr(settings, "STAMP_DAILY_BZZ_PER_CALLER", UNLIMITED)
+        monkeypatch.setattr(settings, "GATEWAY_DAILY_BZZ_CEILING", 1.0)
+        monkeypatch.setattr(settings, "GATEWAY_DAILY_BZZ_FREE_CEILING", 0.01)
+        codes = []
+        for ip in ["1.1.1.1", "2.2.2.2", "3.3.3.3"]:
+            with patch("app.services.swarm_api.get_chainstate", new=AsyncMock(return_value=CHAINSTATE)), \
+                 patch("app.services.swarm_api.check_sufficient_funds", new=AsyncMock(return_value=FUNDS_OK)), \
+                 patch("app.services.swarm_api.purchase_postage_stamp", new=AsyncMock(return_value=STAMP_ID)), \
+                 patch("app.api.endpoints.stamps.get_client_ip", return_value=ip):
+                codes.append(TestClient(app).post("/api/v1/stamps/", json={"depth": 17, "duration_hours": 24}).status_code)
+        assert 503 in codes
+        # The pool can still reserve from the remaining gateway ceiling.
+        hold, _ = tracker.reserve_gateway(0.5)
+        assert hold is not None
+
+
+
+class TestCeilingOnEveryPath:
+    def test_extend_refused_by_bee_gives_everything_back(self, tracker, monkeypatch):
+        monkeypatch.setattr(settings, "X402_MAX_STAMP_BZZ", 0.0)
+        monkeypatch.setattr(settings, "STAMP_DAILY_BZZ_PER_CALLER", 10.0)
+        monkeypatch.setattr(settings, "GATEWAY_DAILY_BZZ_CEILING", 10.0)
+        with patch("app.services.swarm_api.get_all_stamps_processed",
+                   new=AsyncMock(return_value=[{"batchID": STAMP_ID, "depth": 17}])), \
+             patch("app.services.swarm_api.get_chainstate", new=AsyncMock(return_value=CHAINSTATE)), \
+             patch("app.services.swarm_api.check_sufficient_funds", new=AsyncMock(return_value=FUNDS_OK)), \
+             patch("app.services.swarm_api.extend_postage_stamp", new=AsyncMock(side_effect=_bee_refusal())):
+            TestClient(app).patch(f"/api/v1/stamps/{STAMP_ID}/extend", json={"duration_hours": 24})
+        assert tracker.snapshot()["spent"] == {}
+        assert tracker.snapshot()["gateway_spent"] == 0.0
+
+    def test_for_owner_is_bounded_by_the_gateway_ceiling(self, tracker, monkeypatch):
+        from app.api.endpoints import stamps_for_owner as ep
+        monkeypatch.setattr(settings, "STAMP_PURCHASE_FOR_OTHERS_ENABLED", True)
+        monkeypatch.setattr(settings, "STAMP_FOR_OTHERS_REQUIRE_WHITELIST", False)
+        monkeypatch.setattr(settings, "STAMP_FOR_OTHERS_FREE_TIER_ENABLED", True)
+        monkeypatch.setattr(settings, "GATEWAY_DAILY_BZZ_CEILING", 0.000001)
+        chain = ep.gnosis_chain_client
+        with patch("app.services.swarm_api.get_chainstate", new=AsyncMock(return_value=CHAINSTATE)), \
+             patch.object(type(chain), "is_configured", new=property(lambda self: True)), \
+             patch.object(chain, "preflight", new=AsyncMock(return_value={"is_critical": False, "warnings": []})), \
+             patch.object(chain, "create_batch", new=AsyncMock()) as create:
+            r = TestClient(app).post("/api/v1/stamps/for-owner", json={
+                "owner": "0x" + "1" * 40, "depth": 17, "duration_hours": 24})
+        assert r.status_code == 503
+        assert r.json()["detail"]["code"] == "GATEWAY_DAILY_SPEND_CEILING"
+        create.assert_not_called()

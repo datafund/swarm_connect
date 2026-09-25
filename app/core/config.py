@@ -83,6 +83,10 @@ class Settings(BaseSettings):
     # limit is per caller, per origin or per hour; this one bounds the total,
     # including through any bypass not yet found. -1 disables it.
     GATEWAY_DAILY_BZZ_CEILING: float = 20.0
+    # Part of that ceiling open to unpaid spending (free-tier purchases and
+    # extensions, and testnet-paid ones). Keeps headroom for the pool's own
+    # purchases and top-ups, so free callers cannot starve it. -1 disables.
+    GATEWAY_DAILY_BZZ_FREE_CEILING: float = 10.0
     X402_RATE_LIMIT_PER_IP: int = 10  # Requests per minute per IP (for paying users)
 
     # === x402 Free Tier Settings ===

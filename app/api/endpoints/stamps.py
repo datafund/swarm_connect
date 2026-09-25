@@ -10,7 +10,9 @@ from app.services import swarm_api
 from app.services.swarm_api import plur_to_bzz
 from app.services.stamp_ownership import stamp_ownership_manager
 from app.services.stamp_tracker import record_purchase
-from app.services.spend_budget import spend_budget_tracker
+from app.services.spend_budget import (
+    GIVEAWAY_KEY, GLOBAL_KEY, spend_budget_tracker, spend_certainly_did_not_happen,
+)
 from app.x402.middleware import get_client_ip
 from app.services.metrics import (
     stamp_purchases_total,
@@ -38,23 +40,24 @@ class SpendReservation:
 
     Charged when the request is admitted (#363): the limits used to be checked
     first and charged only after the Bee call returned, so concurrent requests
-    all passed the check before any was charged. release() gives it back if
-    the spend then does not happen.
+    all passed the check before any was charged. release_if_unspent() gives it
+    back only when the spend certainly did not happen.
     """
 
-    def __init__(self, operation: str, cost_bzz: float, caller: Optional[str]):
+    def __init__(self, operation: str, cost_bzz: float, caller: Optional[str], hold):
         self.operation = operation
         self.cost_bzz = cost_bzz
         self.caller = caller  # None: not charged to a caller's budget (paid)
-        self._released = False
+        self.hold = hold
 
-    def release(self) -> None:
-        if self._released:
-            return
-        self._released = True
-        spend_budget_tracker.release_gateway(self.cost_bzz)
-        if self.caller is not None:
-            spend_budget_tracker.release(self.caller, self.cost_bzz)
+    def release_if_unspent(self, exc: BaseException) -> None:
+        if spend_certainly_did_not_happen(exc):
+            spend_budget_tracker.release_hold(self.hold)
+        else:
+            logger.warning(
+                "%s failed with %s; the outcome is uncertain, so its %.6f BZZ stays "
+                "charged against the spending limits", self.operation, type(exc).__name__, self.cost_bzz,
+            )
 
     def record(self) -> None:
         stamp_spend_bzz_total.labels(
@@ -65,19 +68,21 @@ class SpendReservation:
 def _enforce_spend_limits(request: Request, cost_bzz: float, operation: str) -> SpendReservation:
     """Bound what one request, one caller in a day, and the gateway in a day may spend.
 
-    Both stamp endpoints spend the gateway's BZZ for whoever asks. Three limits
-    apply, and they answer different questions:
+    Both stamp endpoints spend the gateway's BZZ for whoever asks. The limits
+    answer different questions:
 
     - `X402_MAX_STAMP_BZZ` bounds a SINGLE request, so no one call can take a
       large share of the wallet however it is shaped.
     - `STAMP_DAILY_BZZ_PER_CALLER` bounds a caller over a day, so the first
       limit cannot simply be applied repeatedly.
+    - `GATEWAY_DAILY_BZZ_FREE_CEILING` bounds all unpaid spending in a day,
+      whatever the callers look like, leaving headroom for the pool.
     - `GATEWAY_DAILY_BZZ_CEILING` bounds the gateway's total over a day, paid
-      or not, whatever the caller looks like.
+      or not.
 
-    Returns the reservation, already charged; the caller must release() it if
-    the spend does not happen. Raises rather than returning a failure, because
-    every caller of this must stop.
+    All applicable limits are reserved together, atomically. Returns the
+    reservation; the caller must release_if_unspent() it on failure. Raises
+    rather than returning a failure, because every caller of this must stop.
     """
     max_single = settings.X402_MAX_STAMP_BZZ
     if max_single > 0 and cost_bzz > max_single:
@@ -100,64 +105,72 @@ def _enforce_spend_limits(request: Request, cost_bzz: float, operation: str) -> 
             },
         )
 
-    ok, gw = spend_budget_tracker.reserve_gateway(cost_bzz)
-    if not ok:
-        logger.error(
-            "Gateway daily spend ceiling reached: %.6f of %.6f BZZ spent today, %s needs %.6f",
-            gw["spent_bzz"], gw["daily_budget_bzz"], operation, cost_bzz,
+    charges = [(GLOBAL_KEY, cost_bzz, settings.GATEWAY_DAILY_BZZ_CEILING)]
+    caller = None
+    # A settled payment is not drawn from the giveaway budgets — the caller has
+    # funded it. Withheld on a test network for the same reason as the pool:
+    # testnet currency is free from a faucet, so honouring it there would
+    # replace a bounded giveaway with an unbounded one.
+    paid = getattr(request.state, "x402_mode", None) == "paid"
+    if paid and not settings.paid_bypass_is_honoured():
+        logger.warning(
+            "Payment for %s settled on %s, which is a test network: the daily "
+            "spend budget still applies.", operation, settings.X402_NETWORK,
         )
-        stamp_spend_refusals_total.labels(operation=operation, limit="gateway_daily").inc()
+    if not (paid and settings.paid_bypass_is_honoured()):
+        caller = get_client_ip(request)
+        charges += [
+            (GIVEAWAY_KEY, cost_bzz, settings.GATEWAY_DAILY_BZZ_FREE_CEILING),
+            (caller, cost_bzz, spend_budget_tracker.budget()),
+        ]
+
+    hold, refused, info = spend_budget_tracker.reserve_all(charges)
+    if hold is not None:
+        return SpendReservation(operation, cost_bzz, caller, hold)
+
+    if refused in (GLOBAL_KEY, GIVEAWAY_KEY):
+        which = "gateway_daily" if refused == GLOBAL_KEY else "gateway_free_daily"
+        logger.error(
+            "Gateway %s spend ceiling reached: %.6f of %.6f BZZ today, %s needs %.6f",
+            "total" if refused == GLOBAL_KEY else "free", info["spent_bzz"],
+            info["daily_budget_bzz"], operation, cost_bzz,
+        )
+        stamp_spend_refusals_total.labels(operation=operation, limit=which).inc()
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail={
                 "code": "GATEWAY_DAILY_SPEND_CEILING",
                 "message": (
-                    f"The gateway has reached its daily spending limit. It resets at "
-                    f"{gw['resets_at']}."
+                    ("The gateway has reached its daily spending limit" if refused == GLOBAL_KEY
+                     else "Today's free spending on this gateway is used up; paid requests still work")
+                    + f". It resets at {info['resets_at']}."
                 ),
-                "resets_at": gw["resets_at"],
-            },
-        )
-
-    # A settled payment is not drawn from the giveaway budget — the caller has
-    # funded it. Withheld on a test network for the same reason as the pool:
-    # testnet currency is free from a faucet, so honouring it there would
-    # replace a bounded giveaway with an unbounded one.
-    if getattr(request.state, "x402_mode", None) == "paid":
-        if settings.paid_bypass_is_honoured():
-            return SpendReservation(operation, cost_bzz, caller=None)
-        logger.warning(
-            "Payment for %s settled on %s, which is a test network: the daily "
-            "spend budget still applies.", operation, settings.X402_NETWORK,
-        )
-
-    caller = get_client_ip(request)
-    allowed, info = spend_budget_tracker.reserve(caller, cost_bzz)
-    if not allowed:
-        spend_budget_tracker.release_gateway(cost_bzz)
-        logger.info(
-            "Daily spend budget exhausted for %s: %.6f of %.6f BZZ used, request needs %.6f",
-            caller, info["spent_bzz"], info["daily_budget_bzz"], cost_bzz,
-        )
-        stamp_spend_refusals_total.labels(operation=operation, limit="daily_budget").inc()
-        raise HTTPException(
-            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-            detail={
-                "code": "DAILY_SPEND_BUDGET_EXHAUSTED",
-                "message": (
-                    f"This {operation} would cost {cost_bzz:.6f} BZZ and only "
-                    f"{info['remaining_bzz']:.6f} BZZ remains of today's "
-                    f"{info['daily_budget_bzz']:.6f} BZZ allowance. It resets at "
-                    f"{info['resets_at']}. A smaller or shorter batch may still fit."
-                ),
-                "cost_bzz": info["request_cost_bzz"],
-                "daily_budget_bzz": info["daily_budget_bzz"],
-                "spent_bzz": info["spent_bzz"],
-                "remaining_bzz": info["remaining_bzz"],
                 "resets_at": info["resets_at"],
             },
         )
-    return SpendReservation(operation, cost_bzz, caller=caller)
+
+    logger.info(
+        "Daily spend budget exhausted for %s: %.6f of %.6f BZZ used, request needs %.6f",
+        caller, info["spent_bzz"], info["daily_budget_bzz"], cost_bzz,
+    )
+    stamp_spend_refusals_total.labels(operation=operation, limit="daily_budget").inc()
+    raise HTTPException(
+        status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+        detail={
+            "code": "DAILY_SPEND_BUDGET_EXHAUSTED",
+            "message": (
+                f"This {operation} would cost {cost_bzz:.6f} BZZ and only "
+                f"{info['remaining_bzz']:.6f} BZZ remains of today's "
+                f"{info['daily_budget_bzz']:.6f} BZZ allowance. It resets at "
+                f"{info['resets_at']}. A smaller or shorter batch may still fit."
+            ),
+            "cost_bzz": info["request_cost_bzz"],
+            "daily_budget_bzz": info["daily_budget_bzz"],
+            "spent_bzz": info["spent_bzz"],
+            "remaining_bzz": info["remaining_bzz"],
+            "resets_at": info["resets_at"],
+        },
+    )
 
 
 def _bee_error_detail(exc: httpx.HTTPError):
@@ -560,8 +573,8 @@ async def purchase_stamp(
                 depth=effective_depth,
                 label=stamp_request.label
             )
-        except BaseException:
-            reservation.release()
+        except BaseException as exc:
+            reservation.release_if_unspent(exc)
             raise
         reservation.record()
 
@@ -722,8 +735,8 @@ async def extend_stamp(
                 stamp_id=stamp_id,
                 amount=amount
             )
-        except BaseException:
-            reservation.release()
+        except BaseException as exc:
+            reservation.release_if_unspent(exc)
             raise
         reservation.record()
 
