@@ -18,6 +18,7 @@ from app.services.stamp_pool import stamp_pool_manager, PoolStampStatus
 from app.services.stamp_ownership import stamp_ownership_manager
 from app.services.metrics import pool_acquires_total
 from app.services.pool_allowance import pool_allowance_tracker
+from app.core.client_ip import get_client_ip
 from app.services.signed_auth import POOL_CHECK_PREFIX, authorize_signed_request
 from app.api.models.stamp import SIZE_PRESETS
 
@@ -271,6 +272,23 @@ async def acquire_stamp(
     charged_size = depth_to_size_name(stamp.depth) if stamp else requested_size
 
     allowed_by_budget, budget = pool_allowance_tracker.check(origin, charged_size)
+    client_address = get_client_ip(http_request)
+    if allowed_by_budget and not paid:
+        address_ok, address_info = pool_allowance_tracker.check_address(origin, charged_size, client_address)
+        if not address_ok:
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail={
+                    "code": "DAILY_STAMP_ALLOWANCE_PER_CLIENT_EXHAUSTED",
+                    "size": charged_size,
+                    "allowance": address_info["address_allowance"],
+                    "resets_at": address_info["resets_at"],
+                    "message": (
+                        f"This client has used its {address_info['address_allowance']} free "
+                        f"{charged_size} stamps for today. It resets at {address_info['resets_at']}."
+                    ),
+                },
+            )
     if paid:
         logger.info("Pool acquire paid via x402, bypassing the daily allowance")
     elif not allowed_by_budget and fallback_used:
@@ -339,6 +357,25 @@ async def acquire_stamp(
             }
         detail["message"] = message
 
+        if settings.X402_ENABLED and settings.paid_bypass_is_honoured():
+            # Paying bypasses the allowance here, so answer the way x402
+            # clients understand: 402 with the price, not a 429 they can only
+            # report as a rate limit (#374).
+            from app.x402.dependency import _calculate_price_for_request
+            from app.x402.middleware import X402_VERSION, create_payment_requirements
+            quote = await _calculate_price_for_request(http_request)
+            requirements = create_payment_requirements(
+                http_request, quote["price_usd"], quote.get("description", "Pooled stamp"))
+            raise HTTPException(
+                status_code=status.HTTP_402_PAYMENT_REQUIRED,
+                detail={
+                    "x402Version": X402_VERSION,
+                    "error": message,
+                    "accepts": [requirements.model_dump(by_alias=True)],
+                    **detail,
+                },
+            )
+
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail=detail,
@@ -399,6 +436,7 @@ async def acquire_stamp(
     # caller bought this batch rather than drawing on the free budget.
     if not paid:
         pool_allowance_tracker.consume(origin, charged_size)
+        pool_allowance_tracker.consume_address(origin, charged_size, client_address)
 
     # Trigger immediate replenishment if pool is below target
     # This runs in the background and doesn't affect the response

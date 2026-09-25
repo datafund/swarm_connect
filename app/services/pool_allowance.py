@@ -156,6 +156,26 @@ class PoolAllowanceTracker:
             return configured[origin_key]
         return settings.POOL_DEFAULT_DAILY_ALLOWANCE
 
+    def check_address(self, origin: Optional[str], size: str, address: str) -> Tuple[bool, dict]:
+        """Whether one client address may take another batch within its origin's bucket (#366)."""
+        limit = settings.POOL_ALLOWANCE_PER_IP
+        key = f"{_key(origin, size)}|{address}"
+        with self._lock:
+            self._roll_day()
+            used = self._used.get(key, 0)
+        info = {"address_allowance": limit, "address_used": used,
+                "resets_at": f"{_today()}T24:00:00Z", "size": size}
+        return (limit == UNLIMITED or used < limit), info
+
+    def consume_address(self, origin: Optional[str], size: str, address: str) -> None:
+        if settings.POOL_ALLOWANCE_PER_IP == UNLIMITED:
+            return
+        key = f"{_key(origin, size)}|{address}"
+        with self._lock:
+            self._roll_day()
+            self._used[key] = self._used.get(key, 0) + 1
+            self._save()
+
     def check(self, origin: Optional[str], size: str = "small") -> Tuple[bool, dict]:
         """Whether this origin may take another batch, and the numbers behind it.
 

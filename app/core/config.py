@@ -147,6 +147,11 @@ class Settings(BaseSettings):
     # default so that deploying changes nothing until allowances are deliberately
     # configured. A limit that arrives unannounced breaks callers.
     POOL_DEFAULT_DAILY_ALLOWANCE: int = -1
+    # Most batches of one size a single client address (IPv6: its /64) may
+    # take per day within any origin's allowance (#366). The Origin header is
+    # set by the caller, so without this one client can spend a partner app's
+    # whole allowance, or the shared one. -1 = no per-address limit.
+    POOL_ALLOWANCE_PER_IP: int = -1
     POOL_ALLOWANCE_STATE_FILE: str = "data/pool_allowance.json"
     # Premium charged for taking a pre-bought batch from the pool instead of
     # buying one, as a percentage on top of what the batch itself costs.
