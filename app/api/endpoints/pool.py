@@ -68,7 +68,9 @@ class AcquireStampRequest(BaseModel):
     """Request to acquire a stamp from the pool."""
     size: Optional[Literal["small", "medium", "large"]] = Field(
         None,
-        description="Preferred stamp size. If not available, may return larger size."
+        description=("Preferred stamp size. If it is not available, a free acquire may be served a "
+                     "larger size (charged to that size's allowance); a paid acquire gets exactly the "
+                     "size paid for, or 409.")
     )
     depth: Optional[int] = Field(
         None,
@@ -258,7 +260,9 @@ async def acquire_stamp(
 
     # If no exact match, a larger batch may stand in, but not for a paying
     # caller: the payment was priced for the requested size, and a larger batch
-    # costs the operator up to 32x more (#362).
+    # costs the operator up to 32x more (#362). Deliberately keyed on `settled`
+    # (any settled payment, testnet included) rather than `paid` (payments that
+    # also bypass the allowance): a payment is priced for one size either way.
     if not stamp and not settled:
         stamp = stamp_pool_manager.get_available_stamp_any_size(requested_depth)
         if stamp:
@@ -269,6 +273,24 @@ async def acquire_stamp(
     allowed_by_budget, budget = pool_allowance_tracker.check(origin, charged_size)
     if paid:
         logger.info("Pool acquire paid via x402, bypassing the daily allowance")
+    elif not allowed_by_budget and fallback_used:
+        # The size asked for is out of stock and the allowance for the larger
+        # size that would stand in is spent. Blaming the larger size's
+        # allowance would be confusing (the caller never asked for it); the
+        # accurate answer is that the requested size is momentarily unavailable.
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "code": "REQUESTED_SIZE_UNAVAILABLE",
+                "size": requested_size,
+                "message": (
+                    f"No {requested_size} stamp is available right now; the pool is being "
+                    f"refilled. A larger stamp was available, but today's {charged_size} "
+                    f"allowance for this application is used up. Try again in a few minutes, "
+                    f"or buy a stamp directly with POST /api/v1/stamps/."
+                ),
+            },
+        )
     elif not allowed_by_budget:
         logger.info(
             "Pool allowance exhausted for origin %s (%s/%s today)",

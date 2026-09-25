@@ -59,11 +59,16 @@ def test_allowance_is_charged_for_the_size_handed_out(pool):
     r = client.post("/api/v1/pool/acquire", json={"size": "small"})
     assert r.status_code == 200 and r.json()["fallback_used"] is True
     assert pool.tracker.snapshot()["used"] == {"(unlisted)|medium": 1}
-    # The medium allowance (1) is spent, so the next small request that would
-    # again be served a medium batch is refused rather than drawing on "small".
+    # The medium allowance (1) is spent, so the next small request, which could
+    # only be served a medium batch, is told small is unavailable (not charged
+    # to "small", and not blamed on a medium allowance it never asked for).
     r = client.post("/api/v1/pool/acquire", json={"size": "small"})
-    assert r.status_code == 429
-    assert r.json()["detail"]["size"] == "medium"
+    assert r.status_code == 409
+    assert r.json()["detail"]["code"] == "REQUESTED_SIZE_UNAVAILABLE"
+    assert r.json()["detail"]["size"] == "small"
+    # An explicit medium request is the one that hits the medium allowance.
+    r = client.post("/api/v1/pool/acquire", json={"size": "medium"})
+    assert r.status_code == 429 and r.json()["detail"]["size"] == "medium"
 
 
 def test_paid_acquire_is_not_served_a_larger_batch(pool, monkeypatch):
@@ -95,3 +100,23 @@ def test_pool_price_uses_the_same_parse_as_the_handler(monkeypatch):
     monkeypatch.setattr(settings, "X402_POOL_MARKUP_PERCENT", 0)
     price = asyncio.run(dependency._calculate_price_for_request(Req()))
     assert price["price_usd"] == float(2 ** 22)
+
+
+def test_paid_acquire_of_an_available_size_uses_no_allowance(pool, monkeypatch):
+    from app.api.endpoints.pool import AcquireStampRequest, acquire_stamp
+    monkeypatch.setattr(settings, "X402_NETWORK", "base")  # paid bypass honoured
+    req = SimpleNamespace(headers={}, client=None,
+                          state=SimpleNamespace(x402_mode="paid", x402_payer="0xp"))
+    resp = asyncio.run(acquire_stamp(AcquireStampRequest(size="medium"), req))
+    assert resp.depth == 20
+    assert pool.tracker.snapshot()["used"] == {}
+
+
+def test_refused_paid_acquire_uses_no_allowance(pool):
+    from app.api.endpoints.pool import AcquireStampRequest, acquire_stamp
+    from fastapi import HTTPException
+    req = SimpleNamespace(headers={}, client=None,
+                          state=SimpleNamespace(x402_mode="paid", x402_payer="0xp"))
+    with pytest.raises(HTTPException):
+        asyncio.run(acquire_stamp(AcquireStampRequest(size="small"), req))
+    assert pool.tracker.snapshot()["used"] == {}
