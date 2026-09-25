@@ -9,6 +9,13 @@ on:
       - dev
   workflow_dispatch:
 
+# One deploy per branch at a time, in push order. Without this, a quick second
+# push could finish first and then be overwritten by the older run (the test
+# gate adds about a minute, widening that window).
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   test:
     name: test
