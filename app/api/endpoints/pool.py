@@ -8,7 +8,7 @@ Provides endpoints for:
 - Manual pool maintenance
 """
 from fastapi import APIRouter, BackgroundTasks, Header, HTTPException, Request, status
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from typing import Dict, List, Optional, Literal
 from datetime import datetime, timezone
 import logging
@@ -72,8 +72,30 @@ class AcquireStampRequest(BaseModel):
     )
     depth: Optional[int] = Field(
         None,
-        description="Specific depth requested (overrides size). 17=small, 20=medium, 22=large."
+        description="Specific depth requested (overrides size): 17 (small), 20 (medium) or 22 (large)."
     )
+
+    @field_validator("depth")
+    @classmethod
+    def _pool_depth(cls, v):
+        # The pool only holds the preset sizes. Any other depth used to be
+        # accepted, got its own daily-allowance bucket, and was then served
+        # whatever larger batch was available (#351).
+        if v is not None and v not in SIZE_PRESETS.values():
+            raise ValueError("depth must be one of 17 (small), 20 (medium) or 22 (large)")
+        return v
+
+    def requested_depth(self) -> int:
+        """The depth this request asks for: explicit depth, else size, else small.
+
+        Shared by the handler and the x402 pricer so the price and the batch
+        are derived from the same parse (#362).
+        """
+        if self.depth is not None:
+            return self.depth
+        if self.size is not None:
+            return SIZE_PRESETS[self.size]
+        return SIZE_PRESETS["small"]
 
     class Config:
         json_schema_extra = {
@@ -202,12 +224,7 @@ async def acquire_stamp(
     # Resolve the size first: the budget is per size, because a depth-20 batch
     # costs eight times a depth-17 one and a shared count would let a caller
     # spend eight times its allowance by asking for a larger one.
-    if request.depth is not None:
-        requested_depth = request.depth
-    elif request.size is not None:
-        requested_depth = SIZE_PRESETS.get(request.size, 17)
-    else:
-        requested_depth = 17  # Default to small
+    requested_depth = request.requested_depth()
     requested_size = depth_to_size_name(requested_depth)
 
     # A settled payment bypasses the allowance. The allowance bounds what the
@@ -234,7 +251,22 @@ async def acquire_stamp(
             settings.X402_NETWORK,
         )
 
-    allowed_by_budget, budget = pool_allowance_tracker.check(origin, requested_size)
+    # Pick the batch first, so the allowance is charged for the size actually
+    # handed out rather than the size asked for (#351).
+    stamp = stamp_pool_manager.get_available_stamp(requested_depth)
+    fallback_used = False
+
+    # If no exact match, a larger batch may stand in, but not for a paying
+    # caller: the payment was priced for the requested size, and a larger batch
+    # costs the operator up to 32x more (#362).
+    if not stamp and not settled:
+        stamp = stamp_pool_manager.get_available_stamp_any_size(requested_depth)
+        if stamp:
+            fallback_used = True
+
+    charged_size = depth_to_size_name(stamp.depth) if stamp else requested_size
+
+    allowed_by_budget, budget = pool_allowance_tracker.check(origin, charged_size)
     if paid:
         logger.info("Pool acquire paid via x402, bypassing the daily allowance")
     elif not allowed_by_budget:
@@ -251,12 +283,12 @@ async def acquire_stamp(
         # caller to pay would send them to a path that takes their payment and
         # still refuses them, which is worse than not offering it at all.
         message = (
-            f"The daily free allowance of {budget['allowance']} {requested_size} stamps for this "
+            f"The daily free allowance of {budget['allowance']} {charged_size} stamps for this "
             f"application has been used up. It resets at {budget['resets_at']}. "
         )
         detail = {
             "code": "DAILY_STAMP_ALLOWANCE_EXHAUSTED",
-            "size": requested_size,
+            "size": charged_size,
             "allowance": budget["allowance"],
             "used": budget["used"],
             "resets_at": budget["resets_at"],
@@ -290,23 +322,17 @@ async def acquire_stamp(
             detail=detail,
         )
 
-    # Try to get exact match first
-    stamp = stamp_pool_manager.get_available_stamp(requested_depth)
-    fallback_used = False
-
-    # If no exact match, try any larger stamp
-    if not stamp:
-        stamp = stamp_pool_manager.get_available_stamp_any_size(requested_depth)
-        if stamp:
-            fallback_used = True
-
     if not stamp:
         size_name = depth_to_size_name(requested_depth)
         pool_acquires_total.labels(size=size_name, status="error").inc()
+        message = f"No stamp available for depth {requested_depth} (size: {size_name}). Pool is exhausted."
+        if settled:
+            message = (f"No {size_name} stamp is available right now. Paid acquires are served only at "
+                       f"the size that was paid for, so no larger stamp was substituted and nothing was charged.")
         raise HTTPException(
             status_code=409,
             detail={
-                "message": f"No stamp available for depth {requested_depth} (size: {size_name}). Pool is exhausted.",
+                "message": message,
                 "suggestion": "Purchase a stamp directly via POST /api/v1/stamps/"
             }
         )
@@ -350,7 +376,7 @@ async def acquire_stamp(
     # allowance has genuinely been spent. A paid acquire consumes nothing — the
     # caller bought this batch rather than drawing on the free budget.
     if not paid:
-        pool_allowance_tracker.consume(origin, requested_size)
+        pool_allowance_tracker.consume(origin, charged_size)
 
     # Trigger immediate replenishment if pool is below target
     # This runs in the background and doesn't affect the response

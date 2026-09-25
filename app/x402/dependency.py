@@ -119,15 +119,18 @@ async def _calculate_price_for_request(request: Request) -> dict:
         # regardless of size. A depth-20 batch costs eight times a depth-17 one,
         # so the quote bore no relation to what was handed over. It was harmless
         # only because paying for a pooled batch was not possible at all.
-        from app.api.models.stamp import SIZE_PRESETS
+        # Parsed with the endpoint's own model so the quote and the batch come
+        # from the same reading of the body (#362). A body the model rejects is
+        # refused by the endpoint with 422 and never charged.
+        from app.api.endpoints.pool import AcquireStampRequest
         try:
             b = await request.json()
         except Exception:
             b = {}
-        depth = b.get("depth")
-        if not isinstance(depth, int):
-            size = b.get("size")
-            depth = SIZE_PRESETS.get(size, 17) if isinstance(size, str) else 17
+        try:
+            depth = AcquireStampRequest.model_validate(b).requested_depth()
+        except Exception:
+            depth = 17
         # Price from what the POOL PAID, not from what the caller receives.
         #
         # _purchase_stamp buys at STAMP_POOL_DEFAULT_DURATION_HOURS + 1 — the
