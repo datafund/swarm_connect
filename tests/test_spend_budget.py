@@ -92,12 +92,23 @@ class TestBudgetArithmetic:
         path.write_text(json.dumps({"day": "1999-01-01", "spent": {"1.2.3.4": 999.0}}))
         assert SpendBudgetTracker(state_file=str(path)).check("1.2.3.4", 0.9)[0]
 
-    def test_an_unreadable_state_file_does_not_break_startup(self, tmp_path, monkeypatch):
-        """Never fail to start over a counter."""
+    @pytest.mark.parametrize("content", ["{not json", "[]", '{"day": "TODAY", "spent": {"1.2.3.4": "x"}}'])
+    def test_an_unreadable_state_file_stops_startup_and_is_kept(self, tmp_path, monkeypatch, content):
+        """Starting with empty counters would reset every caller's budget and the
+        next save would overwrite today's record (#378)."""
+        from app.core.atomic_io import StateLoadError
+        from app.services import spend_budget
         monkeypatch.setattr(settings, "STAMP_DAILY_BZZ_PER_CALLER", 1.0)
         path = tmp_path / "spend.json"
-        path.write_text("{not json")
-        assert SpendBudgetTracker(state_file=str(path)).check("1.2.3.4", 0.5)[0]
+        path.write_text(content.replace("TODAY", spend_budget._today()))
+        with pytest.raises(StateLoadError):
+            SpendBudgetTracker(state_file=str(path))
+        assert path.read_text() == content.replace("TODAY", spend_budget._today())
+        assert list(tmp_path.glob("spend.json.corrupt-*")), "no copy of the unreadable file was kept"
+
+    def test_a_missing_state_file_starts_fresh(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(settings, "STAMP_DAILY_BZZ_PER_CALLER", 1.0)
+        assert SpendBudgetTracker(state_file=str(tmp_path / "none.json")).check("1.2.3.4", 0.5)[0]
 
 
 class TestPerRequestCeiling:

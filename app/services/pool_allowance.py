@@ -34,6 +34,7 @@ from typing import Dict, Optional, Tuple
 from urllib.parse import urlparse
 
 from app.core.config import settings
+from app.core.atomic_io import load_json_state, unreadable_state
 
 logger = logging.getLogger(__name__)
 
@@ -110,19 +111,22 @@ class PoolAllowanceTracker:
         return self._state_file or settings.POOL_ALLOWANCE_STATE_FILE
 
     def _load(self) -> None:
+        # Only a missing file means a fresh day. An unreadable one raises
+        # StateLoadError (a copy is kept) and the gateway refuses to start:
+        # carrying on with empty counters would hand out a fresh allowance and
+        # the next save would overwrite the only record of today's (#378).
+        # Deleting the file is the operator's call to make, not ours.
+        path = self._path()
+        data = load_json_state(path)
+        if data is None or data.get("day") != self._day:
+            return
         try:
-            path = self._path()
-            if not os.path.exists(path):
-                return
-            with open(path) as f:
-                data = json.load(f)
-            if data.get("day") == self._day:
-                self._used = {k: int(v) for k, v in (data.get("used") or {}).items()}
-                logger.info("Loaded pool allowance state for %s: %s", self._day, self._used)
-        except Exception as e:
-            # Never fail startup over a counter. Worst case the allowance resets,
-            # and the hourly purchase ceiling still bounds the damage.
-            logger.warning("Could not load pool allowance state: %s", e)
+            self._used = {k: int(v) for k, v in (data.get("used") or {}).items()}
+        except (TypeError, ValueError, AttributeError) as e:
+            raise unreadable_state(path, e) from e
+        # Counts only: keys can carry client addresses, which do not belong in logs.
+        logger.info("Loaded pool allowance state for %s: %d counters, %d batches",
+                    self._day, len(self._used), sum(self._used.values()))
 
     def _save(self) -> None:
         try:

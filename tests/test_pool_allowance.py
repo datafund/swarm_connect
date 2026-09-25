@@ -98,6 +98,20 @@ class TestPersistence:
         ok, info = second.check(APP)
         assert not ok, f"a restart reset the allowance: {info}"
 
+    @pytest.mark.parametrize("content", ["{not json", '"a string"', '{"day": "TODAY", "used": {"k": "x"}}'])
+    def test_an_unreadable_state_file_stops_startup_and_is_kept(self, tmp_path, content):
+        """An empty counter would hand out a fresh allowance and the next save
+        would overwrite today's record (#378)."""
+        from app.core.atomic_io import StateLoadError
+        from app.services import pool_allowance
+        body = content.replace("TODAY", pool_allowance._today())
+        path = tmp_path / "allow.json"
+        path.write_text(body)
+        with pytest.raises(StateLoadError):
+            PoolAllowanceTracker(state_file=str(path))
+        assert path.read_text() == body
+        assert list(tmp_path.glob("allow.json.corrupt-*"))
+
     def test_state_from_a_previous_day_is_ignored(self, tmp_path, monkeypatch):
         monkeypatch.setattr(settings, "POOL_DAILY_ALLOWANCES", f"{APP}=2")
         path = str(tmp_path / "allowance.json")

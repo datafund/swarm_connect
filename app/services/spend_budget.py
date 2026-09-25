@@ -45,6 +45,7 @@ from threading import Lock
 from typing import Dict, Optional, Tuple
 
 from app.core.config import settings
+from app.core.atomic_io import load_json_state, unreadable_state
 
 logger = logging.getLogger(__name__)
 
@@ -76,18 +77,21 @@ class SpendBudgetTracker:
         return self._state_file or settings.STAMP_SPEND_BUDGET_STATE_FILE
 
     def _load(self) -> None:
+        # Only a missing file means a fresh day. An unreadable one raises
+        # StateLoadError (a copy is kept) and the gateway refuses to start:
+        # carrying on with empty counters would reset every caller's BZZ budget
+        # and the next save would overwrite today's record (#378).
+        path = self._path()
+        data = load_json_state(path)
+        if data is None or data.get("day") != self._day:
+            return
         try:
-            path = self._path()
-            if not os.path.exists(path):
-                return
-            with open(path) as f:
-                data = json.load(f)
-            if data.get("day") == self._day:
-                self._spent = {k: float(v) for k, v in (data.get("spent") or {}).items()}
-                logger.info("Loaded spend budget state for %s: %s", self._day, self._spent)
-        except Exception as e:
-            # Never fail startup over a counter.
-            logger.warning("Could not load spend budget state: %s", e)
+            self._spent = {k: float(v) for k, v in (data.get("spent") or {}).items()}
+        except (TypeError, ValueError, AttributeError) as e:
+            raise unreadable_state(path, e) from e
+        # Totals only: keys are client addresses, which do not belong in logs.
+        logger.info("Loaded spend budget state for %s: %d callers, %.4f BZZ",
+                    self._day, len(self._spent), sum(self._spent.values()))
 
     def _save(self) -> None:
         try:
