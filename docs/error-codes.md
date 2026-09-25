@@ -67,6 +67,9 @@ without being listed here, or listed here but no longer raised.
 | `INSUFFICIENT_CREDIT` | 402 | The credit left is less than this chunk. | Top up, then retry the chunk. |
 | `FREE_TIER_DISABLED` | 402 | The free tier is off for this operation (chunk upload, or buy-batch-for-owner). | Pay with `X-PAYMENT`, or for chunks, top up credit. |
 | `FREE_QUOTA_EXCEEDED` | 429 | The free-tier chunk quota for this client is used up. | Wait for the daily quota to reset, or top up credit. |
+| `PAYMENT_SETTLEMENT_UNAVAILABLE` | 502 | The payment could not be settled and **nothing was delivered**: the facilitator errored, so it is unknown whether the transfer was submitted. `detail.x402_status` is `settlement_failed`. | Retry with a fresh payment authorization — a transfer that did go through spent the nonce, so a retry cannot double-charge. If a transfer appears on-chain, contact the operator with this request's authorization for a refund. |
+| `PAYMENT_SETTLEMENT_FAILED` | 402 | The facilitator refused the payment, so **nothing was delivered**. `detail.reason` gives the refusal, `detail.x402_status` is `settlement_failed`. | Fix what `reason` names (usually funds or an expired authorization) and retry. |
+| `DELIVERY_FAILED_AFTER_PAYMENT` | 500 | The payment **was collected** and the request then failed. The only code here that means money moved without a result. `detail.transaction` and the `X-Payment-Transaction` header carry the transfer; `x402_status` is `settled_not_delivered`. | Do not retry blindly. Contact the operator with the transaction for a refund. |
 
 ## Stamps
 
@@ -75,6 +78,8 @@ without being listed here, or listed here but no longer raised.
 | `STAMP_COST_EXCEEDS_LIMIT` | 400 | The requested batch would cost more than the gateway allows per purchase. | Ask for a smaller size or a shorter duration. |
 | `DAILY_SPEND_BUDGET_EXHAUSTED` | 429 | This caller's daily purchase budget is spent. | Wait until the budget resets (see `message`). |
 | `DAILY_STAMP_ALLOWANCE_EXHAUSTED` | 429 | `POST /pool/acquire`: the free daily allowance for this size is used up. `detail` has `allowance`, `used`, `resets_at` and an `alternative`. | Wait for `resets_at`, or follow `detail.alternative` (pay, or buy a stamp directly). |
+| `REQUESTED_SIZE_UNAVAILABLE` | 409 | `POST /pool/acquire`: no stamp of the requested size is in the pool, and although a larger one was, today's allowance for that larger size is spent. `detail.size` is what was asked for. | Retry in a few minutes once the pool refills, or buy directly with `POST /api/v1/stamps/`. |
+| `EXTENSION_TOO_SMALL` | 400 | `PATCH /stamps/{id}/extend` with a legacy `amount` below what 24 hours costs at the current price. `detail.minimum_amount` is the floor in PLUR per chunk. | Send `duration_hours` instead, or raise `amount` to `minimum_amount`. |
 | `DEPTH_TOO_HIGH` | 400 | Buy-batch-for-owner: depth is above the configured maximum. | Use a smaller depth. |
 | `DURATION_TOO_LONG` | 400 | Buy-batch-for-owner: duration is above the configured maximum. | Use a shorter duration. |
 | `OWNER_NOT_ALLOWLISTED` | 403 | Buy-batch-for-owner: the owner address is not allowed. | Ask the operator to allow-list the address. |
@@ -86,6 +91,7 @@ without being listed here, or listed here but no longer raised.
 | Code | Status | Meaning | What to do |
 |---|---|---|---|
 | `FILE_TOO_LARGE` | 413 (422 from `/pricing`) | The upload, or `upload_bytes` on `/pricing`, is over the gateway's maximum upload size. | Split the data, or use chunk uploads. |
+| `DOWNLOAD_TOO_LARGE` | 413 | The content behind the reference is larger than the gateway will fetch. `detail.max_size_mb` is the limit. | Fetch it from a Swarm node directly. |
 | `STAMP_OWNERSHIP_DENIED` | 403 | The stamp belongs to another payer, or is pool inventory that was not handed to you. | Use a stamp you bought or acquired. |
 | `NOTARY_NOT_ENABLED` | 400 | `sign=notary` was requested, but the notary is off. | Upload without `sign`. |
 | `NOTARY_NOT_CONFIGURED` | 400 | `sign=notary` was requested, but the notary has no key. | Upload without `sign`, or ask the operator. |
