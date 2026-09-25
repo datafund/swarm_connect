@@ -791,9 +791,20 @@ async def upload_chunk_to_swarm(
         raise ValueError(f"Could not parse chunk upload response: {e}") from e
 
 
+class DownloadTooLargeError(Exception):
+    """The referenced content exceeds MAX_DOWNLOAD_SIZE_MB."""
+
+    def __init__(self, limit_bytes: int):
+        super().__init__(f"Content exceeds the {limit_bytes} byte download limit")
+        self.limit_bytes = limit_bytes
+
+
 async def download_data_from_swarm(reference: str) -> bytes:
     """
     Downloads data from the Swarm network using a reference hash.
+
+    Streams the body and stops once it exceeds MAX_DOWNLOAD_SIZE_MB, so an
+    arbitrarily large reference cannot be pulled into memory (#353).
 
     Args:
         reference: The Swarm reference hash of the data to download
@@ -804,20 +815,37 @@ async def download_data_from_swarm(reference: str) -> bytes:
     Raises:
         httpx.HTTPError: If the HTTP request to the Swarm API fails
         FileNotFoundError: If the data is not found (404)
+        DownloadTooLargeError: If the content exceeds the download limit
     """
     api_url = urljoin(str(settings.SWARM_BEE_API_URL), f"bzz/{reference.lower()}")
+    limit = settings.MAX_DOWNLOAD_SIZE_MB * 1024 * 1024
+
+    async def fetch() -> bytes:
+        client = get_client()
+        # identity: the limit must apply to the bytes held in memory, and a
+        # compressed response would be inflated chunk by chunk before counting.
+        async with client.stream("GET", api_url, timeout=60,
+                                 headers={"Accept-Encoding": "identity"}) as response:
+            if response.status_code == 404:
+                raise FileNotFoundError(f"Data not found on Swarm at reference {reference}")
+            response.raise_for_status()
+
+            declared = response.headers.get("content-length")
+            if declared and declared.isdigit() and int(declared) > limit:
+                raise DownloadTooLargeError(limit)
+
+            body = bytearray()
+            async for chunk in response.aiter_bytes():
+                if len(body) + len(chunk) > limit:
+                    raise DownloadTooLargeError(limit)
+                body += chunk
+            return bytes(body)
 
     try:
-        client = get_client()
-        response = await client.get(api_url, timeout=60)
-
-        if response.status_code == 404:
-            raise FileNotFoundError(f"Data not found on Swarm at reference {reference}")
-
-        response.raise_for_status()
-
-        logger.info(f"Successfully downloaded {len(response.content)} bytes from Swarm reference: {reference}")
-        return response.content
+        # One deadline for the whole transfer: httpx timeouts apply per read.
+        content = await asyncio.wait_for(fetch(), timeout=settings.DOWNLOAD_TIMEOUT_SECONDS)
+        logger.info(f"Successfully downloaded {len(content)} bytes from Swarm reference: {reference}")
+        return content
 
     except httpx.HTTPError as e:
         _record_bee_error("download")
@@ -1414,7 +1442,33 @@ TTL_THRESHOLD_EXPIRED = 0          # 0 seconds - stamp is expired
 TTL_THRESHOLD_LOW = 3600           # 1 hour - warn about low TTL
 
 
-async def validate_stamp_for_upload(stamp_id: str) -> Dict[str, Any]:
+async def _get_local_stamp_processed(stamp_id: str) -> Optional[Dict[str, Any]]:
+    """One batch as the connected node sees it, in the processed-stamp shape.
+
+    A single GET /stamps/{id} rather than the whole network's /batches list.
+    Returns None when the node does not hold the batch.
+    """
+    client = get_client()
+    url = urljoin(str(settings.SWARM_BEE_API_URL), f"stamps/{stamp_id.lower()}")
+    response = await client.get(url, timeout=10)
+    if response.status_code in (400, 404):
+        return None
+    response.raise_for_status()
+    stamp = response.json()
+    percent = calculate_utilization_percent(
+        coerce_int(stamp.get("utilization"), 0), stamp.get("depth"), stamp.get("bucketDepth"))
+    status, warning = calculate_utilization_status(percent)
+    return {
+        **stamp,
+        "local": True,
+        "batchTTL": coerce_int(stamp.get("batchTTL"), 0),
+        "utilizationPercent": percent,
+        "utilizationStatus": status,
+        "utilizationWarning": warning,
+    }
+
+
+async def validate_stamp_for_upload(stamp_id: str, local_only: bool = False) -> Dict[str, Any]:
     """
     Validates that a stamp is suitable for uploading data.
 
@@ -1435,15 +1489,22 @@ async def validate_stamp_for_upload(stamp_id: str) -> Dict[str, Any]:
         StampValidationError: If stamp fails any blocking validation check
         httpx.HTTPError: If unable to reach Swarm API
     """
-    # Get all processed stamps (includes utilization calculation)
-    all_stamps = await get_all_stamps_processed()
+    if local_only:
+        # Just the one batch on the connected node. Used before settling a paid
+        # upload, where the full network list would add a large, uncached fetch
+        # to every paid request. A batch the node does not hold is reported as
+        # not found, which is what the upload itself would run into.
+        found_stamp = await _get_local_stamp_processed(stamp_id)
+    else:
+        # Get all processed stamps (includes utilization calculation)
+        all_stamps = await get_all_stamps_processed()
 
-    # Find the requested stamp (case-insensitive)
-    found_stamp = None
-    for stamp in all_stamps:
-        if stamp.get("batchID") == stamp_id or stamp.get("batchID", "").lower() == stamp_id.lower():
-            found_stamp = stamp
-            break
+        # Find the requested stamp (case-insensitive)
+        found_stamp = None
+        for stamp in all_stamps:
+            if stamp.get("batchID") == stamp_id or stamp.get("batchID", "").lower() == stamp_id.lower():
+                found_stamp = stamp
+                break
 
     # Check 1: Stamp exists
     if not found_stamp:

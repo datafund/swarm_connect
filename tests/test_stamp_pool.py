@@ -57,9 +57,14 @@ class TestStampPoolManager:
     """Test the StampPoolManager class."""
 
     @pytest.fixture
-    def manager(self):
-        """Create a fresh StampPoolManager for each test."""
-        return StampPoolManager()
+    def manager(self, tmp_path):
+        """Create a fresh StampPoolManager for each test.
+
+        With an explicit state file: several tests patch `settings` with a
+        MagicMock, and a manager that resolves its path from settings then
+        saves to a directory literally named after the mock (#335).
+        """
+        return StampPoolManager(state_file=str(tmp_path / "pool_state.json"))
 
     @pytest.fixture
     def sample_stamp(self):
@@ -363,9 +368,14 @@ class TestImmediateReplenishment:
     """Test immediate replenishment after stamp release."""
 
     @pytest.fixture
-    def manager(self):
-        """Create a fresh StampPoolManager for each test."""
-        return StampPoolManager()
+    def manager(self, tmp_path):
+        """Create a fresh StampPoolManager for each test.
+
+        With an explicit state file: several tests patch `settings` with a
+        MagicMock, and a manager that resolves its path from settings then
+        saves to a directory literally named after the mock (#335).
+        """
+        return StampPoolManager(state_file=str(tmp_path / "pool_state.json"))
 
     def test_trigger_replenishment_when_below_target(self, manager):
         """Test that replenishment is triggered when pool drops below target."""
@@ -460,9 +470,9 @@ class TestImmediateReplenishment:
 class TestLowReserveWarning:
     """Test low reserve warning logic."""
 
-    def test_low_reserve_warning_triggered(self):
+    def test_low_reserve_warning_triggered(self, tmp_path):
         """Test that low reserve warning is triggered correctly."""
-        manager = StampPoolManager()
+        manager = StampPoolManager(state_file=str(tmp_path / "pool_state.json"))
 
         # Add one stamp at depth 17
         manager.add_stamp_to_pool("stamp17", 17, 1000000, 604800)
@@ -476,9 +486,9 @@ class TestLowReserveWarning:
                 # because current (1) <= threshold (1) AND current (1) < target (2)
                 assert status.low_reserve_warning is True
 
-    def test_no_warning_when_above_threshold(self):
+    def test_no_warning_when_above_threshold(self, tmp_path):
         """Test no warning when levels are adequate."""
-        manager = StampPoolManager()
+        manager = StampPoolManager(state_file=str(tmp_path / "pool_state.json"))
 
         # Add enough stamps
         manager.add_stamp_to_pool("stamp17a", 17, 1000000, 604800)

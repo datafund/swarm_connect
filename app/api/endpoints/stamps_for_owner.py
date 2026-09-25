@@ -18,6 +18,7 @@ import logging
 
 from fastapi import APIRouter, HTTPException, Request, status
 
+from app.x402.settlement import settle_payment
 from app.api.models.stamp import StampForOwnerRequest, StampForOwnerResponse
 from app.core.config import settings
 from app.services import metrics, swarm_api
@@ -135,6 +136,7 @@ async def create_batch_for_owner(body: StampForOwnerRequest, request: Request) -
 
     # --- on-chain createBatch(owner=...) ---
     try:
+        await settle_payment(request)
         result = await gnosis_chain_client.create_batch(owner, amount, depth, immutable=body.immutable)
     except GnosisChainError as e:
         # Raised for a connection that was never made or a transaction that

@@ -25,6 +25,18 @@ async def lifespan(app: FastAPI):
     from app.services.http_client import init_client, close_client
     await init_client()
 
+    # Load the stamp ownership registry before anything can register a batch.
+    #
+    # It was saved on every change but never loaded, so each restart (every
+    # deploy) started with an empty registry: owners were denied their own
+    # batches, and the pool's startup sync then rewrote the file with only its
+    # own inventory, erasing the owners' records (#349). Loaded before the pool
+    # starts for exactly that reason. An unreadable file stops startup rather
+    # than being replaced (#378).
+    from app.services.stamp_ownership import stamp_ownership_manager
+    stamp_ownership_manager.load_on_startup()
+    logger.info("Stamp ownership registry loaded")
+
     # Load bandwidth credit ledger so prepaid balances survive restarts
     if settings.CHUNK_UPLOAD_ENABLED:
         from app.services.bandwidth_credit import bandwidth_credit_manager
@@ -84,8 +96,14 @@ from app.middleware.body_limit import BodyLimitMiddleware
 app.add_middleware(BodyLimitMiddleware)
 logger.info(f"JSON body limits enabled: max {settings.MAX_JSON_BODY_BYTES} bytes, max depth {settings.MAX_JSON_DEPTH}")
 
-# Add global rate limiting if enabled and x402 is disabled (x402 has its own limiter)
-if settings.RATE_LIMIT_ENABLED and not settings.X402_ENABLED:
+# Global per-IP rate limiting, whether or not x402 is enabled (#352).
+#
+# It used to be installed only when x402 was off, on the grounds that x402 has
+# its own limiter. That limiter only covers free-tier requests to the protected
+# POST routes, so with x402 on (as in production) every other route, including
+# downloads and paid requests, had no limit at all. The x402 free-tier limit
+# still applies on top, as the stricter inner limit for free writes.
+if settings.RATE_LIMIT_ENABLED:
     from app.middleware.rate_limit import RateLimitMiddleware
     app.add_middleware(RateLimitMiddleware)
     logger.info(f"Global rate limiting enabled: {settings.RATE_LIMIT_PER_MINUTE}/min + {settings.RATE_LIMIT_BURST} burst")
@@ -95,6 +113,18 @@ if settings.X402_ENABLED:
     from app.x402.middleware import X402Middleware
     app.add_middleware(X402Middleware)
     logger.info("x402 middleware enabled")
+
+# Record which client types we serve and whether we serve them (#347).
+#
+# Added AFTER the rate limiter and x402 so that it WRAPS them. Starlette runs the
+# most recently added middleware outermost, so this sees the final response —
+# including the 429 from the rate limiter and the 402 from x402, which are the
+# two outcomes the counter exists to surface. Added before it, it would only ever
+# see responses those two allowed through.
+if settings.METRICS_ENABLED:
+    from app.middleware.client_metrics import ClientMetricsMiddleware
+    app.add_middleware(ClientMetricsMiddleware)
+    logger.info("Client-type metrics enabled")
 
 # Add CORS middleware for browser-based SDK usage
 # IMPORTANT: Add CORS last so it wraps all other middleware.

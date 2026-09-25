@@ -48,6 +48,14 @@ def _get_facilitator_client() -> FacilitatorClient:
     return _facilitator_client
 
 
+def _request_method(request) -> str:
+    """HTTP method, tolerating minimal request stand-ins without a method."""
+    scope = getattr(request, "scope", None)
+    if isinstance(scope, dict):
+        return scope.get("method", "") or ""
+    return getattr(request, "method", "") or ""
+
+
 async def _calculate_price_for_request(request: Request) -> dict:
     """
     Calculate price based on the request type.
@@ -75,6 +83,38 @@ async def _calculate_price_for_request(request: Request) -> dict:
         return {
             "price_usd": quote["price_usd"],
             "description": f"Bandwidth credit top-up ({mb} MB)",
+        }
+
+    if _request_method(request) == "PATCH" and path.rstrip("/").endswith("/extend"):
+        # Stamp top-up (#350). Priced from the SAME model the endpoint parses and
+        # the depth of the batch it will top up, so the quote and the spend
+        # cannot describe different things (the #260/#261 lesson). A batch that
+        # does not exist is refused by the endpoint with 404, so it is never
+        # charged; price it at the smallest depth.
+        from app.api.models.stamp import StampExtensionRequest
+        from app.services import swarm_api
+        try:
+            b = await request.json()
+        except Exception:
+            b = {}
+        try:
+            parsed = StampExtensionRequest.model_validate(b)
+        except Exception:
+            parsed = StampExtensionRequest()
+        batch_id = path.rstrip("/").split("/")[-2]
+        depth = 17
+        for stamp in await swarm_api.get_all_stamps_processed():
+            if stamp.get("batchID") == batch_id:
+                depth = int(stamp.get("depth", 17))
+                break
+        quote = await get_price_quote(
+            operation="stamp_extension", depth=depth,
+            duration_hours=parsed.duration_hours, amount=parsed.amount,
+        )
+        what = f"{parsed.amount} PLUR/chunk" if parsed.amount is not None else f"{parsed.duration_hours or 25}h"
+        return {
+            "price_usd": quote["price_usd"],
+            "description": f"Extend stamp (depth {depth}, {what})",
         }
 
     if "/stamps/for-owner" in path:
@@ -119,15 +159,18 @@ async def _calculate_price_for_request(request: Request) -> dict:
         # regardless of size. A depth-20 batch costs eight times a depth-17 one,
         # so the quote bore no relation to what was handed over. It was harmless
         # only because paying for a pooled batch was not possible at all.
-        from app.api.models.stamp import SIZE_PRESETS
+        # Parsed with the endpoint's own model so the quote and the batch come
+        # from the same reading of the body (#362). A body the model rejects is
+        # refused by the endpoint with 422 and never charged.
+        from app.api.endpoints.pool import AcquireStampRequest
         try:
             b = await request.json()
         except Exception:
             b = {}
-        depth = b.get("depth")
-        if not isinstance(depth, int):
-            size = b.get("size")
-            depth = SIZE_PRESETS.get(size, 17) if isinstance(size, str) else 17
+        try:
+            depth = AcquireStampRequest.model_validate(b).requested_depth()
+        except Exception:
+            depth = 17
         # Price from what the POOL PAID, not from what the caller receives.
         #
         # _purchase_stamp buys at STAMP_POOL_DEFAULT_DURATION_HOURS + 1 — the
@@ -154,15 +197,37 @@ async def _calculate_price_for_request(request: Request) -> dict:
             ),
         }
 
-    if "/stamps/" in path:
+    if path.rstrip("/") == "/api/v1/stamps":
+        # Direct purchase (#361). This used to quote a fixed 24h depth-17 batch
+        # whatever the body asked for, while the handler bought the requested
+        # depth and duration (or legacy amount) up to X402_MAX_STAMP_BZZ: on a
+        # network where a paid purchase skips the daily budget, a minimum
+        # payment bought a batch many times its price. Priced now from the same
+        # model the handler parses, with the same amount calculation. A body the
+        # model rejects is refused with 422 and never charged.
+        from app.api.models.stamp import StampPurchaseRequest
+        try:
+            b = await request.json()
+        except Exception:
+            b = {}
+        try:
+            parsed = StampPurchaseRequest.model_validate(b)
+        except Exception:
+            parsed = StampPurchaseRequest()
+        depth = parsed.get_effective_depth()
         quote = await get_price_quote(
-            operation="stamp_purchase",
-            duration_hours=24,
-            depth=17
+            operation="stamp_batch", depth=depth,
+            duration_hours=parsed.duration_hours, amount=parsed.amount,
         )
+        what = f"{parsed.amount} PLUR/chunk" if parsed.amount is not None else f"{parsed.duration_hours or 25}h"
+        # The handler buys exactly this amount and depth, rather than
+        # recalculating from a second chainstate read that may have moved.
+        details = quote.get("details") or {}
+        if "amount" in details and "depth" in details:
+            request.state.x402_priced_batch = {"amount": details["amount"], "depth": details["depth"]}
         return {
             "price_usd": quote["price_usd"],
-            "description": "Postage stamp purchase (24h, depth 17)"
+            "description": f"Postage stamp purchase (depth {depth}, {what})",
         }
 
     elif "/data/" in path:
@@ -376,6 +441,34 @@ async def require_x402_payment(request: Request) -> None:
         }
         raise HTTPException(status_code=402, detail=response_body)
 
+    # One authorization, one delivery (#356). Reserved only after the facilitator
+    # has verified it, so unverified junk cannot fill the guard. A concurrent
+    # request carrying the same authorization is refused here, before it can do
+    # any work; the middleware releases the reservation if nothing was settled.
+    from app.x402.settlement import authorization_key, replay_guard
+    auth_key = authorization_key(payment_payload)
+    if auth_key is None:
+        # Every payment this gateway accepts (scheme "exact" on an EVM network)
+        # is an EIP-3009 authorization. Anything else cannot be deduplicated.
+        raise HTTPException(
+            status_code=402,
+            detail={
+                "x402Version": X402_VERSION,
+                "error": "Unsupported payment payload: expected an EIP-3009 authorization.",
+                "accepts": [payment_requirements.model_dump(by_alias=True)],
+            },
+        )
+    if not replay_guard.reserve(auth_key):
+        logger.warning(f"x402: Payment authorization reused by {client_ip}")
+        raise HTTPException(
+            status_code=402,
+            detail={
+                "x402Version": X402_VERSION,
+                "error": "This payment authorization has already been used. Sign a new payment.",
+                "accepts": [payment_requirements.model_dump(by_alias=True)],
+            },
+        )
+
     logger.info(f"x402: Payment verified for payer {verify_response.payer}")
     x402_payments_total.labels(mode="paid").inc()
 
@@ -384,3 +477,4 @@ async def require_x402_payment(request: Request) -> None:
     request.state.x402_payer = getattr(verify_response, 'payer', None)
     request.state.x402_payment = payment_payload
     request.state.x402_requirements = payment_requirements
+    request.state.x402_auth_key = auth_key

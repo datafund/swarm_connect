@@ -9,9 +9,22 @@ on:
       - dev
   workflow_dispatch:
 
+# One deploy per branch at a time, in push order. Without this, a quick second
+# push could finish first and then be overwritten by the older run (the test
+# gate adds about a minute, widening that window).
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
+  test:
+    name: test
+    uses: ./.github/workflows/tests.yml
+
   build:
     name: build
+    # Never deploy a commit whose tests fail (#360).
+    needs: test
     # Deploy targets are data, not code: set the repository variable DEPLOY_RUNNERS
     # to a JSON array of runner labels to add or retire a host without a code
     # change. Unset -> the single existing host, i.e. current behaviour.
@@ -78,6 +91,7 @@ jobs:
           CORS_ALLOWED_ORIGINS=${{ vars.CORS_ALLOWED_ORIGINS || '*' }}
           CORS_ALLOW_CREDENTIALS=${{ vars.CORS_ALLOW_CREDENTIALS || 'false' }}
           MAX_UPLOAD_SIZE_MB=${{ vars.MAX_UPLOAD_SIZE_MB || '10' }}
+          MAX_DOWNLOAD_SIZE_MB=${{ vars.MAX_DOWNLOAD_SIZE_MB || '25' }}
           CHUNK_UPLOAD_ENABLED=${{ vars.CHUNK_UPLOAD_ENABLED || 'false' }}
           CHUNK_UPLOAD_MAX_BYTES_PER_REQUEST=${{ vars.CHUNK_UPLOAD_MAX_BYTES_PER_REQUEST || '4104' }}
           CHUNK_UPLOAD_FREE_TIER_ENABLED=${{ vars.CHUNK_UPLOAD_FREE_TIER_ENABLED || 'true' }}
@@ -149,6 +163,7 @@ jobs:
           CORS_ALLOWED_ORIGINS=${{ vars.CORS_ALLOWED_ORIGINS || '*' }}
           CORS_ALLOW_CREDENTIALS=${{ vars.CORS_ALLOW_CREDENTIALS || 'false' }}
           MAX_UPLOAD_SIZE_MB=${{ vars.MAX_UPLOAD_SIZE_MB || '10' }}
+          MAX_DOWNLOAD_SIZE_MB=${{ vars.MAX_DOWNLOAD_SIZE_MB || '25' }}
           CHUNK_UPLOAD_ENABLED=${{ vars.CHUNK_UPLOAD_ENABLED || 'false' }}
           CHUNK_UPLOAD_MAX_BYTES_PER_REQUEST=${{ vars.CHUNK_UPLOAD_MAX_BYTES_PER_REQUEST || '4104' }}
           CHUNK_UPLOAD_FREE_TIER_ENABLED=${{ vars.CHUNK_UPLOAD_FREE_TIER_ENABLED || 'true' }}

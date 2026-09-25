@@ -619,6 +619,10 @@ class TestOnlyASettledPaymentBypasses:
         def as_paid(request, cost_bzz, operation):
             seen["request"] = request
             request.state.x402_mode = "paid"
+            # A real paid request is settled just before the purchase; mark it
+            # settled so the handler does not try to reach a facilitator.
+            from types import SimpleNamespace
+            request.state.x402_settlement = SimpleNamespace(success=True, transaction="0xtx")
             return real(request, cost_bzz, operation)
 
         monkeypatch.setattr(stamps_ep, "_enforce_spend_limits", as_paid)

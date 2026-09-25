@@ -115,6 +115,35 @@ bandwidth_topup_bytes_total = Counter(
     "gateway_bandwidth_topup_bytes_total", "Total bytes of bandwidth credit sold via top-ups"
 )
 
+# ── Who we are serving, and whether we are serving them (#347) ──────────────
+#
+# Production traffic turned out to be almost entirely one client — the MCP
+# plugin, run by AI agents in cloud sandboxes — and 37 of its 84 production
+# requests were refused with 429. That was invisible until someone read the
+# reverse-proxy access logs by hand.
+#
+# Deliberately a NEW counter rather than a client_type label on the existing
+# ones. A dashboard panel graphs rate(gateway_rate_limit_hits_total[5m])
+# unaggregated; adding a label there would turn one line into six and silently
+# change what the panel means. Existing series stay as they are.
+#
+# client_type comes from a fixed table (app/services/client_type.py), never from
+# the User-Agent directly — a label must not take a value the caller chooses, or
+# anyone can mint unlimited series. Eight client types by five outcomes bounds
+# this at 40 series per environment.
+requests_by_client_total = Counter(
+    "gateway_requests_by_client_total",
+    "API requests by client type and outcome",
+    ["client_type", "outcome"],
+)
+
+# A COUNT of callers seen today, not their identities. Reset daily by the
+# tracker that feeds it.
+distinct_callers = Gauge(
+    "gateway_distinct_callers",
+    "Distinct callers seen so far today",
+)
+
 # ── Spending limits (#102) ──────────────────────────────────────────────────
 #
 # Refusals are the signal that matters. The daily budget is a number chosen
