@@ -136,6 +136,8 @@ class IdempotencyStore:
         self._entries: Dict[str, dict] = {}
         # entry id -> (request hash, marker expiry, token of the request holding it)
         self._pending: Dict[str, Tuple[str, float, str]] = {}
+        # Final results that arrived before their interim result was stored.
+        self._resolved: Dict[str, Tuple[int, bytes]] = {}
         # Why the state file could not be read; None when it could.
         self.unavailable: Optional[str] = None
         self._load()
@@ -277,8 +279,12 @@ class IdempotencyStore:
             pending = self._pending.pop(eid, None)
             entry = self._entries.get(eid) or {}
             request_hash = pending[0] if pending else entry.get("request_hash")
+            status_code = response.status_code
             if body is None:
                 body = getattr(response, "body", None)
+            if eid in self._resolved:
+                status_code, body = self._resolved.pop(eid)
+                storable = True
             if not storable or body is None or len(body) > MAX_STORED_BODY_BYTES:
                 # Delivered and paid once: the key stays taken, and a retry is
                 # told that it succeeded rather than sent to ask for a refund.
@@ -292,15 +298,31 @@ class IdempotencyStore:
                 return
             now = time.time()
             self._entries[eid] = {
-                "state": DONE, "request_hash": request_hash, "auth": entry.get("auth"),
+                "state": DONE, "request_hash": request_hash, "auth": entry.get("auth"), "token": token,
                 "transaction": entry.get("transaction"), "created": entry.get("created", now),
                 "expires": now + TTL_SECONDS,
-                "status": response.status_code,
+                "status": status_code,
                 "headers": {k: v for k, v in response.headers.items() if k.lower() in _STORED_HEADERS},
                 "body": base64.b64encode(body).decode("ascii"),
                 "fill": fill,
             }
             self._enforce_cap()
+            self._save()
+
+    def resolve(self, eid: str, token: str, status: int, body: bytes) -> None:
+        """Replace a stored interim result (a 202) with the final one.
+
+        If the interim result has not been stored yet, it is replaced when it is.
+        """
+        with self._lock:
+            if not self._owns(eid, token):
+                return
+            entry = self._entries.get(eid)
+            if entry is None or entry.get("state") != DONE:
+                self._resolved[eid] = (status, body)
+                return
+            entry["status"] = status
+            entry["body"] = base64.b64encode(body).decode("ascii")
             self._save()
 
     def abandon(self, eid: Optional[str], token: Optional[str]) -> None:
@@ -319,6 +341,7 @@ class IdempotencyStore:
         with self._lock:
             self._entries.clear()
             self._pending.clear()
+            self._resolved.clear()
             self.unavailable = None
 
 
@@ -505,6 +528,12 @@ def record_settlement(request: Request, settlement) -> None:
     auth_key = getattr(request.state, "x402_auth_key", None)
     idempotency_store.mark_settled(idem[0], idem[1], auth_hash(auth_key) if auth_key else None,
                                    getattr(settlement, "transaction", None))
+
+
+def resolve_idempotent_result(idem: Optional[Tuple[str, str]], status: int, body: bytes) -> None:
+    """A request answered 202 has its final result: retries get that from now on."""
+    if idem is not None:
+        idempotency_store.resolve(idem[0], idem[1], status, body)
 
 
 def finish_idempotent_request(request: Request, response: Optional[Response]) -> None:

@@ -476,6 +476,10 @@ What to know about the retry's payment:
 - **Credit top-ups.** A replayed `POST /api/v1/chunks/credit` response carries the account's **current** bearer token (the gateway does not store the token, and a replay never issues or rotates one).
 - **It is not spent.** A replayed response leaves the retry's signed authorization unsettled but valid until its `validBefore`. Keep `validBefore` short. `Idempotent-Replayed: true` means the response, including its `X-PAYMENT-RESPONSE` and `X-Payment-Transaction`, belongs to the **original** payment; do not treat it as proof that the retry's authorization settled.
 
+## 202 Accepted from a paid stamp purchase
+
+If the Bee node does not confirm a paid purchase in time, the gateway, having already collected the payment, answers `202` with `code: PURCHASE_PENDING`, the payment `transaction`, and the batch `label`. The batch is registered to the paying wallet as soon as the node reports it: list `GET /api/v1/stamps/?wallet=<your address>` and look for that label, or retry with the same `Idempotency-Key`, which returns the `201` with the `batchID` once it is found. Do not pay again. A `202` is not a failure.
+
 ## Error Handling
 
 | Error | Cause | Resolution |

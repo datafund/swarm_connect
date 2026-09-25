@@ -476,7 +476,9 @@ class X402Middleware(BaseHTTPMiddleware):
         body = b""
         async for chunk in response.body_iterator:
             body += chunk
-        if ok:
+        # 202: accepted, not yet delivered (a stamp purchase Bee has not
+        # confirmed, #400). The handler records the delivery when it happens.
+        if ok and response.status_code != 202:
             _log_delivery(request, settlement, body, client_ip, payer)
         new_response = Response(
             content=body,

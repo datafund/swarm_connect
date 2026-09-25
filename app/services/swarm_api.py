@@ -159,19 +159,16 @@ async def purchase_postage_stamp(amount: int, depth: int, label: Optional[str] =
         raise ValueError(f"Stamp amount must be positive, got {amount}")
 
     api_url = urljoin(str(settings.SWARM_BEE_API_URL), f"stamps/{amount}/{depth}")
-    headers = {"Content-Type": "application/json"}
 
-    # Prepare request body if label is provided
-    request_body = {}
-    if label:
-        request_body["label"] = label
+    # Bee reads the label from the query string. It used to be sent in a JSON
+    # body, which Bee ignores, so every label was silently dropped (#400 needs
+    # it to find a purchase whose response was lost).
+    params = {"label": label} if label else None
 
     try:
         client = get_client()
-        if request_body:
-            response = await client.post(api_url, json=request_body, headers=headers, timeout=120)
-        else:
-            response = await client.post(api_url, headers=headers, timeout=120)
+        response = await client.post(api_url, params=params,
+                                     timeout=settings.SWARM_STAMP_PURCHASE_TIMEOUT_SECONDS)
 
         response.raise_for_status()
         response_json = response.json()
@@ -190,6 +187,50 @@ async def purchase_postage_stamp(amount: int, depth: int, label: Optional[str] =
     except (ValueError, KeyError) as e:
         logger.error(f"Error parsing stamp purchase response: {e}")
         raise ValueError(f"Could not parse stamp purchase response: {e}") from e
+
+
+# The label Bee gives a batch of its own that it learns about from the chain
+# rather than from a completed API call: the purchase request was cancelled
+# (the caller disconnected) after the transaction was sent.
+BEE_RECOVERED_LABEL = "recovered"
+
+
+async def find_purchased_batch(label: str, depth: int, amount: int, is_known, min_block: Optional[int],
+                               wait_seconds: float, interval: float = 3.0) -> Optional[str]:
+    """Find a batch whose purchase response was lost (#400).
+
+    When Bee's POST /stamps times out, the purchase may still go through. Look
+    for it in the node's own batches by what it was bought with: depth, amount
+    and label, excluding batches already registered to someone (is_known). If
+    the timeout cancelled Bee's handler after the transaction was sent, Bee
+    labels the batch "recovered" instead; such a batch matches only if it was
+    created at or after min_block (the node's block when the purchase started).
+
+    Polls for up to wait_seconds, because a new batch appears only once Bee has
+    seen it on-chain. Returns None unless exactly one batch matches: guessing
+    between two would hand someone else's batch to this payer.
+    """
+    def matches(s: Dict[str, Any]) -> bool:
+        if not s.get("batchID") or is_known(s["batchID"]):
+            return False
+        if coerce_int(s.get("depth"), -1) != depth or str(s.get("amount")) != str(amount):
+            return False
+        if s.get("label") == label:
+            return True
+        return (s.get("label") == BEE_RECOVERED_LABEL and min_block is not None
+                and coerce_int(s.get("blockNumber"), -1) >= min_block)
+
+    deadline = time.monotonic() + wait_seconds
+    while True:
+        found = [s["batchID"] for s in await get_local_stamps() if matches(s)]
+        if len(found) == 1:
+            return found[0]
+        if len(found) > 1:
+            logger.warning(f"Lost purchase lookup: {len(found)} batches match label {label!r}; not guessing")
+            return None
+        if time.monotonic() >= deadline:
+            return None
+        await asyncio.sleep(interval)
 
 
 async def extend_postage_stamp(stamp_id: str, amount: int) -> str:

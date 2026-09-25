@@ -82,6 +82,16 @@ class Settings(BaseSettings):
     # any observed legitimate caller and far less than the wallet.
     STAMP_DAILY_BZZ_PER_CALLER: float = 0.5
     STAMP_SPEND_BUDGET_STATE_FILE: str = "data/stamp_spend_budget.json"
+
+    # Paid purchase whose Bee response is lost (#400). Bee's POST /stamps waits
+    # for the on-chain transaction; if it times out after the payment settled,
+    # the gateway looks for the batch (by the purchase label) for up to
+    # STAMP_PURCHASE_LOOKUP_SECONDS before answering 202, then keeps looking in
+    # the background for up to STAMP_PURCHASE_BACKGROUND_LOOKUP_SECONDS and
+    # registers the batch to the payer when it appears.
+    SWARM_STAMP_PURCHASE_TIMEOUT_SECONDS: float = 120.0
+    STAMP_PURCHASE_LOOKUP_SECONDS: float = 30.0
+    STAMP_PURCHASE_BACKGROUND_LOOKUP_SECONDS: float = 900.0
     X402_RATE_LIMIT_PER_IP: int = 10  # Requests per minute per IP (for paying users)
 
     # === x402 Free Tier Settings ===

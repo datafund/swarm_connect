@@ -1,9 +1,12 @@
 # app/api/endpoints/stamps.py
 from fastapi import APIRouter, HTTPException, Path, Query, Request, status, Body
+from fastapi.responses import JSONResponse
 from typing import Any, Optional, Union
+import asyncio
 import datetime
 import httpx
 import logging
+import secrets
 
 from app.x402.settlement import settle_payment
 from app.core.config import settings
@@ -425,6 +428,84 @@ async def get_stamp_details(
          )
 
 
+_PENDING_FIRST_WAIT_SECONDS = 10
+
+
+def _is_registered(batch_id: str) -> bool:
+    return stamp_ownership_manager.get_stamp_info(batch_id) is not None
+
+
+def _register_purchase(request: Request, batch_id: str, payer: Optional[str] = None) -> None:
+    """Register a purchased batch to its payer, or as shared for the free tier."""
+    payer = payer or getattr(request.state, "x402_payer", None)
+    if getattr(request.state, "x402_mode", None) == "paid" and payer:
+        stamp_ownership_manager.register_stamp(
+            batch_id=batch_id, owner=payer, mode="paid", source="direct_purchase")
+    else:
+        stamp_ownership_manager.register_stamp(
+            batch_id=batch_id, owner="shared", mode="free", source="direct_purchase")
+
+
+def _purchase_pending(request: Request, label: str, depth: int, amount: int,
+                      start_block: Optional[int]) -> JSONResponse:
+    """202 for a paid purchase Bee did not confirm in time (#400).
+
+    The payment has settled and the batch may exist. Keep looking in the
+    background and register it to the payer when it appears; with an
+    Idempotency-Key, a retry then gets the 201 instead of this 202.
+    """
+    payer = getattr(request.state, "x402_payer", None)
+    tx = getattr(getattr(request.state, "x402_settlement", None), "transaction", None)
+    stamp_purchases_total.labels(size="custom", status="pending").inc()
+    asyncio.get_running_loop().create_task(_finish_pending_purchase(
+        request, label, depth, amount, start_block, payer, tx,
+        getattr(request.state, "x402_idempotency_id", None)))
+    return JSONResponse(status_code=status.HTTP_202_ACCEPTED, content={
+        "code": "PURCHASE_PENDING",
+        "message": ("Payment received, but the Bee node did not confirm the purchase in time. "
+                    "The batch is registered to your wallet as soon as the node reports it."),
+        "transaction": tx,
+        "label": label,
+        "depth": depth,
+        "amount": str(amount),
+        "lookup": (f"GET /api/v1/stamps/?wallet={payer} and look for this label. "
+                   "Retrying with the same Idempotency-Key returns the batch once it is found."),
+    })
+
+
+async def _finish_pending_purchase(request: Request, label: str, depth: int, amount: int,
+                                   start_block: Optional[int], payer: Optional[str],
+                                   tx: Optional[str], idem) -> None:
+    """Background half of _purchase_pending: find, register, record."""
+    from app.x402.audit import AuditEventType, log_audit_event, log_payment_failed
+    from app.x402.idempotency import resolve_idempotent_result
+    client_ip = get_client_ip(request)
+    # The request just looked; waiting first also lets the middleware store the
+    # 202 for the Idempotency-Key before this replaces it.
+    await asyncio.sleep(_PENDING_FIRST_WAIT_SECONDS)
+    try:
+        batch_id = await swarm_api.find_purchased_batch(
+            label, depth, amount, _is_registered, start_block,
+            wait_seconds=settings.STAMP_PURCHASE_BACKGROUND_LOOKUP_SECONDS, interval=10)
+    except Exception as e:
+        logger.error(f"Lost purchase lookup failed: {e}", exc_info=True)
+        batch_id = None
+    if batch_id is None:
+        log_payment_failed(client_ip=client_ip,
+                           reason=f"stamp purchase not found after settlement; label={label}; tx={tx}",
+                           stage="delivery_after_settlement", wallet_address=payer)
+        return
+    _register_purchase(request, batch_id, payer=payer)
+    record_purchase(batch_id)
+    logger.info(f"Lost purchase found: {batch_id[:16]} registered to {payer}")
+    log_audit_event(event_type=AuditEventType.PAYMENT_DELIVERED, client_ip=client_ip, wallet_address=payer,
+                    data={"transaction_hash": tx, "method": "POST", "path": request.url.path,
+                          "network": settings.X402_NETWORK, "resource": {"batchID": batch_id},
+                          "late": True})
+    body = StampPurchaseResponse(batchID=batch_id, message="Postage stamp purchased successfully")
+    resolve_idempotent_result(idem, status.HTTP_201_CREATED, body.model_dump_json().encode())
+
+
 @router.post(
     "/",
     response_model=StampPurchaseResponse,
@@ -504,46 +585,65 @@ async def purchase_stamp(
                 )
             )
 
+        # A paid purchase always carries a label, so it can be found on the node
+        # if Bee's response is lost after the payment settled (#400). A label
+        # the caller chose is used as it is.
+        paid = getattr(request.state, "x402_mode", None) == "paid"
+        label = stamp_request.label or (f"paid-{secrets.token_hex(8)}" if paid else None)
+        start_block = None
+        if paid:
+            # Where the chain was when the purchase started, to recognise a
+            # batch Bee recovered from the chain after the request was cut off.
+            try:
+                start_block = swarm_api.coerce_int((await swarm_api.get_chainstate()).get("block"), -1)
+                start_block = start_block if start_block >= 0 else None
+            except Exception as e:
+                logger.warning(f"No chain block before a paid purchase: {e}")
+
         # Collect the payment immediately before the purchase: every check
         # above can refuse the request, and a refusal must not cost anything.
         await settle_payment(request)
-        batch_id = await swarm_api.purchase_postage_stamp(
-            amount=amount,
-            depth=effective_depth,
-            label=stamp_request.label
-        )
-
-        # Charged only now: a purchase that failed downstream must not cost the
-        # caller their budget.
-        if charge_to is not None:
-            spend_budget_tracker.consume(charge_to, cost_bzz)
-            stamp_spend_bzz_total.labels(
-                operation="stamp purchase", charged="budget"
-            ).inc(cost_bzz)
-
-        # Record purchase time for propagation tracking
-        record_purchase(batch_id)
-
-        # Register stamp ownership
-        x402_mode = getattr(request.state, 'x402_mode', None)
-        x402_payer = getattr(request.state, 'x402_payer', None)
-        if x402_mode == "paid" and x402_payer:
-            stamp_ownership_manager.register_stamp(
-                batch_id=batch_id,
-                owner=x402_payer,
-                mode="paid",
-                source="direct_purchase"
+        try:
+            batch_id = await swarm_api.purchase_postage_stamp(
+                amount=amount,
+                depth=effective_depth,
+                label=label
             )
-        else:
-            stamp_ownership_manager.register_stamp(
-                batch_id=batch_id,
-                owner="shared",
-                mode="free",
-                source="direct_purchase"
+        except httpx.TransportError as e:
+            # No answer from Bee (timeout, dropped connection). The purchase may
+            # still have happened. Unpaid, the caller just retries; paid, look
+            # for the batch rather than keep the money and report a failure.
+            if getattr(request.state, "x402_settlement", None) is None:
+                raise
+            logger.error(f"Bee gave no answer to a paid purchase ({type(e).__name__}); looking for the batch")
+            batch_id = await swarm_api.find_purchased_batch(
+                label, effective_depth, amount, _is_registered, start_block,
+                wait_seconds=settings.STAMP_PURCHASE_LOOKUP_SECONDS,
             )
+            if batch_id is None:
+                return _purchase_pending(request, label, effective_depth, amount, start_block)
 
-        size_label = stamp_request.size or "custom"
-        stamp_purchases_total.labels(size=size_label, status="success").inc()
+        # Ownership first: once the batch id is known, nothing that can fail
+        # may stand between the payer and the batch they paid for.
+        _register_purchase(request, batch_id)
+
+        try:
+            # Charged only now: a purchase that failed downstream must not cost
+            # the caller their budget.
+            if charge_to is not None:
+                spend_budget_tracker.consume(charge_to, cost_bzz)
+                stamp_spend_bzz_total.labels(
+                    operation="stamp purchase", charged="budget"
+                ).inc(cost_bzz)
+
+            # Record purchase time for propagation tracking
+            record_purchase(batch_id)
+
+            size_label = stamp_request.size or "custom"
+            stamp_purchases_total.labels(size=size_label, status="success").inc()
+        except Exception as e:
+            # Bookkeeping only. The batch is bought and registered: return it.
+            logger.error(f"Stamp {batch_id[:16]} bought, bookkeeping after it failed: {e}", exc_info=True)
 
         return StampPurchaseResponse(
             batchID=batch_id,
