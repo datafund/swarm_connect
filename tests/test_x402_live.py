@@ -160,12 +160,13 @@ class TestX402PaymentFlow:
         from pathlib import Path
         from eth_account import Account
         sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "docs" / "samples"))
-        from x402_client import call
+        from x402_client import Budget, call
 
         response = call(
             "POST", f"{config['gateway_url']}/api/v1/stamps/",
             json={"size": "small", "duration_hours": 25},
-            paid=True, account=Account.from_key(config["wallet_private_key"]), max_usd=0.10,
+            paid=True, account=Account.from_key(config["wallet_private_key"]),
+            budget=Budget(0.10, 0.10), network=config["network"], pay_to=None,
         )
 
         print(f"Response status: {response.status_code}")

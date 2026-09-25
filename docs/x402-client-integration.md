@@ -89,8 +89,8 @@ Content-Type: application/json
   "error": "Payment required. Use X-PAYMENT header for paid access or X-Payment-Mode: free for free tier.",
   "freeTier": {
     "available": true,
-    "requestsRemaining": 5,
-    "requestsLimit": 5,
+    "requestsRemaining": 3,
+    "requestsLimit": 3,
     "windowSeconds": 60,
     "instruction": "Add header 'X-Payment-Mode: free' to use free tier"
   }
@@ -109,6 +109,17 @@ Content-Type: application/json
 The price is at least the gateway's minimum (`X402_MIN_PRICE_USD`, $0.01 by
 default), so sign exactly `maxAmountRequired`, never less.
 
+**Before signing, check `network` and `asset`** against the chain you mean to
+pay on, and `payTo` if you know the gateway's address. A client signs whatever
+the 402 names: pointed at a mainnet gateway, a key you think of as testnet-only
+pays real USDC. The samples refuse any entry that is not USDC on the expected
+network (`base-sepolia` unless told otherwise).
+
+| Network | USDC `asset` |
+|---------|--------------|
+| `base-sepolia` | `0x036CbD53842c5426634e7929541eC2318f3dCF7e` |
+| `base` | `0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913` |
+
 ## Payment Flow
 
 ### Using the x402 Python SDK
@@ -125,7 +136,21 @@ Automatic, for spec-shape gateways:
 from eth_account import Account
 from x402.clients.requests import x402_requests
 
-session = x402_requests(Account.from_key(PRIVATE_KEY), max_value=100_000)  # refuse > $0.10
+from x402.clients.base import x402Client
+
+NETWORK = "base-sepolia"                       # the chain you mean to pay on
+USDC = {"base-sepolia": "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+        "base": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"}
+
+
+def pinned(accepts, network_filter=None, scheme_filter=None, max_value=None):
+    """Only USDC on NETWORK; the SDK's own selector then applies max_value."""
+    ok = [a for a in accepts if a.network == NETWORK and a.asset.lower() == USDC[NETWORK].lower()]
+    return x402Client.default_payment_requirements_selector(ok, None, "exact", max_value)
+
+
+session = x402_requests(Account.from_key(PRIVATE_KEY), max_value=100_000,  # refuse > $0.10
+                        payment_requirements_selector=pinned)
 response = session.post(
     "https://gateway.example.com/api/v1/stamps/",
     json={"size": "small", "duration_hours": 25},
@@ -144,6 +169,9 @@ from x402.clients.base import x402Client
 from x402.types import PaymentRequirements
 
 USDC_UNITS = 1_000_000  # "10000" means $0.01
+NETWORK = "base-sepolia"  # the chain you mean to pay on
+USDC = {"base-sepolia": "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+        "base": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"}
 
 
 def payment_requirements(resp):
@@ -151,19 +179,30 @@ def payment_requirements(resp):
     return body["accepts"] if "accepts" in body else body["detail"]["accepts"]
 
 
-def paid_request(method, url, account, max_usd=0.10, **kwargs):
+def choose(accepts, pay_to=None):
+    """The `exact` USDC entry on NETWORK (and to pay_to, if given), or refuse."""
+    for a in accepts:
+        if (a["scheme"] == "exact" and a["network"] == NETWORK
+                and a["asset"].lower() == USDC[NETWORK].lower()
+                and (pay_to is None or a["payTo"].lower() == pay_to.lower())):
+            return a
+    raise RuntimeError(f"no USDC payment option on {NETWORK}; refusing to sign")
+
+
+def paid_request(method, url, account, max_usd=0.10, pay_to=None, **kwargs):
     resp = requests.request(method, url, **kwargs)
     if resp.status_code != 402:
         resp.raise_for_status()          # any 2xx is success (purchase is 201)
         return resp
 
-    requirement = payment_requirements(resp)[0]
+    requirement = choose(payment_requirements(resp), pay_to)
     price = int(requirement["maxAmountRequired"]) / USDC_UNITS
     if price > max_usd:
         raise RuntimeError(f"price ${price} above budget ${max_usd}")
 
     header = x402Client(account).create_payment_header(PaymentRequirements(**requirement), 1)
-    resp = requests.request(method, url, headers={"X-PAYMENT": header}, **kwargs)
+    headers = {**kwargs.pop("headers", {}), "X-PAYMENT": header}
+    resp = requests.request(method, url, headers=headers, **kwargs)
     resp.raise_for_status()
     return resp
 ```
@@ -174,15 +213,22 @@ EIP-712 domain from `extra`. Each call makes a new nonce. Never reuse a header.
 
 ### Node.js
 
-With the `x402` npm package (1.x speaks x402 v1) and `viem`:
+With the `x402` npm package (`npm install x402@1.2.0 viem`; 1.x speaks x402 v1):
 
 ```js
 import { createPaymentHeader } from "x402/client";
 import { createSigner } from "x402/types";
 
+const NETWORK = "base-sepolia";                      // the chain you mean to pay on
+const USDC = { "base-sepolia": "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+               base: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913" };
+
 const body = await res.json();                       // the 402
-const requirement = (body.accepts ?? body.detail.accepts)[0];
-const signer = await createSigner(requirement.network, process.env.X402_PRIVATE_KEY);
+const requirement = (body.accepts ?? body.detail.accepts).find((a) =>
+  a.scheme === "exact" && a.network === NETWORK &&
+  a.asset.toLowerCase() === USDC[NETWORK].toLowerCase());
+if (!requirement) throw new Error(`no USDC payment option on ${NETWORK}; refusing to sign`);
+const signer = await createSigner(NETWORK, process.env.X402_PRIVATE_KEY);
 const header = await createPaymentHeader(signer, 1, requirement);
 res = await fetch(url, { ...init, headers: { ...init.headers, "X-PAYMENT": header } });
 if (!res.ok) throw new Error(`HTTP ${res.status}`);  // 2xx is success
@@ -222,7 +268,7 @@ def upload_data(file_path, stamp_id):
     response = api.post("/api/v1/data/", params=params, files=files)
 
     if response.status_code == 402:
-        requirement = payment_requirements(response)[0]   # top level or detail
+        requirement = choose(payment_requirements(response))   # pinned network + USDC
         price_usd = int(requirement["maxAmountRequired"]) / 1_000_000
 
         if not (config.auto_pay and price_usd <= config.max_auto_pay_usd):
@@ -290,7 +336,7 @@ async def handle_swarm_upload(data: str, stamp_id: str, allow_payment: bool = Fa
     response = await gateway_client.post("/api/v1/data/", params=params, files=files)
 
     if response.status_code == 402:
-        requirement = payment_requirements(response)[0]   # top level or detail
+        requirement = choose(payment_requirements(response))   # pinned network + USDC
         if not allow_payment:
             return {
                 "error": "payment_required",
@@ -358,11 +404,8 @@ if response.status_code == 402:
 
     if free_tier.get("available") and free_tier.get("requestsRemaining", 0) > 0:
         # Use free tier
-        response = requests.post(
-            url,
-            headers={"X-Payment-Mode": "free"},
-            **kwargs
-        )
+        headers = {**kwargs.pop("headers", {}), "X-Payment-Mode": "free"}
+        response = requests.post(url, headers=headers, **kwargs)
     else:
         # Must pay - no free tier or exhausted
         response = paid_request("POST", url, account, **kwargs)
@@ -375,8 +418,8 @@ Successful free tier responses (2xx: 201 for a stamp purchase, 200 for an upload
 ```
 HTTP/1.1 201 Created
 X-Payment-Mode: free-tier
-X-RateLimit-Limit: 5
-X-RateLimit-Remaining: 4
+X-RateLimit-Limit: 3
+X-RateLimit-Remaining: 2
 X-RateLimit-Reset: 60
 ```
 
@@ -397,7 +440,7 @@ When free tier rate limit is exhausted (the body is under `detail`):
 {
   "detail": {
     "error": "Rate limit exceeded",
-    "detail": "Rate limit exceeded (free tier): 6/5 requests per minute",
+    "detail": "Rate limit exceeded (free tier): 4/3 requests per minute",
     "message": "Free tier rate limit exceeded. Use x402 payment for higher limits.",
     "payment_info": {
       "price_usd": 0.01,
@@ -424,7 +467,8 @@ def smart_request(url, prefer_free=True, **kwargs):
 
     # Try free tier first if available and preferred
     if prefer_free and free_tier.get("available") and free_tier.get("requestsRemaining", 0) > 0:
-        response = requests.post(url, headers={"X-Payment-Mode": "free"}, **kwargs)
+        headers = {**kwargs.get("headers", {}), "X-Payment-Mode": "free"}
+        response = requests.post(url, **{**kwargs, "headers": headers})
         if response.ok:              # 2xx: a purchase answers 201, not 200
             return response
         if response.status_code != 429:
@@ -449,7 +493,7 @@ requests
 Node.js (18+):
 
 ```
-npm install x402@1 viem
+npm install x402@1.2.0 viem   # the version the samples were tested with
 ```
 
 ## Testing
@@ -468,8 +512,13 @@ docs/samples/x402_curl.sh http://localhost:8000
 Each one buys a stamp, waits for it to become usable, uploads a small file,
 downloads it and compares the bytes. It exits non-zero on any failure, so it
 can be used as a smoke test. `--paid` spends real (testnet or mainnet) USDC
-through the gateway's facilitator. `--max-usd` (Python) and `MAX_USD` (Node)
-cap what it will sign.
+through the gateway's facilitator, and signs only for USDC on the expected
+network: `base-sepolia` by default, `--network base` (Python) or
+`--network=base` (Node) for mainnet. `--pay-to` (Python) or `PAY_TO` (Node)
+also pins the payee. A run makes two payments (stamp and upload). `--max-usd`
+/ `MAX_USD` caps each one, and `--max-total-usd` / `MAX_TOTAL_USD` caps the
+run. The curl script never pays, and stops rather than probe a gateway that
+does not answer with a 402.
 
 ### Testnet Mode
 

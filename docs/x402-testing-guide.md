@@ -115,10 +115,16 @@ X402_ENABLED=true X402_PAY_TO_ADDRESS=0x... python run.py
 
 ### 6. Test Without Payment (verify 402)
 
+Only do this with `X402_ENABLED=true`. With x402 off, the same unpaid request
+is served, not refused, and buys a stamp. Check the status code, not just the
+body. Where the gateway has `GET /api/v1/pricing`, that shows the same prices
+without the risk.
+
 ```bash
-# Should return HTTP 402 with payment requirements
-curl -s -X POST http://localhost:8000/api/v1/stamps/ \
-  -H 'Content-Type: application/json' -d '{}' | jq
+# Should print 402, then the payment requirements
+curl -s -o /tmp/402.json -w '%{http_code}\n' -X POST http://localhost:8000/api/v1/stamps/ \
+  -H 'Content-Type: application/json' -d '{}'
+jq . /tmp/402.json
 
 # Expected response. The x402 spec puts these fields at the top level; current
 # gateway releases nest them under "detail", so read `.accepts // .detail.accepts`.
@@ -153,7 +159,7 @@ With `--paid` it answers each 402 by signing a USDC payment with your key:
 ```bash
 TEST_WALLET_PRIVATE_KEY=0x...   # client wallet with testnet USDC
 X402_PRIVATE_KEY=$TEST_WALLET_PRIVATE_KEY \
-  python docs/samples/x402_client.py --gateway http://localhost:8000 --paid
+  python docs/samples/x402_client.py --gateway http://localhost:8000 --paid --network base-sepolia
 ```
 
 Expected output (the purchase answers **201 Created**, the upload 200):
@@ -167,7 +173,12 @@ Stamp is usable
   settled: {...}
 Upload: HTTP 200, reference ...
 Download: HTTP 200, 44 bytes, matches upload
+Spent $0.020000 USDC on base-sepolia
 ```
+
+The sample signs only USDC payments on `--network` (default `base-sepolia`)
+and refuses anything else, so a mainnet gateway gets no signature from a
+testnet run. `--pay-to 0xYOUR_GATEWAY_WALLET` also pins the payee.
 
 Without `--paid` it uses the free tier (`X-Payment-Mode: free`), which needs
 `X402_FREE_TIER_ENABLED=true`. The Node.js and curl versions are next to it in
