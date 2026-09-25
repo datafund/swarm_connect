@@ -272,7 +272,12 @@ class X402Middleware(BaseHTTPMiddleware):
             return await call_next(request)
 
         # Let the request through — the dependency handles pre-request checks
-        response = await call_next(request)
+        try:
+            response = await call_next(request)
+        except Exception:
+            if getattr(request.state, "x402_mode", None) != "paid":
+                raise
+            return self._paid_request_crashed(request)
 
         # Check what the dependency decided
         x402_mode = getattr(request.state, 'x402_mode', None)
@@ -297,52 +302,119 @@ class X402Middleware(BaseHTTPMiddleware):
 
             return new_response
 
-        if x402_mode == "paid" and 200 <= response.status_code < 300:
-            # Settle payment and add response headers
-            payment_payload = getattr(request.state, 'x402_payment', None)
-            payment_requirements = getattr(request.state, 'x402_requirements', None)
-
-            if payment_payload and payment_requirements:
-                try:
-                    logger.debug(f"x402: Calling facilitator settle at {settings.X402_FACILITATOR_URL}")
-                    settle_response = await self.facilitator_client.settle(
-                        payment=payment_payload,
-                        payment_requirements=payment_requirements
-                    )
-
-                    tx_hash = getattr(settle_response, 'transaction_hash', 'unknown')
-                    logger.info(f"x402: Payment settled successfully, tx_hash={tx_hash}")
-
-                    # Add settlement response header
-                    encoded_response = encode_payment_response(settle_response)
-
-                    body = b""
-                    async for chunk in response.body_iterator:
-                        body += chunk
-
-                    new_response = Response(
-                        content=body,
-                        status_code=response.status_code,
-                        headers=dict(response.headers),
-                        media_type=response.media_type
-                    )
-                    new_response.headers[X_PAYMENT_RESPONSE_HEADER] = encoded_response
-                    new_response.headers["X-Payment-Mode"] = "paid"
-                    new_response.headers["X-Payment-Transaction"] = tx_hash
-
-                    return new_response
-
-                except Exception as e:
-                    logger.error(f"x402: Payment settlement failed: {type(e).__name__}: {e}", exc_info=True)
-                    return JSONResponse(
-                        status_code=500,
-                        content={
-                            "error": "Payment settlement failed",
-                            "detail": "Your request was processed but payment settlement failed. Please retry.",
-                            "x402_status": "settlement_failed",
-                            "message": "Please retry with a new payment or use X-Payment-Mode: free for free tier access"
-                        },
-                        headers={"X-Payment-Mode": "failed"}
-                    )
+        if x402_mode == "paid":
+            return await self._finish_paid(request, response)
 
         return response
+
+    async def _finish_paid(self, request: Request, response: Response) -> Response:
+        """Settle what the handler did not, and never deliver an unpaid result.
+
+        Paid handlers settle through settle_payment() before their irreversible
+        step (settlement.py), so normally this only attaches the settlement
+        headers. It settles here only for a paid route that has no settle point
+        of its own, and then checks the result: SettleResponse reports failure
+        with success=False rather than an exception (#355).
+        """
+        from app.x402.settlement import replay_guard
+        from app.x402.audit import log_payment_failed, log_payment_settled
+
+        settlement = getattr(request.state, "x402_settlement", None)
+        ok = 200 <= response.status_code < 300
+        payer = getattr(request.state, "x402_payer", None)
+        client_ip = get_client_ip(request)
+
+        if settlement is None and not ok:
+            # Nothing delivered and nothing collected: let the same signed
+            # authorization be retried.
+            replay_guard.release(getattr(request.state, "x402_auth_key", None))
+            return response
+
+        if settlement is None:
+            payment_payload = getattr(request.state, "x402_payment", None)
+            payment_requirements = getattr(request.state, "x402_requirements", None)
+            try:
+                settlement = await self.facilitator_client.settle(
+                    payment=payment_payload,
+                    payment_requirements=payment_requirements,
+                )
+                failure = None if settlement.success else (settlement.error_reason or "unknown")
+            except Exception as e:
+                logger.error(f"x402: Payment settlement failed: {type(e).__name__}: {e}", exc_info=True)
+                failure = f"{type(e).__name__}"
+            if failure is not None:
+                logger.error(f"x402: settlement failed after delivery on {request.url.path}: {failure}")
+                log_payment_settled(client_ip=client_ip, payer=payer, transaction_hash=None,
+                                    network=settings.X402_NETWORK, success=False, error_reason=failure)
+                return JSONResponse(
+                    status_code=402,
+                    content={
+                        "code": "PAYMENT_SETTLEMENT_FAILED",
+                        "message": f"The payment could not be settled ({failure}).",
+                        "x402_status": "settlement_failed",
+                    },
+                    headers={"X-Payment-Mode": "failed"},
+                )
+            log_payment_settled(client_ip=client_ip, payer=payer,
+                                transaction_hash=getattr(settlement, "transaction", None),
+                                network=settings.X402_NETWORK, success=True)
+
+        tx_hash = getattr(settlement, "transaction", None) or "unknown"
+        if not ok:
+            # Paid, but the step after settlement failed. Record it for a
+            # refund, and give the caller the transaction to cite.
+            logger.error(f"x402: payment {tx_hash} settled but {request.url.path} "
+                         f"returned {response.status_code}; refund needed")
+            log_payment_failed(client_ip=client_ip,
+                               reason=f"HTTP {response.status_code} after settlement; tx={tx_hash}",
+                               stage="delivery_after_settlement", wallet_address=payer)
+
+        body = b""
+        async for chunk in response.body_iterator:
+            body += chunk
+        new_response = Response(
+            content=body,
+            status_code=response.status_code,
+            headers=dict(response.headers),
+            media_type=response.media_type,
+        )
+        new_response.headers[X_PAYMENT_RESPONSE_HEADER] = encode_payment_response(settlement)
+        new_response.headers["X-Payment-Mode"] = "paid"
+        new_response.headers["X-Payment-Transaction"] = tx_hash
+        if not ok:
+            new_response.headers["X-Payment-Status"] = "settled_not_delivered"
+        return new_response
+
+    def _paid_request_crashed(self, request: Request) -> Response:
+        """A paid request raised instead of responding.
+
+        Before settlement nothing was collected: release the authorization so it
+        can be retried. After settlement the payer has paid for nothing: record
+        it for a refund and return the transaction to cite.
+        """
+        from app.x402.settlement import replay_guard
+        from app.x402.audit import log_payment_failed
+
+        settlement = getattr(request.state, "x402_settlement", None)
+        if settlement is None:
+            replay_guard.release(getattr(request.state, "x402_auth_key", None))
+            logger.error(f"x402: paid request to {request.url.path} failed before settlement", exc_info=True)
+            return JSONResponse(status_code=500, content={"detail": "Internal server error. You were not charged."})
+
+        tx_hash = getattr(settlement, "transaction", None) or "unknown"
+        logger.error(f"x402: payment {tx_hash} settled but {request.url.path} raised; refund needed", exc_info=True)
+        log_payment_failed(client_ip=get_client_ip(request),
+                           reason=f"exception after settlement; tx={tx_hash}",
+                           stage="delivery_after_settlement",
+                           wallet_address=getattr(request.state, "x402_payer", None))
+        return JSONResponse(
+            status_code=500,
+            content={
+                "code": "DELIVERY_FAILED_AFTER_PAYMENT",
+                "message": ("The payment was collected but the request failed before completing. "
+                            "Contact the operator with this transaction for a refund."),
+                "transaction": tx_hash,
+                "x402_status": "settled_not_delivered",
+            },
+            headers={"X-Payment-Transaction": tx_hash, "X-Payment-Status": "settled_not_delivered"},
+        )

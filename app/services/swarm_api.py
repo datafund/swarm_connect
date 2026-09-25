@@ -1414,7 +1414,33 @@ TTL_THRESHOLD_EXPIRED = 0          # 0 seconds - stamp is expired
 TTL_THRESHOLD_LOW = 3600           # 1 hour - warn about low TTL
 
 
-async def validate_stamp_for_upload(stamp_id: str) -> Dict[str, Any]:
+async def _get_local_stamp_processed(stamp_id: str) -> Optional[Dict[str, Any]]:
+    """One batch as the connected node sees it, in the processed-stamp shape.
+
+    A single GET /stamps/{id} rather than the whole network's /batches list.
+    Returns None when the node does not hold the batch.
+    """
+    client = get_client()
+    url = urljoin(str(settings.SWARM_BEE_API_URL), f"stamps/{stamp_id.lower()}")
+    response = await client.get(url, timeout=10)
+    if response.status_code in (400, 404):
+        return None
+    response.raise_for_status()
+    stamp = response.json()
+    percent = calculate_utilization_percent(
+        coerce_int(stamp.get("utilization"), 0), stamp.get("depth"), stamp.get("bucketDepth"))
+    status, warning = calculate_utilization_status(percent)
+    return {
+        **stamp,
+        "local": True,
+        "batchTTL": coerce_int(stamp.get("batchTTL"), 0),
+        "utilizationPercent": percent,
+        "utilizationStatus": status,
+        "utilizationWarning": warning,
+    }
+
+
+async def validate_stamp_for_upload(stamp_id: str, local_only: bool = False) -> Dict[str, Any]:
     """
     Validates that a stamp is suitable for uploading data.
 
@@ -1435,15 +1461,22 @@ async def validate_stamp_for_upload(stamp_id: str) -> Dict[str, Any]:
         StampValidationError: If stamp fails any blocking validation check
         httpx.HTTPError: If unable to reach Swarm API
     """
-    # Get all processed stamps (includes utilization calculation)
-    all_stamps = await get_all_stamps_processed()
+    if local_only:
+        # Just the one batch on the connected node. Used before settling a paid
+        # upload, where the full network list would add a large, uncached fetch
+        # to every paid request. A batch the node does not hold is reported as
+        # not found, which is what the upload itself would run into.
+        found_stamp = await _get_local_stamp_processed(stamp_id)
+    else:
+        # Get all processed stamps (includes utilization calculation)
+        all_stamps = await get_all_stamps_processed()
 
-    # Find the requested stamp (case-insensitive)
-    found_stamp = None
-    for stamp in all_stamps:
-        if stamp.get("batchID") == stamp_id or stamp.get("batchID", "").lower() == stamp_id.lower():
-            found_stamp = stamp
-            break
+        # Find the requested stamp (case-insensitive)
+        found_stamp = None
+        for stamp in all_stamps:
+            if stamp.get("batchID") == stamp_id or stamp.get("batchID", "").lower() == stamp_id.lower():
+                found_stamp = stamp
+                break
 
     # Check 1: Stamp exists
     if not found_stamp:

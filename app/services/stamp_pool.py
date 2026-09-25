@@ -306,6 +306,21 @@ class StampPoolManager:
             self._save_state()
             return stamp
 
+    def return_released_stamp(self, stamp: PoolStamp) -> None:
+        """Put back a batch that release_stamp() handed out but was not delivered.
+
+        Used when a paid acquire claims a batch and settlement then fails: the
+        batch goes back to the pool exactly as it was, so it is neither lost to
+        the pool nor handed to a caller who did not pay.
+        """
+        with self._lock:
+            stamp.status = PoolStampStatus.AVAILABLE
+            stamp.released_at = None
+            stamp.released_to = None
+            self._pool[stamp.batch_id] = stamp
+            self._save_state()
+        logger.info(f"Returned undelivered stamp {stamp.batch_id[:16]}... to the pool")
+
     def trigger_replenishment_if_needed(self, depth: int) -> bool:
         """
         Check if replenishment is needed for the given depth and trigger async purchase.

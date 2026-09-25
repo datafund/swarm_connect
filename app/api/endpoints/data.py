@@ -7,6 +7,7 @@ from fastapi import APIRouter, HTTPException, Path, Query, Request, File, Upload
 from fastapi.responses import Response
 import httpx
 
+from app.x402.settlement import settle_payment
 from app.api.models.data import (
     DataUploadRequest,
     DataUploadResponse,
@@ -282,11 +283,13 @@ async def upload_data(
                 detail=f"Invalid redundancy level {redundancy}. Must be 0-4 ({valid_levels})"
             )
 
-        # Optional pre-upload stamp validation
-        if validate_stamp:
+        # Optional pre-upload stamp validation. Always done for a paid upload:
+        # the payment is settled just before the upload, so a stamp Bee would
+        # refuse (missing, expired, full) must be caught while it is still free.
+        if validate_stamp or getattr(request.state, "x402_mode", None) == "paid":
             stamp_start = time.perf_counter()
             try:
-                await validate_stamp_for_upload(stamp_id)
+                await validate_stamp_for_upload(stamp_id, local_only=not validate_stamp)
             except StampValidationError as e:
                 # Build structured error response
                 detail = {
@@ -378,6 +381,7 @@ async def upload_data(
 
         # Upload to Swarm
         bee_start = time.perf_counter()
+        await settle_payment(request)
         reference = await upload_data_to_swarm(
             data=data_bytes,
             stamp_id=stamp_id,
@@ -732,11 +736,13 @@ async def upload_manifest(
                 detail=f"Invalid redundancy level {redundancy}. Must be 0-4 ({valid_levels})"
             )
 
-        # Optional pre-upload stamp validation
-        if validate_stamp:
+        # Optional pre-upload stamp validation. Always done for a paid upload:
+        # the payment is settled just before the upload, so a stamp Bee would
+        # refuse (missing, expired, full) must be caught while it is still free.
+        if validate_stamp or getattr(request.state, "x402_mode", None) == "paid":
             stamp_start = time.perf_counter()
             try:
-                await validate_stamp_for_upload(stamp_id)
+                await validate_stamp_for_upload(stamp_id, local_only=not validate_stamp)
             except StampValidationError as e:
                 # Build structured error response
                 detail = {
@@ -792,6 +798,7 @@ async def upload_manifest(
 
         # Upload to Swarm as collection
         bee_start = time.perf_counter()
+        await settle_payment(request)
         reference = await upload_collection_to_swarm(
             tar_bytes, stamp_id, deferred=deferred, redundancy_level=redundancy
         )

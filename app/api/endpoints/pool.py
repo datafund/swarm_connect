@@ -13,6 +13,7 @@ from typing import Dict, List, Optional, Literal
 from datetime import datetime, timezone
 import logging
 
+from app.x402.settlement import settle_payment
 from app.core.config import settings
 from app.services.stamp_pool import stamp_pool_manager, PoolStampStatus
 from app.services.stamp_ownership import stamp_ownership_manager
@@ -314,8 +315,18 @@ async def acquire_stamp(
     # Get client identifier for logging
     client_ip = http_request.client.host if http_request.client else "unknown"
 
-    # Release the stamp
+    # Claim the batch first, then collect payment. release_stamp is the atomic
+    # claim; settling can take seconds, and a batch merely chosen but not
+    # claimed could be taken by a concurrent acquire in that time, leaving a
+    # paid caller charged with nothing to receive. If settlement fails the
+    # batch goes back to the pool.
     released = stamp_pool_manager.release_stamp(stamp.batch_id, released_to=client_ip)
+    if released:
+        try:
+            await settle_payment(http_request)
+        except BaseException:
+            stamp_pool_manager.return_released_stamp(released)
+            raise
 
     if not released:
         size_name = depth_to_size_name(requested_depth)

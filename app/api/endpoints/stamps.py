@@ -5,6 +5,7 @@ import datetime
 import httpx
 import logging
 
+from app.x402.settlement import settle_payment
 from app.core.config import settings
 from app.services import swarm_api
 from app.services.swarm_api import plur_to_bzz
@@ -508,6 +509,9 @@ async def purchase_stamp(
                 )
             )
 
+        # Collect the payment immediately before the purchase: every check
+        # above can refuse the request, and a refusal must not cost anything.
+        await settle_payment(request)
         batch_id = await swarm_api.purchase_postage_stamp(
             amount=amount,
             depth=effective_depth,
@@ -724,6 +728,7 @@ async def extend_stamp(
                 )
             )
 
+        await settle_payment(request)
         batch_id = await swarm_api.extend_postage_stamp(
             stamp_id=stamp_id,
             amount=amount

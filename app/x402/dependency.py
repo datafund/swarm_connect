@@ -438,6 +438,34 @@ async def require_x402_payment(request: Request) -> None:
         }
         raise HTTPException(status_code=402, detail=response_body)
 
+    # One authorization, one delivery (#356). Reserved only after the facilitator
+    # has verified it, so unverified junk cannot fill the guard. A concurrent
+    # request carrying the same authorization is refused here, before it can do
+    # any work; the middleware releases the reservation if nothing was settled.
+    from app.x402.settlement import authorization_key, replay_guard
+    auth_key = authorization_key(payment_payload)
+    if auth_key is None:
+        # Every payment this gateway accepts (scheme "exact" on an EVM network)
+        # is an EIP-3009 authorization. Anything else cannot be deduplicated.
+        raise HTTPException(
+            status_code=402,
+            detail={
+                "x402Version": X402_VERSION,
+                "error": "Unsupported payment payload: expected an EIP-3009 authorization.",
+                "accepts": [payment_requirements.model_dump(by_alias=True)],
+            },
+        )
+    if not replay_guard.reserve(auth_key):
+        logger.warning(f"x402: Payment authorization reused by {client_ip}")
+        raise HTTPException(
+            status_code=402,
+            detail={
+                "x402Version": X402_VERSION,
+                "error": "This payment authorization has already been used. Sign a new payment.",
+                "accepts": [payment_requirements.model_dump(by_alias=True)],
+            },
+        )
+
     logger.info(f"x402: Payment verified for payer {verify_response.payer}")
     x402_payments_total.labels(mode="paid").inc()
 
@@ -446,3 +474,4 @@ async def require_x402_payment(request: Request) -> None:
     request.state.x402_payer = getattr(verify_response, 'payer', None)
     request.state.x402_payment = payment_payload
     request.state.x402_requirements = payment_requirements
+    request.state.x402_auth_key = auth_key
