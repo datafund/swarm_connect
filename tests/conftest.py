@@ -42,6 +42,7 @@ for _var, _name in (
     ("STAMP_OWNERSHIP_FILE", "stamp_owners.json"),
     ("BANDWIDTH_CREDIT_STATE_FILE", "bandwidth_credit.json"),
     ("STAMP_SPEND_BUDGET_STATE_FILE", "stamp_spend_budget.json"),
+    ("X402_AUDIT_LOG_PATH", "x402_audit.jsonl"),
 ):
     os.environ[_var] = os.path.join(_STATE_DIR, _name)
 
@@ -81,3 +82,16 @@ def _isolate_spend_budget(tmp_path, monkeypatch):
     import app.api.endpoints.stamps as stamps_ep
     monkeypatch.setattr(stamps_ep, "spend_budget_tracker", tracker)
     yield tracker
+
+
+@pytest.fixture(autouse=True)
+def _reset_payment_replay_guard():
+    """Each test starts with no payment authorizations reserved.
+
+    The guard is process-wide by design (one authorization, one delivery), and
+    tests reuse the same signed test authorization.
+    """
+    from app.x402.settlement import replay_guard
+    replay_guard.reset()
+    yield
+    replay_guard.reset()

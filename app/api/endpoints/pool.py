@@ -13,6 +13,7 @@ from typing import Dict, List, Optional, Literal
 from datetime import datetime, timezone
 import logging
 
+from app.x402.settlement import settle_payment
 from app.core.config import settings
 from app.services.stamp_pool import stamp_pool_manager, PoolStampStatus
 from app.services.stamp_ownership import stamp_ownership_manager
@@ -315,6 +316,7 @@ async def acquire_stamp(
     client_ip = http_request.client.host if http_request.client else "unknown"
 
     # Release the stamp
+    await settle_payment(http_request)
     released = stamp_pool_manager.release_stamp(stamp.batch_id, released_to=client_ip)
 
     if not released:

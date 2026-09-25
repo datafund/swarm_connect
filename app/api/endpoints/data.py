@@ -7,6 +7,7 @@ from fastapi import APIRouter, HTTPException, Path, Query, Request, File, Upload
 from fastapi.responses import Response
 import httpx
 
+from app.x402.settlement import settle_payment
 from app.api.models.data import (
     DataUploadRequest,
     DataUploadResponse,
@@ -378,6 +379,7 @@ async def upload_data(
 
         # Upload to Swarm
         bee_start = time.perf_counter()
+        await settle_payment(request)
         reference = await upload_data_to_swarm(
             data=data_bytes,
             stamp_id=stamp_id,
@@ -792,6 +794,7 @@ async def upload_manifest(
 
         # Upload to Swarm as collection
         bee_start = time.perf_counter()
+        await settle_payment(request)
         reference = await upload_collection_to_swarm(
             tar_bytes, stamp_id, deferred=deferred, redundancy_level=redundancy
         )
