@@ -20,6 +20,7 @@ from x402.facilitator import FacilitatorClient, FacilitatorConfig
 
 from app.core.config import settings
 from app.services.metrics import x402_payments_total
+from app.services.stamp_ownership import normalize_address
 from app.x402.pricing import get_price_quote
 from app.x402.ratelimit import check_rate_limit, get_rate_limit_headers, get_free_tier_stats
 from app.x402.base_balance import check_base_eth_balance
@@ -376,11 +377,25 @@ async def require_x402_payment(request: Request) -> None:
         }
         raise HTTPException(status_code=402, detail=response_body)
 
+    # The payer becomes the owner of whatever this request buys, and the
+    # ownership registry refuses an owner that is not an address (#384). Checked
+    # here, before anything is spent: refused later, the batch would already be
+    # bought or taken from the pool, and the caller would get a 500 unsettled.
+    payer = getattr(verify_response, 'payer', None)
+    if normalize_address(payer) is None:
+        logger.warning(f"x402: facilitator reported a payer that is not an address: {payer!r}")
+        response_body = {
+            "x402Version": X402_VERSION,
+            "error": "Payment verification failed: payer is not a valid address",
+            "accepts": [payment_requirements.model_dump(by_alias=True)]
+        }
+        raise HTTPException(status_code=402, detail=response_body)
+
     logger.info(f"x402: Payment verified for payer {verify_response.payer}")
     x402_payments_total.labels(mode="paid").inc()
 
     # Store payment info on request.state for middleware settlement
     request.state.x402_mode = "paid"
-    request.state.x402_payer = getattr(verify_response, 'payer', None)
+    request.state.x402_payer = payer
     request.state.x402_payment = payment_payload
     request.state.x402_requirements = payment_requirements

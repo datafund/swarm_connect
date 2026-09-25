@@ -401,6 +401,49 @@ def smart_request(url, prefer_free=True, **kwargs):
     return make_paid_request(url, data["accepts"][0], **kwargs)
 ```
 
+## Uploading to Your Own Stamp
+
+A stamp bought with a payment (`POST /api/v1/stamps/`, paid `POST /api/v1/pool/acquire`)
+belongs to the paying wallet (`accessMode: "owned"`), and only that wallet may upload to it.
+There are two ways to show it is you:
+
+1. **Pay for the upload** from the same wallet. The x402 payer is the owner.
+2. **Sign an owner proof** and use the free tier. No payment; the free-tier rate limit applies.
+
+```python
+import time
+from eth_account import Account
+from eth_account.messages import encode_defunct
+
+ts = int(time.time())
+message = f"swarm-connect-owner-upload:{stamp_id.lower()}:{ts}"
+signature = Account.sign_message(encode_defunct(text=message), private_key=key).signature.hex()
+
+requests.post(
+    f"{gateway}/api/v1/data/?stamp_id={stamp_id}",
+    headers={
+        "X-Payment-Mode": "free",
+        "X-Owner-Timestamp": str(ts),
+        "X-Owner-Signature": signature,
+    },
+    files={"file": ("data.json", payload)},
+)
+```
+
+- The timestamp must be within 5 minutes of the gateway's clock.
+- Each proof is accepted once. Sign a new one for every upload. A proof that is
+  refused (for example, signed by a wallet that does not own the stamp) is not used up.
+- A proof signed before the gateway last restarted is refused; sign a new one.
+- A proof is a **bearer credential** for one upload to that stamp. It is not bound to the
+  file, so whoever presents it first gets the upload. Send it only over HTTPS, and do not
+  log or share it.
+- The proof names the stamp, so it cannot be used for any other stamp.
+- Errors: `401 OWNER_PROOF_INVALID` (malformed, stale or reused proof);
+  `403 STAMP_OWNERSHIP_DENIED` (valid proof, but the signer does not own the stamp).
+- Owner addresses are compared case-insensitively.
+
+Applies to `POST /api/v1/data/` and `POST /api/v1/data/manifest`.
+
 ## Dependencies
 
 Required packages for x402 client:
