@@ -23,8 +23,8 @@ from app.api.models.stamp import StampForOwnerRequest, StampForOwnerResponse
 from app.core.config import settings
 from app.services import metrics, swarm_api
 from app.services.gnosis_chain import (
-    RECEIPT_TIMEOUT_SECONDS,
     GnosisChainError,
+    SignerBusy,
     TransactionPending,
     gnosis_chain_client,
 )
@@ -142,8 +142,14 @@ async def create_batch_for_owner(body: StampForOwnerRequest, request: Request) -
         pending = True
         result = {"batch_id": e.batch_id, "tx_hash": e.tx_hash, "owner": e.owner}
         metrics.for_owner_batches_total.labels(status="pending").inc()
-        logger.warning(f"for-owner: createBatch {e.tx_hash} not confirmed within "
-                       f"{RECEIPT_TIMEOUT_SECONDS}s; reported as pending")
+        logger.warning(f"for-owner: createBatch {e.tx_hash} not confirmed in time; reported as pending")
+    except SignerBusy as e:
+        # Nothing was sent, so nothing is charged: a 5xx is not settled.
+        metrics.for_owner_batches_total.labels(status="busy").inc()
+        logger.warning(f"for-owner: refused, {e}")
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail={
+            "code": "SIGNER_BUSY",
+            "message": f"The gateway signer is busy ({e}). Nothing was sent and you were not charged; retry later."})
     except GnosisChainError as e:
         metrics.for_owner_batches_total.labels(status="error").inc()
         logger.error(f"for-owner: createBatch failed: {e}")
@@ -155,7 +161,8 @@ async def create_batch_for_owner(body: StampForOwnerRequest, request: Request) -
 
     # propagation tracking + informational ownership record (on-chain is source of truth).
     # Also for a pending batch: its ID is already fixed, and if it mines the
-    # record must exist; if it never does, expiry cleanup drops it.
+    # record must exist. If it never mines, the record stays: nothing removes
+    # it today, and it grants access to no batch that exists.
     record_purchase(bid)
     stamp_ownership_manager.register_stamp(batch_id=bid, owner=owner, mode="paid", source="created_for_owner")
     prop = swarm_api.calculate_propagation_signals(bid, usable=None)
@@ -186,7 +193,7 @@ async def create_batch_for_owner(body: StampForOwnerRequest, request: Request) -
     if pending:
         response.confirmed = False
         response.message = (
-            f"createBatch was broadcast but not confirmed within {RECEIPT_TIMEOUT_SECONDS}s. "
+            "createBatch was broadcast but not confirmed in time. "
             "It is pending and may still mine. Check txHash on Gnosis before retrying, "
             "or you may pay for a second batch."
         )

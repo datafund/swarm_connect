@@ -114,3 +114,14 @@ def test_confirmed_batch_reports_confirmed(client, env):
     with patch("app.api.endpoints.stamps_for_owner.settings", _settings()):
         r = client.post("/api/v1/stamps/for-owner", json={"owner": OWNER, "size": "small"})
     assert r.status_code == 201 and r.json()["confirmed"] is True
+
+
+def test_signer_busy_returns_503_and_is_not_a_success(client, env):
+    """Nothing was sent; a 5xx is not settled by the x402 middleware."""
+    from app.services.gnosis_chain import SignerBusy
+    env["gc"].create_batch = AsyncMock(side_effect=SignerBusy("signer has an unconfirmed transaction (nonce 7)"))
+    with patch("app.api.endpoints.stamps_for_owner.settings", _settings()):
+        r = client.post("/api/v1/stamps/for-owner", json={"owner": OWNER, "size": "small"})
+    assert r.status_code == 503
+    assert r.json()["detail"]["code"] == "SIGNER_BUSY"
+    env["own"].register_stamp.assert_not_called()

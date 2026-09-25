@@ -17,11 +17,15 @@ from eth_utils import keccak, to_checksum_address
 
 from web3.exceptions import TimeExhausted
 
+from app.services import gnosis_chain
 from app.services.gnosis_chain import (
     APPROVE_BUFFER_BATCHES,
     CHAIN_DEFAULTS,
+    CREATE_BATCH_GAS_MARGIN,
+    RECEIPT_TIMEOUT_SECONDS,
     GnosisChainClient,
     GnosisChainError,
+    SignerBusy,
     TransactionPending,
     compute_batch_id,
 )
@@ -202,6 +206,7 @@ class _Chain:
 
     def __init__(self, allowance=0):
         self.sent = []          # nonces of broadcast transactions, in order
+        self.mined = 0          # how many of them are confirmed ("latest" nonce)
         self.events = []        # (request tag, step)
         self.lock = threading.Lock()
         self.allowance = allowance
@@ -221,7 +226,7 @@ class _Chain:
         w3 = MagicMock()
         w3.is_connected.return_value = True
         w3.eth.contract.return_value = contract
-        w3.eth.get_transaction_count.side_effect = lambda addr, block: self._nonce()
+        w3.eth.get_transaction_count.side_effect = lambda addr, block: self._nonce(block)
         w3.eth.send_raw_transaction.side_effect = self._send
         w3.eth.wait_for_transaction_receipt.side_effect = self._receipt
         self.w3 = w3
@@ -231,9 +236,9 @@ class _Chain:
         fn.build_transaction.side_effect = lambda params: {"kind": kind, **params}
         return fn
 
-    def _nonce(self):
+    def _nonce(self, block):
         with self.lock:
-            n = len(self.sent)
+            n = len(self.sent) if block == "pending" else self.mined
         time.sleep(0.02)  # widen the read-then-send window a race would need
         return n
 
@@ -250,6 +255,8 @@ class _Chain:
         time.sleep(0.02)
         if self.timeout_create and self.local.kind == "createBatch":
             raise TimeExhausted("not in chain")
+        with self.lock:
+            self.mined += 1
         r = MagicMock()
         r.status = 1
         r.transactionHash.hex.return_value = "0x" + "12" * 32
@@ -290,9 +297,92 @@ def test_receipt_timeout_on_create_batch_reports_pending_with_tx_hash():
         assert not isinstance(ei.value, GnosisChainError)
         assert ei.value.tx_hash == "0x" + "12" * 32
         assert ei.value.batch_id == compute_batch_id(ADDR, NONCE)
-        # The signer is free again for the next request.
+
+
+def test_request_after_a_stuck_transaction_is_refused_and_sends_nothing():
+    """Otherwise it queues behind the stuck one, times out too, and is charged a 202."""
+    chain = _Chain(allowance=10**30)
+    chain.timeout_create = True
+    c = GnosisChainClient(rpc_url="x", private_key=KEY, chain_id=100)
+    with patch.object(GnosisChainClient, "_connect", return_value=(chain.w3, chain.acct)):
+        with pytest.raises(TransactionPending):
+            c._create_batch_sync(OWNER, 1000, 17, 16, False, NONCE)
+        sent = len(chain.sent)
         chain.timeout_create = False
-        c._create_batch_sync(OWNER, 1000, 17, 16, False, b"\x44" * 32)
+        with pytest.raises(SignerBusy, match="unconfirmed"):
+            c._create_batch_sync(OWNER, 1000, 17, 16, False, b"\x44" * 32)
+        assert len(chain.sent) == sent
+        # Once the stuck transaction confirms, the signer is usable again.
+        chain.mined = len(chain.sent)
+        c._create_batch_sync(OWNER, 1000, 17, 16, False, b"\x55" * 32)
+        assert len(chain.sent) == sent + 1
+
+
+def test_signer_lock_wait_is_bounded():
+    chain = _Chain(allowance=10**30)
+    c = GnosisChainClient(rpc_url="x", private_key=KEY, chain_id=100)
+    c._signer_lock.acquire()  # another request holds the signer
+    try:
+        with patch.object(gnosis_chain, "SIGNER_LOCK_TIMEOUT_SECONDS", 0.05), \
+             patch.object(GnosisChainClient, "_connect", return_value=(chain.w3, chain.acct)):
+            with pytest.raises(SignerBusy, match="busy"):
+                c._create_batch_sync(OWNER, 1000, 17, 16, False, NONCE)
+    finally:
+        c._signer_lock.release()
+    assert chain.sent == []
+
+
+def test_receipt_waits_share_one_budget():
+    """approve + createBatch together wait at most RECEIPT_TIMEOUT_SECONDS."""
+    c = GnosisChainClient(rpc_url="x", private_key=KEY, chain_id=100)
+    w3, acct, contract = _fakes(allowance=0)
+    clock = [1000.0]
+    receipt = w3.eth.wait_for_transaction_receipt.return_value
+
+    def slow_receipt(txh, timeout):
+        clock[0] += 50  # each confirmation takes 50 s
+        return receipt
+
+    w3.eth.wait_for_transaction_receipt.side_effect = slow_receipt
+    with patch.object(GnosisChainClient, "_connect", return_value=(w3, acct)), \
+         patch.object(gnosis_chain.time, "monotonic", lambda: clock[0]):
+        c._create_batch_sync(OWNER, 1000, 17, 16, False, NONCE)
+    waits = [call.kwargs["timeout"] for call in w3.eth.wait_for_transaction_receipt.call_args_list]
+    assert waits == [RECEIPT_TIMEOUT_SECONDS, RECEIPT_TIMEOUT_SECONDS - 50]
+
+
+def test_create_batch_not_sent_when_approve_used_up_the_budget():
+    c = GnosisChainClient(rpc_url="x", private_key=KEY, chain_id=100)
+    w3, acct, contract = _fakes(allowance=0)
+    clock = [1000.0]
+    receipt = w3.eth.wait_for_transaction_receipt.return_value
+
+    def slow_receipt(txh, timeout):
+        clock[0] += RECEIPT_TIMEOUT_SECONDS - 5
+        return receipt
+
+    w3.eth.wait_for_transaction_receipt.side_effect = slow_receipt
+    with patch.object(GnosisChainClient, "_connect", return_value=(w3, acct)), \
+         patch.object(gnosis_chain.time, "monotonic", lambda: clock[0]):
+        with pytest.raises(GnosisChainError, match="createBatch not sent"):
+            c._create_batch_sync(OWNER, 1000, 17, 16, False, NONCE)
+    contract.functions.createBatch.assert_not_called()
+
+
+def test_create_batch_gas_has_a_floor_and_a_margin():
+    from app.services.gnosis_chain import CREATE_BATCH_GAS_CAP, CREATE_BATCH_GAS_FLOOR
+    c = GnosisChainClient(rpc_url="x", private_key=KEY, chain_id=100)
+    for estimate, expected in (
+        (200_000, CREATE_BATCH_GAS_FLOOR),                        # low estimate: the floor
+        (1_000_000, int(1_000_000 * CREATE_BATCH_GAS_MARGIN)),    # high estimate: the margin
+        (2_900_000, CREATE_BATCH_GAS_CAP),                        # capped
+        (5_000_000, 5_000_000),                                   # never below the estimate
+    ):
+        w3, acct, contract = _fakes(allowance=10**30)
+        contract.functions.createBatch.return_value.build_transaction.return_value = {"from": ADDR, "gas": estimate}
+        with patch.object(GnosisChainClient, "_connect", return_value=(w3, acct)):
+            c._create_batch_sync(OWNER, 1000, 17, 16, False, NONCE)
+        assert acct.sign_transaction.call_args.args[0]["gas"] == expected, estimate
 
 
 def test_receipt_timeout_on_approve_is_a_plain_failure():
