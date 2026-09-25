@@ -411,6 +411,10 @@ class Settings(BaseSettings):
         env_file=".env",
         case_sensitive=True,
         extra="ignore",  # Ignore extra fields from .env
+        # A validation error otherwise echoes its input, and for a missing
+        # required field that input is every setting, signing keys included.
+        # Startup errors end up in container logs and the deploy job's log tail.
+        hide_input_in_errors=True,
     )
 
 

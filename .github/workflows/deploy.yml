@@ -294,10 +294,15 @@ jobs:
           else
             BRANCH_SERVICE=provenance_gateway
           fi
-          CID=$(docker compose ps -aq "$BRANCH_SERVICE")
+          # `|| true`: if compose itself fails, fall through to the "missing"
+          # path below (annotation + logs) instead of ending the step under -e.
+          CID=$(docker compose ps -aq "$BRANCH_SERVICE" || true)
           STATE=missing
           for i in $(seq 1 30); do
-            STATE=$(docker inspect -f '{{.State.Status}}/{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}/{{.RestartCount}}' "$CID" 2>/dev/null || echo missing)
+            # No container at all: `docker inspect ""` prints a blank line rather
+            # than failing cleanly, so check for it explicitly.
+            [ -n "$CID" ] || break
+            STATE=$(docker inspect -f '{{.State.Status}}/{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}/{{.RestartCount}}' "$CID" 2>/dev/null) || STATE=missing
             case "$STATE" in
               running/healthy/*) echo "$BRANCH_SERVICE is healthy"; exit 0 ;;
               # No healthcheck defined: fall back to probing the process itself.
@@ -310,10 +315,12 @@ jobs:
             sleep 3
           done
           echo "::error::$BRANCH_SERVICE did not become healthy (status/health/restarts: $STATE)"
-          docker compose logs --tail 200 "$BRANCH_SERVICE"
+          docker compose logs --tail 200 "$BRANCH_SERVICE" || true
           exit 1
 
       - name: post-deploy diagnostics
+        # Most useful exactly when the deploy failed.
+        if: always()
         run: |
           echo "=== Container status ==="
           docker ps -a --filter "name=swarm_connect" --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
