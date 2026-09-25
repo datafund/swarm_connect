@@ -478,11 +478,11 @@ What to know about the retry's payment:
 
 ## Stamp labels
 
-`label` on `POST /api/v1/stamps/` is optional: up to 64 letters, digits, `.`, `_` or `-`, not `recovered` and not starting with `paid-`, `pool-` or `synced-`. Labels are stored on the Bee node and **appear in public stamp listings**: do not put anything identifying in them. For a paid purchase the gateway appends `-<12 hex characters>` so the batch can be found if the node's answer is lost.
+`label` on `POST /api/v1/stamps/` is optional: up to 100 characters, no control characters, not `recovered` and not starting with `paid-`, `pool-` or `synced-`. Labels are stored on the Bee node and **appear in public stamp listings**: do not put anything identifying in them. For a paid purchase the gateway appends `-<12 hex characters>` so the batch can be found if the node's answer is lost.
 
 ## 202 Accepted from a paid stamp purchase
 
-If the Bee node does not confirm a paid purchase in time, the gateway, having already collected the payment, answers `202` with `code: PURCHASE_PENDING`, the payment `transaction`, and the batch `label`. The batch is registered to the paying wallet as soon as the node reports it: list `GET /api/v1/stamps/?wallet=<your address>` and look for that label, or retry with the same `Idempotency-Key`, which returns the `201` with the `batchID` once it is found (or, if it is never found within 15 minutes, `500 DELIVERY_FAILED_AFTER_PAYMENT` with the transaction for a refund). Do not pay again. A `202` is not a failure.
+If the Bee node has not confirmed a paid purchase within the gateway's deadline (120 s by default), the gateway, having already collected the payment, answers `202` with `code: PURCHASE_PENDING`, the payment `transaction`, and the batch `label`. The batch is registered to the paying wallet as soon as the node reports it: list `GET /api/v1/stamps/?wallet=<your address>` and look for that label, or retry with the same `Idempotency-Key`, which returns the `201` with the `batchID` once it is found (or, if it is never found within 15 minutes, `500 DELIVERY_FAILED_AFTER_PAYMENT` with the transaction for a refund). Do not pay again. A `202` is not a failure.
 
 ## Error Handling
 

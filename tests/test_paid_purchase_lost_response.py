@@ -301,3 +301,59 @@ def test_register_stamp_refuses_or_logs_a_change_of_owner(tmp_path, caplog):
     assert m.get_stamp_info(BATCH)["owner"] == "0xaa"
     m.register_stamp(BATCH, "0xbb", "paid", "direct_purchase")
     assert "Re-registering" in caplog.text
+
+
+def _slow_bee(result, delay=0.2):
+    """Bee answers only after the gateway's deadline, as a slow chain does."""
+    async def buy(**kw):
+        await asyncio.sleep(delay)
+        if isinstance(result, Exception):
+            raise result
+        return result
+    return buy
+
+
+def test_slow_bee_is_awaited_not_cut_off(env, monkeypatch):
+    """Bee's request stays open past our deadline, so the batch keeps its label
+    and Bee's own answer delivers it: no lookup at all."""
+    app, fac, buy, find = env
+    monkeypatch.setattr(settings, "SWARM_STAMP_PURCHASE_TIMEOUT_SECONDS", 0.05)
+    buy.side_effect = _slow_bee(BATCH)
+    first, retry = _run_pending(app, None, key="k-slow")
+    assert first.status_code == 202
+    assert buy.await_args.kwargs["timeout"] == settings.STAMP_PURCHASE_BEE_TIMEOUT_SECONDS
+    assert stamp_ownership_manager.get_stamp_info(BATCH)["owner"] == PAYER
+    assert retry.status_code == 201 and retry.json()["batchID"] == BATCH
+    find.assert_not_called()
+    assert fac.settle.await_count == 1
+
+
+def test_slow_bee_refusal_is_recorded_as_such(env, monkeypatch):
+    app, fac, buy, find = env
+    monkeypatch.setattr(settings, "SWARM_STAMP_PURCHASE_TIMEOUT_SECONDS", 0.05)
+    req = httpx.Request("POST", "http://bee/stamps/1/17")
+    buy.side_effect = _slow_bee(httpx.HTTPStatusError(
+        "x", request=req, response=httpx.Response(400, json={"message": "insufficient funds"}, request=req)))
+    first, retry = _run_pending(app, None, key="k-refused")
+    assert first.status_code == 202
+    assert "refused by Bee" in _audit("payment_failed")[0]["data"]["reason"]
+    assert retry.json()["code"] == "DELIVERY_FAILED_AFTER_PAYMENT"
+    find.assert_not_called()
+
+
+def test_slow_bee_connection_lost_falls_back_to_the_label(env, monkeypatch):
+    app, fac, buy, find = env
+    monkeypatch.setattr(settings, "SWARM_STAMP_PURCHASE_TIMEOUT_SECONDS", 0.05)
+    buy.side_effect = _slow_bee(httpx.RemoteProtocolError("bee restarted"))
+    first, retry = _run_pending(app, None, key="k-lost")
+    assert first.status_code == 202
+    assert find.await_count == 1
+    assert retry.status_code == 201 and retry.json()["batchID"] == BATCH
+
+
+def test_taken_batch_is_recorded_as_taken(env):
+    app, fac, buy, find = env
+    stamp_ownership_manager._registry[BATCH] = {"owner": "0x" + "d4" * 20, "mode": "paid"}
+    first, _ = _run_pending(app, None, key="k-taken")
+    assert first.status_code == 202
+    assert "already registered" in _audit("payment_failed")[0]["data"]["reason"]

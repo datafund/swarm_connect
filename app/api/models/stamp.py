@@ -146,12 +146,13 @@ class StampPurchaseRequest(BaseModel):
         le=32
     )
     # Checked here, before any payment is settled: the label now reaches Bee
-    # (?label=), so one it or a proxy refuses would otherwise fail after the
-    # caller had paid. Labels are stored on the node and appear in public
-    # stamp listings.
+    # (?label=, URL-encoded). Bee accepts any text; the bound keeps the query
+    # short (with the 13-character suffix of a paid purchase) and control
+    # characters out. 100 is what published clients (the MCP tool) allow.
+    # Labels are stored on the node and appear in public stamp listings.
     label: Optional[str] = Field(
-        default=None, max_length=64, pattern=r"^[A-Za-z0-9._-]*$",
-        description=("Optional label for the stamp: up to 64 letters, digits, '.', '_' or '-'. "
+        default=None, max_length=100, pattern=r"^[^\x00-\x1f\x7f]*$",
+        description=("Optional human-readable label, up to 100 characters, no control characters. "
                      "Visible to anyone listing stamps. For a paid purchase the gateway appends "
                      "'-<random>' so the batch can be found if the node's answer is lost."),
     )

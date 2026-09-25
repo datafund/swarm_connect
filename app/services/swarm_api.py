@@ -137,7 +137,8 @@ async def get_local_stamps() -> List[Dict[str, Any]]:
         return []
 
 
-async def purchase_postage_stamp(amount: int, depth: int, label: Optional[str] = None) -> str:
+async def purchase_postage_stamp(amount: int, depth: int, label: Optional[str] = None,
+                                 timeout: Optional[float] = None) -> str:
     """
     Purchases a new postage stamp from the configured Swarm Bee node.
 
@@ -145,6 +146,7 @@ async def purchase_postage_stamp(amount: int, depth: int, label: Optional[str] =
         amount: The amount of the postage stamp in wei
         depth: The depth of the postage stamp
         label: Optional user-defined label for the stamp
+        timeout: Seconds to wait for Bee (default SWARM_STAMP_PURCHASE_TIMEOUT_SECONDS)
 
     Returns:
         The batchID of the purchased stamp
@@ -168,7 +170,7 @@ async def purchase_postage_stamp(amount: int, depth: int, label: Optional[str] =
     try:
         client = get_client()
         response = await client.post(api_url, params=params,
-                                     timeout=settings.SWARM_STAMP_PURCHASE_TIMEOUT_SECONDS)
+                                     timeout=timeout or settings.SWARM_STAMP_PURCHASE_TIMEOUT_SECONDS)
 
         response.raise_for_status()
         response_json = response.json()

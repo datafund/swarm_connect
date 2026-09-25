@@ -83,13 +83,18 @@ class Settings(BaseSettings):
     STAMP_DAILY_BZZ_PER_CALLER: float = 0.5
     STAMP_SPEND_BUDGET_STATE_FILE: str = "data/stamp_spend_budget.json"
 
-    # Paid purchase whose Bee response is lost (#400). Bee's POST /stamps waits
-    # for the on-chain transaction; if it times out after the payment settled,
-    # the gateway looks for the batch (by the purchase label) for up to
-    # STAMP_PURCHASE_LOOKUP_SECONDS before answering 202, then keeps looking in
-    # the background for up to STAMP_PURCHASE_BACKGROUND_LOOKUP_SECONDS and
-    # registers the batch to the payer when it appears.
+    # Paid purchase that Bee does not answer in time (#400). Bee's POST /stamps
+    # waits for the on-chain transaction and names the batch only once it has
+    # the receipt, on the request's own context: closing the connection early
+    # leaves an unlabelled ("recovered") batch. So a paid purchase keeps Bee's
+    # request open for up to STAMP_PURCHASE_BEE_TIMEOUT_SECONDS, answers 202
+    # after SWARM_STAMP_PURCHASE_TIMEOUT_SECONDS (the free tier's Bee timeout
+    # too), and registers the batch when Bee answers. Only if that request
+    # itself fails without an answer does the gateway look for the batch by its
+    # label: STAMP_PURCHASE_LOOKUP_SECONDS in the request, then up to
+    # STAMP_PURCHASE_BACKGROUND_LOOKUP_SECONDS in the background.
     SWARM_STAMP_PURCHASE_TIMEOUT_SECONDS: float = 120.0
+    STAMP_PURCHASE_BEE_TIMEOUT_SECONDS: float = 900.0
     STAMP_PURCHASE_LOOKUP_SECONDS: float = 30.0
     STAMP_PURCHASE_BACKGROUND_LOOKUP_SECONDS: float = 900.0
     X402_RATE_LIMIT_PER_IP: int = 10  # Requests per minute per IP (for paying users)

@@ -464,12 +464,17 @@ def _outcome_unknown(e: httpx.HTTPError) -> bool:
 
 
 def _purchase_pending(request: Request, label: str, depth: int, amount: int,
-                      start_block: Optional[int]) -> JSONResponse:
+                      start_block: Optional[int], purchase: Optional[asyncio.Task] = None,
+                      taken: Optional[str] = None) -> JSONResponse:
     """202 for a paid purchase Bee did not confirm in time (#400).
 
-    The payment has settled and the batch may exist. Keep looking in the
-    background and register it to the payer when it appears; with an
-    Idempotency-Key, a retry then gets the 201 instead of this 202.
+    The payment has settled and the batch may exist. `purchase` is Bee's
+    request, still running: the background half awaits it. Without one (it
+    failed without an answer), the background half looks for the batch by its
+    label. `taken`: the lookup found the batch already registered to someone
+    else, which only needs recording. Either way, the batch is registered to
+    the payer when it appears; with an Idempotency-Key, a retry then gets the
+    201 instead of this 202.
     """
     from app.x402.audit import AuditEventType, log_audit_event
     payer = getattr(request.state, "x402_payer", None)
@@ -483,7 +488,7 @@ def _purchase_pending(request: Request, label: str, depth: int, amount: int,
                           "start_block": start_block, "network": settings.X402_NETWORK})
     task = asyncio.get_running_loop().create_task(_finish_pending_purchase(
         request, label, depth, amount, start_block, payer, tx,
-        getattr(request.state, "x402_idempotency_id", None)))
+        getattr(request.state, "x402_idempotency_id", None), purchase, taken))
     _PENDING_TASKS.add(task)
     task.add_done_callback(_PENDING_TASKS.discard)
     return JSONResponse(status_code=status.HTTP_202_ACCEPTED, content={
@@ -501,7 +506,8 @@ def _purchase_pending(request: Request, label: str, depth: int, amount: int,
 
 async def _finish_pending_purchase(request: Request, label: str, depth: int, amount: int,
                                    start_block: Optional[int], payer: Optional[str],
-                                   tx: Optional[str], idem) -> None:
+                                   tx: Optional[str], idem, purchase: Optional[asyncio.Task] = None,
+                                   taken: Optional[str] = None) -> None:
     """Background half of _purchase_pending: find, register, record.
 
     Every way this ends leaves an audit record: delivered (late), or a
@@ -527,12 +533,26 @@ async def _finish_pending_purchase(request: Request, label: str, depth: int, amo
 
     batch_id = None
     try:
-        # The request just looked; waiting first also lets the middleware store
-        # the 202 for the Idempotency-Key before this replaces it.
-        await asyncio.sleep(_PENDING_FIRST_WAIT_SECONDS)
-        batch_id = await swarm_api.find_purchased_batch(
-            label, depth, amount, _is_registered, start_block,
-            wait_seconds=settings.STAMP_PURCHASE_BACKGROUND_LOOKUP_SECONDS, interval=10)
+        if taken:
+            refund_needed(f"found ({taken}) but already registered to someone else")
+            return
+        if purchase is not None:
+            # Bee's own answer, from the request kept open for it. Shielded so
+            # that cancelling this task alone does not cut Bee's request off.
+            try:
+                batch_id = await asyncio.shield(purchase)
+            except httpx.HTTPError as e:
+                if not _outcome_unknown(e):
+                    refund_needed(f"refused by Bee ({_bee_error_detail(e)[1] or type(e).__name__})")
+                    return
+                logger.error(f"Bee gave no answer to a paid purchase ({type(e).__name__}); looking for the batch")
+        if batch_id is None:
+            # Waiting first also lets the middleware store the 202 for the
+            # Idempotency-Key before this replaces it.
+            await asyncio.sleep(_PENDING_FIRST_WAIT_SECONDS)
+            batch_id = await swarm_api.find_purchased_batch(
+                label, depth, amount, _is_registered, start_block,
+                wait_seconds=settings.STAMP_PURCHASE_BACKGROUND_LOOKUP_SECONDS, interval=10)
         if batch_id is None:
             refund_needed("not found")
             return
@@ -550,7 +570,7 @@ async def _finish_pending_purchase(request: Request, label: str, depth: int, amo
     # Registered: from here on, bookkeeping only; it cannot undo the outcome.
     try:
         record_purchase(batch_id)
-        logger.info(f"Lost purchase found: {batch_id[:16]} registered to {payer}")
+        logger.info(f"Pending purchase delivered: {batch_id[:16]} registered to {payer}")
         log_audit_event(event_type=AuditEventType.PAYMENT_DELIVERED, client_ip=client_ip, wallet_address=payer,
                         data={"transaction_hash": tx, "method": "POST", "path": request.url.path,
                               "network": settings.X402_NETWORK, "resource": {"batchID": batch_id},
@@ -661,12 +681,37 @@ async def purchase_stamp(
         # Collect the payment immediately before the purchase: every check
         # above can refuse the request, and a refusal must not cost anything.
         await settle_payment(request)
+        found_by_lookup = False
         try:
-            batch_id = await swarm_api.purchase_postage_stamp(
-                amount=amount,
-                depth=effective_depth,
-                label=label
-            )
+            if getattr(request.state, "x402_settlement", None) is None:
+                batch_id = await swarm_api.purchase_postage_stamp(
+                    amount=amount,
+                    depth=effective_depth,
+                    label=label
+                )
+            else:
+                # Paid: Bee's request runs as a task of its own with a long
+                # timeout, and is never cut off by ours. Bee names the batch only
+                # after the receipt, on that request's context; closed early, the
+                # batch comes back as "recovered", which cannot be told apart
+                # from anyone else's. Past our deadline the caller gets a 202,
+                # and the background half awaits this same task.
+                purchase = asyncio.get_running_loop().create_task(swarm_api.purchase_postage_stamp(
+                    amount=amount, depth=effective_depth, label=label,
+                    timeout=settings.STAMP_PURCHASE_BEE_TIMEOUT_SECONDS))
+                _PENDING_TASKS.add(purchase)
+                purchase.add_done_callback(_PENDING_TASKS.discard)
+                try:
+                    batch_id = await asyncio.wait_for(asyncio.shield(purchase),
+                                                      settings.SWARM_STAMP_PURCHASE_TIMEOUT_SECONDS)
+                except asyncio.TimeoutError:
+                    return _purchase_pending(request, label, effective_depth, amount, start_block,
+                                             purchase=purchase)
+                except asyncio.CancelledError:
+                    # This request was cut off; the purchase goes on. Finish it
+                    # in the background so the batch still reaches the payer.
+                    _purchase_pending(request, label, effective_depth, amount, start_block, purchase=purchase)
+                    raise
         except httpx.HTTPError as e:
             # No answer about the purchase. It may still have happened. Unpaid,
             # the caller just retries; paid, look for the batch rather than keep
@@ -682,11 +727,11 @@ async def purchase_stamp(
             except Exception as lookup_error:
                 logger.error(f"Lost purchase lookup failed: {lookup_error}")
                 batch_id = None
-            if batch_id is None or not _register_purchase(request, batch_id, only_if_unowned=True):
+            if batch_id is None:
                 return _purchase_pending(request, label, effective_depth, amount, start_block)
+            if not _register_purchase(request, batch_id, only_if_unowned=True):
+                return _purchase_pending(request, label, effective_depth, amount, start_block, taken=batch_id)
             found_by_lookup = True
-        else:
-            found_by_lookup = False
 
         # Ownership first: once the batch id is known, nothing that can fail
         # may stand between the payer and the batch they paid for.
