@@ -116,7 +116,7 @@ unset and the stack behaves as it always has.
 | `BEE_NAT_ADDR` / `BEE_DEV_NAT_ADDR` | *(unset)* | public `host:port` each node advertises |
 | `BEE_P2P_PORT` / `BEE_DEV_P2P_PORT` | `1634` / `1734` | host p2p ports |
 | `BEE_FULL_NODE` / `BEE_DEV_FULL_NODE` | `false` | run as a full node instead of light |
-| `GATEWAY_BIND` | `0.0.0.0` | host interface the gateways bind to; set `127.0.0.1` behind a local reverse proxy |
+| `GATEWAY_BIND` | `127.0.0.1` | host interface the gateways bind to; only the local reverse proxy should reach them. Set `0.0.0.0` only on a host without one |
 | `HOST_LABEL` | *(empty)* | value of the `host` label on metrics; set when more than one host runs the stack |
 
 Both Bee endpoints are **required** — compose refuses to start without them, naming
@@ -400,7 +400,7 @@ When `X402_ENABLED=true`, protected endpoints (`POST /stamps/`, `POST /data/`) r
 
 - **Pay-per-request**: No accounts, no subscriptions
 - **Access control**: IP blocklist (`X402_BLACKLIST_IPS`, IPs and CIDR ranges, 403 on every route); there is no payment allowlist
-- **Rate limiting**: Per-IP request throttling (default: 10/min)
+- **Rate limiting**: x402 free tier 3 writes/min per client (IPv6 grouped by /64); global per-client limit `RATE_LIMIT_PER_MINUTE` + `RATE_LIMIT_BURST` (installed alongside x402 once #401 is deployed)
 - **Audit logging**: JSON lines format for all transactions
 - **Pre-flight checks**: Validates gateway wallet balances before accepting payments
 

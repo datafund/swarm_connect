@@ -12,7 +12,7 @@ from fastapi import Request
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import JSONResponse
 
-from app.core.client_ip import get_client_ip
+from app.core.client_ip import client_key, get_client_ip
 from app.x402.access import ip_matches_list, parse_ip_list
 
 logger = logging.getLogger(__name__)
@@ -25,7 +25,9 @@ class AccessListMiddleware(BaseHTTPMiddleware):
 
     async def dispatch(self, request: Request, call_next):
         ip = get_client_ip(request)
-        if self._blocked and ip_matches_list(ip, self._blocked):
+        # IPv4-mapped IPv6 (::ffff:a.b.c.d) is matched as its IPv4 address.
+        mapped = client_key(ip) if ip.lower().startswith("::ffff:") else ip
+        if self._blocked and ip_matches_list(mapped, self._blocked):
             logger.warning(f"Refused blocked address {ip}: {request.method} {request.url.path}")
             return JSONResponse(status_code=403, content={
                 "code": "ACCESS_BLOCKED", "message": "Access from this address is blocked."})

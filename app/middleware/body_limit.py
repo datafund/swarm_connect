@@ -82,7 +82,13 @@ class BodyLimitMiddleware(BaseHTTPMiddleware):
         is_json = "json" in content_type
         if content_type and not is_json:
             return await call_next(request)
-        if not content_type and request.method in ("GET", "HEAD", "OPTIONS", "DELETE"):
+        if not content_type and (
+            request.method in ("GET", "HEAD", "OPTIONS", "DELETE")
+            # Raw chunk uploads are binary and often sent without a
+            # Content-Type; a depth scan would misread random bytes as nested
+            # JSON. The route reads the body itself with its own size limit.
+            or request.url.path.rstrip("/") == f"{settings.API_V1_STR}/chunks"
+        ):
             return await call_next(request)
 
         max_bytes = settings.MAX_JSON_BODY_BYTES

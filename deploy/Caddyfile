@@ -54,7 +54,9 @@
 	}
 
 	# Cap request bodies at the edge (#354): uploads are limited to 10 MB by
-	# the gateway, which only notices after reading the body.
+	# the gateway, which only notices after reading the body. Keep this a bit
+	# above MAX_UPLOAD_SIZE_MB (plus multipart overhead); raising that setting
+	# past ~11 MB needs this raised too, or Caddy answers a bare 413 first.
 	request_body {
 		max_size 12MB
 	}

@@ -83,3 +83,51 @@ def test_ipv6_rotation_shares_one_spend_budget(monkeypatch, tmp_path):
             codes.append(TestClient(app).post("/api/v1/stamps/", json={"depth": 17, "duration_hours": 24},
                                               headers={"X-Forwarded-For": ip}).status_code)
     assert codes == [201, 429]
+
+
+
+def test_binary_chunks_without_content_type_are_not_depth_scanned(monkeypatch):
+    """Random chunk bytes can look like deeply nested JSON; the chunk route is exempt."""
+    from app.core.config import settings
+    monkeypatch.setattr(settings, "MAX_JSON_DEPTH", 3)
+    app = FastAPI()
+
+    @app.post("/api/v1/chunks/")
+    async def chunk(request: Request):
+        return {"n": len(await request.body())}
+
+    app.add_middleware(BodyLimitMiddleware)
+    r = TestClient(app).post("/api/v1/chunks/", content=b"[" * 200, headers={"content-type": ""})
+    assert r.status_code == 200
+
+
+def test_ipv4_mapped_addresses_match_ipv4_blocks(monkeypatch):
+    from app.core.config import settings
+    monkeypatch.setattr(settings, "TRUSTED_PROXY_HOPS", 1)
+    client = TestClient(_app(AccessListMiddleware, blocked="203.0.113.0/24"))
+    assert client.get("/x", headers={"X-Forwarded-For": "::ffff:203.0.113.9"}).status_code == 403
+
+
+def test_blocklist_is_wired_into_the_app():
+    import os, subprocess, sys
+    repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    code = ("from fastapi.testclient import TestClient\n"
+            "from app.main import app\n"
+            "c = TestClient(app)\n"
+            "print(c.get('/api/v1/pool/status', headers={'X-Forwarded-For': '203.0.113.9'}).status_code)\n")
+    env = {**os.environ, "X402_BLACKLIST_IPS": "203.0.113.0/24", "TRUSTED_PROXY_HOPS": "1",
+           "SWARM_BEE_API_URL": "http://localhost:1",
+           "STAMP_POOL_ENABLED": "false", "METRICS_ENABLED": "false"}
+    out = subprocess.run([sys.executable, "-c", code], cwd=repo, env=env, capture_output=True, text=True, timeout=60)
+    assert out.stdout.strip().splitlines()[-1] == "403", out.stderr[-1500:]
+
+
+def test_free_tier_rate_limit_groups_ipv6(monkeypatch):
+    from app.x402.ratelimit import check_rate_limit, reset_rate_limiter
+    from app.core.client_ip import client_key
+    from app.core.config import settings
+    monkeypatch.setattr(settings, "X402_FREE_TIER_RATE_LIMIT", 2)
+    reset_rate_limiter()
+    results = [check_rate_limit(client_key(f"2001:db8:9:9::{i}"), is_free_tier=True)[0] for i in range(1, 4)]
+    reset_rate_limiter()
+    assert results == [True, True, False]

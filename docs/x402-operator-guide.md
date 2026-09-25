@@ -72,8 +72,8 @@ X402_BASE_ETH_CRITICAL_THRESHOLD=0.001  # Block if Base ETH < 0.001 (~10 txs)
 
 # === Limits ===
 X402_MAX_STAMP_BZZ=5                 # Max 5 BZZ per stamp purchase
-# Paid requests are bounded by the global limiter (RATE_LIMIT_PER_MINUTE + RATE_LIMIT_BURST);
-# X402_RATE_LIMIT_PER_IP is not enforced.
+# X402_RATE_LIMIT_PER_IP is not enforced. Paid requests are bounded by the global limiter
+# (RATE_LIMIT_PER_MINUTE + RATE_LIMIT_BURST) once it runs alongside x402 (#401).
 
 # === Free Tier ===
 X402_FREE_TIER_ENABLED=true          # Enable rate-limited free tier (default: true)
