@@ -120,3 +120,120 @@ def test_refused_paid_acquire_uses_no_allowance(pool):
     with pytest.raises(HTTPException):
         asyncio.run(acquire_stamp(AcquireStampRequest(size="small"), req))
     assert pool.tracker.snapshot()["used"] == {}
+
+
+def test_one_client_cannot_take_a_whole_origin_bucket(pool, monkeypatch):
+    """#366: the per-address sub-limit inside an origin's allowance."""
+    monkeypatch.setattr(settings, "POOL_DEFAULT_DAILY_ALLOWANCE", 10)
+    monkeypatch.setattr(settings, "POOL_ALLOWANCE_PER_IP", 2)
+    monkeypatch.setattr(settings, "TRUSTED_PROXY_HOPS", 1)
+    pool.inventory["available"] = [17]
+    client = TestClient(app)
+
+    def take(ip):
+        return client.post("/api/v1/pool/acquire", json={"size": "small"},
+                           headers={"X-Forwarded-For": ip, "Origin": "https://partner.example"}).status_code
+
+    assert [take("198.51.100.1") for _ in range(3)] == [200, 200, 429]
+    assert take("198.51.100.2") == 200   # another client of the same origin still can
+
+
+def test_exhausted_allowance_offers_payment_when_it_would_bypass(pool, monkeypatch):
+    """#374: 402 with accepts, so x402 clients can pay instead of seeing a 429."""
+    from unittest.mock import AsyncMock
+    monkeypatch.setattr(settings, "X402_ENABLED", True)
+    monkeypatch.setattr(settings, "X402_NETWORK", "base")   # mainnet: payment bypasses the allowance
+    monkeypatch.setattr(settings, "X402_PAY_TO_ADDRESS", "0xc87688A40CE2ff1765BA54497c7471c892755488")
+    pool.inventory["available"] = [17]
+    pool.tracker.consume(None, "small")                       # allowance (1) already used
+    with patch("app.x402.dependency._calculate_price_for_request",
+               new=AsyncMock(return_value={"price_usd": 0.05, "description": "Pooled stamp"})):
+        r = TestClient(app).post("/api/v1/pool/acquire", json={"size": "small"})
+    assert r.status_code == 402
+    body = r.json()["detail"]
+    assert body["x402Version"] == 1 and body["accepts"][0]["maxAmountRequired"] == "50000"
+    assert body["code"] == "DAILY_STAMP_ALLOWANCE_EXHAUSTED"
+
+
+def test_exhausted_allowance_on_a_testnet_stays_429(pool, monkeypatch):
+    monkeypatch.setattr(settings, "X402_ENABLED", True)
+    monkeypatch.setattr(settings, "X402_NETWORK", "base-sepolia")
+    monkeypatch.setattr(settings, "X402_ALLOW_TESTNET_PAID_BYPASS", False)
+    pool.inventory["available"] = [17]
+    pool.tracker.consume(None, "small")
+    assert TestClient(app).post("/api/v1/pool/acquire", json={"size": "small"}).status_code == 429
+
+
+def _mainnet_x402(monkeypatch):
+    monkeypatch.setattr(settings, "X402_ENABLED", True)
+    monkeypatch.setattr(settings, "X402_NETWORK", "base")
+    monkeypatch.setattr(settings, "X402_PAY_TO_ADDRESS", "0xc87688A40CE2ff1765BA54497c7471c892755488")
+
+
+def test_a_pricing_failure_still_answers_429(pool, monkeypatch):
+    """The 402 needs a price; if pricing fails the caller still gets the 429, not a 500."""
+    from unittest.mock import AsyncMock
+    _mainnet_x402(monkeypatch)
+    pool.inventory["available"] = [17]
+    pool.tracker.consume(None, "small")
+    with patch("app.x402.dependency._calculate_price_for_request",
+               new=AsyncMock(side_effect=RuntimeError("price feed down"))):
+        r = TestClient(app).post("/api/v1/pool/acquire", json={"size": "small"})
+    assert r.status_code == 429
+    assert r.json()["detail"]["code"] == "DAILY_STAMP_ALLOWANCE_EXHAUSTED"
+
+
+def test_per_client_exhaustion_offers_payment_too(pool, monkeypatch):
+    """Both kinds of exhaustion are bypassed by paying, so both answer 402."""
+    from unittest.mock import AsyncMock
+    _mainnet_x402(monkeypatch)
+    monkeypatch.setattr(settings, "POOL_DEFAULT_DAILY_ALLOWANCE", 10)
+    monkeypatch.setattr(settings, "POOL_ALLOWANCE_PER_IP", 1)
+    pool.inventory["available"] = [17]
+    client = TestClient(app)
+    with patch("app.x402.dependency._calculate_price_for_request",
+               new=AsyncMock(return_value={"price_usd": 0.05, "description": "Pooled stamp"})):
+        assert client.post("/api/v1/pool/acquire", json={"size": "small"}).status_code == 200
+        r = client.post("/api/v1/pool/acquire", json={"size": "small"})
+    assert r.status_code == 402
+    body = r.json()["detail"]
+    assert body["code"] == "DAILY_STAMP_ALLOWANCE_PER_CLIENT_EXHAUSTED"
+    assert body["alternative"]["header"] == "X-PAYMENT"
+
+
+def test_per_client_exhaustion_on_a_fallback_reports_the_size_unavailable(pool, monkeypatch):
+    monkeypatch.setattr(settings, "POOL_DEFAULT_DAILY_ALLOWANCE", 10)
+    monkeypatch.setattr(settings, "POOL_ALLOWANCE_PER_IP", 1)
+    pool.inventory["available"] = [20]           # only medium: a small request falls back
+    client = TestClient(app)
+    assert client.post("/api/v1/pool/acquire", json={"size": "small"}).status_code == 200
+    r = client.post("/api/v1/pool/acquire", json={"size": "small"})
+    assert r.status_code == 409
+    assert r.json()["detail"]["code"] == "REQUESTED_SIZE_UNAVAILABLE"
+
+
+def test_an_empty_pool_is_reported_before_a_spent_allowance(pool, monkeypatch):
+    """No 402 for a size that is not in stock: paying would not help."""
+    _mainnet_x402(monkeypatch)
+    pool.inventory["available"] = []
+    pool.tracker.consume(None, "small")
+    r = TestClient(app).post("/api/v1/pool/acquire", json={"size": "small"})
+    assert r.status_code == 409
+
+
+def test_a_paid_acquire_leaves_the_per_client_counter_alone(pool, monkeypatch):
+    monkeypatch.setattr(settings, "X402_NETWORK", "base")
+    monkeypatch.setattr(settings, "POOL_ALLOWANCE_PER_IP", 1)
+    pool.inventory["available"] = [17]
+    from app.api.endpoints.pool import acquire_stamp, AcquireStampRequest
+    req = SimpleNamespace(headers={}, client=SimpleNamespace(host="198.51.100.7"),
+                          state=SimpleNamespace(x402_mode="paid", x402_payer="0xp"))
+    asyncio.run(acquire_stamp(AcquireStampRequest(size="small"), req))
+    assert pool.tracker.snapshot()["used"] == {}
+
+
+def test_no_per_client_keys_are_written_when_the_limit_is_off(pool, monkeypatch):
+    monkeypatch.setattr(settings, "POOL_ALLOWANCE_PER_IP", -1)
+    pool.inventory["available"] = [17]
+    assert TestClient(app).post("/api/v1/pool/acquire", json={"size": "small"}).status_code == 200
+    assert pool.tracker.snapshot()["used"] == {"(unlisted)|small": 1}
