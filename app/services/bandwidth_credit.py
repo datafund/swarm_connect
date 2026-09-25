@@ -221,14 +221,15 @@ class BandwidthCreditManager:
         with self._lock:
             return sum(int(e.get("balance_bytes", 0)) for e in self._balances.values())
 
-    def issue_token(self, address: str) -> str:
+    def issue_token(self, address: str, rotate: bool = False) -> str:
         """
         Return a bearer credit token bound to an address, creating one if needed.
 
         The token is the credit account's API key: it is established at x402 top-up
         time (the address is the verified x402 payer) and presented on subsequent
         chunk uploads to spend the prepaid balance. Idempotent — repeated calls for
-        the same address return the same token.
+        the same address return the same token — unless `rotate` is set, which
+        replaces it and revokes the old one.
 
         Args:
             address: Client address (the x402 payer that funded the credit).
@@ -252,8 +253,12 @@ class BandwidthCreditManager:
                 }
                 self._balances[key] = entry
             existing = entry.get("token")
-            if existing:
+            if existing and not rotate:
                 return existing
+            if existing:
+                # Rotation revokes the old token at once (#380): the point is
+                # to cut off whoever else may hold it.
+                self._token_index.pop(existing, None)
             token = secrets.token_urlsafe(32)
             entry["token"] = token
             entry["updated_at"] = datetime.now(timezone.utc).isoformat()

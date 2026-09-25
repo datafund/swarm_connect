@@ -91,3 +91,14 @@ def test_chain_client_not_configured_503(client):
          patch("app.services.swarm_api.get_chainstate", AsyncMock(return_value={"currentPrice": "100000"})):
         r = client.post("/api/v1/stamps/for-owner", json={"owner": OWNER, "size": "small"})
     assert r.status_code == 503
+
+
+def test_chain_failure_does_not_return_rpc_internals(client, env):
+    """#380: the exception text (RPC URLs, revert data) is logged, not returned."""
+    from app.services.gnosis_chain import GnosisChainError
+    env["gc"].create_batch.side_effect = GnosisChainError("rpc https://secret-rpc.example/key123 reverted: 0xdeadbeef")
+    with patch("app.api.endpoints.stamps_for_owner.settings", _settings()):
+        r = client.post("/api/v1/stamps/for-owner", json={"owner": OWNER, "size": "small"})
+    assert r.status_code == 502
+    assert r.json()["detail"]["code"] == "CREATE_BATCH_FAILED"
+    assert "secret-rpc" not in r.text and "0xdeadbeef" not in r.text

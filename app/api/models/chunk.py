@@ -36,3 +36,9 @@ class CreditTopUpResponse(BaseModel):
     credited_bytes: int = Field(..., description="Bytes added to the balance by this top-up.")
     balance_bytes: int = Field(..., description="New total balance in bytes after the top-up.")
     message: str = Field(default="Bandwidth credit added successfully", description="Success message")
+
+
+class TokenRotationResponse(BaseModel):
+    """A replacement bandwidth credit token; the previous one is revoked."""
+    address: str = Field(..., description="Credit account (the x402 payer that funded it)")
+    token: str = Field(..., description="New bearer token for X-Bandwidth-Credit-Token")
