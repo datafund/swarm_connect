@@ -148,6 +148,9 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
                     "error": "Rate limit exceeded",
                     "detail": f"Too many requests. Try again in {retry_after} seconds.",
                     "retry_after": retry_after,
+                    # Same top-level code/message as every other error (#381).
+                    "code": "RATE_LIMIT_EXCEEDED",
+                    "message": f"Too many requests. Try again in {retry_after} seconds.",
                 },
                 headers={
                     "Retry-After": str(retry_after),
