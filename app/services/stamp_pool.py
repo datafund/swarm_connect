@@ -808,9 +808,14 @@ class StampPoolManager:
     def _record_spend(self) -> None:
         with self._lock:
             self._spend_times.append(datetime.now(timezone.utc))
-            times = [t.isoformat() for t in self._spend_times]
+            self._persist_spend_times_locked()
+
+    def _persist_spend_times_locked(self) -> None:
+        """Write the spend record; call with self._lock held, after ANY change
+        to self._spend_times (a merge that adds reserve/release paths must call
+        it too, or the ceiling stops surviving restarts)."""
         try:
-            atomic_write_json(self._spend_times_path(), times)
+            atomic_write_json(self._spend_times_path(), [t.isoformat() for t in self._spend_times])
         except Exception as e:
             logger.error(f"Could not persist the pool's hourly spend record: {e}")
 

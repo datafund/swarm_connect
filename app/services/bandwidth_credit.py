@@ -229,7 +229,8 @@ class BandwidthCreditManager:
         time (the address is the verified x402 payer) and presented on subsequent
         chunk uploads to spend the prepaid balance. Idempotent — repeated calls for
         the same address return the same token — unless `rotate` is set, which
-        replaces it and revokes the old one.
+        replaces it and revokes the old one. A rotation is saved before it is
+        returned; if the save fails it is undone and the error propagates.
 
         Args:
             address: Client address (the x402 payer that funded the credit).
@@ -260,10 +261,27 @@ class BandwidthCreditManager:
                 # to cut off whoever else may hold it.
                 self._token_index.pop(existing, None)
             token = secrets.token_urlsafe(32)
+            previous_updated = entry.get("updated_at")
             entry["token"] = token
             entry["updated_at"] = datetime.now(timezone.utc).isoformat()
             self._token_index[token] = key
-            self._save_state()
+            if not rotate:
+                self._save_state()
+                return token
+            # A rotation that is not on disk is undone by the next restart,
+            # which would bring the possibly leaked token back and invalidate
+            # the one just handed out. Only report success once it is saved.
+            try:
+                atomic_write_json(self._get_state_file_path(), self._balances)
+            except Exception:
+                self._token_index.pop(token, None)
+                entry["token"] = existing
+                entry["updated_at"] = previous_updated
+                if existing:
+                    self._token_index[existing] = key
+                elif not entry.get("token"):
+                    entry.pop("token", None)
+                raise
             return token
 
     def resolve_token(self, token: str) -> Optional[str]:

@@ -70,3 +70,50 @@ class TestPoolSpendCeilingPersists:
         m = StampPoolManager(state_file=str(tmp_path / "pool_state.json"))
         assert m._spend_budget_remaining() == 0
 
+
+
+class TestRotationIsDurable:
+    def test_a_rotation_that_cannot_be_saved_is_undone(self, tmp_path):
+        from app.services import bandwidth_credit
+        m = BandwidthCreditManager(state_file=str(tmp_path / "c.json"))
+        old = m.issue_token(ADDR)
+        with patch.object(bandwidth_credit, "atomic_write_json", side_effect=OSError("disk full")):
+            with pytest.raises(OSError):
+                m.issue_token(ADDR, rotate=True)
+        assert m.resolve_token(old) == ADDR.lower()
+        assert m.issue_token(ADDR) == old
+
+    def test_the_endpoint_answers_503_and_keeps_the_token(self, tmp_path, monkeypatch):
+        from app.main import app
+        from app.services import bandwidth_credit
+        import app.api.endpoints.chunks as chunks
+        m = BandwidthCreditManager(state_file=str(tmp_path / "c.json"))
+        monkeypatch.setattr(chunks, "bandwidth_credit_manager", m)
+        old = m.issue_token(ADDR)
+        with patch.object(bandwidth_credit, "atomic_write_json", side_effect=OSError("disk full")):
+            r = TestClient(app).post("/api/v1/chunks/token/rotate", headers={"X-Bandwidth-Credit-Token": old})
+        assert r.status_code == 503
+        assert r.json()["detail"]["code"] == "TOKEN_ROTATION_FAILED"
+        assert m.resolve_token(old) == ADDR.lower()
+
+
+class TestPaidRotation:
+    @pytest.mark.asyncio
+    async def test_a_paid_top_up_takes_the_account_back(self, tmp_path, monkeypatch):
+        """Mixed-case payer, as a facilitator may report it: same account."""
+        from types import SimpleNamespace
+        import app.api.endpoints.chunks as chunks
+        monkeypatch.setattr(settings, "CHUNK_UPLOAD_ENABLED", True)
+        monkeypatch.setattr(settings, "X402_ENABLED", True)
+        m = BandwidthCreditManager(state_file=str(tmp_path / "c.json"))
+        monkeypatch.setattr(chunks, "bandwidth_credit_manager", m)
+        stolen = m.issue_token(ADDR)
+        attackers = m.issue_token(ADDR, rotate=True)          # the thief rotates first
+        req = SimpleNamespace(state=SimpleNamespace(x402_mode="paid", x402_payer=ADDR.upper().replace("0X", "0x")))
+        mb = str(settings.BANDWIDTH_CREDIT_MIN_TOPUP_MB)
+        resp = await chunks.top_up_credit(req, mb=mb, rotate_token=True)
+        assert resp.token not in (stolen, attackers)
+        assert m.resolve_token(attackers) is None
+        assert m.resolve_token(resp.token) == ADDR.lower()
+        plain = await chunks.top_up_credit(req, mb=mb, rotate_token=False)
+        assert plain.token == resp.token                      # a plain top-up returns the current token
