@@ -25,6 +25,18 @@ async def lifespan(app: FastAPI):
     from app.services.http_client import init_client, close_client
     await init_client()
 
+    # Load the stamp ownership registry before anything can register a batch.
+    #
+    # It was saved on every change but never loaded, so each restart (every
+    # deploy) started with an empty registry: owners were denied their own
+    # batches, and the pool's startup sync then rewrote the file with only its
+    # own inventory, erasing the owners' records (#349). Loaded before the pool
+    # starts for exactly that reason. An unreadable file stops startup rather
+    # than being replaced (#378).
+    from app.services.stamp_ownership import stamp_ownership_manager
+    stamp_ownership_manager.load_on_startup()
+    logger.info("Stamp ownership registry loaded")
+
     # Load bandwidth credit ledger so prepaid balances survive restarts
     if settings.CHUNK_UPLOAD_ENABLED:
         from app.services.bandwidth_credit import bandwidth_credit_manager

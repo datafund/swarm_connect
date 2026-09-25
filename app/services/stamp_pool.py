@@ -452,6 +452,20 @@ class StampPoolManager:
         try:
             from app.services.stamp_ownership import POOL_OWNER, stamp_ownership_manager
             for batch_id in batch_ids:
+                # Now that the registry survives restarts (#349), a batch the
+                # pool state still lists may already belong to a caller: the
+                # pool-state save after an acquire can fail while the ownership
+                # save succeeds. Handing such a batch back to the pool would
+                # take it from someone who paid for it. Only claim batches that
+                # are unregistered or already the pool's.
+                existing = stamp_ownership_manager.get_stamp_info(batch_id)
+                if existing is not None:
+                    if existing.get("owner") != POOL_OWNER:
+                        logger.warning(
+                            f"Pool state lists {batch_id[:16]}..., but it is registered to "
+                            f"{str(existing.get('owner'))[:16]}; leaving it with its owner."
+                        )
+                    continue
                 stamp_ownership_manager.register_stamp(
                     batch_id=batch_id,
                     owner=POOL_OWNER,

@@ -10,12 +10,20 @@ one.
 
 See GitHub Issue #212.
 """
+import filecmp
+import glob
 import json
 import os
+import shutil
 import tempfile
-from typing import Any
+from datetime import datetime, timezone
+from typing import Any, Optional
 
-__all__ = ["atomic_write_json"]
+__all__ = ["atomic_write_json", "load_json_state", "unreadable_state", "StateLoadError"]
+
+
+class StateLoadError(RuntimeError):
+    """A state file exists but cannot be read as the expected JSON object."""
 
 
 def atomic_write_json(path: str, data: Any) -> None:
@@ -50,3 +58,55 @@ def atomic_write_json(path: str, data: Any) -> None:
         except OSError:
             pass
         raise
+
+
+def load_json_state(path: str) -> Optional[dict]:
+    """Read a JSON object from ``path`` for a store that must not lose data.
+
+    Returns None when the file does not exist, which is the only case in which
+    starting empty is correct.
+
+    Any other failure (unparseable JSON, a non-object at the top level, a
+    permission or I/O error) raises StateLoadError after copying the file to
+    ``<path>.corrupt-<UTC timestamp>``. The original is left in place. Callers
+    holding money-bearing state (the stamp ownership registry, the prepaid
+    bandwidth ledger) let this propagate so the gateway refuses to start:
+    starting empty would lock owners out and the next save would overwrite the
+    only copy of their records.
+    """
+    try:
+        with open(path, "r") as f:
+            data = json.load(f)
+    except FileNotFoundError:
+        return None
+    except Exception as e:
+        raise unreadable_state(path, e) from e
+    if not isinstance(data, dict):
+        raise unreadable_state(path, f"expected a JSON object, got {type(data).__name__}")
+    return data
+
+
+def unreadable_state(path: str, reason: Any) -> StateLoadError:
+    """Build the StateLoadError for an unreadable state file, backing it up once.
+
+    The containers restart on failure, so this runs on every attempt of a crash
+    loop. A new copy is made only when no existing backup has identical
+    content, so the loop cannot fill the volume.
+    """
+    kept = None
+    try:
+        for existing in sorted(glob.glob(f"{glob.escape(path)}.corrupt-*")):
+            if filecmp.cmp(path, existing, shallow=False):
+                kept = f"a copy already exists at {existing}"
+                break
+        if kept is None:
+            backup = f"{path}.corrupt-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
+            shutil.copy2(path, backup)
+            kept = f"a copy was saved to {backup}"
+    except Exception as copy_error:
+        kept = f"could not save a copy ({copy_error})"
+    return StateLoadError(
+        f"State file {path} could not be read ({reason}); {kept}. Refusing to start "
+        f"with empty state, which would overwrite it. Repair or restore the file, "
+        f"or move it away deliberately to start fresh."
+    )
