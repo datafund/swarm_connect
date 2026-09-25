@@ -47,10 +47,6 @@ jobs:
         if: github.ref == 'refs/heads/dev'
         run: |
           mkdir -p /opt/swarm_connect_dev_data
-          # The container runs as UID 10001 (see Dockerfile), not root. Hand it
-          # the state dir, including files written by earlier root containers.
-          # Done through the image so it works whatever user the runner is.
-          docker run --rm --user 0 --entrypoint chown -v /opt/swarm_connect_dev_data:/app/data swarm_connect:dev -R 10001:10001 /app/data
           # This file holds signing keys: make it owner-only BEFORE writing.
           # umask alone would not narrow a file that already exists as 0644.
           touch /opt/swarm_connect_dev.env && chmod 600 /opt/swarm_connect_dev.env
@@ -123,10 +119,6 @@ jobs:
         if: github.ref == 'refs/heads/main'
         run: |
           mkdir -p /opt/swarm_connect_data
-          # The container runs as UID 10001 (see Dockerfile), not root. Hand it
-          # the state dir, including files written by earlier root containers.
-          # Done through the image so it works whatever user the runner is.
-          docker run --rm --user 0 --entrypoint chown -v /opt/swarm_connect_data:/app/data swarm_connect:main -R 10001:10001 /app/data
           # This file holds signing keys: make it owner-only BEFORE writing.
           # umask alone would not narrow a file that already exists as 0644.
           touch /opt/swarm_connect.env && chmod 600 /opt/swarm_connect.env
@@ -261,10 +253,21 @@ jobs:
           # in through depends_on.
           if [ "$GITHUB_REF_NAME" = "dev" ]; then
             BRANCH_SERVICE=provenance_gateway_dev
+            DATA_DIR=/opt/swarm_connect_dev_data
           else
             BRANCH_SERVICE=provenance_gateway
+            DATA_DIR=/opt/swarm_connect_data
           fi
           echo "Recreating $BRANCH_SERVICE (branch $GITHUB_REF_NAME)"
+          # The new container runs as UID 10001 (see Dockerfile), not root, so
+          # hand it the state dir, including files written by earlier root
+          # containers. Stop the old container FIRST: while it runs it can still
+          # write state files as root with mode 0600, which the new one could not
+          # read. The chown runs through the image so it works whatever user the
+          # runner is; the extra downtime is the chown itself.
+          docker compose stop "$BRANCH_SERVICE"
+          docker run --rm --user 0 --entrypoint chown \
+            -v "$DATA_DIR:/app/data" "swarm_connect:$GITHUB_REF_NAME" -R 10001:10001 /app/data
           docker compose up -d --force-recreate --no-deps "$BRANCH_SERVICE"
 
           # Host-level services (the bundled Bee nodes and the metrics agent) live

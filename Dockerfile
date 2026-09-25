@@ -17,6 +17,10 @@ COPY . .
 ARG VERSION=0.0.0-unknown
 RUN echo "${VERSION}" > VERSION
 
+# The code is read-only to the runtime user below, so Python could never cache
+# bytecode at run time; compile it once here instead.
+RUN python -m compileall -q app
+
 # Run as an unprivileged user rather than root. The UID/GID are fixed so a host
 # directory bind-mounted over /app/data can be given to this user by number
 # (the deploy workflow chowns /opt/swarm_connect*_data to 10001). The code stays

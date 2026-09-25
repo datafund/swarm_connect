@@ -189,6 +189,14 @@ class StampPoolManager:
         except (json.JSONDecodeError, ValueError) as e:
             logger.warning(f"Corrupt pool state file {state_file}: {e}, treating as first run")
             return set()
+        except OSError as e:
+            # The file exists but cannot be read — e.g. still owned by root from
+            # before the container ran unprivileged. That is not a first run:
+            # treating it as one would buy a fresh reserve and the next save would
+            # overwrite the only list of the pool's batches. Raise so the sync
+            # counts as failed (no purchases, no save) and retries next cycle.
+            logger.error(f"Cannot read pool state file {state_file}: {e}")
+            raise
         except Exception as e:
             logger.warning(f"Error loading pool state from {state_file}: {e}, treating as first run")
             return set()

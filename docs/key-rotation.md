@@ -56,4 +56,6 @@ do staging first.
      is documented. Documents signed earlier carry the old address in their signature and
      still verify; only a verifier that pins today's `/notary/info` address would reject them.
 
-A compromised signer key is urgent: drain its balance to a safe address first, then rotate.
+A compromised signer key is urgent. The running gateway keeps the old key loaded until
+step 4 has recreated the container, so drain the old wallet to a safe address **before**
+replacing the secret and redeploying, not after.
