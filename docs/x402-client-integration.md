@@ -461,9 +461,17 @@ What the gateway does with the key (payments with `X-PAYMENT` only; the free tie
 | Same key while the first is still running | `409` `IDEMPOTENCY_KEY_IN_PROGRESS`, `Retry-After: 5`. Not charged; retry with the same key |
 | Same key, different body or query | `422` `IDEMPOTENCY_KEY_REUSED`. Not charged |
 | Key longer than 255 characters or not printable ASCII | `400` `IDEMPOTENCY_KEY_INVALID`. Not charged |
-| First request failed (non-2xx) | Nothing stored; a retry is a new, paid attempt |
+| First request paid, but failed or was interrupted afterwards (including a gateway restart) | `409` `IDEMPOTENCY_KEY_SETTLED_PENDING` with the `transaction`. Not charged again; contact the operator with that transaction for the result or a refund |
+| First request failed before its payment settled | Nothing stored; a retry is a new, paid attempt |
+| The retry presents the same `X-PAYMENT` that paid for the original | `402`: sign a new payment. Only a new, unused authorization gets the stored result |
+| The gateway cannot read its idempotency store | `503` `IDEMPOTENCY_UNAVAILABLE`. Not charged; retry later with the same key |
 
 Keys are scoped to the payer (the verified signer of `X-PAYMENT`), the method and the path, so another wallet's request with the same key is unaffected.
+
+What to know about the retry's payment:
+
+- **It must still pass verification.** The facilitator verifies the retry's payment (that is what proves it comes from the same payer), and verification checks the amount against the current price and the wallet's balance. If the first purchase drained the wallet, or the price has risen since, the retry gets a `402` instead of the stored result. You are not charged; sign again from that `402` (at the new price) with the same key, or top up the wallet.
+- **It is not spent.** A replayed response leaves the retry's signed authorization unsettled but valid until its `validBefore`. Keep `validBefore` short. `Idempotent-Replayed: true` means the response, including its `X-PAYMENT-RESPONSE` and `X-Payment-Transaction`, belongs to the **original** payment; do not treat it as proof that the retry's authorization settled.
 
 ## Error Handling
 
@@ -476,6 +484,8 @@ Keys are scoped to the payer (the verified signer of `X-PAYMENT`), the method an
 | "Payment verification failed" | Facilitator rejected | Check payment amount |
 | 409 `IDEMPOTENCY_KEY_IN_PROGRESS` | Retry of a paid request still running | Retry with the same key after `Retry-After` |
 | 422 `IDEMPOTENCY_KEY_REUSED` | Same `Idempotency-Key` for a different request | Use a new key |
+| 409 `IDEMPOTENCY_KEY_SETTLED_PENDING` | The first request was paid but produced no stored result | Contact the operator with the `transaction` |
+| 503 `IDEMPOTENCY_UNAVAILABLE` | The gateway's idempotency store is unreadable | Retry later; not charged |
 
 ## References
 

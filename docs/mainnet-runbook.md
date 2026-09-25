@@ -66,6 +66,8 @@ The audit log is `data/x402_audit.jsonl` on the persistent volume (`/opt/swarm_c
 | Settlement refused | `payment_settled` with `success: false`. Nothing was delivered and nothing was collected | None; the client was told to pay again |
 | Settlement error (outcome unknown) | `payment_failed` with `stage: settle`, counted as `result="error"`. Nothing delivered | **Check on-chain**: look for the payer's USDC transfer to the pay-to address around that time. If one exists, refund it |
 | **Paid, not delivered** | `payment_failed` with `stage: delivery_after_settlement` and `tx=` in the reason. The client received `x402_status: settled_not_delivered` and the transaction | **Refund** the transaction amount to the payer, or deliver manually |
+| Idempotent retry answered | `payment_idempotent_replay` (the original `transaction_hash`), with no `payment_settled` of its own. The retry's payment was verified, never settled | None |
+| Retry of a paid request with no result | The client got `409 IDEMPOTENCY_KEY_SETTLED_PENDING` naming the transaction. A restart mid-request leaves no `payment_failed` line, only `payment_settled` without `payment_delivered` | Same as paid, not delivered: find what the transaction bought, deliver or **refund** |
 
 Useful queries:
 
@@ -80,7 +82,7 @@ Refunds are manual USDC transfers from the pay-to wallet to the payer address in
 
 ## 4. Backups and restore
 
-`scripts/backup_state.sh` archives `/opt/swarm_connect_data` and `/opt/swarm_connect_dev_data`. They hold the ownership registry, prepaid bandwidth credit, pool state, allowance and spend counters, stored Idempotency-Key results, and the audit log.
+`scripts/backup_state.sh` archives `/opt/swarm_connect_data` and `/opt/swarm_connect_dev_data`. They hold the ownership registry, prepaid bandwidth credit, pool state, allowance and spend counters, stored Idempotency-Key results, and the audit log. If `x402_idempotency.json` is unreadable, the gateway keeps it, saves a `.corrupt-<ts>` copy, logs an ERROR and refuses keyed paid requests (`503 IDEMPOTENCY_UNAVAILABLE`); restore it from backup, or move it away to start empty (retries of the last 24 h are then charged again).
 
 **The archives contain bearer credit tokens.** Treat every copy, including the off-host one, as secret, and set retention on the remote side as well: the script only prunes locally.
 

@@ -375,15 +375,23 @@ async def require_x402_payment(request: Request) -> None:
                 "accepts": [payment_requirements.model_dump(by_alias=True)],
             },
         )
-    # A retry of a request already paid for (#359). Checked only now that the
-    # facilitator has verified this payment's signature for its payer, and
-    # before it is reserved or settled: a repeat is answered from the stored
-    # result and its new payment is never charged.
-    from app.x402.idempotency import begin_idempotent_request, idempotency_store
-    idempotency_id = await begin_idempotent_request(request, payer=auth_key[0])
+    # An Idempotency-Key is scoped to the `from` of the authorization the
+    # facilitator verified. If the facilitator reports a different payer, that
+    # identity is not one to hand someone's stored result to.
+    verified_payer = getattr(verify_response, "payer", None)
+    if (request.headers.get("Idempotency-Key") is not None and verified_payer
+            and str(verified_payer).lower() != auth_key[0]):
+        logger.warning(f"x402: facilitator payer {verified_payer} differs from authorization signer")
+        raise HTTPException(
+            status_code=402,
+            detail={
+                "x402Version": X402_VERSION,
+                "error": "Payment verification failed: payer does not match the authorization.",
+                "accepts": [payment_requirements.model_dump(by_alias=True)],
+            },
+        )
 
     if not replay_guard.reserve(auth_key):
-        idempotency_store.abandon(idempotency_id)
         logger.warning(f"x402: Payment authorization reused by {client_ip}")
         raise HTTPException(
             status_code=402,
@@ -393,6 +401,20 @@ async def require_x402_payment(request: Request) -> None:
                 "accepts": [payment_requirements.model_dump(by_alias=True)],
             },
         )
+
+    # A retry of a request already paid for (#359). Checked only now that the
+    # facilitator has verified this payment's signature for its payer and the
+    # guard has reserved it (so it is not one already in use), and before it
+    # is settled: a repeat is answered from the stored result and its new
+    # payment is never charged. Every way out of here without proceeding
+    # releases the reservation: nothing was collected.
+    from app.x402.idempotency import begin_idempotent_request
+    request.state.x402_requirements = payment_requirements
+    try:
+        idempotency_id = await begin_idempotent_request(request, payer=auth_key[0], auth_key=auth_key)
+    except BaseException:
+        replay_guard.release(auth_key)
+        raise
 
     logger.info(f"x402: Payment verified for payer {verify_response.payer}")
     x402_payments_total.labels(mode="paid").inc()

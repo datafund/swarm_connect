@@ -158,6 +158,10 @@ async def settle_payment(request: Request) -> None:
         raise HTTPException(status_code=402, detail=detail)
 
     request.state.x402_settlement = result
+    # From here on a retry with the same Idempotency-Key must not pay again,
+    # whatever happens to this request (#359).
+    from app.x402.idempotency import record_settlement
+    record_settlement(request, result)
     tx = getattr(result, "transaction", None)
     logger.info(f"x402: payment settled before delivery, tx={tx}")
     log_payment_settled(client_ip=client_ip, payer=payer, transaction_hash=tx,

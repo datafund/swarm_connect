@@ -13,26 +13,45 @@ How a retry is matched, and why in this order:
   X-PAYMENT (new nonce), so the payer is the only identity that survives it.
 - The `from` field of an authorization can be written by anyone. So the lookup
   happens only after the facilitator has VERIFIED the new payment, which checks
-  that its signature is valid for that payer. The new payment is never settled:
-  no second charge, and its authorization stays unused.
+  that its signature is valid for that payer, and after the replay guard has
+  reserved it, so an authorization already in use cannot be presented. The
+  authorization that paid for the original is also refused by hash: verify does
+  not reject a spent nonce, and the guard forgets after an hour or a restart.
+  The new payment is never settled: no second charge.
 - The request itself must be the same: a hash of the query string and body is
   stored, and the same key with a different request is refused (422) rather
   than answered with a result for something else.
 - While the first request is still running, a retry gets 409 rather than
   racing it to a second settlement.
-- Only 2xx results are stored. A failure is not cached, so a retry after one
-  is a new attempt (and a new payment).
+- Once the first request's payment has SETTLED, the key is never released
+  again. A "settled, outcome pending" entry is persisted at settlement; a 2xx
+  result replaces it with the stored response. If the request fails after
+  settlement, raises, is cancelled, or the gateway restarts mid-request, the
+  entry stays and a retry gets 409 naming the transaction, not a second charge.
+- A key is released (a retry is a new, paid attempt) only when nothing was
+  settled.
 
-Stored results live 24 hours and are persisted, so a restart between the
-timeout and the retry does not turn the retry into a second purchase.
-In-flight markers are in memory only: a restart ends the request they guard.
+Entries live 24 hours, are persisted, and are capped at
+X402_IDEMPOTENCY_MAX_ENTRIES (completed entries are evicted, oldest first,
+before pending ones). The whole file is rewritten on each change, which is
+fine at that size. An unreadable state file is kept as it is and the feature
+fails closed: keyed paid requests get 503 until it is repaired, because
+running with an empty store would charge every retry again. Unkeyed requests
+are unaffected.
+
+In-flight markers are in memory only. This assumes ONE gateway process (the
+Dockerfile runs uvicorn without --workers). With several workers, two retries
+could each claim a key in different processes.
 """
 import base64
+import glob
 import hashlib
 import json
 import logging
-import os
+import secrets
+import shutil
 import time
+from datetime import datetime, timezone
 from threading import Lock
 from typing import Dict, Optional, Tuple
 
@@ -60,6 +79,9 @@ MAX_STORED_BODY_BYTES = 64 * 1024
 # settlement headers of the payment that paid for it.
 _STORED_HEADERS = ("content-type", "x-payment-response", "x-payment-mode", "x-payment-transaction")
 
+DONE = "done"
+SETTLED = "settled"
+
 
 class IdempotentReplay(Exception):
     """Raised by the dependency to answer with a stored response.
@@ -73,99 +95,194 @@ class IdempotentReplay(Exception):
         self.response = response
 
 
+def _sha(value) -> str:
+    return hashlib.sha256(json.dumps(value).encode()).hexdigest()
+
+
 def entry_id(payer: str, method: str, path: str, key: str) -> str:
     # Hashed so the state file holds no raw keys or addresses.
-    raw = json.dumps([payer.lower(), method.upper(), path.rstrip("/"), key])
-    return hashlib.sha256(raw.encode()).hexdigest()
+    return _sha([payer.lower(), method.upper(), path.rstrip("/"), key])
+
+
+def auth_hash(auth_key: Tuple[str, str]) -> str:
+    return _sha([auth_key[0].lower(), auth_key[1].lower()])
 
 
 class IdempotencyStore:
-    """Completed paid responses by entry id, plus the requests still running."""
+    """Settled and completed paid requests by entry id, plus those still running."""
 
     def __init__(self, state_file: Optional[str] = None):
         self._lock = Lock()
         self._state_file = state_file
-        self._done: Dict[str, dict] = {}
-        self._pending: Dict[str, Tuple[str, float]] = {}
+        self._entries: Dict[str, dict] = {}
+        # entry id -> (request hash, marker expiry, token of the request holding it)
+        self._pending: Dict[str, Tuple[str, float, str]] = {}
+        # Why the state file could not be read; None when it could.
+        self.unavailable: Optional[str] = None
         self._load()
 
     def _path(self) -> str:
         return self._state_file or settings.X402_IDEMPOTENCY_STATE_FILE
 
     def _load(self) -> None:
+        path = self._path()
         try:
-            path = self._path()
-            if not os.path.exists(path):
-                return
             with open(path) as f:
                 data = json.load(f)
-            now = time.time()
-            self._done = {k: v for k, v in (data.get("entries") or {}).items()
-                          if v.get("expires", 0) > now}
+            entries = data.get("entries") if isinstance(data, dict) else None
+            if not isinstance(entries, dict):
+                raise ValueError("expected {\"entries\": {...}}")
+        except FileNotFoundError:
+            return
         except Exception as e:
-            # Never fail startup over a cache.
-            logger.warning("Could not load idempotency state: %s", e)
+            # Fail closed, and never overwrite the file: an empty store would
+            # charge every retry in the window again. Same semantics as
+            # load_json_state/unreadable_state for the other state stores.
+            self.unavailable = f"{type(e).__name__}: {e}"
+            logger.error("Idempotency state file %s is unreadable (%s); %s. Keyed paid requests "
+                         "are refused until it is repaired or moved away.",
+                         path, self.unavailable, _keep_copy(path))
+            return
+        now = time.time()
+        self._entries = {k: v for k, v in entries.items()
+                         if isinstance(v, dict) and v.get("expires", 0) > now}
 
     def _save(self) -> None:
+        if self.unavailable:
+            return
         try:
-            atomic_write_json(self._path(), {"entries": self._done})
+            atomic_write_json(self._path(), {"entries": self._entries})
         except Exception as e:
-            logger.warning("Could not persist idempotency state: %s", e)
+            logger.error("Could not persist idempotency state: %s", e)
 
     def _prune(self, now: float) -> bool:
-        expired = [k for k, v in self._done.items() if v["expires"] <= now]
+        expired = [k for k, v in self._entries.items() if v.get("expires", 0) <= now]
         for k in expired:
-            del self._done[k]
-        for k in [k for k, (_, until) in self._pending.items() if until <= now]:
+            del self._entries[k]
+        for k in [k for k, p in self._pending.items() if p[1] <= now]:
             del self._pending[k]
         return bool(expired)
 
-    def begin(self, eid: str, request_hash: str) -> Tuple[str, Optional[dict]]:
+    def _enforce_cap(self) -> None:
+        excess = len(self._entries) - max(1, settings.X402_IDEMPOTENCY_MAX_ENTRIES)
+        if excess <= 0:
+            return
+        # Completed entries first: losing one only means a late retry pays
+        # again. A settled-pending entry is the record that a payment was taken.
+        order = sorted(self._entries, key=lambda k: (self._entries[k].get("state") != DONE,
+                                                     self._entries[k].get("created", 0)))
+        for k in order[:excess]:
+            del self._entries[k]
+        logger.warning("Idempotency store over X402_IDEMPOTENCY_MAX_ENTRIES; evicted %d oldest", excess)
+
+    def begin(self, eid: str, request_hash: str, auth: str) -> Tuple[str, Optional[dict], Optional[str]]:
         """Claim eid for a new request, or say why not.
 
-        Returns ("new", None), ("replay", entry), ("in_progress", None) or
-        ("mismatch", None).
+        Returns (state, entry, token). state is one of "new" (token set),
+        "replay", "settled_pending", "in_progress", "mismatch",
+        "original_auth" or "unavailable".
         """
+        if self.unavailable:
+            return "unavailable", None, None
         now = time.time()
         with self._lock:
             if self._prune(now):
                 self._save()
-            done = self._done.get(eid)
-            if done is not None:
-                return ("replay", done) if done["request_hash"] == request_hash else ("mismatch", None)
             pending = self._pending.get(eid)
             if pending is not None:
-                return ("in_progress", None) if pending[0] == request_hash else ("mismatch", None)
-            self._pending[eid] = (request_hash, now + IN_FLIGHT_TIMEOUT_SECONDS)
-            return "new", None
+                return ("in_progress" if pending[0] == request_hash else "mismatch"), None, None
+            entry = self._entries.get(eid)
+            if entry is not None:
+                if entry["request_hash"] != request_hash:
+                    return "mismatch", None, None
+                if entry.get("auth") == auth:
+                    return "original_auth", None, None
+                return ("replay" if entry["state"] == DONE else "settled_pending"), entry, None
+            token = secrets.token_hex(8)
+            self._pending[eid] = (request_hash, now + IN_FLIGHT_TIMEOUT_SECONDS, token)
+            return "new", None, token
 
-    def complete(self, eid: str, response: Response) -> None:
+    def _owns(self, eid: str, token: str) -> bool:
+        pending = self._pending.get(eid)
+        if pending is not None:
+            return pending[2] == token
+        entry = self._entries.get(eid)
+        return entry is not None and entry.get("token") == token
+
+    def mark_settled(self, eid: str, token: str, auth: Optional[str], tx: Optional[str]) -> None:
+        """Persist that this request's payment settled; from now on the key stays taken."""
+        with self._lock:
+            pending = self._pending.get(eid)
+            if pending is None or pending[2] != token:
+                return
+            now = time.time()
+            self._entries[eid] = {
+                "state": SETTLED, "request_hash": pending[0], "auth": auth, "token": token,
+                "transaction": tx, "created": now, "expires": now + TTL_SECONDS,
+            }
+            self._enforce_cap()
+            self._save()
+
+    def complete(self, eid: str, token: str, response: Response) -> None:
         """Store a successful response for eid."""
         with self._lock:
-            pending = self._pending.pop(eid, None)
-            body = getattr(response, "body", None)
-            if pending is None or body is None or len(body) > MAX_STORED_BODY_BYTES:
+            if not self._owns(eid, token):
                 return
-            self._done[eid] = {
-                "request_hash": pending[0],
-                "expires": time.time() + TTL_SECONDS,
+            pending = self._pending.pop(eid, None)
+            entry = self._entries.get(eid) or {}
+            request_hash = pending[0] if pending else entry.get("request_hash")
+            body = getattr(response, "body", None)
+            if body is None or len(body) > MAX_STORED_BODY_BYTES:
+                # A settled entry, if any, stays: a retry is told it was paid.
+                logger.warning("x402: %s result not stored for its Idempotency-Key (%s); a retry "
+                               "will not get it back", response.status_code,
+                               "no body" if body is None else f"{len(body)} bytes over the cap")
+                return
+            now = time.time()
+            self._entries[eid] = {
+                "state": DONE, "request_hash": request_hash, "auth": entry.get("auth"),
+                "transaction": entry.get("transaction"), "created": entry.get("created", now),
+                "expires": now + TTL_SECONDS,
                 "status": response.status_code,
                 "headers": {k: v for k, v in response.headers.items() if k.lower() in _STORED_HEADERS},
                 "body": base64.b64encode(body).decode("ascii"),
             }
+            self._enforce_cap()
             self._save()
 
-    def abandon(self, eid: Optional[str]) -> None:
-        """Forget a request that did not succeed, so the key can be retried."""
+    def abandon(self, eid: Optional[str], token: Optional[str]) -> None:
+        """End a request that did not succeed.
+
+        Frees the key only if nothing was settled; a settled entry stays.
+        """
         if eid is None:
             return
         with self._lock:
-            self._pending.pop(eid, None)
+            pending = self._pending.get(eid)
+            if pending is not None and pending[2] == token:
+                del self._pending[eid]
 
     def reset(self) -> None:
         with self._lock:
-            self._done.clear()
+            self._entries.clear()
             self._pending.clear()
+            self.unavailable = None
+
+
+def _keep_copy(path: str) -> str:
+    """Copy an unreadable state file aside once (not on every restart)."""
+    try:
+        with open(path, "rb") as f:
+            content = f.read()
+        for existing in sorted(glob.glob(f"{glob.escape(path)}.corrupt-*")):
+            with open(existing, "rb") as f:
+                if f.read() == content:
+                    return f"a copy already exists at {existing}"
+        backup = f"{path}.corrupt-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
+        shutil.copy2(path, backup)
+        return f"a copy was saved to {backup}"
+    except Exception as e:
+        return f"could not save a copy ({e})"
 
 
 idempotency_store = IdempotencyStore()
@@ -202,16 +319,31 @@ def _replay_response(entry: dict) -> Response:
     return Response(content=base64.b64decode(entry["body"]), status_code=entry["status"], headers=headers)
 
 
-async def begin_idempotent_request(request: Request, payer: str) -> Optional[str]:
-    """Check the Idempotency-Key of a VERIFIED paid request.
+def _log_replay(request: Request, payer: str, entry: dict) -> None:
+    # A verify with no settle: reconciliation needs to see why.
+    from app.core.client_ip import get_client_ip
+    from app.x402.audit import AuditEventType, log_audit_event
+    log_audit_event(
+        event_type=AuditEventType.PAYMENT_IDEMPOTENT_REPLAY,
+        data={"method": request.method, "path": request.url.path,
+              "transaction_hash": entry.get("transaction"), "network": settings.X402_NETWORK},
+        client_ip=get_client_ip(request),
+        wallet_address=payer,
+    )
 
-    Returns the entry id to complete or abandon once the request ends, or None
-    when no key was sent. Raises IdempotentReplay with the stored response for
-    a repeat, and HTTPException for a key that is malformed, in use, or reused
-    for a different request.
 
-    Call only after the facilitator has verified the payment: that is what
-    makes `payer` an identity rather than a claim.
+async def begin_idempotent_request(request: Request, payer: str,
+                                   auth_key: Tuple[str, str]) -> Optional[Tuple[str, str]]:
+    """Check the Idempotency-Key of a VERIFIED, reserved paid request.
+
+    Returns (entry id, token) to settle, complete or abandon the request with,
+    or None when no key was sent. Raises IdempotentReplay with the stored
+    response for a repeat, and HTTPException for a key that is malformed, in
+    use, reused for a different request, or cannot be checked.
+
+    Call only after the facilitator has verified the payment and the replay
+    guard has reserved it: that is what makes `payer` an identity rather than a
+    claim, and the authorization an unused one.
     """
     key = request.headers.get(IDEMPOTENCY_HEADER)
     if key is None:
@@ -222,31 +354,69 @@ async def begin_idempotent_request(request: Request, payer: str) -> Optional[str
             "message": f"{IDEMPOTENCY_HEADER} must be 1-{MAX_KEY_LENGTH} printable ASCII characters.",
         })
     eid = entry_id(payer, request.method, request.url.path, key)
-    state, entry = idempotency_store.begin(eid, await _request_hash(request))
+    state, entry, token = idempotency_store.begin(eid, await _request_hash(request), auth_hash(auth_key))
+    if state == "new":
+        return eid, token
     if state == "replay":
         logger.info(f"x402: idempotent replay for payer {payer} on {request.url.path}; new payment not settled")
+        _log_replay(request, payer, entry)
         raise IdempotentReplay(_replay_response(entry))
+    if state == "unavailable":
+        raise HTTPException(status_code=503, detail={
+            "code": "IDEMPOTENCY_UNAVAILABLE",
+            "message": ("Idempotency-Key requests cannot be processed right now; this payment "
+                        "was not charged. Retry later with the same key."),
+        })
     if state == "in_progress":
         raise HTTPException(status_code=409, headers={"Retry-After": "5"}, detail={
             "code": "IDEMPOTENCY_KEY_IN_PROGRESS",
             "message": ("A request with this Idempotency-Key is still being processed. "
                         "Retry with the same key shortly; this payment was not charged."),
         })
-    if state == "mismatch":
-        raise HTTPException(status_code=422, detail={
-            "code": "IDEMPOTENCY_KEY_REUSED",
-            "message": ("This Idempotency-Key was already used for a different request. "
-                        "Use a new key for a new request; this payment was not charged."),
+    if state == "settled_pending":
+        tx = entry.get("transaction") or "unknown"
+        raise HTTPException(status_code=409, headers={"X-Payment-Transaction": tx}, detail={
+            "code": "IDEMPOTENCY_KEY_SETTLED_PENDING",
+            "message": ("The first request with this Idempotency-Key was paid, but its result is "
+                        "not available (it failed or was interrupted after payment). This payment "
+                        "was not charged. Contact the operator with this transaction for the "
+                        "result or a refund."),
+            "transaction": tx,
+            "x402_status": "settled_not_delivered",
         })
-    return eid
+    if state == "original_auth":
+        requirements = getattr(request.state, "x402_requirements", None)
+        raise HTTPException(status_code=402, detail={
+            "x402Version": 1,
+            "error": "This payment authorization has already been used. Sign a new payment.",
+            "accepts": [requirements.model_dump(by_alias=True)] if hasattr(requirements, "model_dump") else [],
+        })
+    raise HTTPException(status_code=422, detail={
+        "code": "IDEMPOTENCY_KEY_REUSED",
+        "message": ("This Idempotency-Key was already used for a different request. "
+                    "Use a new key for a new request; this payment was not charged."),
+    })
+
+
+def record_settlement(request: Request, settlement) -> None:
+    """The request's payment settled: keep its key taken from now on."""
+    idem = getattr(request.state, "x402_idempotency_id", None)
+    if idem is None:
+        return
+    auth_key = getattr(request.state, "x402_auth_key", None)
+    idempotency_store.mark_settled(idem[0], idem[1], auth_hash(auth_key) if auth_key else None,
+                                   getattr(settlement, "transaction", None))
 
 
 def finish_idempotent_request(request: Request, response: Optional[Response]) -> None:
-    """Store a 2xx response for the request's key; release the key otherwise."""
-    eid = getattr(request.state, "x402_idempotency_id", None)
-    if eid is None:
+    """Store a 2xx response for the request's key; otherwise end the claim.
+
+    Ending the claim frees the key only when nothing was settled.
+    """
+    idem = getattr(request.state, "x402_idempotency_id", None)
+    if idem is None:
         return
     if response is not None and 200 <= response.status_code < 300:
-        idempotency_store.complete(eid, response)
+        idempotency_store.complete(idem[0], idem[1], response)
     else:
-        idempotency_store.abandon(eid)
+        idempotency_store.abandon(idem[0], idem[1])

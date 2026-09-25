@@ -101,6 +101,8 @@ class Settings(BaseSettings):
     # Stored results of paid requests sent with an Idempotency-Key, kept 24 h
     # so a retry after a client timeout is not charged again (#359).
     X402_IDEMPOTENCY_STATE_FILE: str = "data/x402_idempotency.json"
+    # Bound on stored entries; the oldest completed ones are evicted first.
+    X402_IDEMPOTENCY_MAX_ENTRIES: int = 10000
 
     # === Base Chain Settings (for monitoring USDC receipts) ===
     BASE_RPC_URL: str = "https://sepolia.base.org"

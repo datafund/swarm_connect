@@ -347,7 +347,8 @@ class X402Middleware(BaseHTTPMiddleware):
             return replay.response
         except BaseException as exc:
             # Also on cancellation (client gone), so the key is not left
-            # blocked as in progress.
+            # blocked as in progress. A key whose payment already settled stays
+            # taken (idempotency.py), so a retry is not charged again.
             finish_idempotent_request(request, None)
             if not isinstance(exc, Exception) or getattr(request.state, "x402_mode", None) != "paid":
                 raise
@@ -454,6 +455,8 @@ class X402Middleware(BaseHTTPMiddleware):
             log_payment_settled(client_ip=client_ip, payer=payer,
                                 transaction_hash=getattr(settlement, "transaction", None),
                                 network=settings.X402_NETWORK, success=True)
+            from app.x402.idempotency import record_settlement
+            record_settlement(request, settlement)
             x402_settlements_total.labels(result="settled").inc()
 
         tx_hash = getattr(settlement, "transaction", None) or "unknown"
