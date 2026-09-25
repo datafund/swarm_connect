@@ -25,15 +25,14 @@ budget applies. A script forging the header consumes that origin's allowance and
 no more. Treat this as attribution with a cap, not as authorisation: if you need
 to know who is spending, require a payment or a signature instead.
 """
-import json
 import logging
-import os
 from datetime import datetime, timezone
 from threading import Lock
 from typing import Dict, Optional, Tuple
 from urllib.parse import urlparse
 
 from app.core.config import settings
+from app.core.atomic_io import StateLoadError, atomic_write_json, load_json_state, unreadable_state
 
 logger = logging.getLogger(__name__)
 
@@ -98,6 +97,8 @@ class PoolAllowanceTracker:
         self._state_file = state_file
         self._day = _today()
         self._used: Dict[str, int] = {}
+        # Set when today's file could not be read; see _load.
+        self._unreadable: Optional[str] = None
         self._load()
 
     # --- persistence -------------------------------------------------------
@@ -110,28 +111,41 @@ class PoolAllowanceTracker:
         return self._state_file or settings.POOL_ALLOWANCE_STATE_FILE
 
     def _load(self) -> None:
+        # Only a missing file means a fresh day. An unreadable one is not
+        # treated as empty (#378): that would hand out a fresh allowance and the
+        # next save would overwrite today's record. Instead a copy is kept,
+        # nothing is written, and limited allowances are refused until the next
+        # UTC day or until an operator restores or removes the file and
+        # restarts. Paid acquires, which bypass the allowance, keep working.
+        path = self._path()
         try:
-            path = self._path()
-            if not os.path.exists(path):
+            data = load_json_state(path)
+            if data is None:
                 return
-            with open(path) as f:
-                data = json.load(f)
-            if data.get("day") == self._day:
-                self._used = {k: int(v) for k, v in (data.get("used") or {}).items()}
-                logger.info("Loaded pool allowance state for %s: %s", self._day, self._used)
-        except Exception as e:
-            # Never fail startup over a counter. Worst case the allowance resets,
-            # and the hourly purchase ceiling still bounds the damage.
-            logger.warning("Could not load pool allowance state: %s", e)
+            if "day" not in data:
+                logger.warning("Pool allowance state %s has no day; ignoring it", path)
+                return
+            if data["day"] != self._day:
+                return
+            used = data.get("used", {})
+            if not isinstance(used, dict) or not all(
+                isinstance(v, int) and not isinstance(v, bool) and v >= 0 for v in used.values()
+            ):
+                raise unreadable_state(path, "used must map keys to non-negative whole numbers")
+        except StateLoadError as e:
+            self._unreadable = str(e)
+            logger.error("Pool allowances refused until the next UTC day: %s", e)
+            return
+        self._used = dict(used)
+        # Counts only: keys can carry client addresses, which do not belong in logs.
+        logger.info("Loaded pool allowance state for %s: %d counters, %d batches",
+                    self._day, len(self._used), sum(self._used.values()))
 
     def _save(self) -> None:
+        if self._unreadable:
+            return  # leave the unreadable file for the operator
         try:
-            path = self._path()
-            os.makedirs(os.path.dirname(path), exist_ok=True)
-            tmp = f"{path}.tmp"
-            with open(tmp, "w") as f:
-                json.dump({"day": self._day, "used": self._used}, f)
-            os.replace(tmp, path)
+            atomic_write_json(self._path(), {"day": self._day, "used": self._used})
         except Exception as e:
             logger.warning("Could not persist pool allowance state: %s", e)
 
@@ -143,6 +157,7 @@ class PoolAllowanceTracker:
             logger.info("Pool allowance day rolled %s -> %s, resetting counters", self._day, today)
             self._day = today
             self._used = {}
+            self._unreadable = None
             self._save()
 
     def allowance_for(self, origin: Optional[str]) -> int:
@@ -183,6 +198,9 @@ class PoolAllowanceTracker:
         }
         if limit == UNLIMITED:
             return True, info
+        if self._unreadable:
+            info["state_unreadable"] = True
+            return False, info
         return used < limit, info
 
     def consume(self, origin: Optional[str], size: str = "small") -> None:

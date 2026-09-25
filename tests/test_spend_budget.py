@@ -15,6 +15,7 @@ Two limits, answering different questions: a per-request ceiling so no single
 call takes a large share of the wallet, and a per-caller daily budget so the
 first cannot simply be applied repeatedly.
 """
+import json
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -92,18 +93,60 @@ class TestBudgetArithmetic:
         path.write_text(json.dumps({"day": "1999-01-01", "spent": {"1.2.3.4": 999.0}}))
         assert SpendBudgetTracker(state_file=str(path)).check("1.2.3.4", 0.9)[0]
 
-    def test_an_unreadable_state_file_does_not_break_startup(self, tmp_path, monkeypatch):
-        """Never fail to start over a counter."""
+    BAD_FILES = ["", "{not json", "[]", '{"day": "TODAY", "spent": []}',
+                 '{"day": "TODAY", "spent": {"1.2.3.4": "x"}}', '{"day": "TODAY", "spent": {"1.2.3.4": -5}}',
+                 '{"day": "TODAY", "spent": {"1.2.3.4": NaN}}', '{"day": "TODAY", "spent": {"1.2.3.4": true}}']
+
+    @pytest.mark.parametrize("content", BAD_FILES)
+    def test_an_unreadable_file_refuses_limited_budgets_and_is_kept(self, tmp_path, monkeypatch, content):
+        """Empty counters would reset every caller's budget and the next save
+        would overwrite today's record (#378). The process stays up; limited
+        checks are refused and nothing is written."""
+        from app.services import spend_budget
+        monkeypatch.setattr(settings, "STAMP_DAILY_BZZ_PER_CALLER", 1.0)
+        body = content.replace("TODAY", spend_budget._today())
+        path = tmp_path / "spend.json"
+        path.write_text(body)
+        t = SpendBudgetTracker(state_file=str(path))
+        allowed, info = t.check("1.2.3.4", 0.1)
+        assert not allowed and info["state_unreadable"]
+        t.consume("1.2.3.4", 0.1)
+        assert path.read_text() == body, "the unreadable file was overwritten"
+        backups = list(tmp_path.glob("spend.json.corrupt-*"))
+        assert len(backups) == 1 and backups[0].read_text() == body
+
+    def test_an_unlimited_budget_is_unaffected(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(settings, "STAMP_DAILY_BZZ_PER_CALLER", -1)
+        path = tmp_path / "spend.json"
+        path.write_text("{not json")
+        assert SpendBudgetTracker(state_file=str(path)).check("1.2.3.4", 5.0)[0]
+
+    def test_the_refusal_ends_with_the_day(self, tmp_path, monkeypatch):
+        from app.services import spend_budget
         monkeypatch.setattr(settings, "STAMP_DAILY_BZZ_PER_CALLER", 1.0)
         path = tmp_path / "spend.json"
         path.write_text("{not json")
+        t = SpendBudgetTracker(state_file=str(path))
+        monkeypatch.setattr(spend_budget, "_today", lambda: "2099-01-01")
+        assert t.check("1.2.3.4", 0.1)[0]
+
+    def test_bad_values_in_a_previous_days_file_are_ignored(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(settings, "STAMP_DAILY_BZZ_PER_CALLER", 1.0)
+        path = tmp_path / "spend.json"
+        path.write_text('{"day": "1999-01-01", "spent": {"1.2.3.4": "x"}}')
         assert SpendBudgetTracker(state_file=str(path)).check("1.2.3.4", 0.5)[0]
 
+    def test_a_leftover_tmp_file_does_not_matter(self, tmp_path, monkeypatch):
+        from app.services import spend_budget
+        monkeypatch.setattr(settings, "STAMP_DAILY_BZZ_PER_CALLER", 1.0)
+        path = tmp_path / "spend.json"
+        path.write_text(json.dumps({"day": spend_budget._today(), "spent": {"1.2.3.4": 0.95}}))
+        (tmp_path / "spend.json.tmp").write_text("{trunc")
+        assert not SpendBudgetTracker(state_file=str(path)).check("1.2.3.4", 0.1)[0]
 
-class TestPerRequestCeiling:
-    """X402_MAX_STAMP_BZZ was in configuration from the start and referenced
-    nowhere — a cap that reads as protection during review and enforces
-    nothing."""
+    def test_a_missing_state_file_starts_fresh(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(settings, "STAMP_DAILY_BZZ_PER_CALLER", 1.0)
+        assert SpendBudgetTracker(state_file=str(tmp_path / "none.json")).check("1.2.3.4", 0.5)[0]
 
     def _purchase(self, depth=20, duration=8760):
         with patch("app.services.swarm_api.get_chainstate",
