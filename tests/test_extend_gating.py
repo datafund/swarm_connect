@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
-from x402.types import VerifyResponse
+from x402.types import SettleResponse, VerifyResponse
 
 from fastapi import Depends, FastAPI
 
@@ -61,6 +61,14 @@ def _patch(headers=None, body=None):
 def _paying(payer):
     fac = MagicMock()
     fac.verify = AsyncMock(return_value=VerifyResponse(isValid=True, payer=payer))
+    # settle must be awaitable too. The handler settles immediately before the
+    # Bee call (#398) and awaits this; with settle left as a bare MagicMock the
+    # await raised TypeError inside settle_payment, which surfaced as a 502
+    # PAYMENT_SETTLEMENT_UNAVAILABLE and looked like a payment problem rather
+    # than a test double missing a method.
+    fac.settle = AsyncMock(return_value=SettleResponse(
+        success=True, transaction="0x" + "ab" * 32, network="base-sepolia"
+    ))
     return patch("app.x402.dependency._get_facilitator_client", return_value=fac)
 
 
