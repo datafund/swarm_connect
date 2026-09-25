@@ -137,15 +137,22 @@ async def settle_payment(request: Request) -> None:
         logger.warning(f"x402: settlement refused before delivery: {reason}")
         log_payment_settled(client_ip=client_ip, payer=payer, transaction_hash=None,
                             network=settings.X402_NETWORK, success=False, error_reason=reason)
-        raise HTTPException(
-            status_code=402,
-            detail={
-                "code": "PAYMENT_SETTLEMENT_FAILED",
-                "message": f"The payment could not be settled ({reason}). Nothing was delivered.",
-                "x402_status": "settlement_failed",
-                "reason": reason,
-            },
-        )
+        message = f"The payment could not be settled ({reason}). Nothing was delivered."
+        detail = {
+            "code": "PAYMENT_SETTLEMENT_FAILED",
+            "message": message,
+            "x402_status": "settlement_failed",
+            "reason": reason,
+        }
+        # Also a well-formed x402 Payment Required body, so a client can sign a
+        # fresh payment from it like from any other 402 (#372).
+        if hasattr(requirements, "model_dump"):
+            detail.update({
+                "x402Version": 1,
+                "error": message,
+                "accepts": [requirements.model_dump(by_alias=True)],
+            })
+        raise HTTPException(status_code=402, detail=detail)
 
     request.state.x402_settlement = result
     tx = getattr(result, "transaction", None)

@@ -185,14 +185,20 @@ async def _spec_shaped_402(response: Response) -> Response:
     raw = b""
     async for chunk in response.body_iterator:
         raw += chunk
-    headers = {k: v for k, v in response.headers.items() if k.lower() != "content-length"}
     try:
         detail = json.loads(raw).get("detail")
     except Exception:
         detail = None
-    if not (isinstance(detail, dict) and "x402Version" in detail and "accepts" in detail):
-        return Response(content=raw, status_code=402, headers=headers, media_type=response.media_type)
-    return JSONResponse(status_code=402, content={**detail, "detail": detail}, headers=headers)
+    if isinstance(detail, dict) and "x402Version" in detail and "accepts" in detail:
+        out = JSONResponse(status_code=402, content={**detail, "detail": detail})
+    else:
+        out = Response(content=raw, status_code=402, media_type=response.media_type)
+    # Keep every original header (repeated ones included) except those that
+    # describe the old body.
+    out.raw_headers = [
+        (k, v) for k, v in response.raw_headers if k.lower() not in (b"content-length", b"content-type")
+    ] + [(k, v) for k, v in out.raw_headers if k.lower() in (b"content-length", b"content-type")]
+    return out
 
 
 def decode_payment_header(header_value: str) -> Optional[PaymentPayload]:
@@ -244,6 +250,9 @@ def encode_payment_response(settle_response: SettleResponse) -> str:
 class X402Middleware(BaseHTTPMiddleware):
     """
     x402 post-response middleware for FastAPI.
+
+    Also returns x402 Payment Required bodies at the top level, as x402 v1
+    specifies (see _spec_shaped_402).
 
     Handles post-response processing only:
     - Settles payments via facilitator after successful responses
@@ -350,6 +359,8 @@ class X402Middleware(BaseHTTPMiddleware):
             # Nothing delivered and nothing collected: let the same signed
             # authorization be retried.
             replay_guard.release(getattr(request.state, "x402_auth_key", None))
+            if response.status_code == 402:
+                return await _spec_shaped_402(response)
             return response
 
         if settlement is None:
