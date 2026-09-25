@@ -266,8 +266,15 @@ jobs:
           # read. The chown runs through the image so it works whatever user the
           # runner is; the extra downtime is the chown itself.
           docker compose stop "$BRANCH_SERVICE"
-          docker run --rm --user 0 --entrypoint chown \
-            -v "$DATA_DIR:/app/data" "swarm_connect:$GITHUB_REF_NAME" -R 10001:10001 /app/data
+          if ! docker run --rm --user 0 --entrypoint chown \
+            -v "$DATA_DIR:/app/data" "swarm_connect:$GITHUB_REF_NAME" -R 10001:10001 /app/data; then
+            # Do not leave a payment-taking gateway down: bring the old
+            # container back (it runs as root, so a partial chown is harmless
+            # to it) and fail the job.
+            echo "::error::chown of $DATA_DIR failed; restarting the previous container"
+            docker compose start "$BRANCH_SERVICE"
+            exit 1
+          fi
           docker compose up -d --force-recreate --no-deps "$BRANCH_SERVICE"
 
           # Host-level services (the bundled Bee nodes and the metrics agent) live
