@@ -2,7 +2,7 @@
 import os
 from typing import Optional, List
 from pydantic_settings import BaseSettings, SettingsConfigDict
-from pydantic import AnyHttpUrl, field_validator
+from pydantic import Field, AnyHttpUrl, field_validator
 from functools import lru_cache
 from dotenv import load_dotenv
 
@@ -257,7 +257,10 @@ class Settings(BaseSettings):
     # download is buffered to detect the content type, and it can be any Swarm
     # reference, not only ones uploaded here, so without a cap a few requests
     # for large content could exhaust memory and the chequebook.
-    MAX_DOWNLOAD_SIZE_MB: int = 25
+    MAX_DOWNLOAD_SIZE_MB: int = Field(25, ge=1)
+    # Total time allowed for fetching one download from Bee. httpx timeouts
+    # apply per read, so a slow trickle could otherwise hold the request open.
+    DOWNLOAD_TIMEOUT_SECONDS: int = Field(120, ge=1)
 
     # === Chunk Upload (stamped-chunk forwarding, Flow A) ===
     # When enabled, the gateway forwards a single client-supplied PRE-STAMPED chunk

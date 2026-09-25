@@ -820,9 +820,12 @@ async def download_data_from_swarm(reference: str) -> bytes:
     api_url = urljoin(str(settings.SWARM_BEE_API_URL), f"bzz/{reference.lower()}")
     limit = settings.MAX_DOWNLOAD_SIZE_MB * 1024 * 1024
 
-    try:
+    async def fetch() -> bytes:
         client = get_client()
-        async with client.stream("GET", api_url, timeout=60) as response:
+        # identity: the limit must apply to the bytes held in memory, and a
+        # compressed response would be inflated chunk by chunk before counting.
+        async with client.stream("GET", api_url, timeout=60,
+                                 headers={"Accept-Encoding": "identity"}) as response:
             if response.status_code == 404:
                 raise FileNotFoundError(f"Data not found on Swarm at reference {reference}")
             response.raise_for_status()
@@ -831,15 +834,16 @@ async def download_data_from_swarm(reference: str) -> bytes:
             if declared and declared.isdigit() and int(declared) > limit:
                 raise DownloadTooLargeError(limit)
 
-            chunks = []
-            received = 0
+            body = bytearray()
             async for chunk in response.aiter_bytes():
-                received += len(chunk)
-                if received > limit:
+                if len(body) + len(chunk) > limit:
                     raise DownloadTooLargeError(limit)
-                chunks.append(chunk)
-            content = b"".join(chunks)
+                body += chunk
+            return bytes(body)
 
+    try:
+        # One deadline for the whole transfer: httpx timeouts apply per read.
+        content = await asyncio.wait_for(fetch(), timeout=settings.DOWNLOAD_TIMEOUT_SECONDS)
         logger.info(f"Successfully downloaded {len(content)} bytes from Swarm reference: {reference}")
         return content
 

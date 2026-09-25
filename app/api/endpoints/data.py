@@ -1,4 +1,5 @@
 # app/api/endpoints/data.py
+import asyncio
 import base64
 import json
 import logging
@@ -65,6 +66,39 @@ def _build_server_timing_header(timing_dict: dict) -> str:
     return ", ".join(parts)
 
 
+SNIFF_FULL_PARSE_BYTES = 1024 * 1024
+
+
+def _is_utf8_prefix(data: bytes, size: int = 64 * 1024) -> bool:
+    """Whether the first `size` bytes decode as UTF-8 (a cut multi-byte char at the end is fine)."""
+    import codecs
+    try:
+        codecs.getincrementaldecoder("utf-8")().decode(data[:size], final=len(data) <= size)
+        return True
+    except UnicodeDecodeError:
+        return False
+
+
+def _too_large(reference: str, e: Exception) -> HTTPException:
+    downloads_total.labels(status="too_large").inc()
+    logger.warning(f"Download of {reference} refused: {e}")
+    return HTTPException(
+        status_code=413,
+        detail={
+            "code": "DOWNLOAD_TOO_LARGE",
+            "message": (f"This content is larger than the gateway's download limit of "
+                        f"{settings.MAX_DOWNLOAD_SIZE_MB} MB. Fetch it from a Swarm node directly."),
+            "max_size_mb": settings.MAX_DOWNLOAD_SIZE_MB,
+        },
+    )
+
+
+def _download_timeout(reference: str) -> HTTPException:
+    downloads_total.labels(status="error").inc()
+    logger.warning(f"Download of {reference} exceeded {settings.DOWNLOAD_TIMEOUT_SECONDS}s")
+    return HTTPException(status_code=504, detail="Fetching the content from the Swarm network took too long.")
+
+
 def _detect_content_type_and_filename(data_bytes: bytes, reference: str) -> tuple[str, str]:
     """
     Detect content type and generate user-friendly filename for downloads.
@@ -76,14 +110,19 @@ def _detect_content_type_and_filename(data_bytes: bytes, reference: str) -> tupl
     Returns:
         Tuple of (content_type, filename)
     """
-    # Try to detect if it's JSON
-    try:
-        json.loads(data_bytes.decode('utf-8'))
-        # It's valid JSON - use JSON content type and provenance filename
-        short_ref = reference[:8]  # First 8 chars of reference for filename
-        return "application/json", f"provenance-{short_ref}.json"
-    except (json.JSONDecodeError, UnicodeDecodeError):
-        pass
+    # Try to detect if it's JSON. A full parse only for small bodies: parsing a
+    # large JSON document of many small values costs many times its size in
+    # memory and blocks the event loop; beyond that, the leading bracket decides.
+    if len(data_bytes) <= SNIFF_FULL_PARSE_BYTES:
+        try:
+            json.loads(data_bytes.decode('utf-8'))
+            # It's valid JSON - use JSON content type and provenance filename
+            short_ref = reference[:8]  # First 8 chars of reference for filename
+            return "application/json", f"provenance-{short_ref}.json"
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            pass
+    elif data_bytes[:1024].lstrip()[:1] in (b"{", b"[") and _is_utf8_prefix(data_bytes):
+        return "application/json", f"provenance-{reference[:8]}.json"
 
     # Check for common binary file signatures
     if data_bytes.startswith(b'\x89PNG'):
@@ -96,12 +135,8 @@ def _detect_content_type_and_filename(data_bytes: bytes, reference: str) -> tupl
         return "image/gif", f"image-{reference[:8]}.gif"
 
     # Check if it's likely text
-    try:
-        data_bytes.decode('utf-8')
-        # It's valid UTF-8 text
+    if _is_utf8_prefix(data_bytes):
         return "text/plain", f"text-{reference[:8]}.txt"
-    except UnicodeDecodeError:
-        pass
 
     # Default to binary with .bin extension
     return "application/octet-stream", f"data-{reference[:8]}.bin"
@@ -495,17 +530,9 @@ async def download_data(
         logger.warning(f"Data not found for reference {reference}: {e}")
         raise HTTPException(status_code=404, detail=f"Data not found for reference {reference}")
     except DownloadTooLargeError as e:
-        downloads_total.labels(status="error").inc()
-        logger.warning(f"Download of {reference} refused: {e}")
-        raise HTTPException(
-            status_code=413,
-            detail={
-                "code": "DOWNLOAD_TOO_LARGE",
-                "message": (f"This content is larger than the gateway's download limit of "
-                            f"{settings.MAX_DOWNLOAD_SIZE_MB} MB. Fetch it from a Swarm node directly."),
-                "max_size_mb": settings.MAX_DOWNLOAD_SIZE_MB,
-            },
-        )
+        raise _too_large(reference, e)
+    except asyncio.TimeoutError:
+        raise _download_timeout(reference)
     except httpx.HTTPError as e:
         downloads_total.labels(status="error").inc()
         logger.error(f"Swarm API error during download: {e}")
@@ -567,17 +594,9 @@ async def download_data_json(
         logger.warning(f"Data not found for reference {reference}: {e}")
         raise HTTPException(status_code=404, detail=f"Data not found for reference {reference}")
     except DownloadTooLargeError as e:
-        downloads_total.labels(status="error").inc()
-        logger.warning(f"Download of {reference} refused: {e}")
-        raise HTTPException(
-            status_code=413,
-            detail={
-                "code": "DOWNLOAD_TOO_LARGE",
-                "message": (f"This content is larger than the gateway's download limit of "
-                            f"{settings.MAX_DOWNLOAD_SIZE_MB} MB. Fetch it from a Swarm node directly."),
-                "max_size_mb": settings.MAX_DOWNLOAD_SIZE_MB,
-            },
-        )
+        raise _too_large(reference, e)
+    except asyncio.TimeoutError:
+        raise _download_timeout(reference)
     except httpx.HTTPError as e:
         downloads_total.labels(status="error").inc()
         logger.error(f"Swarm API error during download: {e}")
