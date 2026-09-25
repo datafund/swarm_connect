@@ -289,7 +289,7 @@ async def upload_data(
         if validate_stamp or getattr(request.state, "x402_mode", None) == "paid":
             stamp_start = time.perf_counter()
             try:
-                await validate_stamp_for_upload(stamp_id)
+                await validate_stamp_for_upload(stamp_id, local_only=not validate_stamp)
             except StampValidationError as e:
                 # Build structured error response
                 detail = {
@@ -742,7 +742,7 @@ async def upload_manifest(
         if validate_stamp or getattr(request.state, "x402_mode", None) == "paid":
             stamp_start = time.perf_counter()
             try:
-                await validate_stamp_for_upload(stamp_id)
+                await validate_stamp_for_upload(stamp_id, local_only=not validate_stamp)
             except StampValidationError as e:
                 # Build structured error response
                 detail = {

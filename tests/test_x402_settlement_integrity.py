@@ -236,10 +236,27 @@ def test_settlement_error_is_audited_and_the_authorization_can_be_retried(env):
 
 
 def test_payload_without_an_authorization_is_refused(env):
-    import base64, json
     fac = _facilitator(ok())
-    bare = base64.b64encode(json.dumps({"x402Version": 1, "scheme": "exact", "network": "base-sepolia",
-                                        "payload": {"signature": "0x" + "ab" * 65, "authorization": None}}).encode()).decode()
-    r = _run(fac, header=bare)
+    with patch("app.x402.settlement.authorization_key", return_value=None):
+        r = _run(fac)
     assert r.status_code == 402
+    assert "EIP-3009" in r.json()["detail"]["error"]
     assert DELIVERED == []
+
+
+def test_returned_pool_batch_is_available_again(tmp_path):
+    """return_released_stamp on the real manager: back in the pool and on disk."""
+    import json
+    from datetime import datetime, timezone
+    from app.services.stamp_pool import PoolStamp, PoolStampStatus, StampPoolManager
+    state = tmp_path / "pool.json"
+    mgr = StampPoolManager(state_file=str(state))
+    batch = "f" * 64
+    mgr._pool[batch] = PoolStamp(batch_id=batch, depth=17, amount=1, created_at=datetime.now(timezone.utc),
+                                 ttl_at_creation=3600, status=PoolStampStatus.AVAILABLE)
+    released = mgr.release_stamp(batch, released_to="1.2.3.4")
+    assert mgr.get_available_stamp(17) is None
+    mgr.return_released_stamp(released)
+    assert mgr.get_available_stamp(17).batch_id == batch
+    assert batch in json.dumps(json.load(open(state)))
+    assert mgr.release_stamp(batch) is not None
