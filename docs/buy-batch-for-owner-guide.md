@@ -47,6 +47,28 @@ Response `201`:
 The batch is created on-chain immediately but needs ~1–2 min to propagate before stamps
 are usable — poll the propagation fields or `GET /api/v1/stamps/{batchID}`.
 
+Response `202` (`"confirmed": false`): `createBatch` was broadcast but no receipt arrived
+in time (the gateway waits at most 120 s for approve + createBatch together). The
+transaction is **pending and may still mine**, so the request is not treated as failed and
+a payment is settled. `batchID` is already fixed (it derives from the signer and nonce).
+Look up `txHash` on Gnosis before retrying; a retry creates a second batch. The batch is
+recorded in the ownership registry either way; if it never mines, the record stays (it
+refers to no batch, and nothing removes it today).
+
+Response `503` `SIGNER_BUSY`: nothing was sent and nothing is charged. Either another
+request held the signer for more than 30 s, or an earlier transaction from the signer is
+still unconfirmed. The gateway refuses new batches until that transaction confirms, rather
+than queue them behind it. If it never confirms (for example, its fee is too low), an
+operator must replace or cancel it from the signer wallet.
+
+Concurrency: the gateway sends one transaction sequence at a time from its signer
+(nonce → `approve` → `createBatch` → receipt), and keeps a standing BZZ allowance of
+10× the per-batch cap (`STAMP_FOR_OTHERS_MAX_BZZ`), topped up when it falls below half
+(each top-up is logged with its tx hash). createBatch is sent with a gas limit of at least
+1,000,000 (1.3× the estimate if higher, capped at 3M), since its estimate can be far too
+low: the cost depends on the block it executes in. Time bounds: 30 s queueing + 120 s
+receipt waiting, inside the 300 s x402 authorization and Caddy's 300 s read timeout.
+
 ## Guards (all enforced BEFORE any on-chain spend)
 
 | Guard | Env var | Default | Failure |
@@ -103,7 +125,7 @@ so it never burns gas on a call that would revert. Warn thresholds
 
 | Metric | Meaning |
 |--------|---------|
-| `gateway_for_owner_batches_total{status}` | attempts by outcome (`success`, `error`, `insufficient_funds`, `payment_required`) |
+| `gateway_for_owner_batches_total{status}` | attempts by outcome (`success`, `pending`, `busy`, `error`, `insufficient_funds`, `payment_required`) |
 | `gateway_for_owner_bzz_spent_total` | cumulative PLUR spent creating batches |
 | `gateway_gnosis_signer_xbzz_balance` | signer wallet xBZZ (BZZ) — alert when low |
 | `gateway_gnosis_signer_xdai_balance` | signer wallet xDAI — alert when low |
