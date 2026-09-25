@@ -35,6 +35,16 @@ X_PAYMENT_HEADER = "X-PAYMENT"
 X_PAYMENT_RESPONSE_HEADER = "X-PAYMENT-RESPONSE"
 X_PAYMENT_MODE_HEADER = "X-Payment-Mode"
 
+
+def is_free_tier_opt_in(request) -> bool:
+    """Whether the caller asked for the free tier.
+
+    Responses have always echoed "free-tier", and clients reasonably send back
+    what they were shown, so it is accepted alongside "free" (#385). One
+    function so every route that reads the header agrees.
+    """
+    return request.headers.get(X_PAYMENT_MODE_HEADER, "").strip().lower() in ("free", "free-tier")
+
 # USDC contract addresses by network
 USDC_ADDRESSES = {
     "base": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",

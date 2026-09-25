@@ -112,7 +112,7 @@ app.add_middleware(
     expose_headers=[
         "X-PAYMENT-RESPONSE", "X-Payment-Mode", "X-Payment-Transaction",
         "Retry-After", "X-RateLimit-Limit", "X-RateLimit-Remaining", "X-RateLimit-Reset",
-        "X-Swarm-Reference",
+        "X-Swarm-Reference", "Content-Disposition",
     ],
 )
 logger.info(f"CORS enabled for origins: {cors_origins}")

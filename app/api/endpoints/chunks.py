@@ -265,9 +265,9 @@ async def upload_chunk(
     credit_balance: Optional[int] = None
 
     if settings.X402_ENABLED:
-        payment_mode = request.headers.get("X-Payment-Mode", "").lower()
+        from app.x402.middleware import is_free_tier_opt_in
 
-        if payment_mode == "free":
+        if is_free_tier_opt_in(request):
             if not settings.CHUNK_UPLOAD_FREE_TIER_ENABLED:
                 raise HTTPException(
                     status_code=402,

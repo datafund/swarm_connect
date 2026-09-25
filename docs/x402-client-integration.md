@@ -319,7 +319,7 @@ When `X402_FREE_TIER_ENABLED=true` on the gateway, clients can choose between pa
 
 ### Using Free Tier
 
-To use free tier, add the `X-Payment-Mode: free` header:
+To use free tier, add the `X-Payment-Mode: free` header (`free-tier`, the value responses echo, is accepted too):
 
 ```python
 # Check 402 response for free tier availability
