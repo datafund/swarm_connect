@@ -112,6 +112,10 @@ Example for a 24-hour stamp at depth 17:
 
 The minimum price (`X402_MIN_PRICE_USD`) ensures you always cover costs.
 
+### Keeping the BZZ/USD rate honest (#364)
+
+Every price is computed from `X402_BZZ_USD_RATE`. It is **not** updated automatically. Set it explicitly per environment (GitHub variable `X402_BZZ_USD_RATE`, also `X402_MARKUP_PERCENT` and `X402_MIN_PRICE_USD`) and review it regularly. To be warned when it drifts, set `X402_BZZ_PRICE_FEED_URL`, for example `https://api.coingecko.com/api/v3/simple/price?ids=swarm-bzz&vs_currencies=usd`. The gateway then exports `gateway_bzz_usd_rate_configured` and `gateway_bzz_usd_rate_market`, logs a warning, and the Grafana alert "BZZ pricing rate off market" fires when the configured rate is more than 2× away from the market (above: overcharging; below 0.5×: sales can lose money).
+
 ## Access Control
 
 ### Whitelist (Free Access)
