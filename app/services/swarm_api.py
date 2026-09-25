@@ -189,40 +189,39 @@ async def purchase_postage_stamp(amount: int, depth: int, label: Optional[str] =
         raise ValueError(f"Could not parse stamp purchase response: {e}") from e
 
 
-# The label Bee gives a batch of its own that it learns about from the chain
-# rather than from a completed API call: the purchase request was cancelled
-# (the caller disconnected) after the transaction was sent.
-BEE_RECOVERED_LABEL = "recovered"
-
-
 async def find_purchased_batch(label: str, depth: int, amount: int, is_known, min_block: Optional[int],
                                wait_seconds: float, interval: float = 3.0) -> Optional[str]:
     """Find a batch whose purchase response was lost (#400).
 
-    When Bee's POST /stamps times out, the purchase may still go through. Look
-    for it in the node's own batches by what it was bought with: depth, amount
-    and label, excluding batches already registered to someone (is_known). If
-    the timeout cancelled Bee's handler after the transaction was sent, Bee
-    labels the batch "recovered" instead; such a batch matches only if it was
-    created at or after min_block (the node's block when the purchase started).
+    When Bee's POST /stamps gives no answer, the purchase may still go through.
+    Look for it in the node's own batches by what it was bought with. `label`
+    must be unique to this purchase (the gateway adds a random suffix), and a
+    match must also have the depth and amount, not be registered to anyone
+    (is_known), and, when min_block is known, be created at or after it (the
+    node's block when the purchase started), so an older batch can never match.
+
+    Bee labels a batch it learns about only from the chain "recovered". Those
+    are NOT matched: nothing ties one to this purchase rather than to another
+    purchase in flight at the same time, so a lost purchase that surfaces that
+    way goes to the refund path instead.
 
     Polls for up to wait_seconds, because a new batch appears only once Bee has
-    seen it on-chain. Returns None unless exactly one batch matches: guessing
-    between two would hand someone else's batch to this payer.
+    seen it on-chain. A failed poll counts as "not found yet". Returns None
+    unless exactly one batch matches.
     """
     def matches(s: Dict[str, Any]) -> bool:
-        if not s.get("batchID") or is_known(s["batchID"]):
-            return False
-        if coerce_int(s.get("depth"), -1) != depth or str(s.get("amount")) != str(amount):
-            return False
-        if s.get("label") == label:
-            return True
-        return (s.get("label") == BEE_RECOVERED_LABEL and min_block is not None
-                and coerce_int(s.get("blockNumber"), -1) >= min_block)
+        return (bool(s.get("batchID")) and s.get("label") == label
+                and coerce_int(s.get("depth"), -1) == depth and str(s.get("amount")) == str(amount)
+                and (min_block is None or coerce_int(s.get("blockNumber"), -1) >= min_block)
+                and not is_known(s["batchID"]))
 
     deadline = time.monotonic() + wait_seconds
     while True:
-        found = [s["batchID"] for s in await get_local_stamps() if matches(s)]
+        try:
+            found = [s["batchID"] for s in await get_local_stamps() if matches(s)]
+        except Exception as e:
+            logger.warning(f"Lost purchase lookup: listing failed ({e}); retrying")
+            found = []
         if len(found) == 1:
             return found[0]
         if len(found) > 1:

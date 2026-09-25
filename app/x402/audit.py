@@ -46,6 +46,7 @@ class AuditEventType(Enum):
     PAYMENT_SETTLED = "payment_settled"
     PAYMENT_DELIVERED = "payment_delivered"
     PAYMENT_IDEMPOTENT_REPLAY = "payment_idempotent_replay"
+    PURCHASE_PENDING = "purchase_pending"
     PAYMENT_FAILED = "payment_failed"
     ACCESS_BLOCKED = "access_blocked"
     ACCESS_WHITELISTED = "access_whitelisted"

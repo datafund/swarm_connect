@@ -2,6 +2,9 @@
 from pydantic import BaseModel, Field, field_validator, model_validator
 from typing import Optional, List, Literal
 
+# Label prefixes the gateway uses for batches it names itself.
+RESERVED_LABEL_PREFIXES = ("paid-", "pool-", "synced-")
+
 # Size presets mapping to depth values
 SIZE_PRESETS = {
     "small": 17,   # Use for one small document
@@ -142,7 +145,16 @@ class StampPurchaseRequest(BaseModel):
         ge=16,
         le=32
     )
-    label: Optional[str] = Field(default=None, description="Optional user-defined label for the stamp.")
+    # Checked here, before any payment is settled: the label now reaches Bee
+    # (?label=), so one it or a proxy refuses would otherwise fail after the
+    # caller had paid. Labels are stored on the node and appear in public
+    # stamp listings.
+    label: Optional[str] = Field(
+        default=None, max_length=64, pattern=r"^[A-Za-z0-9._-]*$",
+        description=("Optional label for the stamp: up to 64 letters, digits, '.', '_' or '-'. "
+                     "Visible to anyone listing stamps. For a paid purchase the gateway appends "
+                     "'-<random>' so the batch can be found if the node's answer is lost."),
+    )
 
     model_config = {
         "json_schema_extra": {
@@ -153,6 +165,17 @@ class StampPurchaseRequest(BaseModel):
             }
         }
     }
+
+    @field_validator("label")
+    @classmethod
+    def label_not_reserved(cls, v):
+        # Bee's own label for recovered batches, and the gateway's prefixes: a
+        # caller label must not be mistaken for either.
+        if v == "":
+            return None     # no label, as before
+        if v is not None and (v == "recovered" or v.startswith(RESERVED_LABEL_PREFIXES)):
+            raise ValueError(f"label must not be 'recovered' or start with {', '.join(RESERVED_LABEL_PREFIXES)}")
+        return v
 
     @model_validator(mode='after')
     def check_duration_amount_exclusive(self):

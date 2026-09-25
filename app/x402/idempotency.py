@@ -186,6 +186,9 @@ class IdempotencyStore:
             del self._entries[k]
         for k in [k for k, p in self._pending.items() if p[1] <= now]:
             del self._pending[k]
+        # A final result whose interim one was never stored has nothing to replace.
+        for k in [k for k in self._resolved if k not in self._pending]:
+            del self._resolved[k]
         return bool(expired)
 
     def _enforce_cap(self) -> None:
@@ -336,6 +339,7 @@ class IdempotencyStore:
             pending = self._pending.get(eid)
             if pending is not None and pending[2] == token:
                 del self._pending[eid]
+                self._resolved.pop(eid, None)
 
     def reset(self) -> None:
         with self._lock:

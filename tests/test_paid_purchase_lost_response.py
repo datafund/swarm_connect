@@ -87,10 +87,110 @@ def test_bee_timeout_after_settlement_returns_the_batch_found(env):
     assert fac.settle.await_count == 1
 
 
-def test_caller_label_is_kept(env):
+def test_caller_label_gets_a_unique_suffix(env):
+    """A caller's label alone could match someone else's batch; the one sent to Bee is unique."""
     app, _, buy, find = env
     TestClient(app).post("/api/v1/stamps/", json={**BODY, "label": "mine"}, headers={"X-PAYMENT": pay()})
-    assert buy.await_args.kwargs["label"] == "mine" and find.await_args.args[0] == "mine"
+    sent = buy.await_args.kwargs["label"]
+    assert sent.startswith("mine-") and len(sent) == len("mine-") + 12
+    assert find.await_args.args[0] == sent
+
+
+def test_found_batch_already_owned_is_not_taken(env):
+    """A batch registered to someone else between the lookup and the claim is left alone."""
+    app, fac, buy, find = env
+    stamp_ownership_manager._registry[BATCH] = {"owner": "0x" + "d4" * 20, "mode": "paid"}
+    r = TestClient(app).post("/api/v1/stamps/", json=BODY, headers={"X-PAYMENT": pay()})
+    assert r.status_code == 202
+    assert stamp_ownership_manager.get_stamp_info(BATCH)["owner"] == "0x" + "d4" * 20
+
+
+def test_lookup_error_is_not_found_yet(env):
+    app, fac, buy, find = env
+    find.side_effect = RuntimeError("bee listing down")
+    r = TestClient(app).post("/api/v1/stamps/", json=BODY, headers={"X-PAYMENT": pay()})
+    assert r.status_code == 202 and r.json()["code"] == "PURCHASE_PENDING"
+
+
+@pytest.mark.parametrize("bee_status,looked_up", [(502, True), (504, True), (500, False)])
+def test_proxy_gateway_errors_are_unknown_outcomes(env, bee_status, looked_up):
+    app, fac, buy, find = env
+    req = httpx.Request("POST", "http://bee/stamps/1/17")
+    buy.side_effect = httpx.HTTPStatusError("x", request=req, response=httpx.Response(bee_status, request=req))
+    r = TestClient(app).post("/api/v1/stamps/", json=BODY, headers={"X-PAYMENT": pay()})
+    assert (r.status_code == 201) == looked_up
+    assert find.await_count == (1 if looked_up else 0)
+
+
+def _run_pending(app, find_results, key="k"):
+    """First request (202), then wait for the background task, then a keyed retry."""
+    from app.api.endpoints import stamps
+
+    async def run():
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t") as c:
+            h = lambda: {"X-PAYMENT": pay(), "Idempotency-Key": key}
+            first = await c.post("/api/v1/stamps/", json=BODY, headers=h())
+            for _ in range(200):
+                if not stamps._PENDING_TASKS:
+                    break
+                await asyncio.sleep(0.01)
+            retry = await c.post("/api/v1/stamps/", json=BODY, headers=h())
+            return first, retry
+    return asyncio.run(run())
+
+
+def _audit(event):
+    from app.x402.audit import AuditEventType, read_audit_log
+    return read_audit_log(max_entries=1, event_type=AuditEventType(event))
+
+
+def test_202_is_audited_with_what_is_needed_to_find_the_batch(env):
+    app, fac, buy, find = env
+    find.side_effect = [None, BATCH]
+    first, _ = _run_pending(app, None)
+    ev = _audit("purchase_pending")[0]
+    assert ev["wallet_address"] == PAYER
+    assert ev["data"]["label"] == first.json()["label"]
+    assert ev["data"]["start_block"] == 180000 and ev["data"]["depth"] == 17
+    assert ev["data"]["transaction_hash"] == "0x" + "ab" * 32
+
+
+def test_never_found_records_a_refund_and_a_final_result(env):
+    app, fac, buy, find = env
+    find.side_effect = [None, None]
+    first, retry = _run_pending(app, None, key="k-never")
+    assert first.status_code == 202
+    failed = _audit("payment_failed")[0]
+    assert "not found after settlement" in failed["data"]["reason"]
+    assert retry.status_code == 500
+    assert retry.json()["code"] == "DELIVERY_FAILED_AFTER_PAYMENT"
+    assert fac.settle.await_count == 1
+
+
+def test_interrupted_background_search_records_a_refund(env):
+    from app.api.endpoints import stamps
+    app, fac, buy, find = env
+
+    calls = []
+
+    async def lookup(*a, **kw):
+        calls.append(1)
+        if len(calls) > 1:          # the background search: still looking at shutdown
+            await asyncio.sleep(3600)
+        return None
+    find.side_effect = lookup
+
+    async def run():
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t") as c:
+            r = await c.post("/api/v1/stamps/", json=BODY, headers={"X-PAYMENT": pay()})
+            await asyncio.sleep(0.05)
+            assert stamps._PENDING_TASKS, "the running search is held"
+            for t in list(stamps._PENDING_TASKS):
+                t.cancel()
+            await asyncio.gather(*list(stamps._PENDING_TASKS), return_exceptions=True)
+            return r
+    assert asyncio.run(run()).status_code == 202
+    assert "interrupted" in _audit("payment_failed")[0]["data"]["reason"]
 
 
 def test_not_found_answers_202_then_registers_and_resolves_the_key(env):
@@ -167,9 +267,11 @@ def _stamp(batch, label="lbl", depth=17, amount="1000", block=500):
     ([_stamp("a"), _stamp("b")], {"a"}, "b"),           # someone else's already
     ([_stamp("a"), _stamp("b")], set(), None),          # ambiguous: do not guess
     ([_stamp("a", amount="999")], set(), None),
-    # Bee's label for a batch whose API call was cut off: only if new enough.
-    ([_stamp("a", label="recovered", block=500)], set(), "a"),
-    ([_stamp("a", label="recovered", block=499)], set(), None),
+    # Older than the purchase: an orphan with the same label, never this one.
+    ([_stamp("a", block=499)], set(), None),
+    ([_stamp("a", block=499), _stamp("b", block=501)], set(), "b"),
+    # Bee's "recovered" batches are never matched: nothing ties one to this purchase.
+    ([_stamp("a", label="recovered", block=600)], set(), None),
 ])
 def test_find_purchased_batch(stamps, known, expected):
     with patch("app.services.swarm_api.get_local_stamps", new=AsyncMock(return_value=stamps)):
@@ -182,3 +284,20 @@ def test_find_purchased_batch_waits_for_the_node_to_see_it():
     with patch("app.services.swarm_api.get_local_stamps", new=lists):
         got = asyncio.run(swarm_api.find_purchased_batch("lbl", 17, 1000, lambda b: False, None, 5, interval=0.01))
     assert got == "a" and lists.await_count == 3
+
+
+def test_find_purchased_batch_survives_a_failed_poll():
+    lists = AsyncMock(side_effect=[RuntimeError("down"), [_stamp("a")]])
+    with patch("app.services.swarm_api.get_local_stamps", new=lists):
+        got = asyncio.run(swarm_api.find_purchased_batch("lbl", 17, 1000, lambda b: False, None, 5, interval=0.01))
+    assert got == "a"
+
+
+def test_register_stamp_refuses_or_logs_a_change_of_owner(tmp_path, caplog):
+    from app.services.stamp_ownership import StampOwnershipManager
+    m = StampOwnershipManager(state_file=str(tmp_path / "o.json"))
+    assert m.register_stamp(BATCH, "0xaa", "paid", "direct_purchase")
+    assert not m.register_stamp(BATCH, "0xbb", "paid", "direct_purchase", only_if_unowned=True)
+    assert m.get_stamp_info(BATCH)["owner"] == "0xaa"
+    m.register_stamp(BATCH, "0xbb", "paid", "direct_purchase")
+    assert "Re-registering" in caplog.text
