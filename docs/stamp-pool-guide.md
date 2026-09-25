@@ -101,7 +101,7 @@ Acquire a stamp from the pool for immediate use.
   "size": "small"
 }
 ```
-Or with explicit depth:
+Or with explicit depth, which must be one of the pool sizes: 17 (small), 20 (medium) or 22 (large). Any other value is rejected with 422.
 ```json
 {
   "depth": 17
@@ -120,19 +120,17 @@ Or with explicit depth:
 }
 ```
 
-**Response (pool exhausted):**
+**Response (pool exhausted): HTTP 409**
 ```json
 {
-  "success": false,
-  "batch_id": null,
-  "depth": null,
-  "size_name": null,
-  "message": "No stamp available for depth 17 (size: small). Pool may be exhausted.",
-  "fallback_used": false
+  "detail": {
+    "message": "No stamp available for depth 17 (size: small). Pool is exhausted.",
+    "suggestion": "Purchase a stamp directly via POST /api/v1/stamps/"
+  }
 }
 ```
 
-**Response (fallback to larger):**
+**Response (fallback to larger)**, for free acquires only. The daily allowance is charged for the size actually handed out. If that larger size's allowance is used up, the response is 409 `REQUESTED_SIZE_UNAVAILABLE`. A paid acquire always gets exactly the size it paid for, or a 409 without being charged.
 ```json
 {
   "success": true,
