@@ -3,7 +3,7 @@ import base64
 import json
 import logging
 import time
-from fastapi import APIRouter, HTTPException, Path, Query, Request, File, UploadFile
+from fastapi import APIRouter, Header, HTTPException, Path, Query, Request, File, UploadFile
 from fastapi.responses import Response
 import httpx
 
@@ -29,6 +29,7 @@ from app.services.swarm_api import (
 )
 from app.core.config import settings
 from app.services.stamp_ownership import stamp_ownership_manager
+from app.services.signed_auth import OwnerProofError, verify_owner_proof
 from app.services.provenance import (
     get_provenance_service,
     DocumentValidationError,
@@ -106,6 +107,52 @@ def _detect_content_type_and_filename(data_bytes: bytes, reference: str) -> tupl
     return "application/octet-stream", f"data-{reference[:8]}.bin"
 
 
+def _check_stamp_access(
+    request: Request,
+    stamp_id: str,
+    owner_timestamp: Optional[str],
+    owner_signature: Optional[str],
+) -> None:
+    """Raise unless the caller may upload to stamp_id.
+
+    The caller is identified by the x402 payer on a paid request, or by a
+    signed owner proof (#384). The proof is only examined when the payer alone
+    is not enough, so a proof is not consumed by a request that did not need it.
+    """
+    x402_payer = getattr(request.state, 'x402_payer', None)
+    x402_mode = getattr(request.state, 'x402_mode', None)
+    allowed, reason = stamp_ownership_manager.check_access(stamp_id, x402_payer, x402_mode)
+    if not allowed and (owner_timestamp or owner_signature):
+        try:
+            signer = verify_owner_proof(stamp_id, owner_timestamp, owner_signature)
+        except OwnerProofError as e:
+            raise HTTPException(
+                status_code=401,
+                detail={
+                    "code": "OWNER_PROOF_INVALID",
+                    "message": f"Owner proof rejected: {e}",
+                    "stamp_id": stamp_id
+                }
+            )
+        allowed, reason = stamp_ownership_manager.check_access(stamp_id, signer, x402_mode)
+    if not allowed:
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "code": "STAMP_OWNERSHIP_DENIED",
+                "message": f"Access denied: {reason}",
+                "stamp_id": stamp_id
+            }
+        )
+
+
+_OWNER_TS_DESC = "Owner proof: unix seconds, signed in X-Owner-Signature. See 'Owned stamps' above."
+_OWNER_SIG_DESC = (
+    "Owner proof: EIP-191 personal_sign of "
+    "'swarm-connect-owner-upload:<stamp_id lowercase>:<X-Owner-Timestamp>'."
+)
+
+
 @router.post("/", response_model=DataUploadResponse)
 async def upload_data(
     request: Request,
@@ -116,7 +163,9 @@ async def upload_data(
     include_timing: bool = False,
     redundancy: Optional[int] = Query(default=None, ge=0, le=4),
     sign: Optional[str] = None,
-    file: UploadFile = File(...)
+    file: UploadFile = File(...),
+    x_owner_timestamp: Optional[str] = Header(None, alias="X-Owner-Timestamp", description=_OWNER_TS_DESC),
+    x_owner_signature: Optional[str] = Header(None, alias="X-Owner-Signature", description=_OWNER_SIG_DESC),
 ):
     """
     Upload data to the Swarm network via the configured Bee node.
@@ -126,6 +175,17 @@ async def upload_data(
     - **Free tier**: Add header `X-Payment-Mode: free` (rate limited)
     - **Paid**: Include x402 payment header (higher rate limit)
     - Without either header, returns **HTTP 402** with payment instructions and free tier info
+
+    **Owned stamps** (x402 enabled): a stamp bought with a payment belongs to the
+    paying wallet, and only that wallet may upload to it. Prove it is you either
+    by paying for the upload from that wallet, or for free (`X-Payment-Mode: free`,
+    free-tier rate limit applies) with an owner proof:
+    - `X-Owner-Timestamp`: current unix time in seconds (valid for 5 minutes)
+    - `X-Owner-Signature`: EIP-191 `personal_sign` by the owner wallet of
+      `swarm-connect-owner-upload:<stamp_id in lowercase>:<timestamp>`
+    - Each proof is accepted once; sign a new one per upload. A rejected proof
+      returns **401** `OWNER_PROOF_INVALID`; a valid proof from another wallet
+      returns **403** `STAMP_OWNERSHIP_DENIED`.
     - Downloads (`GET /api/v1/data/{reference}`) are always free — no headers needed
 
     **Requirements**:
@@ -261,18 +321,7 @@ async def upload_data(
 
         # Check stamp ownership
         if settings.X402_ENABLED:
-            x402_payer = getattr(request.state, 'x402_payer', None)
-            x402_mode = getattr(request.state, 'x402_mode', None)
-            allowed, reason = stamp_ownership_manager.check_access(stamp_id, x402_payer, x402_mode)
-            if not allowed:
-                raise HTTPException(
-                    status_code=403,
-                    detail={
-                        "code": "STAMP_OWNERSHIP_DENIED",
-                        "message": f"Access denied: {reason}",
-                        "stamp_id": stamp_id
-                    }
-                )
+            _check_stamp_access(request, stamp_id, x_owner_timestamp, x_owner_signature)
 
         # Validate redundancy level if provided
         if redundancy is not None and redundancy not in REDUNDANCY_LEVELS:
@@ -571,7 +620,9 @@ async def upload_manifest(
     deferred: bool = False,
     include_timing: bool = False,
     redundancy: Optional[int] = Query(default=None, ge=0, le=4),
-    file: UploadFile = File(...)
+    file: UploadFile = File(...),
+    x_owner_timestamp: Optional[str] = Header(None, alias="X-Owner-Timestamp", description=_OWNER_TS_DESC),
+    x_owner_signature: Optional[str] = Header(None, alias="X-Owner-Signature", description=_OWNER_SIG_DESC),
 ):
     """
     Upload a TAR archive as a collection/manifest to the Swarm network.
@@ -585,6 +636,17 @@ async def upload_manifest(
     - **Free tier**: Add header `X-Payment-Mode: free` (rate limited)
     - **Paid**: Include x402 payment header (higher rate limit)
     - Without either header, returns **HTTP 402** with payment instructions and free tier info
+
+    **Owned stamps** (x402 enabled): a stamp bought with a payment belongs to the
+    paying wallet, and only that wallet may upload to it. Prove it is you either
+    by paying for the upload from that wallet, or for free (`X-Payment-Mode: free`,
+    free-tier rate limit applies) with an owner proof:
+    - `X-Owner-Timestamp`: current unix time in seconds (valid for 5 minutes)
+    - `X-Owner-Signature`: EIP-191 `personal_sign` by the owner wallet of
+      `swarm-connect-owner-upload:<stamp_id in lowercase>:<timestamp>`
+    - Each proof is accepted once; sign a new one per upload. A rejected proof
+      returns **401** `OWNER_PROOF_INVALID`; a valid proof from another wallet
+      returns **403** `STAMP_OWNERSHIP_DENIED`.
 
     **Performance benefit**: Uploading 50 files as a TAR manifest takes ~500ms vs
     ~14 seconds for sequential individual uploads (15x improvement).
@@ -711,18 +773,7 @@ async def upload_manifest(
 
         # Check stamp ownership
         if settings.X402_ENABLED:
-            x402_payer = getattr(request.state, 'x402_payer', None)
-            x402_mode = getattr(request.state, 'x402_mode', None)
-            allowed, reason = stamp_ownership_manager.check_access(stamp_id, x402_payer, x402_mode)
-            if not allowed:
-                raise HTTPException(
-                    status_code=403,
-                    detail={
-                        "code": "STAMP_OWNERSHIP_DENIED",
-                        "message": f"Access denied: {reason}",
-                        "stamp_id": stamp_id
-                    }
-                )
+            _check_stamp_access(request, stamp_id, x_owner_timestamp, x_owner_signature)
 
         # Validate redundancy level if provided
         if redundancy is not None and redundancy not in REDUNDANCY_LEVELS:
