@@ -204,6 +204,14 @@ app.add_middleware(
     allow_credentials=settings.CORS_ALLOW_CREDENTIALS,
     allow_methods=["*"],
     allow_headers=["*"],
+    # Browsers hide every response header not listed here from page scripts,
+    # so a browser client could not read its settlement receipt, how long to
+    # back off, or its remaining free-tier quota (#385).
+    expose_headers=[
+        "X-PAYMENT-RESPONSE", "X-Payment-Mode", "X-Payment-Transaction",
+        "Retry-After", "X-RateLimit-Limit", "X-RateLimit-Remaining", "X-RateLimit-Reset",
+        "X-Swarm-Reference", "Content-Disposition",
+    ],
 )
 logger.info(f"CORS enabled for origins: {cors_origins}")
 

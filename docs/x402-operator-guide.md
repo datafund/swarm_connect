@@ -197,7 +197,7 @@ When a client hits a protected endpoint without proper headers:
 | Header | Value | Purpose |
 |--------|-------|---------|
 | `X-PAYMENT` | Base64-encoded payment payload | Use paid tier |
-| `X-Payment-Mode` | `free` | Use free tier |
+| `X-Payment-Mode` | `free` (or `free-tier`) | Use free tier |
 
 ### Free Tier Response Headers
 
