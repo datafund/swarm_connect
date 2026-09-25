@@ -1211,6 +1211,44 @@ def calculate_stamp_amount(duration_hours: int, current_price,
     return amount
 
 
+SECONDS_PER_BLOCK = 3600 / BLOCKS_PER_HOUR
+
+
+def expiry_from_amount(amount: int, current_price) -> Optional[str]:
+    """When a batch funded with `amount` PLUR per chunk runs out at today's price.
+
+    An estimate: the price moves, and top-ups extend it. ISO 8601 UTC, or None.
+    """
+    try:
+        price = int(current_price)
+        if price <= 0:
+            return None
+        seconds = int(int(amount) / price * SECONDS_PER_BLOCK)
+        return (datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(seconds=seconds)).isoformat()
+    except Exception:
+        return None
+
+
+async def get_batch_expiry(batch_id: str) -> Optional[str]:
+    """When a batch held by this node runs out, from its current TTL (#383).
+
+    Best effort: one GET /stamps/{id} with a short timeout; None if unknown.
+    Data uploaded with a batch can disappear from Swarm once it expires.
+    """
+    try:
+        client = get_client()
+        url = urljoin(str(settings.SWARM_BEE_API_URL), f"stamps/{batch_id.lower()}")
+        response = await client.get(url, timeout=5)
+        if response.status_code != 200:
+            return None
+        ttl = coerce_int(response.json().get("batchTTL"), 0)
+        if ttl <= 0:
+            return None
+        return (datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(seconds=ttl)).isoformat()
+    except Exception:
+        return None
+
+
 def calculate_stamp_total_cost(amount: int, depth: int) -> int:
     """
     Calculates the total BZZ cost for a stamp based on amount and depth.

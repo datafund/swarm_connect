@@ -173,6 +173,11 @@ class StampPurchaseResponse(BaseModel):
     """Response model for successful stamp purchase."""
     batchID: str = Field(..., description="The unique identifier of the purchased stamp batch.")
     message: str = Field(..., description="Success message.")
+    expires_at: Optional[str] = Field(
+        default=None,
+        description=("Estimated time the stamp runs out at today's price (ISO 8601 UTC). Data uploaded "
+                     "with it can disappear from Swarm after this unless the stamp is extended."),
+    )
 
     model_config = {
         "json_schema_extra": {

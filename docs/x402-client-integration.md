@@ -2,6 +2,8 @@
 
 This document describes how to integrate x402 payment support into CLI tools and MCP servers that interact with the Swarm Connect gateway.
 
+> **Data retention.** What you pay for is a stamp with a limited lifetime, not permanent storage. Upload and stamp responses include `expires_at`; after that, data can disappear unless the stamp is extended. See [TERMS.md](../TERMS.md).
+
 ## Protocol Version
 
 **This gateway implements x402 protocol version 1 (v1).**

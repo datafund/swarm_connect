@@ -465,6 +465,7 @@ async def purchase_stamp(
     try:
         # Get effective depth from size preset or explicit depth
         effective_depth = stamp_request.get_effective_depth()
+        price_for_expiry = None
 
         # Determine the amount to use
         if stamp_request.amount is not None:
@@ -475,6 +476,7 @@ async def purchase_stamp(
             duration_hours = stamp_request.duration_hours or 25
             chainstate = await swarm_api.get_chainstate()
             current_price = int(chainstate["currentPrice"])
+            price_for_expiry = current_price
             amount = swarm_api.calculate_stamp_amount(
                 duration_hours, current_price,
                 minimum_validity_blocks=chainstate.get("minimumValidityBlocks"),
@@ -541,9 +543,17 @@ async def purchase_stamp(
         size_label = stamp_request.size or "custom"
         stamp_purchases_total.labels(size=size_label, status="success").inc()
 
+        # Estimated from the amount funded at today's price (#383).
+        if price_for_expiry is None:
+            try:
+                price_for_expiry = int((await swarm_api.get_chainstate())["currentPrice"])
+            except Exception:
+                price_for_expiry = None
+        expires_at = swarm_api.expiry_from_amount(amount, price_for_expiry) if price_for_expiry else None
         return StampPurchaseResponse(
             batchID=batch_id,
-            message="Postage stamp purchased successfully"
+            message="Postage stamp purchased successfully",
+            expires_at=expires_at if isinstance(expires_at, str) else None,
         )
 
     except HTTPException:

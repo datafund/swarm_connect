@@ -52,6 +52,9 @@ swarm_connect/
 └── run.py                  # Development server
 ``` 
 
+
+> **Data retention.** Swarm keeps data only while the stamp it was uploaded with is valid. Stamp purchase, pool acquire and upload responses include `expires_at`, the time the stamp runs out. Extend the stamp (`PATCH /api/v1/stamps/{id}/extend`) before then, or the data can disappear. Pool and free-tier stamps last about a day. Service terms: [TERMS.md](TERMS.md), also linked as `terms_url` from `GET /`.
+
 ## Running
 
 ### Setup and Installation
