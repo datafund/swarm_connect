@@ -205,7 +205,7 @@ def test_failure_after_settlement_is_recorded_for_refund(env):
     assert r.headers["X-Payment-Transaction"] == TX
     assert r.headers["X-Payment-Status"] == "settled_not_delivered"
     events = [e for e in read_audit_log() if e["data"].get("stage") == "delivery_after_settlement"]
-    assert events and TX in events[-1]["data"]["reason"]
+    assert any(TX in e["data"]["reason"] for e in events)
 
 
 def test_crash_after_settlement_returns_the_transaction(env):

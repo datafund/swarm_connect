@@ -161,7 +161,7 @@ class TestLabelValidation:
     @patch('app.services.swarm_api.purchase_postage_stamp', return_value="mock_batch")
     @patch('app.services.swarm_api.check_sufficient_funds', return_value=MOCK_FUNDS_OK)
     def test_label_string_validation(self, mock_funds, mock_purchase):
-        """Test that label accepts valid string values."""
+        """Human-readable labels are accepted; Bee takes any text (sent URL-encoded)."""
         valid_labels = [
             "simple-label",
             "label_with_underscores",
@@ -178,6 +178,15 @@ class TestLabelValidation:
             response = client.post("/api/v1/stamps/", json=purchase_data)
             assert response.status_code == 201, f"Valid label '{label}' should be accepted"
 
+        # Refused before any payment (#400): control characters, Bee's label for
+        # recovered batches, and the gateway's own prefixes.
+        invalid_labels = ["line\nbreak", "tab\there", "c1\x85control", "bidi\u202eflip", "zero\u200bwidth",
+                          "recovered", "paid-1", "pool-17", "synced-17"]
+        for label in invalid_labels:
+            purchase_data = {"amount": 8000000000, "depth": 17, "label": label}
+            response = client.post("/api/v1/stamps/", json=purchase_data)
+            assert response.status_code == 422, f"Label {label!r} should be refused"
+
     @patch('app.services.swarm_api.purchase_postage_stamp', return_value="mock_batch")
     @patch('app.services.swarm_api.check_sufficient_funds', return_value=MOCK_FUNDS_OK)
     def test_label_length_limits(self, mock_funds, mock_purchase):
@@ -188,12 +197,11 @@ class TestLabelValidation:
         response = client.post("/api/v1/stamps/", json=purchase_data)
         assert response.status_code == 201, "Medium length label should be accepted"
 
-        # Test very long label (should be handled gracefully)
-        very_long_label = "a" * 10000
-        purchase_data = {"amount": 8000000000, "depth": 17, "label": very_long_label}
-        response = client.post("/api/v1/stamps/", json=purchase_data)
-        # Should either accept or reject gracefully
-        assert response.status_code in [201, 422], "Very long label should be handled gracefully"
+        # Over 100 characters is refused, before any payment.
+        for too_long in ("a" * 101, "a" * 10000):
+            purchase_data = {"amount": 8000000000, "depth": 17, "label": too_long}
+            response = client.post("/api/v1/stamps/", json=purchase_data)
+            assert response.status_code == 422, "Labels over 100 characters are refused"
 
     def test_label_type_validation(self):
         """Test that non-string label values are rejected."""
