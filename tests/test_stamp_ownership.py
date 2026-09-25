@@ -367,7 +367,8 @@ class TestOwnershipIntegration:
 
             with patch('app.api.endpoints.pool.stamp_pool_manager') as mock_pool:
                 mock_pool.get_available_stamp.return_value = mock_stamp
-                mock_pool.release_stamp.return_value = mock_released
+                mock_pool.reserve_stamp.return_value = mock_stamp
+                mock_pool.release_reserved_stamp.return_value = mock_released
                 mock_pool.trigger_replenishment_if_needed.return_value = False
 
                 with patch('app.api.endpoints.pool.stamp_ownership_manager') as mock_ownership:
@@ -399,7 +400,8 @@ class TestOwnershipIntegration:
 
             with patch('app.api.endpoints.pool.stamp_pool_manager') as mock_pool:
                 mock_pool.get_available_stamp.return_value = mock_stamp
-                mock_pool.release_stamp.return_value = mock_released
+                mock_pool.reserve_stamp.return_value = mock_stamp
+                mock_pool.release_reserved_stamp.return_value = mock_released
                 mock_pool.trigger_replenishment_if_needed.return_value = False
 
                 with patch('app.api.endpoints.pool.stamp_ownership_manager') as mock_ownership:

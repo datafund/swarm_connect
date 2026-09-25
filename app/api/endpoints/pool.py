@@ -315,18 +315,40 @@ async def acquire_stamp(
     # Get client identifier for logging
     client_ip = http_request.client.host if http_request.client else "unknown"
 
-    # Claim the batch first, then collect payment. release_stamp is the atomic
-    # claim; settling can take seconds, and a batch merely chosen but not
+    # Reserve the batch first, then collect payment. reserve_stamp is the
+    # atomic claim; settling can take seconds, and a batch merely chosen but not
     # claimed could be taken by a concurrent acquire in that time, leaving a
-    # paid caller charged with nothing to receive. If settlement fails the
-    # batch goes back to the pool.
-    released = stamp_pool_manager.release_stamp(stamp.batch_id, released_to=client_ip)
-    if released:
+    # paid caller charged with nothing to receive. The reserved batch stays in
+    # the pool (and counts toward its target) until settlement has succeeded; if
+    # settlement fails it is simply available again.
+    released = None
+    if stamp_pool_manager.reserve_stamp(stamp.batch_id, reserved_for=client_ip):
         try:
             await settle_payment(http_request)
-        except BaseException:
-            stamp_pool_manager.return_released_stamp(released)
+        except BaseException as e:
+            # Named here so the operator can match a transfer that does appear
+            # on-chain after an uncertain settlement (502) to the batch this
+            # request would have received.
+            logger.warning(
+                "Pool acquire: settlement did not complete for batch %s (%s); "
+                "batch made available again",
+                stamp.batch_id, type(e).__name__,
+            )
+            stamp_pool_manager.unreserve_stamp(stamp.batch_id)
             raise
+        released = stamp_pool_manager.release_reserved_stamp(stamp.batch_id)
+        if not released:
+            # Cannot happen while nothing but this request moves a reserved
+            # batch. If it ever does, the caller has paid and gets a 409, which
+            # must not read as an ordinary lost race.
+            settlement = getattr(http_request.state, "x402_settlement", None)
+            logger.error(
+                "Pool acquire: PAID NON-DELIVERY: batch %s was no longer reserved "
+                "after settlement (payer=%s, tx=%s)",
+                stamp.batch_id,
+                getattr(http_request.state, "x402_payer", None),
+                getattr(settlement, "transaction", None),
+            )
 
     if not released:
         size_name = depth_to_size_name(requested_depth)
