@@ -235,7 +235,7 @@ Every batch a caller can obtain is registered to them — pool acquire, direct p
 
 The gateway supports x402 payment protocol for pay-per-request access without user accounts. When enabled, clients pay in USDC on Base chain to access stamp purchase and data upload endpoints.
 
-**Current Status**: Deployed on both staging (`dev`) and production (`main`); switched per environment by the `X402_ENABLED` / `X402_NETWORK` variables in `deploy.yml` (defaults: `base-sepolia` for dev, `base` for main). `GET /` reports `x402.enabled` for a running gateway.
+**Current Status**: Deployed on both staging (`dev`) and production (`main`); switched per environment by the `X402_ENABLED` / `X402_NETWORK` repository variables read in `deploy.yml` (`X402_ENABLED` defaults to `false` there, so the repo variable is what turns it on; network defaults: `base-sepolia` for dev, `base` for main). `GET /` reports `x402.enabled` for a running gateway.
 
 **Parent Issue**: [datafund/provenance-fellowship#23](https://github.com/datafund/provenance-fellowship/issues/23)
 

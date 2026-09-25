@@ -64,7 +64,7 @@ STAMP_POOL_MAX_PURCHASES_PER_HOUR=10
 
 # Daily free allowance of acquires, per calling Origin and per size
 POOL_DAILY_ALLOWANCES=https://app.example=50   # comma-separated origin=limit
-POOL_DEFAULT_DAILY_ALLOWANCE=-1                # unlisted origins / no Origin; -1 = unlimited
+POOL_DEFAULT_DAILY_ALLOWANCE=-1                # ONE bucket shared by all unlisted origins and no-Origin callers; -1 = unlimited
 
 # x402 (only when X402_ENABLED=true)
 X402_POOL_MARKUP_PERCENT=100            # premium on a paid acquire (100 = double the batch cost)

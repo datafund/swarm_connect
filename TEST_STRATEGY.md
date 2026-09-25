@@ -17,7 +17,7 @@ python -m pytest tests/test_stamp_pool.py -v    # one area
 
 - **No network.** Bee and chain calls are mocked. The live modules are opt-in (next
   section).
-- **No writes to the working tree.** `tests/conftest.py` points every persisted
+- **No writes to the working tree** (the x402 audit log still lands in `logs/` until #404 redirects it). `tests/conftest.py` points every persisted
   state file (pool inventory, pool allowance, stamp ownership, bandwidth credit,
   spend budget) at a temporary directory before the app is imported, because those
   services are module-level singletons that read their paths at import time (#335).
