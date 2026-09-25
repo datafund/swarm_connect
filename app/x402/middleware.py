@@ -173,6 +173,28 @@ def create_402_response(
     )
 
 
+async def _spec_shaped_402(response: Response) -> Response:
+    """Put an x402 Payment Required body at the top level, as x402 v1 specifies.
+
+    The dependency raises HTTPException(402, detail=body), which FastAPI
+    serialises as {"detail": body}. Standard x402 clients read x402Version,
+    accepts and error from the top level and cannot pay a nested body (#372).
+    The same body is kept under "detail" as well, so clients written against
+    the old shape keep working; that copy is deprecated.
+    """
+    raw = b""
+    async for chunk in response.body_iterator:
+        raw += chunk
+    headers = {k: v for k, v in response.headers.items() if k.lower() != "content-length"}
+    try:
+        detail = json.loads(raw).get("detail")
+    except Exception:
+        detail = None
+    if not (isinstance(detail, dict) and "x402Version" in detail and "accepts" in detail):
+        return Response(content=raw, status_code=402, headers=headers, media_type=response.media_type)
+    return JSONResponse(status_code=402, content={**detail, "detail": detail}, headers=headers)
+
+
 def decode_payment_header(header_value: str) -> Optional[PaymentPayload]:
     """
     Decode the X-PAYMENT header into a PaymentPayload.
@@ -278,6 +300,9 @@ class X402Middleware(BaseHTTPMiddleware):
 
         # Check what the dependency decided
         x402_mode = getattr(request.state, 'x402_mode', None)
+
+        if x402_mode is None and response.status_code == 402:
+            return await _spec_shaped_402(response)
 
         if x402_mode == "free-tier":
             # Add rate limit headers for free-tier responses
