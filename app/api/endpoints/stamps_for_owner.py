@@ -116,14 +116,28 @@ async def create_batch_for_owner(body: StampForOwnerRequest, request: Request) -
             "message": "Gateway signer wallet has insufficient funds to create this batch.",
             "warnings": pf["warnings"]})
 
+    # --- gateway-wide daily ceiling (#363), charged before the on-chain spend ---
+    from app.services.spend_budget import spend_budget_tracker
+    ok, ceiling = spend_budget_tracker.reserve_gateway(cost_bzz)
+    if not ok:
+        metrics.for_owner_batches_total.labels(status="ceiling").inc()
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail={
+            "code": "GATEWAY_DAILY_SPEND_CEILING",
+            "message": f"The gateway has reached its daily spending limit. It resets at {ceiling['resets_at']}.",
+            "resets_at": ceiling["resets_at"]})
+
     # --- on-chain createBatch(owner=...) ---
     try:
         result = await gnosis_chain_client.create_batch(owner, amount, depth, immutable=body.immutable)
     except GnosisChainError as e:
+        spend_budget_tracker.release_gateway(cost_bzz)
         metrics.for_owner_batches_total.labels(status="error").inc()
         logger.error(f"for-owner: createBatch failed: {e}")
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY,
                             detail=f"createBatch failed: {e}")
+    except BaseException:
+        spend_budget_tracker.release_gateway(cost_bzz)
+        raise
 
     batch_id = result["batch_id"]
     bid = batch_id[2:] if batch_id.startswith("0x") else batch_id  # Bee uses 64-hex, no 0x

@@ -75,6 +75,8 @@ def _isolate_spend_budget(tmp_path, monkeypatch):
     # legitimately cost more than the cap allows, and the test would then be
     # asserting the cap rather than the validation it was written for.
     monkeypatch.setattr(settings, "X402_MAX_STAMP_BZZ", 0.0)  # 0 disables the cap
+    # And the gateway-wide daily ceiling, for the same reason (#363).
+    monkeypatch.setattr(settings, "GATEWAY_DAILY_BZZ_CEILING", -1.0)
 
     tracker = spend_budget.SpendBudgetTracker(state_file=str(tmp_path / "spend.json"))
     monkeypatch.setattr(spend_budget, "spend_budget_tracker", tracker)

@@ -270,9 +270,12 @@ class TestPaidCallersBypass:
                 self.headers = {}
                 self.client = None
 
-        # None means "charge nobody" — the caller funded it themselves.
-        assert stamps_ep._enforce_spend_limits(_Req(), 5.0, "stamp purchase") is None
+        # caller None means "charge nobody's budget" — the caller funded it.
+        # The gateway-wide ceiling still counts it (#363).
+        reservation = stamps_ep._enforce_spend_limits(_Req(), 5.0, "stamp purchase")
+        assert reservation.caller is None
         assert tracker.snapshot()["spent"] == {"testclient": 0.001}, "the payer was charged"
+        assert tracker.snapshot()["gateway_spent"] == 5.0
 
     def test_a_testnet_payment_does_not_bypass(self, tracker, monkeypatch):
         """Testnet currency is free from a faucet, so a payment settled there is
@@ -456,7 +459,7 @@ class TestDayRollover:
 
         from app.services import spend_budget
         monkeypatch.setattr(spend_budget, "_today", lambda: "2099-01-01")
-        assert t.snapshot() == {"day": "2099-01-01", "spent": {}}
+        assert t.snapshot() == {"day": "2099-01-01", "spent": {}, "gateway_spent": 0.0}
 
 
 class TestDurability:
@@ -629,3 +632,73 @@ class TestOnlyASettledPaymentBypasses:
             r = TestClient(app).post("/api/v1/stamps/",
                                      json={"depth": 17, "duration_hours": 24})
         assert r.status_code == 429
+
+
+
+class TestReservation:
+    """Limits are charged when a request is admitted, not after Bee returns (#363)."""
+
+    def test_reserve_is_atomic_check_and_charge(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(settings, "STAMP_DAILY_BZZ_PER_CALLER", 1.0)
+        t = SpendBudgetTracker(state_file=str(tmp_path / "s.json"))
+        assert t.reserve("1.2.3.4", 0.6)[0]
+        assert not t.reserve("1.2.3.4", 0.6)[0], "a second concurrent request must see the first"
+        t.release("1.2.3.4", 0.6)
+        assert t.reserve("1.2.3.4", 0.6)[0]
+
+    def test_concurrent_extends_cannot_overrun_the_budget(self, tracker, monkeypatch):
+        """The audit PoC, inverted: many parallel extends from one IP."""
+        import asyncio
+        import httpx
+        monkeypatch.setattr(settings, "X402_MAX_STAMP_BZZ", 5.0)
+        monkeypatch.setattr(settings, "STAMP_DAILY_BZZ_PER_CALLER", 0.5)
+        extended = []
+
+        async def slow_extend(stamp_id, amount):
+            await asyncio.sleep(0.05)
+            extended.append(amount)
+            return stamp_id
+
+        async def run():
+            transport = httpx.ASGITransport(app=app, client=("203.0.113.7", 1234))
+            async with httpx.AsyncClient(transport=transport, base_url="http://t") as c:
+                return await asyncio.gather(*[
+                    c.patch(f"/api/v1/stamps/{STAMP_ID}/extend", json={"duration_hours": 24})
+                    for _ in range(20)])
+
+        with patch("app.services.swarm_api.get_all_stamps_processed",
+                   new=AsyncMock(return_value=[{"batchID": STAMP_ID, "depth": 20}])), \
+             patch("app.services.swarm_api.get_chainstate",
+                   new=AsyncMock(return_value={"currentPrice": "114458", "minimumValidityBlocks": 17280})), \
+             patch("app.services.swarm_api.check_sufficient_funds", new=AsyncMock(return_value=FUNDS_OK)), \
+             patch("app.services.swarm_api.extend_postage_stamp", new=slow_extend):
+            asyncio.run(run())
+        spent = sum(tracker.snapshot()["spent"].values())
+        assert spent <= 0.5 + 1e-9
+        assert len(extended) == 2   # ~0.218 BZZ each: two fit, the rest are refused
+
+    def test_gateway_ceiling_bounds_all_callers_together(self, tracker, monkeypatch):
+        monkeypatch.setattr(settings, "X402_MAX_STAMP_BZZ", 0.0)
+        monkeypatch.setattr(settings, "STAMP_DAILY_BZZ_PER_CALLER", UNLIMITED)
+        monkeypatch.setattr(settings, "GATEWAY_DAILY_BZZ_CEILING", 0.01)  # ~0.0057 BZZ per purchase here
+        codes = []
+        for ip in ["1.1.1.1", "2.2.2.2", "3.3.3.3"]:
+            with patch("app.services.swarm_api.get_chainstate", new=AsyncMock(return_value=CHAINSTATE)), \
+                 patch("app.services.swarm_api.check_sufficient_funds", new=AsyncMock(return_value=FUNDS_OK)), \
+                 patch("app.services.swarm_api.purchase_postage_stamp", new=AsyncMock(return_value=STAMP_ID)), \
+                 patch("app.api.endpoints.stamps.get_client_ip", return_value=ip):
+                codes.append(TestClient(app).post("/api/v1/stamps/", json={"depth": 17, "duration_hours": 24}).status_code)
+        assert 503 in codes
+        assert tracker.snapshot()["gateway_spent"] <= 0.01 + 1e-9
+
+    def test_a_refused_request_gives_the_gateway_reservation_back(self, tracker, monkeypatch):
+        monkeypatch.setattr(settings, "X402_MAX_STAMP_BZZ", 0.0)
+        monkeypatch.setattr(settings, "STAMP_DAILY_BZZ_PER_CALLER", 10.0)
+        monkeypatch.setattr(settings, "GATEWAY_DAILY_BZZ_CEILING", 10.0)
+        with patch("app.services.swarm_api.get_chainstate", new=AsyncMock(return_value=CHAINSTATE)), \
+             patch("app.services.swarm_api.check_sufficient_funds",
+                   new=AsyncMock(return_value={**FUNDS_OK, "sufficient": False, "shortfall_bzz": 1.0})):
+            r = TestClient(app).post("/api/v1/stamps/", json={"depth": 17, "duration_hours": 24})
+        assert r.status_code == 400
+        assert tracker.snapshot() ["gateway_spent"] == 0.0
+        assert tracker.snapshot()["spent"] == {}

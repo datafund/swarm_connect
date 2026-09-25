@@ -1511,3 +1511,60 @@ class TestTopUpRespectsTheSpendCeiling:
                 await manager._topup_stamp("a" * 64)
 
         chainstate.assert_not_called()
+
+
+
+class TestSpendReservation:
+    """The hourly slot and the gateway ceiling are taken before the Bee call (#363)."""
+
+    def test_concurrent_purchases_cannot_exceed_the_hourly_ceiling(self, tmp_path, monkeypatch):
+        import asyncio
+        from app.core.config import settings as real
+        monkeypatch.setattr(real, "STAMP_POOL_MAX_PURCHASES_PER_HOUR", 2)
+        monkeypatch.setattr(real, "STAMP_POOL_DEFAULT_DURATION_HOURS", 24)
+        mgr = StampPoolManager(state_file=str(tmp_path / "pool.json"))
+        bought = []
+
+        async def slow_buy(amount, depth, label):
+            await asyncio.sleep(0.05)
+            bought.append(depth)
+            return f"{len(bought):064x}"
+
+        async def run():
+            return await asyncio.gather(*[mgr._purchase_stamp(17) for _ in range(5)])
+
+        with patch("app.services.swarm_api.get_chainstate",
+                   new=AsyncMock(return_value={"currentPrice": "24000"})), \
+             patch("app.services.swarm_api.purchase_postage_stamp", new=slow_buy), \
+             patch.object(mgr, "_wait_for_stamp_usable", new=AsyncMock(return_value=False)):
+            asyncio.run(run())
+        assert len(bought) == 2
+
+    def test_failed_purchase_gives_the_slot_back(self, tmp_path, monkeypatch):
+        import asyncio
+        from app.core.config import settings as real
+        monkeypatch.setattr(real, "STAMP_POOL_MAX_PURCHASES_PER_HOUR", 1)
+        mgr = StampPoolManager(state_file=str(tmp_path / "pool.json"))
+        with patch("app.services.swarm_api.get_chainstate",
+                   new=AsyncMock(return_value={"currentPrice": "24000"})), \
+             patch("app.services.swarm_api.purchase_postage_stamp",
+                   new=AsyncMock(side_effect=RuntimeError("bee said no"))):
+            with pytest.raises(RuntimeError):
+                asyncio.run(mgr._purchase_stamp(17))
+        assert mgr._spend_budget_remaining() == 1
+
+    def test_gateway_ceiling_stops_pool_purchases(self, tmp_path, monkeypatch):
+        import asyncio
+        from app.core.config import settings as real
+        from app.services import spend_budget
+        monkeypatch.setattr(real, "GATEWAY_DAILY_BZZ_CEILING", 0.000001)
+        tracker = spend_budget.SpendBudgetTracker(state_file=str(tmp_path / "s.json"))
+        monkeypatch.setattr(spend_budget, "spend_budget_tracker", tracker)
+        mgr = StampPoolManager(state_file=str(tmp_path / "pool.json"))
+        buy = AsyncMock(return_value="b" * 64)
+        with patch("app.services.swarm_api.get_chainstate",
+                   new=AsyncMock(return_value={"currentPrice": "24000"})), \
+             patch("app.services.swarm_api.purchase_postage_stamp", new=buy):
+            assert asyncio.run(mgr._purchase_stamp(17)) is None
+        buy.assert_not_called()
+        assert mgr._spend_budget_remaining() == real.STAMP_POOL_MAX_PURCHASES_PER_HOUR

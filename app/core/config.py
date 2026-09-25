@@ -77,6 +77,12 @@ class Settings(BaseSettings):
     # any observed legitimate caller and far less than the wallet.
     STAMP_DAILY_BZZ_PER_CALLER: float = 0.5
     STAMP_SPEND_BUDGET_STATE_FILE: str = "data/stamp_spend_budget.json"
+    # Ceiling on everything the gateway spends in one UTC day, across every
+    # path: direct purchases and extensions (paid or not), pool purchases and
+    # top-ups, and batches bought for an external owner (#363). Every other
+    # limit is per caller, per origin or per hour; this one bounds the total,
+    # including through any bypass not yet found. -1 disables it.
+    GATEWAY_DAILY_BZZ_CEILING: float = 20.0
     X402_RATE_LIMIT_PER_IP: int = 10  # Requests per minute per IP (for paying users)
 
     # === x402 Free Tier Settings ===

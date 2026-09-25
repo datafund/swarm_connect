@@ -48,6 +48,10 @@ from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
+# Key under which the gateway-wide total is kept, alongside per-caller keys.
+# Not a valid IP, so it cannot collide with a caller.
+GLOBAL_KEY = "(gateway total)"
+
 # Sentinel for "no limit", matching pool_allowance so the two read alike.
 UNLIMITED = -1.0
 
@@ -144,6 +148,51 @@ class SpendBudgetTracker:
             return True, info
         return (spent + cost_bzz) <= limit, info
 
+    def reserve(self, caller: str, cost_bzz: float, limit: Optional[float] = None) -> Tuple[bool, dict]:
+        """Check and charge in one step (#363).
+
+        check() followed later by consume() let concurrent requests all pass
+        the check before any of them was charged. This charges immediately,
+        under the lock; call release() if the spend then does not happen.
+        """
+        limit = self.budget() if limit is None else limit
+        with self._lock:
+            self._roll_day()
+            spent = self._spent.get(caller, 0.0)
+            remaining = UNLIMITED if limit == UNLIMITED else max(0.0, limit - spent)
+            info = {
+                "caller": caller,
+                "daily_budget_bzz": limit,
+                "spent_bzz": round(spent, 6),
+                "remaining_bzz": remaining if limit == UNLIMITED else round(remaining, 6),
+                "request_cost_bzz": round(cost_bzz, 6),
+                "resets_at": f"{self._day}T24:00:00Z",
+            }
+            if limit != UNLIMITED and spent + cost_bzz > limit:
+                return False, info
+            self._spent[caller] = spent + cost_bzz
+            self._save()
+            return True, info
+
+    def release(self, caller: str, cost_bzz: float) -> None:
+        """Undo a reservation whose spend did not happen."""
+        with self._lock:
+            self._roll_day()
+            if caller in self._spent:
+                left = self._spent[caller] - cost_bzz
+                if left <= 1e-12:
+                    del self._spent[caller]
+                else:
+                    self._spent[caller] = left
+                self._save()
+
+    def reserve_gateway(self, cost_bzz: float) -> Tuple[bool, dict]:
+        """Reserve against GATEWAY_DAILY_BZZ_CEILING, the gateway-wide total."""
+        return self.reserve(GLOBAL_KEY, cost_bzz, limit=settings.GATEWAY_DAILY_BZZ_CEILING)
+
+    def release_gateway(self, cost_bzz: float) -> None:
+        self.release(GLOBAL_KEY, cost_bzz)
+
     def consume(self, caller: str, cost_bzz: float) -> None:
         with self._lock:
             self._roll_day()
@@ -153,7 +202,11 @@ class SpendBudgetTracker:
     def snapshot(self) -> dict:
         with self._lock:
             self._roll_day()
-            return {"day": self._day, "spent": dict(self._spent)}
+            return {
+                "day": self._day,
+                "spent": {k: v for k, v in self._spent.items() if k != GLOBAL_KEY},
+                "gateway_spent": self._spent.get(GLOBAL_KEY, 0.0),
+            }
 
 
 spend_budget_tracker = SpendBudgetTracker()

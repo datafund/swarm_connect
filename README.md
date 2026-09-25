@@ -261,7 +261,7 @@ Swarm Connect is a FastAPI-based API gateway that provides comprehensive access 
 #### 🛡️ Security & Rate Limiting
 - **Upload Size Limits**: Configurable maximum upload size (default: 10 MB) with clear 413 errors
 - **Global Rate Limiting**: Per-IP sliding window rate limiter with burst capacity (default: 60 req/min + 10 burst)
-- **Spending Limits**: Stamp purchases and extensions are bounded per request and per caller per day, so no caller can drain the gateway's BZZ
+- **Spending Limits**: Stamp purchases and extensions are bounded per request and per caller per day, so no caller can drain the gateway's BZZ. All spending (purchases, extensions, pool buys and top-ups, for-owner batches) also counts against one gateway-wide daily ceiling, `GATEWAY_DAILY_BZZ_CEILING` (default 20 BZZ; 503 `GATEWAY_DAILY_SPEND_CEILING` when reached). Limits are reserved when a request is admitted, so concurrent requests cannot overrun them.
 - **Input Validation**: Strict regex validation on stamp IDs (64-char hex) and references (64-128 char hex)
 - **Error Sanitization**: Internal details (IPs, ports, file paths) are never exposed in error responses
 - **Server Header Suppression**: `Server` header removed to prevent version fingerprinting
