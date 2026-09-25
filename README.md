@@ -421,6 +421,7 @@ When `X402_ENABLED=true`, protected endpoints (`POST /stamps/`, `POST /data/`) r
 | `POST /api/v1/data/manifest` | Yes |
 | `GET /api/v1/data/{ref}` | No (free) |
 | `GET /api/v1/stamps/` | No (free) |
+| `GET /api/v1/pricing` | No (free): current price quotes for the paid operations, so a client can learn a price without triggering a 402 |
 
 ### Configuration
 
@@ -447,6 +448,7 @@ X402_AUDIT_LOG_PATH=logs/x402_audit.jsonl
 ### Documentation
 
 See [x402 Operator Guide](docs/x402-operator-guide.md) for complete setup instructions.
+Every error carries `code` and `message` at the top level; the codes are listed in [Error codes](docs/error-codes.md).
 
 ## Monitoring
 

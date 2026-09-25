@@ -5,7 +5,13 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from app.core.config import settings
 from app.core.version import VERSION
-from app.api.endpoints import stamps, data, wallet, pool, notary, chunks, debug, stamps_for_owner
+from app.api.endpoints import stamps, data, wallet, pool, notary, chunks, debug, stamps_for_owner, pricing
+from fastapi.encoders import jsonable_encoder
+from fastapi.exceptions import RequestValidationError
+from fastapi.utils import is_body_allowed_for_status_code
+from starlette.exceptions import HTTPException as StarletteHTTPException
+from starlette.responses import Response
+from http import HTTPStatus
 import logging
 import time
 
@@ -90,6 +96,68 @@ app = FastAPI(
     openapi_url=f"{settings.API_V1_STR}/openapi.json",  # Standard location for OpenAPI spec
     lifespan=lifespan
 )
+
+
+# --- One error envelope (#381) ---
+#
+# Errors used to come in several shapes: {"detail": "text"}, {"detail": {code,
+# message, ...}}, and others. The SDK and CLI read `code` from the top level,
+# which none of them had. Every HTTPException now also carries `code` and
+# `message` at the top level, next to `detail`.
+#
+# `detail` is left exactly as it was, so this adds fields and breaks nothing a
+# client already reads. The 402 Payment Required body in particular is still
+# under `detail` unchanged. Codes are listed in docs/error-codes.md.
+def error_envelope(status_code: int, detail) -> dict:
+    """Build {detail, code, message} for an error response.
+
+    `code` is the one the endpoint raised, or HTTP_<status> when it raised none.
+    `message` is the endpoint's own message, else its `error` text, else the
+    detail string itself, else the standard status phrase.
+    """
+    code = message = None
+    if isinstance(detail, dict):
+        code = detail.get("code")
+        message = detail.get("message") or detail.get("error")
+        if message is None and isinstance(detail.get("detail"), str):
+            message = detail["detail"]
+    elif isinstance(detail, str):
+        message = detail
+    if not isinstance(code, str) or not code:
+        code = f"HTTP_{status_code}"
+    if not message:
+        try:
+            message = HTTPStatus(status_code).phrase
+        except ValueError:
+            message = "Error"
+    return {"detail": detail, "code": code, "message": str(message)}
+
+
+@app.exception_handler(StarletteHTTPException)
+async def http_exception_handler(request, exc: StarletteHTTPException):
+    # Same as FastAPI's default handler, plus the top-level code and message.
+    headers = getattr(exc, "headers", None)
+    if not is_body_allowed_for_status_code(exc.status_code):
+        return Response(status_code=exc.status_code, headers=headers)
+    return JSONResponse(
+        status_code=exc.status_code,
+        content=error_envelope(exc.status_code, exc.detail),
+        headers=headers,
+    )
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request, exc: RequestValidationError):
+    # Same `detail` list FastAPI returns by default, plus code and message.
+    return JSONResponse(
+        status_code=422,
+        content={
+            "detail": jsonable_encoder(exc.errors()),
+            "code": "VALIDATION_ERROR",
+            "message": "The request is invalid; see detail for the fields.",
+        },
+    )
+
 
 # Add JSON body size and depth limiting (protects against nested-JSON DoS)
 from app.middleware.body_limit import BodyLimitMiddleware
@@ -189,6 +257,8 @@ app.include_router(debug.router, prefix=f"{settings.API_V1_STR}/debug", tags=["d
 # prefix; the handler is also 404'd + guarded (toggle off by default, allow-list + caps)
 # so the on-chain spend path is never open.
 app.include_router(stamps_for_owner.router, prefix=f"{settings.API_V1_STR}/stamps", tags=["stamps"], dependencies=x402_deps)
+# Price quotes (#381). No x402 dependency: learning a price must never cost one.
+app.include_router(pricing.router, prefix=f"{settings.API_V1_STR}", tags=["pricing"])
 
 @app.get("/", summary="Health Check", tags=["default"])
 @app.get("/health", summary="Health Check", tags=["default"], include_in_schema=False)
