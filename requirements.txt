@@ -2,6 +2,9 @@
 # requirements.lock, which pins every package (transitive ones included) with
 # hashes. After changing this file, regenerate it (Python 3.10 = the image):
 #   uv pip compile requirements.txt --universal --python-version 3.10 --generate-hashes -o requirements.lock
+# Re-running it keeps the existing pins wherever they still satisfy this file.
+# To bump a package deliberately, add --upgrade-package <name> (or --upgrade
+# for everything), then run the test suite against the new lock.
 fastapi>=0.95.0
 uvicorn[standard]>=0.21.0  # ASGI server with performance extras
 httpx>=0.24.0              # Async HTTP client for Swarm Bee API calls
