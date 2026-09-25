@@ -82,6 +82,31 @@ class Settings(BaseSettings):
     # any observed legitimate caller and far less than the wallet.
     STAMP_DAILY_BZZ_PER_CALLER: float = 0.5
     STAMP_SPEND_BUDGET_STATE_FILE: str = "data/stamp_spend_budget.json"
+
+    # Paid purchase that Bee does not answer in time (#400). Bee's POST /stamps
+    # waits for the on-chain transaction and names the batch only once it has
+    # the receipt, on the request's own context: closing the connection early
+    # leaves an unlabelled ("recovered") batch. So a paid purchase keeps Bee's
+    # request open for up to STAMP_PURCHASE_BEE_TIMEOUT_SECONDS, answers 202
+    # after SWARM_STAMP_PURCHASE_TIMEOUT_SECONDS (the free tier's Bee timeout
+    # too), and registers the batch when Bee answers. Only if that request
+    # itself fails without an answer does the gateway look for the batch by its
+    # label: STAMP_PURCHASE_LOOKUP_SECONDS in the request, then up to
+    # STAMP_PURCHASE_BACKGROUND_LOOKUP_SECONDS in the background.
+    SWARM_STAMP_PURCHASE_TIMEOUT_SECONDS: float = 120.0
+    STAMP_PURCHASE_BEE_TIMEOUT_SECONDS: float = 900.0
+    # Paid purchases waiting on Bee at once. Each holds a connection of the
+    # shared Bee client (100) for up to STAMP_PURCHASE_BEE_TIMEOUT_SECONDS; the
+    # cap keeps a hung Bee from starving uploads and health checks. Checked
+    # before the payment is settled: a caller refused here is not charged.
+    STAMP_MAX_CONCURRENT_PAID_PURCHASES: int = 10
+    # On shutdown, how long to let paid purchases still waiting on Bee finish
+    # before cutting them off. Keep the container's stop grace period (docker
+    # stop_grace_period, systemd TimeoutStopSec) above uvicorn's graceful
+    # shutdown timeout plus this.
+    SHUTDOWN_PENDING_PURCHASE_GRACE_SECONDS: float = 25.0
+    STAMP_PURCHASE_LOOKUP_SECONDS: float = 30.0
+    STAMP_PURCHASE_BACKGROUND_LOOKUP_SECONDS: float = 900.0
     X402_RATE_LIMIT_PER_IP: int = 10  # Requests per minute per IP (for paying users)
 
     # === x402 Free Tier Settings ===
@@ -97,6 +122,12 @@ class Settings(BaseSettings):
     # Under data/, which is the persistent volume in docker-compose: logs/ was
     # inside the container and lost on every deploy (#375).
     X402_AUDIT_LOG_PATH: str = "data/x402_audit.jsonl"
+
+    # Stored results of paid requests sent with an Idempotency-Key, kept 24 h
+    # so a retry after a client timeout is not charged again (#359).
+    X402_IDEMPOTENCY_STATE_FILE: str = "data/x402_idempotency.json"
+    # Bound on stored entries; the oldest completed ones are evicted first.
+    X402_IDEMPOTENCY_MAX_ENTRIES: int = 10000
 
     # === Base Chain Settings (for monitoring USDC receipts) ===
     BASE_RPC_URL: str = "https://sepolia.base.org"

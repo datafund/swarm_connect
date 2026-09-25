@@ -77,8 +77,9 @@ class StampOwnershipManager:
         batch_id: str,
         owner: str,
         mode: str,
-        source: str
-    ):
+        source: str,
+        only_if_unowned: bool = False,
+    ) -> bool:
         """
         Register stamp ownership.
 
@@ -87,8 +88,22 @@ class StampOwnershipManager:
             owner: Wallet address (e.g. "0xABC...") or "shared" for communal stamps
             mode: "paid" or "free"
             source: How the stamp was acquired (e.g. "pool_acquire", "direct_purchase")
+            only_if_unowned: Refuse (return False) if the batch is registered already.
+
+        Returns:
+            False if refused, else True.
         """
         with self._lock:
+            existing = self._registry.get(batch_id)
+            if existing is not None:
+                if only_if_unowned:
+                    logger.error(f"Refusing to register {batch_id[:16]} to {owner}: already registered "
+                                 f"to {existing.get('owner')}")
+                    return False
+                if existing.get("owner") not in (POOL_OWNER, owner):
+                    # A batch changing hands between callers is never expected.
+                    logger.error(f"Re-registering {batch_id[:16]} from {existing.get('owner')} to {owner} "
+                                 f"(source={source})")
             self._registry[batch_id] = {
                 "owner": owner,
                 "mode": mode,
@@ -97,6 +112,7 @@ class StampOwnershipManager:
             }
             logger.info(f"Registered stamp {batch_id[:16]}... owner={owner[:16] if owner != 'shared' else 'shared'}, mode={mode}, source={source}")
             self._save_state()
+            return True
 
     def check_access(
         self,

@@ -338,10 +338,19 @@ class X402Middleware(BaseHTTPMiddleware):
             return await call_next(request)
 
         # Let the request through — the dependency handles pre-request checks
+        from app.x402.idempotency import IdempotentReplay, finish_idempotent_request
         try:
             response = await call_next(request)
-        except Exception:
-            if getattr(request.state, "x402_mode", None) != "paid":
+        except IdempotentReplay as replay:
+            # A repeat of a completed paid request (idempotency.py): the stored
+            # response, and nothing settled.
+            return replay.response
+        except BaseException as exc:
+            # Also on cancellation (client gone), so the key is not left
+            # blocked as in progress. A key whose payment already settled stays
+            # taken (idempotency.py), so a retry is not charged again.
+            finish_idempotent_request(request, None)
+            if not isinstance(exc, Exception) or getattr(request.state, "x402_mode", None) != "paid":
                 raise
             return self._paid_request_crashed(request)
 
@@ -372,7 +381,14 @@ class X402Middleware(BaseHTTPMiddleware):
             return new_response
 
         if x402_mode == "paid":
-            return await self._finish_paid(request, response)
+            try:
+                out = await self._finish_paid(request, response)
+            except BaseException:
+                finish_idempotent_request(request, None)
+                raise
+            # Stores a 2xx result for the request's Idempotency-Key, if any.
+            finish_idempotent_request(request, out)
+            return out
 
         return response
 
@@ -405,6 +421,8 @@ class X402Middleware(BaseHTTPMiddleware):
             payment_payload = getattr(request.state, "x402_payment", None)
             payment_requirements = getattr(request.state, "x402_requirements", None)
             unknown_outcome = False
+            from app.x402.idempotency import record_settling, settlement_refused
+            record_settling(request)
             try:
                 settlement = await self.facilitator_client.settle(
                     payment=payment_payload,
@@ -424,6 +442,7 @@ class X402Middleware(BaseHTTPMiddleware):
                                        wallet_address=payer)
                     x402_settlements_total.labels(result="error").inc()
                 else:
+                    settlement_refused(request)
                     log_payment_settled(client_ip=client_ip, payer=payer, transaction_hash=None,
                                         network=settings.X402_NETWORK, success=False, error_reason=failure)
                     x402_settlements_total.labels(result="refused").inc()
@@ -439,6 +458,8 @@ class X402Middleware(BaseHTTPMiddleware):
             log_payment_settled(client_ip=client_ip, payer=payer,
                                 transaction_hash=getattr(settlement, "transaction", None),
                                 network=settings.X402_NETWORK, success=True)
+            from app.x402.idempotency import record_settlement
+            record_settlement(request, settlement)
             x402_settlements_total.labels(result="settled").inc()
 
         tx_hash = getattr(settlement, "transaction", None) or "unknown"
@@ -455,7 +476,9 @@ class X402Middleware(BaseHTTPMiddleware):
         body = b""
         async for chunk in response.body_iterator:
             body += chunk
-        if ok:
+        # 202: accepted, not yet delivered (a stamp purchase Bee has not
+        # confirmed, #400). The handler records the delivery when it happens.
+        if ok and response.status_code != 202:
             _log_delivery(request, settlement, body, client_ip, payer)
         new_response = Response(
             content=body,

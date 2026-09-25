@@ -65,7 +65,13 @@ The audit log is `data/x402_audit.jsonl` on the persistent volume (`/opt/swarm_c
 | Paid and delivered | `payment_settled` (success, `transaction_hash`), then `payment_delivered` (same transaction, `resource`: batchID, reference or credited bytes) | None |
 | Settlement refused | `payment_settled` with `success: false`. Nothing was delivered and nothing was collected | None; the client was told to pay again |
 | Settlement error (outcome unknown) | `payment_failed` with `stage: settle`, counted as `result="error"`. Nothing delivered | **Check on-chain**: look for the payer's USDC transfer to the pay-to address around that time. If one exists, refund it |
+| Purchase in flight at shutdown | `payment_failed` `delivery_after_settlement` with `Bee purchase in flight at shutdown, a batch may exist on-chain unlabelled` and the label | Look for a `recovered` batch with that depth and amount created after the `purchase_pending` start block; then as below: assign **or** refund |
+| Paid stamp purchase, Bee response lost | `purchase_pending` (tx, label, depth, amount, start block, payer); the client got `202`. Later `payment_delivered` with `late: true` and the batchID (found and registered), or `payment_failed` `delivery_after_settlement` with `stamp purchase after settlement: not found`/`refused by Bee`/`already registered`/`lookup interrupted` | Found: none. Otherwise look in Bee `/stamps` for the label from `purchase_pending`. A batch Bee labelled `recovered` with that depth and amount, created after the start block, may be it: the gateway never assigns those itself, because a concurrent purchase could produce one too. Do **exactly one** of: register it to the payer (if you can tell it is theirs), or **refund**. Record which, next to the transaction in the ops log. After registering, tell the payer the batchID directly: a retry with their Idempotency-Key keeps answering `DELIVERY_FAILED_AFTER_PAYMENT` until the entry expires (24 h). To change that answer, stop the gateway, set the entry in `x402_idempotency.json` whose `transaction` matches to `"status": 201` and a base64 `{"batchID": …}` body, and start it again |
 | **Paid, not delivered** | `payment_failed` with `stage: delivery_after_settlement` and `tx=` in the reason. The client received `x402_status: settled_not_delivered` and the transaction | **Refund** the transaction amount to the payer, or deliver manually |
+| Idempotent retry answered | `payment_idempotent_replay` (the original `transaction_hash`), with no `payment_settled` of its own. The retry's payment was verified, never settled | None |
+| Retry after an unanswered settlement | The client got `409 IDEMPOTENCY_KEY_SETTLEMENT_UNKNOWN` with the first `nonce`; the first request logged `payment_failed` `stage: settle` (or nothing, after a restart) | Same as "settlement error": check on-chain whether that nonce was used; if so, deliver or refund |
+| Retry of a result too large to replay | The client got `409 IDEMPOTENCY_KEY_DELIVERED_NOT_STORED`; `payment_delivered` exists for the transaction | None: it was delivered |
+| Retry of a paid request with no result | The client got `409 IDEMPOTENCY_KEY_SETTLED_PENDING` naming the transaction. A restart mid-request leaves no `payment_failed` line, only `payment_settled` without `payment_delivered` | Same as paid, not delivered: find what the transaction bought, deliver or **refund** |
 
 Useful queries:
 
@@ -78,9 +84,11 @@ grep '<tx hash>' /opt/swarm_connect_data/x402_audit.jsonl
 
 Refunds are manual USDC transfers from the pay-to wallet to the payer address in the record. Note the refund transaction next to the record in your ops log.
 
+**Stopping the gateway.** Paid stamp purchases can be waiting on Bee for minutes. On shutdown uvicorn stops in-flight requests after 10 s (`--timeout-graceful-shutdown 10`), then the gateway waits up to `SHUTDOWN_PENDING_PURCHASE_GRACE_SECONDS` (25) for pending purchases before cutting them off with a refund record. Keep the stop grace period above the sum: `stop_grace_period: 40s` in docker-compose, or `TimeoutStopSec=40` under systemd. Prefer deploying when `purchase_pending` has no recent unmatched entries.
+
 ## 4. Backups and restore
 
-`scripts/backup_state.sh` archives `/opt/swarm_connect_data` and `/opt/swarm_connect_dev_data`. They hold the ownership registry, prepaid bandwidth credit, pool state, allowance and spend counters, and the audit log.
+`scripts/backup_state.sh` archives `/opt/swarm_connect_data` and `/opt/swarm_connect_dev_data`. They hold the ownership registry, prepaid bandwidth credit, pool state, allowance and spend counters, stored Idempotency-Key results, and the audit log. If `x402_idempotency.json` is unreadable, the gateway keeps it, saves a `.corrupt-<ts>` copy, logs an ERROR and refuses keyed paid requests (`503 IDEMPOTENCY_UNAVAILABLE`); restore it from backup, or move it away to start empty (retries of the last 24 h are then charged again). Either way, **restart the gateway** afterwards: the file is read only at startup, and until then the 503 persists.
 
 **The archives contain bearer credit tokens.** Treat every copy, including the off-host one, as secret, and set retention on the remote side as well: the script only prunes locally.
 

@@ -23,6 +23,7 @@ reserves each authorization when it is verified, so a second request with the
 same one is refused before it can do any work.
 """
 import logging
+import re
 import time
 from threading import Lock
 from typing import Dict, Optional, Tuple
@@ -77,13 +78,26 @@ class PaymentReplayGuard:
 replay_guard = PaymentReplayGuard()
 
 
+_ADDRESS = re.compile(r"^0x[0-9a-fA-F]{40}$")
+_NONCE = re.compile(r"^(0x)?[0-9a-fA-F]{64}$")
+
+
 def authorization_key(payment_payload) -> Optional[Tuple[str, str]]:
-    """(payer, nonce) of an EIP-3009 authorization, or None if the payload has none."""
+    """(payer, nonce) of an EIP-3009 authorization, canonical, or None.
+
+    Canonical so that every spelling of the same authorization is the same key:
+    the replay guard and the Idempotency-Key store compare these as strings.
+    The nonce is a bytes32 (64 hex digits, "0x" optional on input) and the
+    payer a 20-byte address; anything else is refused rather than compared.
+    """
     try:
         auth = payment_payload.payload.authorization
-        return (str(auth.from_).lower(), str(auth.nonce).lower())
+        payer, nonce = str(auth.from_), str(auth.nonce)
     except AttributeError:
         return None
+    if not _ADDRESS.match(payer) or not _NONCE.match(nonce):
+        return None
+    return (payer.lower(), "0x" + nonce[-64:].lower())
 
 
 def _facilitator():
@@ -109,6 +123,11 @@ async def settle_payment(request: Request) -> None:
     payer = getattr(request.state, "x402_payer", None)
     client_ip = get_client_ip(request)
 
+    # For an Idempotency-Key: from here until the facilitator answers, the
+    # outcome is unknown, and a retry must not be charged on the assumption
+    # that nothing happened (idempotency.py).
+    from app.x402.idempotency import record_settlement, record_settling, settlement_refused
+    record_settling(request)
     try:
         result = await _facilitator().settle(payment=payment, payment_requirements=requirements)
     except Exception as e:
@@ -135,6 +154,7 @@ async def settle_payment(request: Request) -> None:
         )
 
     if not getattr(result, "success", False):
+        settlement_refused(request)
         reason = getattr(result, "error_reason", None) or "unknown"
         logger.warning(f"x402: settlement refused before delivery: {reason}")
         log_payment_settled(client_ip=client_ip, payer=payer, transaction_hash=None,
@@ -158,6 +178,9 @@ async def settle_payment(request: Request) -> None:
         raise HTTPException(status_code=402, detail=detail)
 
     request.state.x402_settlement = result
+    # From here on a retry with the same Idempotency-Key must not pay again,
+    # whatever happens to this request (#359).
+    record_settlement(request, result)
     tx = getattr(result, "transaction", None)
     logger.info(f"x402: payment settled before delivery, tx={tx}")
     log_payment_settled(client_ip=client_ip, payer=payer, transaction_hash=tx,
