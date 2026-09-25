@@ -28,8 +28,15 @@ How a retry is matched, and why in this order:
   result replaces it with the stored response. If the request fails after
   settlement, raises, is cancelled, or the gateway restarts mid-request, the
   entry stays and a retry gets 409 naming the transaction, not a second charge.
-- A key is released (a retry is a new, paid attempt) only when nothing was
-  settled.
+- The key is taken from the moment settlement is REQUESTED ("settling"). If
+  the facilitator raises, times out or the request is cancelled while waiting,
+  the outcome is unknown and a retry gets 409 naming the authorization to
+  check on-chain. Only a definite refusal from the facilitator, or a failure
+  before settlement, releases the key (a retry is then a new, paid attempt).
+- A result too large to store is recorded as delivered, so a retry is told
+  the first request succeeded rather than that it needs a refund.
+- A /chunks/credit result is stored without its bearer token; a replay fills
+  in the account's current token.
 
 Entries live 24 hours, are persisted, and are capped at
 X402_IDEMPOTENCY_MAX_ENTRIES (completed entries are evicted, oldest first,
@@ -79,8 +86,20 @@ MAX_STORED_BODY_BYTES = 64 * 1024
 # settlement headers of the payment that paid for it.
 _STORED_HEADERS = ("content-type", "x-payment-response", "x-payment-mode", "x-payment-transaction")
 
-DONE = "done"
+# Entry states. SETTLING: the facilitator was asked to settle and has not
+# answered (or the request died waiting), so the payment may have been taken.
+# SETTLED: paid, result not stored yet (or never, if the request then failed).
+# DONE: paid and the response is stored. DELIVERED: paid and delivered, but the
+# response was too large to store.
+SETTLING = "settling"
 SETTLED = "settled"
+DONE = "done"
+DELIVERED = "delivered_not_stored"
+_STATES = (SETTLING, SETTLED, DONE, DELIVERED)
+# A /chunks/credit response carries the account's bearer token. It is not
+# written to disk, and a replay gets the account's CURRENT token instead (it
+# may have been rotated since).
+_CREDIT_TOKEN = "credit_token"
 
 
 class IdempotentReplay(Exception):
@@ -132,6 +151,10 @@ class IdempotencyStore:
             entries = data.get("entries") if isinstance(data, dict) else None
             if not isinstance(entries, dict):
                 raise ValueError("expected {\"entries\": {...}}")
+            for k, v in entries.items():
+                if (not isinstance(v, dict) or not isinstance(v.get("request_hash"), str)
+                        or v.get("state") not in _STATES):
+                    raise ValueError(f"malformed entry {k[:12]}")
         except FileNotFoundError:
             return
         except Exception as e:
@@ -179,8 +202,8 @@ class IdempotencyStore:
         """Claim eid for a new request, or say why not.
 
         Returns (state, entry, token). state is one of "new" (token set),
-        "replay", "settled_pending", "in_progress", "mismatch",
-        "original_auth" or "unavailable".
+        "in_progress", "mismatch", "original_auth", "unavailable", or the
+        state of the stored entry (DONE, SETTLED, SETTLING, DELIVERED).
         """
         if self.unavailable:
             return "unavailable", None, None
@@ -197,7 +220,7 @@ class IdempotencyStore:
                     return "mismatch", None, None
                 if entry.get("auth") == auth:
                     return "original_auth", None, None
-                return ("replay" if entry["state"] == DONE else "settled_pending"), entry, None
+                return entry["state"], entry, None
             token = secrets.token_hex(8)
             self._pending[eid] = (request_hash, now + IN_FLIGHT_TIMEOUT_SECONDS, token)
             return "new", None, token
@@ -208,6 +231,28 @@ class IdempotencyStore:
             return pending[2] == token
         entry = self._entries.get(eid)
         return entry is not None and entry.get("token") == token
+
+    def mark_settling(self, eid: str, token: str, auth: Optional[str], nonce: Optional[str]) -> None:
+        """Persist that this request's payment is being settled: outcome unknown until it answers."""
+        with self._lock:
+            pending = self._pending.get(eid)
+            if pending is None or pending[2] != token:
+                return
+            now = time.time()
+            self._entries[eid] = {
+                "state": SETTLING, "request_hash": pending[0], "auth": auth, "nonce": nonce,
+                "token": token, "created": now, "expires": now + TTL_SECONDS,
+            }
+            self._enforce_cap()
+            self._save()
+
+    def clear_settling(self, eid: str, token: str) -> None:
+        """The facilitator refused the payment: nothing was taken, the key can be freed."""
+        with self._lock:
+            entry = self._entries.get(eid)
+            if entry is not None and entry.get("state") == SETTLING and entry.get("token") == token:
+                del self._entries[eid]
+                self._save()
 
     def mark_settled(self, eid: str, token: str, auth: Optional[str], tx: Optional[str]) -> None:
         """Persist that this request's payment settled; from now on the key stays taken."""
@@ -223,20 +268,27 @@ class IdempotencyStore:
             self._enforce_cap()
             self._save()
 
-    def complete(self, eid: str, token: str, response: Response) -> None:
-        """Store a successful response for eid."""
+    def complete(self, eid: str, token: str, response: Response, body: Optional[bytes] = None,
+                 fill: Optional[str] = None, storable: bool = True) -> None:
+        """Store a successful response for eid (body, if given, in place of response.body)."""
         with self._lock:
             if not self._owns(eid, token):
                 return
             pending = self._pending.pop(eid, None)
             entry = self._entries.get(eid) or {}
             request_hash = pending[0] if pending else entry.get("request_hash")
-            body = getattr(response, "body", None)
-            if body is None or len(body) > MAX_STORED_BODY_BYTES:
-                # A settled entry, if any, stays: a retry is told it was paid.
+            if body is None:
+                body = getattr(response, "body", None)
+            if not storable or body is None or len(body) > MAX_STORED_BODY_BYTES:
+                # Delivered and paid once: the key stays taken, and a retry is
+                # told that it succeeded rather than sent to ask for a refund.
                 logger.warning("x402: %s result not stored for its Idempotency-Key (%s); a retry "
                                "will not get it back", response.status_code,
-                               "no body" if body is None else f"{len(body)} bytes over the cap")
+                               "not storable" if not storable else "no body" if body is None
+                               else f"{len(body)} bytes over the cap")
+                if entry:
+                    entry["state"] = DELIVERED
+                    self._save()
                 return
             now = time.time()
             self._entries[eid] = {
@@ -246,6 +298,7 @@ class IdempotencyStore:
                 "status": response.status_code,
                 "headers": {k: v for k, v in response.headers.items() if k.lower() in _STORED_HEADERS},
                 "body": base64.b64encode(body).decode("ascii"),
+                "fill": fill,
             }
             self._enforce_cap()
             self._save()
@@ -313,10 +366,17 @@ async def _request_hash(request: Request) -> str:
     return h.hexdigest()
 
 
-def _replay_response(entry: dict) -> Response:
+def _replay_response(entry: dict, payer: str) -> Response:
     headers = dict(entry.get("headers") or {})
     headers[REPLAYED_HEADER] = "true"
-    return Response(content=base64.b64decode(entry["body"]), status_code=entry["status"], headers=headers)
+    body = base64.b64decode(entry["body"])
+    if entry.get("fill") == _CREDIT_TOKEN:
+        # The account's current token, never a new or rotated one.
+        from app.services.bandwidth_credit import bandwidth_credit_manager
+        parsed = json.loads(body)
+        parsed["token"] = bandwidth_credit_manager.issue_token(payer)
+        body = json.dumps(parsed).encode()
+    return Response(content=body, status_code=entry["status"], headers=headers)
 
 
 def _log_replay(request: Request, payer: str, entry: dict) -> None:
@@ -357,10 +417,10 @@ async def begin_idempotent_request(request: Request, payer: str,
     state, entry, token = idempotency_store.begin(eid, await _request_hash(request), auth_hash(auth_key))
     if state == "new":
         return eid, token
-    if state == "replay":
+    if state == DONE:
         logger.info(f"x402: idempotent replay for payer {payer} on {request.url.path}; new payment not settled")
         _log_replay(request, payer, entry)
-        raise IdempotentReplay(_replay_response(entry))
+        raise IdempotentReplay(_replay_response(entry, payer))
     if state == "unavailable":
         raise HTTPException(status_code=503, detail={
             "code": "IDEMPOTENCY_UNAVAILABLE",
@@ -373,7 +433,28 @@ async def begin_idempotent_request(request: Request, payer: str,
             "message": ("A request with this Idempotency-Key is still being processed. "
                         "Retry with the same key shortly; this payment was not charged."),
         })
-    if state == "settled_pending":
+    if state == SETTLING:
+        raise HTTPException(status_code=409, detail={
+            "code": "IDEMPOTENCY_KEY_SETTLEMENT_UNKNOWN",
+            "message": ("The payment for the first request with this Idempotency-Key was sent for "
+                        "settlement but no answer came back, so it may or may not have been "
+                        "collected. This payment was not charged. Before paying again, check "
+                        "whether the original authorization (nonce below) was used on-chain; if "
+                        "it was, contact the operator."),
+            "nonce": entry.get("nonce"),
+            "x402_status": "settlement_unknown",
+        })
+    if state == DELIVERED:
+        tx = entry.get("transaction") or "unknown"
+        raise HTTPException(status_code=409, headers={"X-Payment-Transaction": tx}, detail={
+            "code": "IDEMPOTENCY_KEY_DELIVERED_NOT_STORED",
+            "message": ("The first request with this Idempotency-Key succeeded and was paid once, "
+                        "but its response was too large to keep for a retry. This payment was not "
+                        "charged. Look the result up through the resource itself."),
+            "transaction": tx,
+            "x402_status": "delivered",
+        })
+    if state == SETTLED:
         tx = entry.get("transaction") or "unknown"
         raise HTTPException(status_code=409, headers={"X-Payment-Transaction": tx}, detail={
             "code": "IDEMPOTENCY_KEY_SETTLED_PENDING",
@@ -398,6 +479,24 @@ async def begin_idempotent_request(request: Request, payer: str,
     })
 
 
+def record_settling(request: Request) -> None:
+    """The request's payment is about to be settled: from now on the key stays
+    taken unless the facilitator definitely refuses it."""
+    idem = getattr(request.state, "x402_idempotency_id", None)
+    if idem is None:
+        return
+    auth_key = getattr(request.state, "x402_auth_key", None)
+    idempotency_store.mark_settling(idem[0], idem[1], auth_hash(auth_key) if auth_key else None,
+                                    auth_key[1] if auth_key else None)
+
+
+def settlement_refused(request: Request) -> None:
+    """The facilitator refused the payment (a definite answer): nothing was taken."""
+    idem = getattr(request.state, "x402_idempotency_id", None)
+    if idem is not None:
+        idempotency_store.clear_settling(idem[0], idem[1])
+
+
 def record_settlement(request: Request, settlement) -> None:
     """The request's payment settled: keep its key taken from now on."""
     idem = getattr(request.state, "x402_idempotency_id", None)
@@ -417,6 +516,15 @@ def finish_idempotent_request(request: Request, response: Optional[Response]) ->
     if idem is None:
         return
     if response is not None and 200 <= response.status_code < 300:
-        idempotency_store.complete(idem[0], idem[1], response)
+        body, fill, storable = getattr(response, "body", None), None, True
+        if request.url.path.rstrip("/").endswith("/chunks/credit") and body:
+            try:
+                parsed = json.loads(body)
+                if isinstance(parsed, dict) and "token" in parsed:
+                    parsed["token"] = None
+                    body, fill = json.dumps(parsed).encode(), _CREDIT_TOKEN
+            except ValueError:
+                storable = False    # never stored with a secret in it
+        idempotency_store.complete(idem[0], idem[1], response, body=body, fill=fill, storable=storable)
     else:
         idempotency_store.abandon(idem[0], idem[1])

@@ -64,6 +64,8 @@ def _app(fac, gate=None, status=201):
         await settle_payment(request)
         if gate is not None:
             await gate.wait()
+        if body.get("big"):
+            return {"batchID": bought[-1] if bought else "x", "pad": "x" * 70000}
         if body.get("fail") == "raise":
             raise RuntimeError("bee went away after payment")
         if body.get("fail") == "500":
@@ -71,6 +73,14 @@ def _app(fac, gate=None, status=201):
             raise HTTPException(status_code=500, detail="bee refused")
         bought.append(secrets.token_hex(32))
         return {"batchID": bought[-1]}
+
+    @router.post("/chunks/credit")
+    async def credit(request: Request):
+        from app.services.bandwidth_credit import bandwidth_credit_manager
+        await settle_payment(request)
+        bought.append("credit")
+        return {"address": request.state.x402_payer,
+                "token": bandwidth_credit_manager.issue_token(request.state.x402_payer)}
 
     @router.post("/upload")
     async def upload(request: Request, file: UploadFile = File(...)):
@@ -80,6 +90,7 @@ def _app(fac, gate=None, status=201):
 
     app = FastAPI()
     app.include_router(router, prefix="/api/v1/stamps", dependencies=[Depends(require_x402_payment)])
+    app.include_router(router, prefix="/api/v1", dependencies=[Depends(require_x402_payment)])
     app.add_middleware(X402Middleware, facilitator_client=fac)
     return app, bought
 
@@ -236,7 +247,7 @@ def test_settled_entry_survives_a_restart_mid_request(fac, tmp_path, monkeypatch
     s.mark_settled(eid, token, auth_hash((ALICE, "0x01")), "0xtx")
     # Process dies here: no complete(), no abandon().
     state, entry, _ = IdempotencyStore(state_file=path).begin(eid, "h", auth_hash((ALICE, "0x02")))
-    assert state == "settled_pending" and entry["transaction"] == "0xtx"
+    assert state == "settled" and entry["transaction"] == "0xtx"
 
 
 def test_unsettled_failure_frees_the_key(fac):
@@ -355,7 +366,7 @@ def test_stored_results_survive_restart_and_expire(tmp_path, monkeypatch):
     assert state == "new"
     s.complete(eid, token, JSONResponse({"batchID": "b"}, status_code=201))
     state, entry, _ = IdempotencyStore(state_file=path).begin(eid, "h", "a2")
-    assert state == "replay" and entry["status"] == 201
+    assert state == "done" and entry["status"] == 201
 
     import app.x402.idempotency as idem
     real = idem.time.time
@@ -365,3 +376,95 @@ def test_stored_results_survive_restart_and_expire(tmp_path, monkeypatch):
 
 def test_payer_match_is_case_insensitive():
     assert entry_id(ALICE.upper(), "post", "/p/", "k") == entry_id(ALICE, "POST", "/p", "k")
+
+
+def test_unknown_settlement_outcome_keeps_the_key(fac):
+    """The facilitator may have moved the money: a retry must not pay again."""
+    app, bought = _app(fac)
+    c = TestClient(app)
+    fac.settle.side_effect = httpx.ReadTimeout("facilitator slow")
+    first_nonce = "0x" + "5e" * 32
+    r = c.post("/api/v1/stamps/", json={"depth": 17},
+               headers={"X-PAYMENT": pay(nonce=first_nonce), "Idempotency-Key": "k1"})
+    assert r.status_code == 502
+    fac.settle.side_effect = lambda **kw: SettleResponse(success=True, transaction="0x" + "cd" * 32)
+    retry = _post(c)
+    assert retry.status_code == 409
+    detail = retry.json()["detail"]
+    assert detail["code"] == "IDEMPOTENCY_KEY_SETTLEMENT_UNKNOWN"
+    assert detail["nonce"] == first_nonce
+    assert fac.settle.await_count == 1 and not bought
+
+
+def test_settling_entry_survives_a_restart(tmp_path):
+    """Killed or cancelled while waiting for the facilitator: still unknown after a restart."""
+    path = str(tmp_path / "idem.json")
+    s = IdempotencyStore(state_file=path)
+    eid = entry_id(ALICE, "POST", "/p", "k")
+    _, _, token = s.begin(eid, "h", "a1")
+    s.mark_settling(eid, token, "a1", "0x" + "01" * 32)
+    state, entry, _ = IdempotencyStore(state_file=path).begin(eid, "h", "a2")
+    assert state == "settling" and entry["nonce"] == "0x" + "01" * 32
+
+
+def test_definite_refusal_clears_the_settling_entry(tmp_path):
+    s = IdempotencyStore(state_file=str(tmp_path / "idem.json"))
+    eid = entry_id(ALICE, "POST", "/p", "k")
+    _, _, token = s.begin(eid, "h", "a1")
+    s.mark_settling(eid, token, "a1", "n")
+    s.clear_settling(eid, token)
+    s.abandon(eid, token)
+    assert s.begin(eid, "h", "a2")[0] == "new"
+
+
+def test_oversize_result_tells_the_retry_it_was_delivered(fac):
+    app, bought = _app(fac)
+    c = TestClient(app)
+    first = _post(c, body={"depth": 17, "big": True})
+    assert first.status_code == 201
+    retry = _post(c, body={"depth": 17, "big": True})
+    assert retry.status_code == 409
+    assert retry.json()["detail"]["code"] == "IDEMPOTENCY_KEY_DELIVERED_NOT_STORED"
+    assert retry.json()["detail"]["x402_status"] == "delivered"
+    assert fac.settle.await_count == 1
+
+
+def test_credit_token_is_not_stored_and_replay_gets_the_current_one(fac, tmp_path, monkeypatch):
+    import app.x402.idempotency as idem
+    from app.services.bandwidth_credit import bandwidth_credit_manager
+    store = IdempotencyStore(state_file=str(tmp_path / "idem.json"))
+    monkeypatch.setattr(idem, "idempotency_store", store)
+    tokens = iter(["tok-original", "tok-current"])
+    issue = MagicMock(side_effect=lambda addr: next(tokens))
+    monkeypatch.setattr(bandwidth_credit_manager, "issue_token", issue)
+    app, bought = _app(fac)
+    c = TestClient(app)
+    first = _post(c, path="/api/v1/chunks/credit", body={})
+    assert first.json()["token"] == "tok-original"
+    assert "tok-original" not in (tmp_path / "idem.json").read_text()
+    retry = _post(c, path="/api/v1/chunks/credit", body={})
+    assert retry.json() == {"address": ALICE, "token": "tok-current"}
+    # Looked up for the payer, with no rotation and no second top-up.
+    issue.assert_called_with(ALICE)
+    assert bought == ["credit"] and fac.settle.await_count == 1
+
+
+def test_malformed_entry_makes_the_store_unavailable(tmp_path):
+    path = tmp_path / "idem.json"
+    path.write_text(json.dumps({"entries": {"abc": {"state": "done", "expires": 9e12}}}))
+    assert IdempotencyStore(state_file=str(path)).unavailable
+
+
+@pytest.mark.parametrize("nonce,expected", [
+    ("0x" + "AB" * 32, "0x" + "ab" * 32),
+    ("ab" * 32, "0x" + "ab" * 32),          # same bytes32 without the prefix
+    ("0x" + "ab" * 31, None),               # too short
+    ("0x" + "zz" * 32, None),
+])
+def test_authorization_key_is_canonical(nonce, expected):
+    from types import SimpleNamespace
+    from app.x402.settlement import authorization_key
+    payload = SimpleNamespace(payload=SimpleNamespace(
+        authorization=SimpleNamespace(from_=ALICE.upper().replace("0X", "0x"), nonce=nonce)))
+    key = authorization_key(payload)
+    assert key == ((ALICE, expected) if expected else None)

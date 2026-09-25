@@ -421,6 +421,8 @@ class X402Middleware(BaseHTTPMiddleware):
             payment_payload = getattr(request.state, "x402_payment", None)
             payment_requirements = getattr(request.state, "x402_requirements", None)
             unknown_outcome = False
+            from app.x402.idempotency import record_settling, settlement_refused
+            record_settling(request)
             try:
                 settlement = await self.facilitator_client.settle(
                     payment=payment_payload,
@@ -440,6 +442,7 @@ class X402Middleware(BaseHTTPMiddleware):
                                        wallet_address=payer)
                     x402_settlements_total.labels(result="error").inc()
                 else:
+                    settlement_refused(request)
                     log_payment_settled(client_ip=client_ip, payer=payer, transaction_hash=None,
                                         network=settings.X402_NETWORK, success=False, error_reason=failure)
                     x402_settlements_total.labels(result="refused").inc()

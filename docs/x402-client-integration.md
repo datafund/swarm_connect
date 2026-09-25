@@ -462,7 +462,9 @@ What the gateway does with the key (payments with `X-PAYMENT` only; the free tie
 | Same key, different body or query | `422` `IDEMPOTENCY_KEY_REUSED`. Not charged |
 | Key longer than 255 characters or not printable ASCII | `400` `IDEMPOTENCY_KEY_INVALID`. Not charged |
 | First request paid, but failed or was interrupted afterwards (including a gateway restart) | `409` `IDEMPOTENCY_KEY_SETTLED_PENDING` with the `transaction`. Not charged again; contact the operator with that transaction for the result or a refund |
-| First request failed before its payment settled | Nothing stored; a retry is a new, paid attempt |
+| The first payment was sent for settlement but no answer came back (facilitator error or timeout, or the request was cut off while waiting) | `409` `IDEMPOTENCY_KEY_SETTLEMENT_UNKNOWN` with the first authorization's `nonce`. Not charged. The first payment may or may not have been collected: check whether that nonce was used on-chain (USDC `authorizationState(from, nonce)`) before paying again with a new key; if it was, contact the operator |
+| First request succeeded, but its response was too large to keep (over 64 KB) | `409` `IDEMPOTENCY_KEY_DELIVERED_NOT_STORED` with the `transaction`. It was delivered and paid once; look the result up through the resource itself |
+| The facilitator refused the first payment, or the request failed before settlement | Nothing stored; a retry is a new, paid attempt |
 | The retry presents the same `X-PAYMENT` that paid for the original | `402`: sign a new payment. Only a new, unused authorization gets the stored result |
 | The gateway cannot read its idempotency store | `503` `IDEMPOTENCY_UNAVAILABLE`. Not charged; retry later with the same key |
 
@@ -471,6 +473,7 @@ Keys are scoped to the payer (the verified signer of `X-PAYMENT`), the method an
 What to know about the retry's payment:
 
 - **It must still pass verification.** The facilitator verifies the retry's payment (that is what proves it comes from the same payer), and verification checks the amount against the current price and the wallet's balance. If the first purchase drained the wallet, or the price has risen since, the retry gets a `402` instead of the stored result. You are not charged; sign again from that `402` (at the new price) with the same key, or top up the wallet.
+- **Credit top-ups.** A replayed `POST /api/v1/chunks/credit` response carries the account's **current** bearer token (the gateway does not store the token, and a replay never issues or rotates one).
 - **It is not spent.** A replayed response leaves the retry's signed authorization unsettled but valid until its `validBefore`. Keep `validBefore` short. `Idempotent-Replayed: true` means the response, including its `X-PAYMENT-RESPONSE` and `X-Payment-Transaction`, belongs to the **original** payment; do not treat it as proof that the retry's authorization settled.
 
 ## Error Handling
@@ -483,6 +486,8 @@ What to know about the retry's payment:
 | "Invalid signature" | Wrong private key or network | Check configuration |
 | "Payment verification failed" | Facilitator rejected | Check payment amount |
 | 409 `IDEMPOTENCY_KEY_IN_PROGRESS` | Retry of a paid request still running | Retry with the same key after `Retry-After` |
+| 409 `IDEMPOTENCY_KEY_SETTLEMENT_UNKNOWN` | The first payment's settlement returned no answer | Check the `nonce` on-chain before paying again |
+| 409 `IDEMPOTENCY_KEY_DELIVERED_NOT_STORED` | The first request succeeded; its response was too large to replay | Look up the result; do not pay again |
 | 422 `IDEMPOTENCY_KEY_REUSED` | Same `Idempotency-Key` for a different request | Use a new key |
 | 409 `IDEMPOTENCY_KEY_SETTLED_PENDING` | The first request was paid but produced no stored result | Contact the operator with the `transaction` |
 | 503 `IDEMPOTENCY_UNAVAILABLE` | The gateway's idempotency store is unreadable | Retry later; not charged |
