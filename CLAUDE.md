@@ -398,6 +398,7 @@ The gateway exposes a `/metrics` endpoint (Prometheus text format) when `METRICS
 - `gateway_pool_acquires_total{size, status}`
 - `gateway_stamp_spend_refusals_total{operation, limit}` — purchases and extends refused by a spending limit (`limit` = `per_request` or `daily_budget`)
 - `gateway_stamp_spend_bzz_total{operation, charged}` — BZZ committed through the stamp endpoints (`charged` = `budget` or `paid`)
+- `gateway_requests_by_client_total{client_type, outcome}` — which clients are served and whether they are (`client_type` = `mcp`/`cli`/`sdk-js`/`browser`/`curl`/`http-lib`/`bot`/`other`/`none`; `outcome` = `ok`/`client_error`/`rate_limited`/`payment_required`/`server_error`)
 - `gateway_notary_signatures_total{status}`
 - `gateway_x402_payments_total{mode}` (paid/free/rejected)
 - `gateway_rate_limit_hits_total`
@@ -411,8 +412,19 @@ The gateway exposes a `/metrics` endpoint (Prometheus text format) when `METRICS
 - `gateway_stamp_min_ttl_seconds`, `gateway_uptime_seconds`
 - `gateway_bandwidth_credit_accounts`, `gateway_bandwidth_credit_bytes_total` (when `CHUNK_UPLOAD_ENABLED`)
 - `gateway_stamp_spend_callers`, `gateway_stamp_spend_bzz_today` — callers holding a spend balance today, and the BZZ charged to budgets so far. Polled rather than accumulated, because the day rolls over inside the tracker and a counter would keep climbing past midnight UTC.
+- `gateway_distinct_callers` — how many separate callers today. A count, not a list.
 
 **Info**: `gateway_info{version, environment, x402_enabled, pool_enabled, notary_enabled, chunk_upload_enabled}`
+
+**Who we serve, and the line on caller data (#347).** Production traffic turned out to be almost entirely one client — the MCP plugin, run by AI agents in cloud sandboxes — and 37 of its 84 production requests were being refused with 429, because the free tier allows three requests a minute and an agent making several calls in sequence exceeds it. Finding that meant reading reverse-proxy access logs by hand on the host. `gateway_requests_by_client_total` makes it a dashboard panel.
+
+`client_type` comes from a fixed table in `app/services/client_type.py`, **never from the `User-Agent` directly**. A metric label must not take a value the caller chooses, or anyone can mint unlimited time series — a cost attack on the metrics bill and a Prometheus instance that slows for everyone. Anything unrecognised becomes `other`.
+
+The rule this follows: **counts and buckets, never per-user records.** No hashed or truncated IP appears in any label — a hashed IP is pseudonymised, not anonymised, so it is still personal data, *and* still high-cardinality, failing on privacy and cost at once. `gateway_distinct_callers` needs to recognise a repeat caller to count distinctness, so the middleware keeps a salted hash in memory with a random per-process salt, and exports only the total: the values cannot be reversed, cannot be checked against a precomputed table, and cannot be correlated across restarts or between the two gateways. Nothing is persisted. A test asserts no caller string reaches `/metrics`.
+
+Per-caller detail stays in the logs, where retention is short and access is controlled, and is read when someone is investigating rather than exported continuously to a third party.
+
+`ClientMetricsMiddleware` is registered **after** the rate limiter and x402 so that it wraps them — Starlette runs the most recently added middleware outermost, so it sees the final response including their 429s and 402s, which are the outcomes the counter exists for. It is plain ASGI rather than a `BaseHTTPMiddleware` subclass: that base class wraps each request in an anyio task group and re-plumbs the streams, which deadlocked the entire test suite when stacked behind the existing middleware. `/metrics`, `/health` and `/` are excluded — Alloy scrapes and Docker healthchecks are the two most frequent requests the gateway sees and would bury everything else.
 
 **Bee chain-backend metrics** (scraped from the bundled Bee nodes, not produced by the gateway):
 - `bee_eth_backend_total_rpc_calls` / `bee_eth_backend_total_rpc_errors` — Gnosis RPC volume and failures
