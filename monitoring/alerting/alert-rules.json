@@ -768,5 +768,83 @@
     "noDataState": "Alerting",
     "ruleGroup": "critical",
     "title": "No Data \u2014 System May Be Down"
+  },
+  {
+    "annotations": {
+      "summary": "{{ $labels.environment }}: configured BZZ/USD rate is {{ printf \"%.1f\" $values.B.Value }}x the market price",
+      "description": "X402_BZZ_USD_RATE (the rate every x402 price is computed from) is more than 2x away from the market price reported by X402_BZZ_PRICE_FEED_URL. Above 2x the gateway overcharges; below 0.5x every sale can lose money. Review and set X402_BZZ_USD_RATE in the GitHub environment, then redeploy (#364)."
+    },
+    "condition": "C",
+    "data": [
+      {
+        "datasourceUid": "grafanacloud-prom",
+        "model": {
+          "expr": "gateway_bzz_usd_rate_configured / (gateway_bzz_usd_rate_market > 0)",
+          "instant": true,
+          "intervalMs": 1000,
+          "maxDataPoints": 43200,
+          "refId": "A"
+        },
+        "queryType": "",
+        "refId": "A",
+        "relativeTimeRange": {
+          "from": 300,
+          "to": 0
+        }
+      },
+      {
+        "datasourceUid": "__expr__",
+        "model": {
+          "expression": "A",
+          "intervalMs": 1000,
+          "maxDataPoints": 43200,
+          "reducer": "last",
+          "refId": "B",
+          "type": "reduce"
+        },
+        "queryType": "",
+        "refId": "B",
+        "relativeTimeRange": {
+          "from": 0,
+          "to": 0
+        }
+      },
+      {
+        "datasourceUid": "__expr__",
+        "model": {
+          "conditions": [
+            {
+              "evaluator": {
+                "params": [
+                  0.5,
+                  2
+                ],
+                "type": "outside_range"
+              }
+            }
+          ],
+          "expression": "B",
+          "intervalMs": 1000,
+          "maxDataPoints": 43200,
+          "refId": "C",
+          "type": "threshold"
+        },
+        "queryType": "",
+        "refId": "C",
+        "relativeTimeRange": {
+          "from": 0,
+          "to": 0
+        }
+      }
+    ],
+    "execErrState": "Error",
+    "for": "1h",
+    "isPaused": false,
+    "labels": {
+      "severity": "warning"
+    },
+    "noDataState": "OK",
+    "ruleGroup": "warning",
+    "title": "BZZ pricing rate off market"
   }
 ]

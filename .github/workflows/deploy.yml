@@ -52,6 +52,11 @@ jobs:
           X402_PAY_TO_ADDRESS=${{ vars.X402_PAY_TO_ADDRESS || '' }}
           X402_NETWORK=${{ vars.X402_NETWORK || 'base-sepolia' }}
           X402_FACILITATOR_URL=${{ vars.X402_FACILITATOR_URL || 'https://x402.org/facilitator' }}
+          X402_BZZ_USD_RATE=${{ vars.X402_BZZ_USD_RATE || '0.50' }}
+          X402_MARKUP_PERCENT=${{ vars.X402_MARKUP_PERCENT || '50' }}
+          X402_MIN_PRICE_USD=${{ vars.X402_MIN_PRICE_USD || '0.01' }}
+          X402_BZZ_PRICE_FEED_URL=${{ vars.X402_BZZ_PRICE_FEED_URL || '' }}
+          X402_BZZ_PRICE_FEED_INTERVAL_SECONDS=${{ vars.X402_BZZ_PRICE_FEED_INTERVAL_SECONDS || '900' }}
           X402_FREE_TIER_ENABLED=${{ vars.X402_FREE_TIER_ENABLED || 'true' }}
           STAMP_POOL_ENABLED=${{ vars.STAMP_POOL_ENABLED || 'false' }}
           STAMP_POOL_RESERVE_SMALL=${{ vars.STAMP_POOL_RESERVE_SMALL || '1' }}
@@ -121,6 +126,11 @@ jobs:
           X402_PAY_TO_ADDRESS=${{ vars.X402_PAY_TO_ADDRESS || '' }}
           X402_NETWORK=${{ vars.X402_NETWORK || 'base' }}
           X402_FACILITATOR_URL=${{ vars.X402_FACILITATOR_URL || 'https://x402.org/facilitator' }}
+          X402_BZZ_USD_RATE=${{ vars.X402_BZZ_USD_RATE || '0.50' }}
+          X402_MARKUP_PERCENT=${{ vars.X402_MARKUP_PERCENT || '50' }}
+          X402_MIN_PRICE_USD=${{ vars.X402_MIN_PRICE_USD || '0.01' }}
+          X402_BZZ_PRICE_FEED_URL=${{ vars.X402_BZZ_PRICE_FEED_URL || '' }}
+          X402_BZZ_PRICE_FEED_INTERVAL_SECONDS=${{ vars.X402_BZZ_PRICE_FEED_INTERVAL_SECONDS || '900' }}
           X402_FREE_TIER_ENABLED=${{ vars.X402_FREE_TIER_ENABLED || 'true' }}
           STAMP_POOL_ENABLED=${{ vars.STAMP_POOL_ENABLED || 'false' }}
           STAMP_POOL_RESERVE_SMALL=${{ vars.STAMP_POOL_RESERVE_SMALL || '1' }}
