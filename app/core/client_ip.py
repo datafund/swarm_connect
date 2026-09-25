@@ -104,3 +104,27 @@ def get_client_ip(request: Request) -> str:
         return real_ip.strip()
 
     return _peer(request)
+
+
+def client_key(ip: str) -> str:
+    """The key per-caller limits use for an address (#367).
+
+    IPv6 clients are normally given a whole /64, so keying on the full address
+    lets one client present billions of fresh ones. IPv6 addresses are grouped
+    by their /64; IPv4 addresses are used as they are.
+    """
+    import ipaddress
+    try:
+        addr = ipaddress.ip_address(ip)
+    except ValueError:
+        return ip
+    if addr.version == 6:
+        if addr.ipv4_mapped:
+            return str(addr.ipv4_mapped)
+        return str(ipaddress.ip_network(f"{addr}/64", strict=False))
+    return str(addr)
+
+
+def get_client_key(request: Request) -> str:
+    """get_client_ip() grouped for per-caller limits (see client_key)."""
+    return client_key(get_client_ip(request))

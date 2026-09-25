@@ -19,6 +19,7 @@ from x402.types import PaymentPayload
 from x402.facilitator import FacilitatorClient, FacilitatorConfig
 
 from app.core.config import settings
+from app.core.client_ip import client_key
 from app.services.metrics import x402_payments_total
 from app.x402.pricing import get_price_quote
 from app.x402.ratelimit import check_rate_limit, get_rate_limit_headers, get_free_tier_stats
@@ -282,7 +283,7 @@ async def require_x402_payment(request: Request) -> None:
 
     # If no payment header AND no free tier opt-in, return 402
     if not payment_header and payment_mode != "free":
-        free_tier_info = get_free_tier_stats(client_ip) if settings.X402_FREE_TIER_ENABLED else None
+        free_tier_info = get_free_tier_stats(client_key(client_ip)) if settings.X402_FREE_TIER_ENABLED else None
 
         logger.info(f"x402: No payment header, returning 402 for ${price_usd}")
         x402_payments_total.labels(mode="rejected").inc()
@@ -309,7 +310,7 @@ async def require_x402_payment(request: Request) -> None:
             raise HTTPException(status_code=402, detail=response_body)
 
         # Check free tier rate limit
-        is_allowed, reason, stats = check_rate_limit(client_ip, is_free_tier=True)
+        is_allowed, reason, stats = check_rate_limit(client_key(client_ip), is_free_tier=True)
 
         if is_allowed:
             logger.info(f"x402: Free tier access granted for {client_ip} ({stats['requests_made']}/{stats['limit']} requests)")

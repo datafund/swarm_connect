@@ -90,6 +90,18 @@ if settings.RATE_LIMIT_ENABLED and not settings.X402_ENABLED:
     app.add_middleware(RateLimitMiddleware)
     logger.info(f"Global rate limiting enabled: {settings.RATE_LIMIT_PER_MINUTE}/min + {settings.RATE_LIMIT_BURST} burst")
 
+# Blocklist (#379). Added after the rate limiter, so it runs before it (outer).
+if settings.X402_BLACKLIST_IPS.strip():
+    from app.middleware.access_list import AccessListMiddleware
+    app.add_middleware(AccessListMiddleware, blocked=settings.X402_BLACKLIST_IPS)
+    logger.info("IP blocklist enabled")
+# Documented but deliberately not implemented: an allowlist that skips payment
+# would give paid operations away to anyone who can appear from a listed
+# address. Say so rather than silently ignore it.
+if settings.X402_WHITELIST_IPS.strip():
+    logger.warning("X402_WHITELIST_IPS is set but has no effect: listed IPs do not bypass payment. "
+                   "Remove it to silence this warning.")
+
 # Add x402 payment middleware if enabled (must be added before CORS)
 if settings.X402_ENABLED:
     from app.x402.middleware import X402Middleware

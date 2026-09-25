@@ -72,7 +72,8 @@ X402_BASE_ETH_CRITICAL_THRESHOLD=0.001  # Block if Base ETH < 0.001 (~10 txs)
 
 # === Limits ===
 X402_MAX_STAMP_BZZ=5                 # Max 5 BZZ per stamp purchase
-X402_RATE_LIMIT_PER_IP=10            # 10 requests/minute per IP
+# X402_RATE_LIMIT_PER_IP is not enforced. Paid requests are bounded by the global limiter
+# (RATE_LIMIT_PER_MINUTE + RATE_LIMIT_BURST) once it runs alongside x402 (#401).
 
 # === Free Tier ===
 X402_FREE_TIER_ENABLED=true          # Enable rate-limited free tier (default: true)
@@ -80,7 +81,7 @@ X402_FREE_TIER_RATE_LIMIT=5          # Free tier requests per minute per IP (def
 
 # === Access Control ===
 X402_BLACKLIST_IPS=                  # Comma-separated: 192.168.1.100,10.0.0.50
-X402_WHITELIST_IPS=127.0.0.1         # Free access for these IPs
+# X402_WHITELIST_IPS has no effect (no payment allowlist; see Access Control)
 
 # === Audit ===
 X402_AUDIT_LOG_PATH=logs/x402_audit.jsonl
@@ -114,25 +115,16 @@ The minimum price (`X402_MIN_PRICE_USD`) ensures you always cover costs.
 
 ## Access Control
 
-### Whitelist (Free Access)
+### No payment allowlist
 
-IPs in the whitelist bypass x402 payment entirely:
-
-```bash
-X402_WHITELIST_IPS=192.168.1.100,10.0.0.1
-```
-
-Use for:
-- Internal services
-- Trusted partners
-- Development/testing
+There is no allowlist that bypasses payment. `X402_WHITELIST_IPS` has no effect, and the gateway logs a warning at startup if it is set: an address-based bypass would give paid operations away to anyone who can appear from a listed address. Trusted internal callers should pay, or use the free tier.
 
 ### Blacklist (Blocked)
 
-IPs in the blacklist receive 403 Forbidden:
+Addresses in the blocklist receive 403 `ACCESS_BLOCKED` on every route, before any other work. IPs and CIDR ranges are accepted; IPv6 clients are best blocked by their /64. The list is read at startup, so a change takes a restart. For an immediate block, use the proxy (see `docs/mainnet-runbook.md`).
 
 ```bash
-X402_BLACKLIST_IPS=203.0.113.50
+X402_BLACKLIST_IPS=203.0.113.50,2001:db8:1234:5678::/64
 ```
 
 Use for:

@@ -12,6 +12,7 @@ from app.services.stamp_ownership import stamp_ownership_manager
 from app.services.stamp_tracker import record_purchase
 from app.services.spend_budget import spend_budget_tracker
 from app.x402.middleware import get_client_ip
+from app.core.client_ip import get_client_key
 from app.services.metrics import (
     stamp_purchases_total,
     stamp_spend_refusals_total,
@@ -82,7 +83,7 @@ def _enforce_spend_limits(request: Request, cost_bzz: float, operation: str) -> 
             "spend budget still applies.", operation, settings.X402_NETWORK,
         )
 
-    caller = get_client_ip(request)
+    caller = get_client_key(request)
     allowed, info = spend_budget_tracker.check(caller, cost_bzz)
     if not allowed:
         logger.info(
