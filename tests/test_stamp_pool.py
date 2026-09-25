@@ -1604,3 +1604,54 @@ class TestSpendReservation:
             assert asyncio.run(mgr._purchase_stamp(17)) is None
         buy.assert_not_called()
         assert mgr._spend_budget_remaining() == real.STAMP_POOL_MAX_PURCHASES_PER_HOUR
+
+
+
+class TestPoolSpendOutcomes:
+    @staticmethod
+    def _mgr(tmp_path, monkeypatch, ceiling=10.0):
+        from app.core.config import settings as real
+        from app.services import spend_budget
+        monkeypatch.setattr(real, "GATEWAY_DAILY_BZZ_CEILING", ceiling)
+        monkeypatch.setattr(real, "STAMP_POOL_MAX_PURCHASES_PER_HOUR", 5)
+        tracker = spend_budget.SpendBudgetTracker(state_file=str(tmp_path / "s.json"))
+        monkeypatch.setattr(spend_budget, "spend_budget_tracker", tracker)
+        return StampPoolManager(state_file=str(tmp_path / "pool.json")), tracker
+
+    def test_a_read_timeout_during_purchase_stays_counted(self, tmp_path, monkeypatch):
+        import asyncio
+        import httpx
+        mgr, tracker = self._mgr(tmp_path, monkeypatch)
+        with patch("app.services.swarm_api.get_chainstate", new=AsyncMock(return_value={"currentPrice": "24000"})), \
+             patch("app.services.swarm_api.purchase_postage_stamp",
+                   new=AsyncMock(side_effect=httpx.ReadTimeout("mining"))):
+            with pytest.raises(httpx.ReadTimeout):
+                asyncio.run(mgr._purchase_stamp(17))
+        assert tracker.snapshot()["gateway_spent"] > 0
+        assert mgr._spend_budget_remaining() == 4
+
+    def test_a_cancelled_purchase_stays_counted(self, tmp_path, monkeypatch):
+        import asyncio
+        mgr, tracker = self._mgr(tmp_path, monkeypatch)
+        with patch("app.services.swarm_api.get_chainstate", new=AsyncMock(return_value={"currentPrice": "24000"})), \
+             patch("app.services.swarm_api.purchase_postage_stamp",
+                   new=AsyncMock(side_effect=asyncio.CancelledError())):
+            with pytest.raises(asyncio.CancelledError):
+                asyncio.run(mgr._purchase_stamp(17))
+        assert tracker.snapshot()["gateway_spent"] > 0
+
+    def test_ceiling_refusals_reach_pool_status(self, tmp_path, monkeypatch):
+        """Through check_and_replenish, whose results replace _errors."""
+        import asyncio
+        mgr, _ = self._mgr(tmp_path, monkeypatch, ceiling=0.000001)
+        mgr.add_stamp_to_pool("a" * 64, 17, 1_000_000, 60)
+        with patch.object(mgr, "sync_from_bee_node", new=AsyncMock(return_value=1)), \
+             patch.object(mgr, "_update_stamp_ttls", new=AsyncMock()), \
+             patch.object(mgr, "_get_stamp_ttl", new=AsyncMock(return_value=60)), \
+             patch.object(mgr, "get_reserve_config", return_value={17: 2}), \
+             patch("app.services.swarm_api.get_chainstate", new=AsyncMock(return_value={"currentPrice": "24000"})):
+            mgr._last_sync_ok = True
+            results = asyncio.run(mgr._check_and_replenish_locked(
+                {"checked_at": "", "stamps_purchased": 0, "stamps_topped_up": 0, "errors": []}))
+        assert results["stamps_topped_up"] == 0
+        assert any("daily spending ceiling" in e for e in mgr._errors), mgr._errors

@@ -228,6 +228,19 @@ class SpendBudgetTracker:
                         self._spent[key] = left
             self._save()
 
+    def reserve_spend(self, cost_bzz: float, caller: Optional[str]) -> Tuple[Optional[Hold], Optional[str], dict]:
+        """Reserve a gateway spend against every limit that applies to it.
+
+        Always the gateway-wide ceiling. When `caller` is given (the spend is a
+        giveaway: unpaid, or paid on a test network) also the free-spending
+        ceiling and that caller's daily budget. All or nothing, one write.
+        """
+        charges = [(GLOBAL_KEY, cost_bzz, settings.GATEWAY_DAILY_BZZ_CEILING)]
+        if caller is not None:
+            charges += [(GIVEAWAY_KEY, cost_bzz, settings.GATEWAY_DAILY_BZZ_FREE_CEILING),
+                        (caller, cost_bzz, self.budget())]
+        return self.reserve_all(charges)
+
     def reserve_gateway(self, cost_bzz: float) -> Tuple[Optional[Hold], dict]:
         """Reserve against GATEWAY_DAILY_BZZ_CEILING only (pool, for-owner)."""
         hold, _, info = self.reserve_all([(GLOBAL_KEY, cost_bzz, settings.GATEWAY_DAILY_BZZ_CEILING)])
@@ -258,18 +271,6 @@ class SpendBudgetTracker:
             self._spent[caller] = spent + cost_bzz
             self._save()
             return True, info
-
-    def release(self, caller: str, cost_bzz: float) -> None:
-        """Undo a reservation whose spend did not happen."""
-        with self._lock:
-            self._roll_day()
-            if caller in self._spent:
-                left = self._spent[caller] - cost_bzz
-                if left <= 1e-12:
-                    del self._spent[caller]
-                else:
-                    self._spent[caller] = left
-                self._save()
 
     def consume(self, caller: str, cost_bzz: float) -> None:
         with self._lock:

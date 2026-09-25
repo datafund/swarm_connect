@@ -146,6 +146,13 @@ gateway_spend_bzz_today = Gauge(
     "scope=total (everything) or scope=free (unpaid spending)",
     ["scope"],
 )
+gateway_spend_uncertain_bzz_total = Counter(
+    "gateway_spend_uncertain_bzz_total",
+    "BZZ kept charged against the spending limits after a failure whose outcome "
+    "was uncertain (timeout after sending, cancellation, 5xx); may or may not "
+    "have been spent (#363)",
+    ["operation"],
+)
 gateway_spend_ceiling_bzz = Gauge(
     "gateway_spend_ceiling_bzz",
     "Configured gateway-wide daily ceilings (-1 = unlimited)",

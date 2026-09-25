@@ -232,7 +232,9 @@ class TestPurchaseEndpoint:
              patch("app.services.swarm_api.purchase_postage_stamp",
                    new=AsyncMock(side_effect=httpx.ReadTimeout("mining"))):
             TestClient(app).post("/api/v1/stamps/", json={"depth": 17, "duration_hours": 24})
-        assert tracker.snapshot()["spent"] != {}
+        snap = tracker.snapshot()
+        assert snap["spent"] != {}
+        assert snap["gateway_spent"] > 0 and snap["giveaway_spent"] > 0
 
 
 class TestExtendEndpoint:
@@ -663,10 +665,12 @@ class TestReservation:
     def test_reserve_is_atomic_check_and_charge(self, tmp_path, monkeypatch):
         monkeypatch.setattr(settings, "STAMP_DAILY_BZZ_PER_CALLER", 1.0)
         t = SpendBudgetTracker(state_file=str(tmp_path / "s.json"))
-        assert t.reserve("1.2.3.4", 0.6)[0]
-        assert not t.reserve("1.2.3.4", 0.6)[0], "a second concurrent request must see the first"
-        t.release("1.2.3.4", 0.6)
-        assert t.reserve("1.2.3.4", 0.6)[0]
+        hold, _, _ = t.reserve_all([("1.2.3.4", 0.6, 1.0)])
+        assert hold is not None
+        assert t.reserve_all([("1.2.3.4", 0.6, 1.0)])[0] is None, "a second concurrent request must see the first"
+        t.release_hold(hold)
+        t.release_hold(hold)   # idempotent
+        assert t.reserve_all([("1.2.3.4", 0.6, 1.0)])[0] is not None
 
     def test_concurrent_extends_cannot_overrun_the_budget(self, tracker, monkeypatch):
         """The audit PoC, inverted: many parallel extends from one IP."""
@@ -795,3 +799,52 @@ class TestCeilingOnEveryPath:
         assert r.status_code == 503
         assert r.json()["detail"]["code"] == "GATEWAY_DAILY_SPEND_CEILING"
         create.assert_not_called()
+
+
+
+class TestClassification:
+    @staticmethod
+    def _status(code):
+        import httpx
+        return httpx.HTTPStatusError(str(code), request=httpx.Request("POST", "http://bee/x"),
+                                     response=httpx.Response(code))
+
+    def test_what_counts_as_certainly_unspent(self):
+        import asyncio
+        import httpx
+        from fastapi import HTTPException
+        from app.services.spend_budget import spend_certainly_did_not_happen as unspent
+        req = httpx.Request("POST", "http://bee/x")
+        released = [HTTPException(status_code=400), httpx.ConnectError("x", request=req),
+                    httpx.ConnectTimeout("x", request=req), self._status(400), self._status(429)]
+        kept = [httpx.ReadTimeout("x", request=req), httpx.WriteTimeout("x", request=req),
+                httpx.RemoteProtocolError("x", request=req), self._status(500), self._status(503),
+                asyncio.CancelledError(), ValueError("?"), RuntimeError("?")]
+        assert all(unspent(e) for e in released)
+        assert not any(unspent(e) for e in kept)
+
+
+
+class TestForOwnerRelease:
+    def _call(self, monkeypatch, error):
+        from app.api.endpoints import stamps_for_owner as ep
+        monkeypatch.setattr(settings, "STAMP_PURCHASE_FOR_OTHERS_ENABLED", True)
+        monkeypatch.setattr(settings, "STAMP_FOR_OTHERS_REQUIRE_WHITELIST", False)
+        monkeypatch.setattr(settings, "STAMP_FOR_OTHERS_FREE_TIER_ENABLED", True)
+        monkeypatch.setattr(settings, "GATEWAY_DAILY_BZZ_CEILING", 10.0)
+        chain = ep.gnosis_chain_client
+        with patch("app.services.swarm_api.get_chainstate", new=AsyncMock(return_value=CHAINSTATE)), \
+             patch.object(type(chain), "is_configured", new=property(lambda self: True)), \
+             patch.object(chain, "preflight", new=AsyncMock(return_value={"is_critical": False, "warnings": []})), \
+             patch.object(chain, "create_batch", new=AsyncMock(side_effect=error)):
+            return TestClient(app, raise_server_exceptions=False).post("/api/v1/stamps/for-owner", json={
+                "owner": "0x" + "1" * 40, "depth": 17, "duration_hours": 24})
+
+    def test_a_gnosis_error_gives_the_hold_back(self, tracker, monkeypatch):
+        from app.services.gnosis_chain import GnosisChainError
+        assert self._call(monkeypatch, GnosisChainError("reverted")).status_code == 502
+        assert tracker.snapshot()["gateway_spent"] == 0.0
+
+    def test_an_uncertain_error_keeps_the_hold(self, tracker, monkeypatch):
+        assert self._call(monkeypatch, TimeoutError("receipt")).status_code == 500
+        assert tracker.snapshot()["gateway_spent"] > 0

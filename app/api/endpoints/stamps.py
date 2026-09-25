@@ -15,6 +15,7 @@ from app.services.spend_budget import (
 )
 from app.x402.middleware import get_client_ip
 from app.services.metrics import (
+    gateway_spend_uncertain_bzz_total,
     stamp_purchases_total,
     stamp_spend_refusals_total,
     stamp_spend_bzz_total,
@@ -54,6 +55,7 @@ class SpendReservation:
         if spend_certainly_did_not_happen(exc):
             spend_budget_tracker.release_hold(self.hold)
         else:
+            gateway_spend_uncertain_bzz_total.labels(operation=self.operation).inc(self.cost_bzz)
             logger.warning(
                 "%s failed with %s; the outcome is uncertain, so its %.6f BZZ stays "
                 "charged against the spending limits", self.operation, type(exc).__name__, self.cost_bzz,
@@ -105,7 +107,6 @@ def _enforce_spend_limits(request: Request, cost_bzz: float, operation: str) -> 
             },
         )
 
-    charges = [(GLOBAL_KEY, cost_bzz, settings.GATEWAY_DAILY_BZZ_CEILING)]
     caller = None
     # A settled payment is not drawn from the giveaway budgets — the caller has
     # funded it. Withheld on a test network for the same reason as the pool:
@@ -119,12 +120,8 @@ def _enforce_spend_limits(request: Request, cost_bzz: float, operation: str) -> 
         )
     if not (paid and settings.paid_bypass_is_honoured()):
         caller = get_client_ip(request)
-        charges += [
-            (GIVEAWAY_KEY, cost_bzz, settings.GATEWAY_DAILY_BZZ_FREE_CEILING),
-            (caller, cost_bzz, spend_budget_tracker.budget()),
-        ]
 
-    hold, refused, info = spend_budget_tracker.reserve_all(charges)
+    hold, refused, info = spend_budget_tracker.reserve_spend(cost_bzz, caller)
     if hold is not None:
         return SpendReservation(operation, cost_bzz, caller, hold)
 
