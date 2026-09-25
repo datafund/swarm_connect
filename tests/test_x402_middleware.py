@@ -305,10 +305,9 @@ class TestX402MiddlewareFlow:
         assert response.status_code == 200
         assert response.json() == {"status": "uploaded"}
 
-    @patch("app.x402.dependency.check_base_eth_balance", return_value=OK_BALANCE)
     @patch("app.x402.middleware.settings")
     @patch("app.x402.dependency.settings")
-    def test_unprotected_endpoint_passes_through(self, mock_dep, mock_mw, mock_balance):
+    def test_unprotected_endpoint_passes_through(self, mock_dep, mock_mw):
         """Unprotected endpoints pass through even when x402 enabled."""
         _configure_dep(mock_dep, mock_mw)
 
@@ -321,11 +320,10 @@ class TestX402MiddlewareFlow:
         assert response.status_code == 200
         assert response.json() == {"reference": "abc123"}
 
-    @patch("app.x402.dependency.check_base_eth_balance", return_value=OK_BALANCE)
     @patch("app.x402.dependency.get_price_quote")
     @patch("app.x402.middleware.settings")
     @patch("app.x402.dependency.settings")
-    def test_protected_endpoint_returns_402_without_payment(self, mock_dep, mock_mw, mock_price, mock_balance):
+    def test_protected_endpoint_returns_402_without_payment(self, mock_dep, mock_mw, mock_price):
         """Protected endpoint returns 402 without X-PAYMENT header when free tier disabled."""
         _configure_dep(mock_dep, mock_mw, free_tier=False)
         mock_price.return_value = {"price_usd": 0.05, "description": "Data upload"}
@@ -343,11 +341,10 @@ class TestX402MiddlewareFlow:
         assert "Payment required" in body["error"]
         assert "accepts" in body
 
-    @patch("app.x402.dependency.check_base_eth_balance", return_value=OK_BALANCE)
     @patch("app.x402.dependency.get_price_quote")
     @patch("app.x402.middleware.settings")
     @patch("app.x402.dependency.settings")
-    def test_invalid_payment_header_returns_402(self, mock_dep, mock_mw, mock_price, mock_balance):
+    def test_invalid_payment_header_returns_402(self, mock_dep, mock_mw, mock_price):
         """Invalid X-PAYMENT header returns 402."""
         _configure_dep(mock_dep, mock_mw)
         mock_price.return_value = {"price_usd": 0.05, "description": "Data upload"}
@@ -363,12 +360,11 @@ class TestX402MiddlewareFlow:
         body = response.json()["detail"]
         assert "Invalid X-PAYMENT header format" in body["error"]
 
-    @patch("app.x402.dependency.check_base_eth_balance", return_value=OK_BALANCE)
     @patch("app.x402.dependency._get_facilitator_client")
     @patch("app.x402.dependency.get_price_quote")
     @patch("app.x402.middleware.settings")
     @patch("app.x402.dependency.settings")
-    def test_verification_failure_returns_402(self, mock_dep, mock_mw, mock_price, mock_get_fac, mock_balance):
+    def test_verification_failure_returns_402(self, mock_dep, mock_mw, mock_price, mock_get_fac):
         """Payment verification failure returns 402."""
         _configure_dep(mock_dep, mock_mw)
         mock_dep.X402_FACILITATOR_URL = "https://x402.org/facilitator"
@@ -410,11 +406,10 @@ class TestX402MiddlewareFlow:
 class TestMiddlewarePriceCalculation:
     """Test dependency price calculation for different endpoints."""
 
-    @patch("app.x402.dependency.check_base_eth_balance", return_value=OK_BALANCE)
     @patch("app.x402.dependency.get_price_quote")
     @patch("app.x402.middleware.settings")
     @patch("app.x402.dependency.settings")
-    def test_stamps_endpoint_pricing(self, mock_dep, mock_mw, mock_price, mock_balance):
+    def test_stamps_endpoint_pricing(self, mock_dep, mock_mw, mock_price):
         _configure_dep(mock_dep, mock_mw, free_tier=False)
         mock_price.return_value = {"price_usd": 1.50, "description": "Stamp purchase"}
 
@@ -430,11 +425,10 @@ class TestMiddlewarePriceCalculation:
         mock_price.assert_called()
         assert body["accepts"][0]["maxAmountRequired"] == "1500000"
 
-    @patch("app.x402.dependency.check_base_eth_balance", return_value=OK_BALANCE)
     @patch("app.x402.dependency.get_price_quote")
     @patch("app.x402.middleware.settings")
     @patch("app.x402.dependency.settings")
-    def test_data_endpoint_uses_content_length(self, mock_dep, mock_mw, mock_price, mock_balance):
+    def test_data_endpoint_uses_content_length(self, mock_dep, mock_mw, mock_price):
         _configure_dep(mock_dep, mock_mw, free_tier=False)
         mock_price.return_value = {"price_usd": 0.10, "description": "Data upload"}
 
@@ -546,11 +540,10 @@ class TestFreeTierAccess:
         from app.x402.ratelimit import reset_rate_limiter
         reset_rate_limiter()
 
-    @patch("app.x402.dependency.check_base_eth_balance", return_value=OK_BALANCE)
     @patch("app.x402.dependency.get_price_quote")
     @patch("app.x402.middleware.settings")
     @patch("app.x402.dependency.settings")
-    def test_free_tier_allows_access_without_payment(self, mock_dep, mock_mw, mock_price, mock_balance):
+    def test_free_tier_allows_access_without_payment(self, mock_dep, mock_mw, mock_price):
         _configure_dep(mock_dep, mock_mw, free_tier=True)
         mock_price.return_value = {"price_usd": 0.05, "description": "Data upload"}
 
@@ -567,12 +560,11 @@ class TestFreeTierAccess:
         assert "X-RateLimit-Limit" in response.headers
         assert "X-RateLimit-Remaining" in response.headers
 
-    @patch("app.x402.dependency.check_base_eth_balance", return_value=OK_BALANCE)
     @patch("app.x402.ratelimit.settings")
     @patch("app.x402.dependency.get_price_quote")
     @patch("app.x402.middleware.settings")
     @patch("app.x402.dependency.settings")
-    def test_free_tier_rate_limit_enforced(self, mock_dep, mock_mw, mock_price, mock_rl, mock_balance):
+    def test_free_tier_rate_limit_enforced(self, mock_dep, mock_mw, mock_price, mock_rl):
         _configure_dep(mock_dep, mock_mw, free_tier=True)
         mock_dep.X402_FREE_TIER_RATE_LIMIT = 2
         mock_rl.X402_FREE_TIER_RATE_LIMIT = 2
@@ -597,11 +589,10 @@ class TestFreeTierAccess:
         assert "payment_info" in body
         assert body["payment_info"]["price_usd"] == 0.05
 
-    @patch("app.x402.dependency.check_base_eth_balance", return_value=OK_BALANCE)
     @patch("app.x402.dependency.get_price_quote")
     @patch("app.x402.middleware.settings")
     @patch("app.x402.dependency.settings")
-    def test_free_tier_disabled_returns_402(self, mock_dep, mock_mw, mock_price, mock_balance):
+    def test_free_tier_disabled_returns_402(self, mock_dep, mock_mw, mock_price):
         _configure_dep(mock_dep, mock_mw, free_tier=False)
         mock_price.return_value = {"price_usd": 0.05, "description": "Data upload"}
 
@@ -613,12 +604,11 @@ class TestFreeTierAccess:
         response = client.post("/api/v1/data/")
         assert response.status_code == 402
 
-    @patch("app.x402.dependency.check_base_eth_balance", return_value=OK_BALANCE)
     @patch("app.x402.ratelimit.settings")
     @patch("app.x402.dependency.get_price_quote")
     @patch("app.x402.middleware.settings")
     @patch("app.x402.dependency.settings")
-    def test_free_tier_rate_limit_headers_present(self, mock_dep, mock_mw, mock_price, mock_rl, mock_balance):
+    def test_free_tier_rate_limit_headers_present(self, mock_dep, mock_mw, mock_price, mock_rl):
         _configure_dep(mock_dep, mock_mw, free_tier=True)
         mock_dep.X402_FREE_TIER_RATE_LIMIT = 5
         mock_rl.X402_FREE_TIER_RATE_LIMIT = 5
@@ -637,12 +627,11 @@ class TestFreeTierAccess:
         assert response.headers["X-RateLimit-Remaining"] == "4"
         assert response.headers["X-Payment-Mode"] == "free-tier"
 
-    @patch("app.x402.dependency.check_base_eth_balance", return_value=OK_BALANCE)
     @patch("app.x402.ratelimit.settings")
     @patch("app.x402.dependency.get_price_quote")
     @patch("app.x402.middleware.settings")
     @patch("app.x402.dependency.settings")
-    def test_free_tier_429_includes_upgrade_info(self, mock_dep, mock_mw, mock_price, mock_rl, mock_balance):
+    def test_free_tier_429_includes_upgrade_info(self, mock_dep, mock_mw, mock_price, mock_rl):
         _configure_dep(mock_dep, mock_mw, free_tier=True)
         mock_dep.X402_FREE_TIER_RATE_LIMIT = 1
         mock_dep.X402_PAY_TO_ADDRESS = "0xPaymentWallet"
@@ -670,11 +659,10 @@ class TestFreeTierAccess:
         assert body["payment_info"]["price_usd"] == 0.10
         assert "Use x402 payment for higher limits" in body["message"]
 
-    @patch("app.x402.dependency.check_base_eth_balance", return_value=OK_BALANCE)
     @patch("app.x402.dependency.get_price_quote")
     @patch("app.x402.middleware.settings")
     @patch("app.x402.dependency.settings")
-    def test_different_endpoints_share_free_tier_limit(self, mock_dep, mock_mw, mock_price, mock_balance):
+    def test_different_endpoints_share_free_tier_limit(self, mock_dep, mock_mw, mock_price):
         _configure_dep(mock_dep, mock_mw, free_tier=True)
         mock_price.return_value = {"price_usd": 0.05, "description": "Operation"}
 
@@ -697,12 +685,11 @@ class TestFreeTierAccess:
         response = client.post("/api/v1/data/", headers={"X-Payment-Mode": "free"})
         assert response.status_code == 429
 
-    @patch("app.x402.dependency.check_base_eth_balance", return_value=OK_BALANCE)
     @patch("app.x402.ratelimit.settings")
     @patch("app.x402.dependency.get_price_quote")
     @patch("app.x402.middleware.settings")
     @patch("app.x402.dependency.settings")
-    def test_402_response_includes_free_tier_info(self, mock_dep, mock_mw, mock_price, mock_rl, mock_balance):
+    def test_402_response_includes_free_tier_info(self, mock_dep, mock_mw, mock_price, mock_rl):
         _configure_dep(mock_dep, mock_mw, free_tier=True)
         mock_dep.X402_FREE_TIER_RATE_LIMIT = 5
         mock_rl.X402_FREE_TIER_ENABLED = True
@@ -726,11 +713,10 @@ class TestFreeTierAccess:
         assert body["freeTier"]["requestsLimit"] == 5
         assert "X-Payment-Mode: free" in body["freeTier"]["instruction"]
 
-    @patch("app.x402.dependency.check_base_eth_balance", return_value=OK_BALANCE)
     @patch("app.x402.dependency.get_price_quote")
     @patch("app.x402.middleware.settings")
     @patch("app.x402.dependency.settings")
-    def test_402_response_no_free_tier_when_disabled(self, mock_dep, mock_mw, mock_price, mock_balance):
+    def test_402_response_no_free_tier_when_disabled(self, mock_dep, mock_mw, mock_price):
         _configure_dep(mock_dep, mock_mw, free_tier=False)
         mock_price.return_value = {"price_usd": 0.05, "description": "Data upload"}
 
@@ -747,11 +733,10 @@ class TestFreeTierAccess:
         assert "accepts" in body
         assert "freeTier" not in body
 
-    @patch("app.x402.dependency.check_base_eth_balance", return_value=OK_BALANCE)
     @patch("app.x402.dependency.get_price_quote")
     @patch("app.x402.middleware.settings")
     @patch("app.x402.dependency.settings")
-    def test_free_tier_request_disabled_returns_402(self, mock_dep, mock_mw, mock_price, mock_balance):
+    def test_free_tier_request_disabled_returns_402(self, mock_dep, mock_mw, mock_price):
         _configure_dep(mock_dep, mock_mw, free_tier=False)
         mock_price.return_value = {"price_usd": 0.05, "description": "Data upload"}
 

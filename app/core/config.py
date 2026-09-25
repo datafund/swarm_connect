@@ -92,6 +92,10 @@ class Settings(BaseSettings):
     X402_AUDIT_LOG_PATH: str = "logs/x402_audit.jsonl"
 
     # === Base Chain Settings (for monitoring USDC receipts) ===
+    # Optional facilitator authentication (#369). CDP needs the cdp-sdk package.
+    X402_FACILITATOR_CDP_API_KEY_ID: Optional[str] = None
+    X402_FACILITATOR_CDP_API_KEY_SECRET: Optional[str] = None
+    X402_FACILITATOR_BEARER_TOKEN: Optional[str] = None
     BASE_RPC_URL: str = "https://sepolia.base.org"
 
     # === Base Sepolia Gateway Wallet Monitoring ===

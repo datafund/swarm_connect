@@ -139,10 +139,9 @@ class TestMiddlewareIntegration:
         assert response.status_code == 200
         assert response.json()["status"] == "created"
 
-    @patch("app.x402.dependency.check_base_eth_balance", return_value=OK_BALANCE)
     @patch("app.x402.middleware.settings")
     @patch("app.x402.dependency.settings")
-    def test_unprotected_endpoint_passes_through(self, mock_dep, mock_mw, mock_balance):
+    def test_unprotected_endpoint_passes_through(self, mock_dep, mock_mw):
         _configure(mock_dep, mock_mw)
         app = _make_app(("GET", "/api/v1/health", health))
         client = TestClient(app)
@@ -150,11 +149,10 @@ class TestMiddlewareIntegration:
         assert response.status_code == 200
         assert response.json()["status"] == "healthy"
 
-    @patch("app.x402.dependency.check_base_eth_balance", return_value=OK_BALANCE)
     @patch("app.x402.dependency.get_price_quote")
     @patch("app.x402.middleware.settings")
     @patch("app.x402.dependency.settings")
-    def test_protected_endpoint_returns_402_without_payment(self, mock_dep, mock_mw, mock_price, mock_balance):
+    def test_protected_endpoint_returns_402_without_payment(self, mock_dep, mock_mw, mock_price):
         _configure(mock_dep, mock_mw, free_tier=False)
         mock_price.return_value = {"price_usd": 0.05, "description": "Test operation"}
 
@@ -168,11 +166,10 @@ class TestMiddlewareIntegration:
         assert "accepts" in data
         assert len(data["accepts"]) > 0
 
-    @patch("app.x402.dependency.check_base_eth_balance", return_value=OK_BALANCE)
     @patch("app.x402.dependency.get_price_quote")
     @patch("app.x402.middleware.settings")
     @patch("app.x402.dependency.settings")
-    def test_402_response_contains_payment_requirements(self, mock_dep, mock_mw, mock_price, mock_balance):
+    def test_402_response_contains_payment_requirements(self, mock_dep, mock_mw, mock_price):
         _configure(mock_dep, mock_mw, free_tier=False)
         mock_dep.X402_PAY_TO_ADDRESS = "0xTestPayee"
         mock_mw.X402_PAY_TO_ADDRESS = "0xTestPayee"
@@ -190,11 +187,10 @@ class TestMiddlewareIntegration:
         assert requirements["payTo"] == "0xTestPayee"
         assert int(requirements["maxAmountRequired"]) == 100000
 
-    @patch("app.x402.dependency.check_base_eth_balance", return_value=OK_BALANCE)
     @patch("app.x402.dependency.get_price_quote")
     @patch("app.x402.middleware.settings")
     @patch("app.x402.dependency.settings")
-    def test_invalid_payment_header_returns_402(self, mock_dep, mock_mw, mock_price, mock_balance):
+    def test_invalid_payment_header_returns_402(self, mock_dep, mock_mw, mock_price):
         _configure(mock_dep, mock_mw)
         mock_price.return_value = {"price_usd": 0.05, "description": "Test operation"}
 
@@ -221,10 +217,9 @@ class TestValidationBeforePayment:
     def teardown_method(self):
         reset_rate_limiter()
 
-    @patch("app.x402.dependency.check_base_eth_balance", return_value=OK_BALANCE)
     @patch("app.x402.middleware.settings")
     @patch("app.x402.dependency.settings")
-    def test_nonexistent_route_returns_404_not_402(self, mock_dep, mock_mw, mock_balance):
+    def test_nonexistent_route_returns_404_not_402(self, mock_dep, mock_mw):
         """Requests to non-existent routes should return 404, not 402."""
         _configure(mock_dep, mock_mw, free_tier=False)
 
@@ -233,10 +228,9 @@ class TestValidationBeforePayment:
         response = client.post("/api/v1/nonexistent/")
         assert response.status_code == 404
 
-    @patch("app.x402.dependency.check_base_eth_balance", return_value=OK_BALANCE)
     @patch("app.x402.middleware.settings")
     @patch("app.x402.dependency.settings")
-    def test_get_on_protected_path_passes_through(self, mock_dep, mock_mw, mock_balance):
+    def test_get_on_protected_path_passes_through(self, mock_dep, mock_mw):
         """GET requests on protected endpoint paths should pass through."""
         _configure(mock_dep, mock_mw, free_tier=False)
 
@@ -252,10 +246,9 @@ class TestValidationBeforePayment:
         assert response.status_code == 200
         assert response.json() == {"stamps": []}
 
-    @patch("app.x402.dependency.check_base_eth_balance", return_value=OK_BALANCE)
     @patch("app.x402.middleware.settings")
     @patch("app.x402.dependency.settings")
-    def test_unprotected_get_with_x402_enabled(self, mock_dep, mock_mw, mock_balance):
+    def test_unprotected_get_with_x402_enabled(self, mock_dep, mock_mw):
         """GET endpoints on the same router should not be payment-gated."""
         _configure(mock_dep, mock_mw, free_tier=False)
 
@@ -408,12 +401,11 @@ class TestFullPaymentFlow:
     def teardown_method(self):
         reset_rate_limiter()
 
-    @patch("app.x402.dependency.check_base_eth_balance", return_value=OK_BALANCE)
     @patch("app.x402.dependency._get_facilitator_client")
     @patch("app.x402.dependency.get_price_quote")
     @patch("app.x402.middleware.settings")
     @patch("app.x402.dependency.settings")
-    def test_successful_payment_flow(self, mock_dep, mock_mw, mock_price, mock_get_fac, mock_balance):
+    def test_successful_payment_flow(self, mock_dep, mock_mw, mock_price, mock_get_fac):
         _configure(mock_dep, mock_mw)
         mock_dep.X402_FACILITATOR_URL = "https://x402.org/facilitator"
         mock_price.return_value = {"price_usd": 0.05, "description": "Test stamp"}
@@ -447,12 +439,11 @@ class TestFullPaymentFlow:
         mock_fac.verify.assert_called_once()
         mock_mw_fac.settle.assert_called_once()
 
-    @patch("app.x402.dependency.check_base_eth_balance", return_value=OK_BALANCE)
     @patch("app.x402.dependency._get_facilitator_client")
     @patch("app.x402.dependency.get_price_quote")
     @patch("app.x402.middleware.settings")
     @patch("app.x402.dependency.settings")
-    def test_payment_verification_failure(self, mock_dep, mock_mw, mock_price, mock_get_fac, mock_balance):
+    def test_payment_verification_failure(self, mock_dep, mock_mw, mock_price, mock_get_fac):
         _configure(mock_dep, mock_mw)
         mock_dep.X402_FACILITATOR_URL = "https://x402.org/facilitator"
         mock_price.return_value = {"price_usd": 0.05, "description": "Test stamp"}
@@ -482,11 +473,10 @@ class TestProtectedEndpoints:
     def teardown_method(self):
         reset_rate_limiter()
 
-    @patch("app.x402.dependency.check_base_eth_balance", return_value=OK_BALANCE)
     @patch("app.x402.dependency.get_price_quote")
     @patch("app.x402.middleware.settings")
     @patch("app.x402.dependency.settings")
-    def test_stamps_endpoint_protected(self, mock_dep, mock_mw, mock_price, mock_balance):
+    def test_stamps_endpoint_protected(self, mock_dep, mock_mw, mock_price):
         _configure(mock_dep, mock_mw, free_tier=False)
         mock_price.return_value = {"price_usd": 0.05, "description": "Test"}
         app = _make_app(("POST", "/api/v1/stamps/", create_stamp))
@@ -494,11 +484,10 @@ class TestProtectedEndpoints:
         response = client.post("/api/v1/stamps/")
         assert response.status_code == 402
 
-    @patch("app.x402.dependency.check_base_eth_balance", return_value=OK_BALANCE)
     @patch("app.x402.dependency.get_price_quote")
     @patch("app.x402.middleware.settings")
     @patch("app.x402.dependency.settings")
-    def test_data_endpoint_protected(self, mock_dep, mock_mw, mock_price, mock_balance):
+    def test_data_endpoint_protected(self, mock_dep, mock_mw, mock_price):
         _configure(mock_dep, mock_mw, free_tier=False)
         mock_price.return_value = {"price_usd": 0.05, "description": "Test"}
         app = _make_app(("POST", "/api/v1/data/", upload_data))
@@ -506,11 +495,10 @@ class TestProtectedEndpoints:
         response = client.post("/api/v1/data/")
         assert response.status_code == 402
 
-    @patch("app.x402.dependency.check_base_eth_balance", return_value=OK_BALANCE)
     @patch("app.x402.dependency.get_price_quote")
     @patch("app.x402.middleware.settings")
     @patch("app.x402.dependency.settings")
-    def test_manifest_endpoint_protected(self, mock_dep, mock_mw, mock_price, mock_balance):
+    def test_manifest_endpoint_protected(self, mock_dep, mock_mw, mock_price):
         _configure(mock_dep, mock_mw, free_tier=False)
         mock_price.return_value = {"price_usd": 0.05, "description": "Test"}
         app = _make_app(("POST", "/api/v1/data/manifest", upload_manifest))
@@ -528,12 +516,11 @@ class TestEndToEndScenarios:
     def teardown_method(self):
         reset_rate_limiter()
 
-    @patch("app.x402.dependency.check_base_eth_balance", return_value=OK_BALANCE)
     @patch("app.x402.dependency._get_facilitator_client")
     @patch("app.x402.dependency.get_price_quote")
     @patch("app.x402.middleware.settings")
     @patch("app.x402.dependency.settings")
-    def test_gateway_operator_workflow(self, mock_dep, mock_mw, mock_price, mock_get_fac, mock_balance):
+    def test_gateway_operator_workflow(self, mock_dep, mock_mw, mock_price, mock_get_fac):
         # Step 1: x402 disabled
         mock_mw.X402_ENABLED = False
         app = _make_simple_app(("POST", "/api/v1/stamps/", create_stamp))
@@ -573,11 +560,10 @@ class TestEndToEndScenarios:
         response = client2.post("/api/v1/stamps/", headers={"X-PAYMENT": payment_header})
         assert response.status_code == 200
 
-    @patch("app.x402.dependency.check_base_eth_balance", return_value=OK_BALANCE)
     @patch("app.x402.dependency.get_price_quote")
     @patch("app.x402.middleware.settings")
     @patch("app.x402.dependency.settings")
-    def test_price_varies_by_endpoint(self, mock_dep, mock_mw, mock_price, mock_balance):
+    def test_price_varies_by_endpoint(self, mock_dep, mock_mw, mock_price):
         _configure(mock_dep, mock_mw, free_tier=False)
 
         app = _make_app(
@@ -739,43 +725,18 @@ class TestMiddlewareWithCriticalBalance:
         from app.x402.base_balance import clear_balance_cache
         clear_balance_cache()
 
-    @patch("app.x402.dependency.check_base_eth_balance")
     @patch("app.x402.dependency.get_price_quote")
     @patch("app.x402.middleware.settings")
     @patch("app.x402.dependency.settings")
-    def test_critical_balance_returns_503(self, mock_dep, mock_mw, mock_price, mock_base_balance):
-        _configure(mock_dep, mock_mw, free_tier=False)
-        mock_base_balance.return_value = {
-            "ok": False, "is_critical": True,
-            "balance_wei": int(0.0005 * 10**18), "balance_eth": 0.0005,
-            "threshold_eth": 0.005, "critical_eth": 0.001,
-            "address": "0xpayee", "warning": "Base wallet ETH critically low"
-        }
+    def test_pay_to_balance_does_not_gate_requests(self, mock_dep, mock_mw, mock_price):
+        """The facilitator pays settlement gas; the pay-to address never sends a
+        transaction. A cold pay-to wallet with 0 ETH, or a failing Base RPC,
+        must not take the paid and free write paths down (#371)."""
+        _configure(mock_dep, mock_mw, free_tier=True)
         mock_price.return_value = {"price_usd": 0.05, "description": "Test"}
-
-        app = _make_app(("POST", "/api/v1/stamps/", create_stamp))
-        client = TestClient(app)
-        response = client.post("/api/v1/stamps/")
-
-        assert response.status_code == 503
-        assert "temporarily unavailable" in response.json()["detail"]["error"]
-        assert response.json()["detail"]["x402_status"] == "critical"
-
-    @patch("app.x402.dependency.check_base_eth_balance")
-    @patch("app.x402.dependency.get_price_quote")
-    @patch("app.x402.middleware.settings")
-    @patch("app.x402.dependency.settings")
-    def test_warning_balance_allows_requests(self, mock_dep, mock_mw, mock_price, mock_base_balance):
-        _configure(mock_dep, mock_mw, free_tier=False)
-        mock_base_balance.return_value = {
-            "ok": False, "is_critical": False,
-            "balance_wei": int(0.003 * 10**18), "balance_eth": 0.003,
-            "threshold_eth": 0.005, "critical_eth": 0.001,
-            "address": "0xpayee", "warning": "Base wallet ETH below warning threshold"
-        }
-        mock_price.return_value = {"price_usd": 0.05, "description": "Test"}
-
-        app = _make_app(("POST", "/api/v1/stamps/", create_stamp))
-        client = TestClient(app)
-        response = client.post("/api/v1/stamps/")
-        assert response.status_code == 402
+        critical = {"ok": False, "is_critical": True, "balance_eth": 0.0}
+        with patch("app.x402.base_balance.check_base_eth_balance", new=AsyncMock(return_value=critical)):
+            app = _make_app(("POST", "/api/v1/stamps/", create_stamp))
+            client = TestClient(app)
+            assert client.post("/api/v1/stamps/").status_code == 402
+            assert client.post("/api/v1/stamps/", headers={"X-Payment-Mode": "free"}).status_code == 200

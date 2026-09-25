@@ -116,12 +116,11 @@ def create_payment_requirements(
     # Convert USD to USDC smallest units (string format for x402)
     amount_usdc = int(price_usd * 1_000_000)
 
-    # Get USDC address for the configured network
-    asset = USDC_ADDRESSES.get(network, USDC_ADDRESSES["base-sepolia"])
-
-    # Get USDC token metadata for EIP-712 domain separator
-    # This is required for clients to construct proper EIP-3009 signatures
-    token_metadata = USDC_TOKEN_METADATA.get(network, USDC_TOKEN_METADATA["base-sepolia"])
+    # USDC address and EIP-712 domain for the configured network. No fallback:
+    # an unknown network used to get the Base Sepolia asset silently (#370);
+    # validate_x402_config() now refuses to start with one.
+    asset = USDC_ADDRESSES[network]
+    token_metadata = USDC_TOKEN_METADATA[network]
 
     # Build resource path
     resource = str(request.url)
@@ -275,10 +274,10 @@ class X402Middleware(BaseHTTPMiddleware):
 
     @property
     def facilitator_client(self) -> FacilitatorClient:
-        """Lazy initialization of facilitator client."""
+        """The shared, authenticated facilitator client (app/x402/facilitator.py)."""
         if self._facilitator_client is None:
-            config: FacilitatorConfig = {"url": settings.X402_FACILITATOR_URL}
-            self._facilitator_client = FacilitatorClient(config=config)
+            from app.x402.facilitator import get_facilitator_client
+            return get_facilitator_client()
         return self._facilitator_client
 
     async def dispatch(

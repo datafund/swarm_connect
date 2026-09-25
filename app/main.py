@@ -21,6 +21,12 @@ _STARTED_MONOTONIC = time.monotonic()
 async def lifespan(app: FastAPI):
     """Application lifespan handler for startup/shutdown tasks."""
     # === Startup ===
+    # Refuse to start with an x402 configuration that cannot take payment
+    # safely: an unknown network, a missing pay-to address, or a mainnet
+    # paired with the public test-network facilitator (#370).
+    from app.x402.facilitator import validate_x402_config
+    validate_x402_config()
+
     # Initialize shared HTTP client (must be first — other services depend on it)
     from app.services.http_client import init_client, close_client
     await init_client()

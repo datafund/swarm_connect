@@ -203,7 +203,7 @@ pytest tests/test_x402_live.py -v -s
 **You don't need to register a facilitator.** The public x402.org facilitator handles testnet payments automatically.
 
 - **Testnet facilitator**: `https://x402.org/facilitator`
-- **Mainnet facilitator**: `https://x402.org/facilitator` (same URL, detects network)
+- **Mainnet facilitator**: the public x402.org facilitator serves **test networks only** (its `/supported` list has no Base mainnet). Mainnet needs an authenticated facilitator, such as Coinbase CDP: set `X402_FACILITATOR_CDP_API_KEY_ID` / `X402_FACILITATOR_CDP_API_KEY_SECRET` (requires the `cdp-sdk` package), or `X402_FACILITATOR_BEARER_TOKEN` for a facilitator that takes a bearer token. The gateway refuses to start with a mainnet network and the x402.org facilitator.
 
 The facilitator:
 - Verifies payment signatures are valid
