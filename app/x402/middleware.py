@@ -186,12 +186,15 @@ def _log_delivery(request: Request, settlement, body: bytes, client_ip: str, pay
     """
     from app.x402.audit import AuditEventType, log_audit_event
     resource = {}
-    try:
-        parsed = json.loads(body)
-        if isinstance(parsed, dict):
-            resource = {k: parsed[k] for k in _RESOURCE_FIELDS if k in parsed}
-    except Exception:
-        pass
+    # Paid routes answer with small JSON bodies; skip anything else rather than
+    # parse a large payload just for the audit line.
+    if len(body) <= 64 * 1024 and body[:1] in (b"{", b" "):
+        try:
+            parsed = json.loads(body)
+            if isinstance(parsed, dict):
+                resource = {k: parsed[k] for k in _RESOURCE_FIELDS if k in parsed}
+        except Exception:
+            pass
     requirements = getattr(request.state, "x402_requirements", None)
     log_audit_event(
         event_type=AuditEventType.PAYMENT_DELIVERED,
@@ -401,6 +404,7 @@ class X402Middleware(BaseHTTPMiddleware):
         if settlement is None:
             payment_payload = getattr(request.state, "x402_payment", None)
             payment_requirements = getattr(request.state, "x402_requirements", None)
+            unknown_outcome = False
             try:
                 settlement = await self.facilitator_client.settle(
                     payment=payment_payload,
@@ -410,11 +414,19 @@ class X402Middleware(BaseHTTPMiddleware):
             except Exception as e:
                 logger.error(f"x402: Payment settlement failed: {type(e).__name__}: {e}", exc_info=True)
                 failure = f"{type(e).__name__}"
+                unknown_outcome = True
             if failure is not None:
                 logger.error(f"x402: settlement failed after delivery on {request.url.path}: {failure}")
-                log_payment_settled(client_ip=client_ip, payer=payer, transaction_hash=None,
-                                    network=settings.X402_NETWORK, success=False, error_reason=failure)
-                x402_settlements_total.labels(result="refused").inc()
+                if unknown_outcome:
+                    # The facilitator may or may not have moved the money: not
+                    # a refusal. Same record as settlement.py uses for it.
+                    log_payment_failed(client_ip=client_ip, reason=failure, stage="settle",
+                                       wallet_address=payer)
+                    x402_settlements_total.labels(result="error").inc()
+                else:
+                    log_payment_settled(client_ip=client_ip, payer=payer, transaction_hash=None,
+                                        network=settings.X402_NETWORK, success=False, error_reason=failure)
+                    x402_settlements_total.labels(result="refused").inc()
                 return JSONResponse(
                     status_code=402,
                     content={

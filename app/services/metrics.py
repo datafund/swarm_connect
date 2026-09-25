@@ -96,6 +96,11 @@ x402_settlements_total = Counter(
     "(outcome unknown, nothing delivered), settled_not_delivered (refund needed)",
     ["result"],
 )
+# Every result exists from startup. A series first seen at 1 gives increase() of
+# 0 for that event, and the process restarts on every deploy, so without this
+# the first failure of each kind after a restart would never alert.
+for _result in ("settled", "refused", "error", "settled_not_delivered"):
+    x402_settlements_total.labels(result=_result)
 x402_payments_total = Counter(
     "gateway_x402_payments_total", "x402 payment mode breakdown", ["mode"]
 )
