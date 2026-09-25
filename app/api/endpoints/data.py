@@ -19,6 +19,7 @@ from typing import Optional
 from app.services.swarm_api import (
     upload_data_to_swarm,
     download_data_from_swarm,
+    DownloadTooLargeError,
     upload_collection_to_swarm,
     validate_tar,
     count_tar_files,
@@ -493,6 +494,18 @@ async def download_data(
         downloads_total.labels(status="error").inc()
         logger.warning(f"Data not found for reference {reference}: {e}")
         raise HTTPException(status_code=404, detail=f"Data not found for reference {reference}")
+    except DownloadTooLargeError as e:
+        downloads_total.labels(status="error").inc()
+        logger.warning(f"Download of {reference} refused: {e}")
+        raise HTTPException(
+            status_code=413,
+            detail={
+                "code": "DOWNLOAD_TOO_LARGE",
+                "message": (f"This content is larger than the gateway's download limit of "
+                            f"{settings.MAX_DOWNLOAD_SIZE_MB} MB. Fetch it from a Swarm node directly."),
+                "max_size_mb": settings.MAX_DOWNLOAD_SIZE_MB,
+            },
+        )
     except httpx.HTTPError as e:
         downloads_total.labels(status="error").inc()
         logger.error(f"Swarm API error during download: {e}")
@@ -553,6 +566,18 @@ async def download_data_json(
         downloads_total.labels(status="error").inc()
         logger.warning(f"Data not found for reference {reference}: {e}")
         raise HTTPException(status_code=404, detail=f"Data not found for reference {reference}")
+    except DownloadTooLargeError as e:
+        downloads_total.labels(status="error").inc()
+        logger.warning(f"Download of {reference} refused: {e}")
+        raise HTTPException(
+            status_code=413,
+            detail={
+                "code": "DOWNLOAD_TOO_LARGE",
+                "message": (f"This content is larger than the gateway's download limit of "
+                            f"{settings.MAX_DOWNLOAD_SIZE_MB} MB. Fetch it from a Swarm node directly."),
+                "max_size_mb": settings.MAX_DOWNLOAD_SIZE_MB,
+            },
+        )
     except httpx.HTTPError as e:
         downloads_total.labels(status="error").inc()
         logger.error(f"Swarm API error during download: {e}")

@@ -253,6 +253,11 @@ class Settings(BaseSettings):
 
     # === Upload Limits ===
     MAX_UPLOAD_SIZE_MB: int = 10  # Maximum file upload size in megabytes
+    # Largest body GET /data/{ref} will fetch from Bee and return (#353). The
+    # download is buffered to detect the content type, and it can be any Swarm
+    # reference, not only ones uploaded here, so without a cap a few requests
+    # for large content could exhaust memory and the chequebook.
+    MAX_DOWNLOAD_SIZE_MB: int = 25
 
     # === Chunk Upload (stamped-chunk forwarding, Flow A) ===
     # When enabled, the gateway forwards a single client-supplied PRE-STAMPED chunk
