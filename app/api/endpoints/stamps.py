@@ -84,6 +84,20 @@ def _enforce_spend_limits(request: Request, cost_bzz: float, operation: str) -> 
 
     caller = get_client_ip(request)
     allowed, info = spend_budget_tracker.check(caller, cost_bzz)
+    if not allowed and info.get("state_unreadable"):
+        # Today's spend record could not be read (#378); refuse rather than
+        # guess, and say so plainly instead of claiming the budget is spent.
+        stamp_spend_refusals_total.labels(operation=operation, limit="daily_budget").inc()
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={
+                "code": "SPEND_BUDGET_UNAVAILABLE",
+                "message": (
+                    "Stamp purchases are paused until the operator restores the "
+                    f"gateway's spend records, or until {info['resets_at']}."
+                ),
+            },
+        )
     if not allowed:
         logger.info(
             "Daily spend budget exhausted for %s: %.6f of %.6f BZZ used, request needs %.6f",
