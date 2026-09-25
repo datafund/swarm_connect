@@ -431,7 +431,12 @@ requests.post(
 ```
 
 - The timestamp must be within 5 minutes of the gateway's clock.
-- Each proof is accepted once. Sign a new one for every upload.
+- Each proof is accepted once. Sign a new one for every upload. A proof that is
+  refused (for example, signed by a wallet that does not own the stamp) is not used up.
+- A proof signed before the gateway last restarted is refused; sign a new one.
+- A proof is a **bearer credential** for one upload to that stamp. It is not bound to the
+  file, so whoever presents it first gets the upload. Send it only over HTTPS, and do not
+  log or share it.
 - The proof names the stamp, so it cannot be used for any other stamp.
 - Errors: `401 OWNER_PROOF_INVALID` (malformed, stale or reused proof);
   `403 STAMP_OWNERSHIP_DENIED` (valid proof, but the signer does not own the stamp).

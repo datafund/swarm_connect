@@ -24,7 +24,7 @@ into spending it.
 import logging
 import threading
 import time
-from typing import Dict, List, Optional
+from typing import Dict, List, NamedTuple, Optional
 
 from eth_account import Account
 from eth_account.messages import encode_defunct
@@ -100,9 +100,18 @@ def authorize_signed_request(
 # Keyed on the message and the signer rather than the signature bytes, which
 # can be re-encoded into a second valid signature for the same message.
 #
+# A proof is marked used only once it has been granted access, so proofs from
+# non-owners do not fill the used set, and an owner's proof is not spent by a
+# request that was refused anyway.
+#
 # The used set lives in memory. That is sufficient because the gateway runs as a
-# single process, and a restart forgets nothing that is still fresh for longer
-# than the freshness window. Running several workers would need a shared store.
+# single process. A restart empties it, so proofs signed before the process
+# started are refused outright; otherwise one seen just before a restart could
+# be accepted again while still fresh. Running several workers would need a
+# shared store.
+#
+# A proof is a bearer credential: it is not bound to the upload's content, so
+# whoever presents it first gets that one upload. It must not be logged or shared.
 # ---------------------------------------------------------------------------
 
 
@@ -110,8 +119,16 @@ class OwnerProofError(Exception):
     """An owner proof was presented and is not acceptable."""
 
 
+class OwnerProof(NamedTuple):
+    """A verified owner proof, not yet marked used (see consume_owner_proof)."""
+    signer: str
+    key: str        # message|signer: what "used" is recorded against
+    expires: float  # unix seconds after which the proof is stale anyway
+
+
 _used_owner_proofs: Dict[str, float] = {}  # message|signer -> expiry (unix seconds)
 _used_owner_proofs_lock = threading.Lock()
+_process_started_at = int(time.time())
 
 
 def owner_proof_message(batch_id: str, timestamp: int) -> str:
@@ -119,11 +136,12 @@ def owner_proof_message(batch_id: str, timestamp: int) -> str:
     return f"{OWNER_UPLOAD_PREFIX}{batch_id.lower()}:{timestamp}"
 
 
-def verify_owner_proof(batch_id: str, timestamp: Optional[str], signature: Optional[str]) -> str:
-    """Return the address that signed a fresh, unused owner proof for batch_id.
+def verify_owner_proof(batch_id: str, timestamp: Optional[str], signature: Optional[str]) -> OwnerProof:
+    """Verify a fresh, unused owner proof for batch_id, without marking it used.
 
     Only proves who is asking; whether that address owns the batch is for the
-    ownership registry to decide. Raises OwnerProofError.
+    ownership registry to decide. Call consume_owner_proof once access is
+    granted. Raises OwnerProofError.
     """
     if not timestamp or not signature:
         raise OwnerProofError("both X-Owner-Timestamp and X-Owner-Signature are required")
@@ -135,6 +153,8 @@ def verify_owner_proof(batch_id: str, timestamp: Optional[str], signature: Optio
     # operator signatures above.
     if abs(int(time.time()) - ts) > settings.DEBUG_SIG_MAX_AGE_SECONDS:
         raise OwnerProofError("timestamp is stale or in the future")
+    if ts < _process_started_at:
+        raise OwnerProofError("proof was signed before the gateway restarted; sign a new one")
 
     message = owner_proof_message(batch_id, ts)
     try:
@@ -142,13 +162,23 @@ def verify_owner_proof(batch_id: str, timestamp: Optional[str], signature: Optio
     except Exception:
         raise OwnerProofError("signature is not valid")
 
-    key = f"{message}|{signer.lower()}"
+    proof = OwnerProof(signer, f"{message}|{signer.lower()}", ts + settings.DEBUG_SIG_MAX_AGE_SECONDS + 1)
+    with _used_owner_proofs_lock:
+        if proof.key in _used_owner_proofs:
+            raise OwnerProofError("owner proof has already been used; sign a new one")
+    return proof
+
+
+def consume_owner_proof(proof: OwnerProof) -> None:
+    """Mark a verified proof used. Raises OwnerProofError if it already was.
+
+    Check and mark happen under one lock, so two requests racing with the same
+    proof cannot both get through.
+    """
     now = time.time()
     with _used_owner_proofs_lock:
         for k in [k for k, exp in _used_owner_proofs.items() if exp < now]:
             del _used_owner_proofs[k]
-        if key in _used_owner_proofs:
+        if proof.key in _used_owner_proofs:
             raise OwnerProofError("owner proof has already been used; sign a new one")
-        _used_owner_proofs[key] = ts + settings.DEBUG_SIG_MAX_AGE_SECONDS + 1
-
-    return signer
+        _used_owner_proofs[proof.key] = proof.expires

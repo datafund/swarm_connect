@@ -18,6 +18,7 @@ from app.services import signed_auth
 from app.services.signed_auth import (
     DEBUG_PREFIX,
     OwnerProofError,
+    consume_owner_proof,
     owner_proof_message,
     verify_owner_proof,
 )
@@ -98,26 +99,38 @@ class TestAddressNormalisation:
 class TestVerifyOwnerProof:
     def test_valid_proof_recovers_signer(self):
         ts, sig = _proof(OWNER)
-        assert verify_owner_proof(STAMP, ts, sig) == OWNER.address
+        assert verify_owner_proof(STAMP, ts, sig).signer == OWNER.address
 
     def test_batch_id_casing_does_not_matter(self):
         ts, sig = _proof(OWNER, batch_id=STAMP.upper())
-        assert verify_owner_proof(STAMP, ts, sig) == OWNER.address
+        assert verify_owner_proof(STAMP, ts, sig).signer == OWNER.address
 
-    def test_proof_is_single_use(self):
+    def test_proof_is_single_use_once_consumed(self):
         ts, sig = _proof(OWNER)
-        verify_owner_proof(STAMP, ts, sig)
+        proof = verify_owner_proof(STAMP, ts, sig)
+        # Verifying alone does not spend it.
+        assert verify_owner_proof(STAMP, ts, sig) == proof
+        consume_owner_proof(proof)
         with pytest.raises(OwnerProofError, match="already been used"):
             verify_owner_proof(STAMP, ts, sig)
+        with pytest.raises(OwnerProofError, match="already been used"):
+            consume_owner_proof(proof)
+
+    def test_proof_signed_before_process_start_rejected(self):
+        """A restart empties the used set, so older proofs are refused outright."""
+        ts, sig = _proof(OWNER, ts=int(time.time()) - 5)
+        with patch.object(signed_auth, "_process_started_at", int(time.time())):
+            with pytest.raises(OwnerProofError, match="restarted"):
+                verify_owner_proof(STAMP, ts, sig)
 
     def test_proof_for_another_batch_names_a_different_signer(self):
         ts, sig = _proof(OWNER, batch_id="ef" * 32)
-        assert verify_owner_proof(STAMP, ts, sig) != OWNER.address
+        assert verify_owner_proof(STAMP, ts, sig).signer != OWNER.address
 
     def test_debug_signature_is_not_an_owner_proof(self):
         ts = int(time.time())
         sig = _sign(OWNER, f"{DEBUG_PREFIX}{ts}")
-        assert verify_owner_proof(STAMP, str(ts), sig) != OWNER.address
+        assert verify_owner_proof(STAMP, str(ts), sig).signer != OWNER.address
 
     @pytest.mark.parametrize("offset", [-10_000, 10_000])
     def test_stale_or_future_timestamp_rejected(self, offset):
@@ -173,6 +186,8 @@ class TestUploadWithOwnerProof:
         r = self._upload(client, self._headers(OTHER))
         assert r.status_code == 403
         assert r.json()["detail"]["code"] == "STAMP_OWNERSHIP_DENIED"
+        # A refused proof is not recorded as used.
+        assert signed_auth._used_owner_proofs == {}
 
     def test_replayed_proof_rejected(self, client):
         h = self._headers(OWNER)

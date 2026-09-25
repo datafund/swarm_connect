@@ -29,7 +29,7 @@ from app.services.swarm_api import (
 )
 from app.core.config import settings
 from app.services.stamp_ownership import stamp_ownership_manager
-from app.services.signed_auth import OwnerProofError, verify_owner_proof
+from app.services.signed_auth import OwnerProofError, consume_owner_proof, verify_owner_proof
 from app.services.provenance import (
     get_provenance_service,
     DocumentValidationError,
@@ -124,7 +124,12 @@ def _check_stamp_access(
     allowed, reason = stamp_ownership_manager.check_access(stamp_id, x402_payer, x402_mode)
     if not allowed and (owner_timestamp or owner_signature):
         try:
-            signer = verify_owner_proof(stamp_id, owner_timestamp, owner_signature)
+            proof = verify_owner_proof(stamp_id, owner_timestamp, owner_signature)
+            allowed, reason = stamp_ownership_manager.check_access(stamp_id, proof.signer, x402_mode)
+            # Marked used only when it grants access: a refused proof spends
+            # nothing, and non-owners' proofs do not fill the used set.
+            if allowed:
+                consume_owner_proof(proof)
         except OwnerProofError as e:
             raise HTTPException(
                 status_code=401,
@@ -134,7 +139,6 @@ def _check_stamp_access(
                     "stamp_id": stamp_id
                 }
             )
-        allowed, reason = stamp_ownership_manager.check_access(stamp_id, signer, x402_mode)
     if not allowed:
         raise HTTPException(
             status_code=403,
@@ -183,7 +187,9 @@ async def upload_data(
     - `X-Owner-Timestamp`: current unix time in seconds (valid for 5 minutes)
     - `X-Owner-Signature`: EIP-191 `personal_sign` by the owner wallet of
       `swarm-connect-owner-upload:<stamp_id in lowercase>:<timestamp>`
-    - Each proof is accepted once; sign a new one per upload. A rejected proof
+    - Each proof is accepted once; sign a new one per upload. It is a bearer
+      credential for one upload (not bound to the file): do not log or share it.
+      A rejected proof
       returns **401** `OWNER_PROOF_INVALID`; a valid proof from another wallet
       returns **403** `STAMP_OWNERSHIP_DENIED`.
     - Downloads (`GET /api/v1/data/{reference}`) are always free — no headers needed
@@ -644,7 +650,9 @@ async def upload_manifest(
     - `X-Owner-Timestamp`: current unix time in seconds (valid for 5 minutes)
     - `X-Owner-Signature`: EIP-191 `personal_sign` by the owner wallet of
       `swarm-connect-owner-upload:<stamp_id in lowercase>:<timestamp>`
-    - Each proof is accepted once; sign a new one per upload. A rejected proof
+    - Each proof is accepted once; sign a new one per upload. It is a bearer
+      credential for one upload (not bound to the file): do not log or share it.
+      A rejected proof
       returns **401** `OWNER_PROOF_INVALID`; a valid proof from another wallet
       returns **403** `STAMP_OWNERSHIP_DENIED`.
 
