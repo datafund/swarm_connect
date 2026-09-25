@@ -596,6 +596,14 @@ async def extend_stamp(
     """
     Extends an existing postage stamp by adding more funds to it.
 
+    **Payment and ownership** (when x402 is enabled): priced like a purchase
+    (x402 payment, or `X-Payment-Mode: free` within the free-tier rate limit).
+    A batch registered to a payer can only be extended by a paid request from
+    that payer; a shared batch can be extended by anyone; pool inventory and
+    batches the gateway has no record of cannot be extended. A legacy `amount`
+    must be worth at least 24 hours. With x402 disabled, only the minimum
+    amount and the spend limits apply.
+
     This operation adds the specified duration or amount to the existing stamp,
     extending its validity period. If duration_hours is provided, amount is
     calculated based on current network price. If neither is provided, defaults
@@ -655,6 +663,13 @@ async def extend_stamp(
         # Determine the amount to use
         chainstate = await swarm_api.get_chainstate()
         current_price = int(chainstate["currentPrice"])
+        if current_price <= 0:
+            # Bee reports 0 while it is still syncing chain state. The minimum
+            # below would then be 0 and admit any amount.
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="The Bee node has not reported a current stamp price yet. Try again shortly.",
+            )
         if extension_request.amount is not None:
             # Legacy mode: use provided amount directly, but not below 24 hours'
             # worth. Every top-up is an on-chain transaction paid in gas and holds

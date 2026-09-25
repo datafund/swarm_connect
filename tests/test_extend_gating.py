@@ -120,3 +120,29 @@ def test_dust_amounts_are_refused_before_any_spend(gated):
     assert r.status_code == 400
     assert r.json()["detail"]["code"] == "EXTENSION_TOO_SMALL"
     gated.assert_not_called()
+
+
+def test_legacy_amount_is_priced_as_topped_up(gated):
+    from app.services import swarm_api
+    from app.x402.pricing import _price_from_cost_bzz
+    amount = 24000 * 17280 * 3
+    r = _patch(body={"amount": amount})
+    cost = swarm_api.plur_to_bzz(swarm_api.calculate_stamp_total_cost(amount, 20))
+    expected = _price_from_cost_bzz(cost)["price_usd"]
+    assert r.json()["detail"]["accepts"][0]["maxAmountRequired"] == str(int(expected * 1_000_000))
+
+
+def test_free_tier_rate_limit_applies_to_extend(gated, monkeypatch):
+    monkeypatch.setattr(settings, "X402_FREE_TIER_RATE_LIMIT", 2)
+    stamp_ownership_manager._registry[BATCH] = {"owner": "shared", "mode": "free"}
+    codes = [_patch(headers={"X-Payment-Mode": "free"}).status_code for _ in range(3)]
+    assert codes == [200, 200, 429]
+
+
+def test_unknown_current_price_is_refused(gated):
+    stamp_ownership_manager._registry[BATCH] = {"owner": "shared", "mode": "free"}
+    with patch("app.services.swarm_api.get_chainstate",
+               new=AsyncMock(return_value={"currentPrice": "0"})):
+        r = _patch(headers={"X-Payment-Mode": "free"}, body={"amount": 1_000_000_000})
+    assert r.status_code == 503
+    gated.assert_not_called()
