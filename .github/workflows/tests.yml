@@ -1,0 +1,32 @@
+name: tests
+
+# Runs the hermetic suite on every pull request, and is called by deploy.yml
+# so nothing is deployed unless it passes (#360). Live tests stay skipped:
+# they need RUN_LIVE_TESTS and a reachable gateway.
+on:
+  pull_request:
+  workflow_call:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  pytest:
+    name: pytest
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          # Same interpreter as the Docker image.
+          python-version: "3.10"
+          cache: pip
+      - name: install
+        run: pip install -r requirements.txt
+      - name: pytest
+        env:
+          # Required by Settings; tests never reach it.
+          SWARM_BEE_API_URL: http://localhost:1
+        run: python -m pytest -q
