@@ -20,18 +20,28 @@ from app.services.metrics import rate_limit_hits_total
 logger = logging.getLogger(__name__)
 
 # Paths exempt from rate limiting
-EXEMPT_PATHS = {"/", "/health", "/docs", "/redoc", "/openapi.json", "/metrics"}
+EXEMPT_PATHS = {"/", "/health", "/docs", "/redoc", "/openapi.json", "/metrics",
+                f"{settings.API_V1_STR}/openapi.json"}
+
+# Pre-stamped chunk forwarding. Each request carries one ~4 KB chunk, so a
+# per-request limit sized for API calls throttles it to a few hundred KB a
+# minute. When x402 billing is on, every chunk is already paid per byte (prepaid
+# credit or the per-IP free daily quota), which bounds it; with billing off the
+# global limit still applies.
+CHUNK_UPLOAD_PATH = f"{settings.API_V1_STR}/chunks"
 
 
 def _is_exempt_path(path: str) -> bool:
     """Check if path is exempt from rate limiting."""
-    # Exact match for exempt paths
-    if path in EXEMPT_PATHS:
-        return True
-    # OpenAPI spec path
-    if path.endswith("/openapi.json"):
-        return True
-    return False
+    return path in EXEMPT_PATHS
+
+
+def _is_billed_chunk_upload(request: Request) -> bool:
+    return (
+        settings.X402_ENABLED
+        and request.method == "POST"
+        and request.url.path.rstrip("/") == CHUNK_UPLOAD_PATH
+    )
 
 
 class SlidingWindowCounter:
@@ -124,7 +134,7 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
             return await call_next(request)
 
         # Skip exempt paths
-        if _is_exempt_path(request.url.path):
+        if _is_exempt_path(request.url.path) or _is_billed_chunk_upload(request):
             return await call_next(request)
 
         # Periodic cleanup of stale entries
@@ -158,8 +168,10 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
 
         response = await call_next(request)
 
-        # Add rate limit headers to successful responses
-        response.headers["X-RateLimit-Limit"] = str(stats["limit"])
-        response.headers["X-RateLimit-Remaining"] = str(stats["remaining"])
+        # Add rate limit headers, unless an inner limiter already did: the x402
+        # free-tier limit is stricter, and its headers are the ones that tell a
+        # free caller when it may write again.
+        response.headers.setdefault("X-RateLimit-Limit", str(stats["limit"]))
+        response.headers.setdefault("X-RateLimit-Remaining", str(stats["remaining"]))
 
         return response

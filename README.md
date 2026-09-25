@@ -265,7 +265,7 @@ Swarm Connect is a FastAPI-based API gateway that provides comprehensive access 
 - **Input Validation**: Strict regex validation on stamp IDs (64-char hex) and references (64-128 char hex)
 - **Error Sanitization**: Internal details (IPs, ports, file paths) are never exposed in error responses
 - **Server Header Suppression**: `Server` header removed to prevent version fingerprinting
-- **Rate Limit Headers**: `X-RateLimit-Limit` and `X-RateLimit-Remaining` on every response
+- **Rate Limit Headers**: `X-RateLimit-Limit` and `X-RateLimit-Remaining` on rate-limited routes (free-tier writes report the stricter free-tier limit)
 
 #### 🛡️ Reliability Features
 - **Request Timeouts**: 10-second timeout for external API calls
@@ -904,9 +904,9 @@ When the limit is exceeded, the gateway returns **429**:
 {"error": "Rate limit exceeded", "detail": "Too many requests. Try again in 42 seconds.", "retry_after": 42}
 ```
 
-**Exempt paths** (never rate-limited): `/`, `/health`, `/docs`, `/redoc`, `/openapi.json`
+**Exempt paths** (never rate-limited): `/`, `/health`, `/docs`, `/redoc`, `/api/v1/openapi.json`, `/metrics`. With x402 billing on, pre-stamped chunk uploads (`POST /api/v1/chunks/`) are also exempt, because each chunk is already paid for per byte (prepaid credit or the free daily quota).
 
-**Note**: Rate limiting is automatically disabled when x402 payment is enabled (x402 has its own rate limiting).
+**With x402 enabled** the global limit still applies to every other route. Free-tier writes additionally meet the x402 free-tier limit (`X402_FREE_TIER_RATE_LIMIT`, default 3/min), and count against both. Callers sharing one IP (NAT, CI runners, a shared backend) share one budget.
 
 ### Input Validation
 
