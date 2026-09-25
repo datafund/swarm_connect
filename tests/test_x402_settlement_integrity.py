@@ -43,10 +43,28 @@ async def no_settle_point():
     return {"ok": True}
 
 
+async def settle_then_fail(request: Request):
+    from fastapi import HTTPException
+    await settle_payment(request)
+    raise HTTPException(status_code=502, detail="Bee unavailable")
+
+
+async def settle_then_crash(request: Request):
+    await settle_payment(request)
+    raise RuntimeError("unexpected")
+
+
+async def crash_before_settle(request: Request):
+    raise RuntimeError("unexpected")
+
+
 def _app(facilitator):
     app = FastAPI()
     router = APIRouter(dependencies=[Depends(require_x402_payment)])
     router.add_api_route("/api/v1/stamps/", buy, methods=["POST"])
+    router.add_api_route("/api/v1/stamps/fail", settle_then_fail, methods=["POST"])
+    router.add_api_route("/api/v1/stamps/crash", settle_then_crash, methods=["POST"])
+    router.add_api_route("/api/v1/data/crash", crash_before_settle, methods=["POST"])
     router.add_api_route("/api/v1/data/", refuse, methods=["POST"])
     router.add_api_route("/api/v1/data/manifest", no_settle_point, methods=["POST"])
     app.include_router(router)
@@ -85,7 +103,8 @@ def env():
 
 def _run(fac, path="/api/v1/stamps/", header=None):
     with patch("app.x402.dependency._get_facilitator_client", return_value=fac):
-        return TestClient(_app(fac)).post(path, headers={"X-PAYMENT": header or create_valid_payment_header()})
+        client = TestClient(_app(fac), raise_server_exceptions=False)
+        return client.post(path, headers={"X-PAYMENT": header or create_valid_payment_header()})
 
 
 def test_failed_settlement_delivers_nothing(env):
@@ -113,7 +132,8 @@ def test_successful_settlement_delivers_once_and_reports_the_transaction(env):
 
 
 def test_concurrent_reuse_of_one_authorization_delivers_once(env):
-    fac = _facilitator(*([ok()] + [refused("nonce_used")] * 9))
+    # Every settle would succeed: only the replay guard can stop the reuse.
+    fac = _facilitator(*([ok()] * 10))
     header = create_valid_payment_header()
 
     async def burst():
@@ -127,6 +147,7 @@ def test_concurrent_reuse_of_one_authorization_delivers_once(env):
 
     assert DELIVERED == [1]
     assert sorted(r.status_code for r in responses) == [200] + [402] * 9
+    assert fac.settle.await_count == 1
 
 
 def test_sequential_reuse_is_refused(env):
@@ -175,3 +196,50 @@ def test_chunk_credit_is_not_granted_when_settlement_fails(env):
             asyncio.run(chunks.top_up_credit(req, mb="100"))
     assert exc.value.status_code == 402
     mgr.credit.assert_not_called()
+
+
+def test_failure_after_settlement_is_recorded_for_refund(env):
+    from app.x402.audit import read_audit_log
+    fac = _facilitator(ok())
+    r = _run(fac, path="/api/v1/stamps/fail")
+    assert r.status_code == 502
+    assert r.headers["X-Payment-Transaction"] == TX
+    assert r.headers["X-Payment-Status"] == "settled_not_delivered"
+    events = [e for e in read_audit_log() if e["data"].get("stage") == "delivery_after_settlement"]
+    assert events and TX in events[-1]["data"]["reason"]
+
+
+def test_crash_after_settlement_returns_the_transaction(env):
+    fac = _facilitator(ok())
+    r = _run(fac, path="/api/v1/stamps/crash")
+    assert r.status_code == 500
+    assert r.json()["x402_status"] == "settled_not_delivered"
+    assert r.json()["transaction"] == TX
+
+
+def test_crash_before_settlement_releases_the_authorization(env):
+    fac = _facilitator(ok())
+    header = create_valid_payment_header()
+    r = _run(fac, path="/api/v1/data/crash", header=header)
+    assert r.status_code == 500 and fac.settle.await_count == 0
+    assert _run(fac, header=header).status_code == 200
+
+
+def test_settlement_error_is_audited_and_the_authorization_can_be_retried(env):
+    from app.x402.audit import read_audit_log
+    fac = _facilitator(RuntimeError("facilitator down"), ok())
+    header = create_valid_payment_header()
+    assert _run(fac, header=header).status_code == 502
+    assert any(e["data"].get("stage") == "settle" for e in read_audit_log())
+    assert _run(fac, header=header).status_code == 200
+    assert DELIVERED == [1]
+
+
+def test_payload_without_an_authorization_is_refused(env):
+    import base64, json
+    fac = _facilitator(ok())
+    bare = base64.b64encode(json.dumps({"x402Version": 1, "scheme": "exact", "network": "base-sepolia",
+                                        "payload": {"signature": "0x" + "ab" * 65, "authorization": None}}).encode()).decode()
+    r = _run(fac, header=bare)
+    assert r.status_code == 402
+    assert DELIVERED == []

@@ -283,8 +283,10 @@ async def upload_data(
                 detail=f"Invalid redundancy level {redundancy}. Must be 0-4 ({valid_levels})"
             )
 
-        # Optional pre-upload stamp validation
-        if validate_stamp:
+        # Optional pre-upload stamp validation. Always done for a paid upload:
+        # the payment is settled just before the upload, so a stamp Bee would
+        # refuse (missing, expired, full) must be caught while it is still free.
+        if validate_stamp or getattr(request.state, "x402_mode", None) == "paid":
             stamp_start = time.perf_counter()
             try:
                 await validate_stamp_for_upload(stamp_id)
@@ -734,8 +736,10 @@ async def upload_manifest(
                 detail=f"Invalid redundancy level {redundancy}. Must be 0-4 ({valid_levels})"
             )
 
-        # Optional pre-upload stamp validation
-        if validate_stamp:
+        # Optional pre-upload stamp validation. Always done for a paid upload:
+        # the payment is settled just before the upload, so a stamp Bee would
+        # refuse (missing, expired, full) must be caught while it is still free.
+        if validate_stamp or getattr(request.state, "x402_mode", None) == "paid":
             stamp_start = time.perf_counter()
             try:
                 await validate_stamp_for_upload(stamp_id)

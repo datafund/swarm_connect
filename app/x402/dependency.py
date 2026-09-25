@@ -382,7 +382,18 @@ async def require_x402_payment(request: Request) -> None:
     # any work; the middleware releases the reservation if nothing was settled.
     from app.x402.settlement import authorization_key, replay_guard
     auth_key = authorization_key(payment_payload)
-    if auth_key is not None and not replay_guard.reserve(auth_key):
+    if auth_key is None:
+        # Every payment this gateway accepts (scheme "exact" on an EVM network)
+        # is an EIP-3009 authorization. Anything else cannot be deduplicated.
+        raise HTTPException(
+            status_code=402,
+            detail={
+                "x402Version": X402_VERSION,
+                "error": "Unsupported payment payload: expected an EIP-3009 authorization.",
+                "accepts": [payment_requirements.model_dump(by_alias=True)],
+            },
+        )
+    if not replay_guard.reserve(auth_key):
         logger.warning(f"x402: Payment authorization reused by {client_ip}")
         raise HTTPException(
             status_code=402,

@@ -112,7 +112,10 @@ async def settle_payment(request: Request) -> None:
         result = await _facilitator().settle(payment=payment, payment_requirements=requirements)
     except Exception as e:
         # The outcome is unknown: the facilitator may or may not have submitted
-        # the transfer. Keep the authorization reserved and deliver nothing.
+        # the transfer. Deliver nothing. The middleware then releases the
+        # reservation, which is safe: a retry with the same authorization is
+        # delivered only if its own settlement succeeds, and a transfer that did
+        # go through spent the nonce, so it cannot.
         logger.error(f"x402: settlement error before delivery: {type(e).__name__}: {e}", exc_info=True)
         log_payment_failed(client_ip=client_ip, reason=f"{type(e).__name__}: {e}",
                            stage="settle", wallet_address=payer)
