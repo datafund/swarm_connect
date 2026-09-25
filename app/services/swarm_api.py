@@ -791,9 +791,20 @@ async def upload_chunk_to_swarm(
         raise ValueError(f"Could not parse chunk upload response: {e}") from e
 
 
+class DownloadTooLargeError(Exception):
+    """The referenced content exceeds MAX_DOWNLOAD_SIZE_MB."""
+
+    def __init__(self, limit_bytes: int):
+        super().__init__(f"Content exceeds the {limit_bytes} byte download limit")
+        self.limit_bytes = limit_bytes
+
+
 async def download_data_from_swarm(reference: str) -> bytes:
     """
     Downloads data from the Swarm network using a reference hash.
+
+    Streams the body and stops once it exceeds MAX_DOWNLOAD_SIZE_MB, so an
+    arbitrarily large reference cannot be pulled into memory (#353).
 
     Args:
         reference: The Swarm reference hash of the data to download
@@ -804,20 +815,37 @@ async def download_data_from_swarm(reference: str) -> bytes:
     Raises:
         httpx.HTTPError: If the HTTP request to the Swarm API fails
         FileNotFoundError: If the data is not found (404)
+        DownloadTooLargeError: If the content exceeds the download limit
     """
     api_url = urljoin(str(settings.SWARM_BEE_API_URL), f"bzz/{reference.lower()}")
+    limit = settings.MAX_DOWNLOAD_SIZE_MB * 1024 * 1024
+
+    async def fetch() -> bytes:
+        client = get_client()
+        # identity: the limit must apply to the bytes held in memory, and a
+        # compressed response would be inflated chunk by chunk before counting.
+        async with client.stream("GET", api_url, timeout=60,
+                                 headers={"Accept-Encoding": "identity"}) as response:
+            if response.status_code == 404:
+                raise FileNotFoundError(f"Data not found on Swarm at reference {reference}")
+            response.raise_for_status()
+
+            declared = response.headers.get("content-length")
+            if declared and declared.isdigit() and int(declared) > limit:
+                raise DownloadTooLargeError(limit)
+
+            body = bytearray()
+            async for chunk in response.aiter_bytes():
+                if len(body) + len(chunk) > limit:
+                    raise DownloadTooLargeError(limit)
+                body += chunk
+            return bytes(body)
 
     try:
-        client = get_client()
-        response = await client.get(api_url, timeout=60)
-
-        if response.status_code == 404:
-            raise FileNotFoundError(f"Data not found on Swarm at reference {reference}")
-
-        response.raise_for_status()
-
-        logger.info(f"Successfully downloaded {len(response.content)} bytes from Swarm reference: {reference}")
-        return response.content
+        # One deadline for the whole transfer: httpx timeouts apply per read.
+        content = await asyncio.wait_for(fetch(), timeout=settings.DOWNLOAD_TIMEOUT_SECONDS)
+        logger.info(f"Successfully downloaded {len(content)} bytes from Swarm reference: {reference}")
+        return content
 
     except httpx.HTTPError as e:
         _record_bee_error("download")
