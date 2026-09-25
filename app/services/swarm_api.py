@@ -1211,6 +1211,52 @@ def calculate_stamp_amount(duration_hours: int, current_price,
     return amount
 
 
+SECONDS_PER_BLOCK = 3600 / BLOCKS_PER_HOUR
+
+
+def _utc_iso(seconds_from_now: int) -> str:
+    """UTC timestamp in the form 2026-09-25T10:00:00Z."""
+    t = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(seconds=seconds_from_now)
+    return t.replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def expiry_from_amount(amount: int, current_price) -> Optional[str]:
+    """When a batch funded with `amount` PLUR per chunk runs out at today's price.
+
+    An estimate: it assumes Gnosis's 5 s blocks and today's price, which moves;
+    top-ups extend it. None if it cannot be computed.
+    """
+    try:
+        price = int(current_price)
+        if price <= 0:
+            return None
+        return _utc_iso(int(int(amount) / price * SECONDS_PER_BLOCK))
+    except Exception:
+        return None
+
+
+async def get_batch_expiry(batch_id: str, timeout: float = 1.0) -> Optional[str]:
+    """When a batch held by this node runs out, from its current TTL (#383).
+
+    Best effort, bounded to `timeout` seconds in total so it never holds up the
+    response it decorates; None if unknown. The TTL is Bee's own estimate at
+    the current price, so it can move.
+    """
+    async def lookup() -> Optional[str]:
+        client = get_client()
+        url = urljoin(str(settings.SWARM_BEE_API_URL), f"stamps/{batch_id.lower()}")
+        response = await client.get(url, timeout=timeout)
+        if response.status_code != 200:
+            return None
+        ttl = coerce_int(response.json().get("batchTTL"), 0)
+        return _utc_iso(ttl) if ttl > 0 else None
+
+    try:
+        return await asyncio.wait_for(lookup(), timeout=timeout)
+    except Exception:
+        return None
+
+
 def calculate_stamp_total_cost(amount: int, depth: int) -> int:
     """
     Calculates the total BZZ cost for a stamp based on amount and depth.

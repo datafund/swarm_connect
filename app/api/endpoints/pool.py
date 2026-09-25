@@ -15,11 +15,13 @@ import logging
 
 from app.core.config import settings
 from app.services.stamp_pool import stamp_pool_manager, PoolStampStatus
+from app.services.swarm_api import get_batch_expiry
 from app.services.stamp_ownership import stamp_ownership_manager
 from app.services.metrics import pool_acquires_total
 from app.services.pool_allowance import pool_allowance_tracker
 from app.services.signed_auth import POOL_CHECK_PREFIX, authorize_signed_request
 from app.api.models.stamp import SIZE_PRESETS
+
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -91,6 +93,12 @@ class AcquireStampResponse(BaseModel):
     size_name: Optional[str] = Field(None, description="Human-friendly size name")
     message: str = Field(..., description="Status message")
     fallback_used: bool = Field(False, description="True if a larger stamp was provided")
+    expires_at: Optional[str] = Field(
+        None,
+        description=("When the stamp runs out (UTC, from its current TTL on the node; an estimate at today's "
+                     "price, null if unknown). Data uploaded with it can disappear after this unless "
+                     "the stamp is extended; extend with a margin."),
+    )
 
     class Config:
         json_schema_extra = {
@@ -371,7 +379,8 @@ async def acquire_stamp(
         depth=released.depth,
         size_name=size_name,
         message=message,
-        fallback_used=fallback_used
+        fallback_used=fallback_used,
+        expires_at=await get_batch_expiry(released.batch_id),
     )
 
 

@@ -7,7 +7,7 @@ import logging
 
 from app.core.config import settings
 from app.services import swarm_api
-from app.services.swarm_api import plur_to_bzz
+from app.services.swarm_api import expiry_from_amount, get_batch_expiry, plur_to_bzz
 from app.services.stamp_ownership import stamp_ownership_manager
 from app.services.stamp_tracker import record_purchase
 from app.services.spend_budget import spend_budget_tracker
@@ -465,6 +465,7 @@ async def purchase_stamp(
     try:
         # Get effective depth from size preset or explicit depth
         effective_depth = stamp_request.get_effective_depth()
+        price_for_expiry = None
 
         # Determine the amount to use
         if stamp_request.amount is not None:
@@ -475,6 +476,7 @@ async def purchase_stamp(
             duration_hours = stamp_request.duration_hours or 25
             chainstate = await swarm_api.get_chainstate()
             current_price = int(chainstate["currentPrice"])
+            price_for_expiry = current_price
             amount = swarm_api.calculate_stamp_amount(
                 duration_hours, current_price,
                 minimum_validity_blocks=chainstate.get("minimumValidityBlocks"),
@@ -541,9 +543,16 @@ async def purchase_stamp(
         size_label = stamp_request.size or "custom"
         stamp_purchases_total.labels(size=size_label, status="success").inc()
 
+        # Estimated from the amount funded at today's price (#383).
+        if price_for_expiry is None:
+            try:
+                price_for_expiry = int((await swarm_api.get_chainstate())["currentPrice"])
+            except Exception:
+                price_for_expiry = None
         return StampPurchaseResponse(
             batchID=batch_id,
-            message="Postage stamp purchased successfully"
+            message="Postage stamp purchased successfully",
+            expires_at=expiry_from_amount(amount, price_for_expiry) if price_for_expiry else None,
         )
 
     except HTTPException:
@@ -682,7 +691,8 @@ async def extend_stamp(
 
         return StampExtensionResponse(
             batchID=batch_id,
-            message="Postage stamp extended successfully"
+            message="Postage stamp extended successfully",
+            expires_at=await get_batch_expiry(stamp_id),
         )
 
     except HTTPException:
