@@ -175,8 +175,10 @@ class StampPurchaseResponse(BaseModel):
     message: str = Field(..., description="Success message.")
     expires_at: Optional[str] = Field(
         default=None,
-        description=("Estimated time the stamp runs out at today's price (ISO 8601 UTC). Data uploaded "
-                     "with it can disappear from Swarm after this unless the stamp is extended."),
+        description=("Estimated time the stamp runs out (UTC, e.g. 2026-09-25T10:00:00Z), from the amount "
+                     "funded at today's price; it includes the 5% amount margin, so a 24 h request shows "
+                     "about 25 h. The price moves, so extend with a margin: data uploaded with the stamp "
+                     "can disappear once it runs out."),
     )
 
     model_config = {
@@ -266,6 +268,11 @@ class StampExtensionResponse(BaseModel):
     """Response model for successful stamp extension."""
     batchID: str = Field(..., description="The unique identifier of the extended stamp batch.")
     message: str = Field(..., description="Success message.")
+    expires_at: Optional[str] = Field(
+        default=None,
+        description=("Estimated new expiry from the batch's TTL on the node (UTC; null if the node has "
+                     "not reported it yet). An estimate at today's price."),
+    )
 
     model_config = {
         "json_schema_extra": {

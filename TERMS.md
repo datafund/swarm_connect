@@ -1,6 +1,10 @@
 # Provenance Gateway: service terms
 
-> **Draft for review.** Datafund must review this before the gateway takes payments on Base mainnet. Items marked **[to confirm]** need a decision (legal entity, jurisdiction, contact channel).
+> **Draft for review.** Datafund must review this before the gateway takes payments on Base mainnet. Items marked **[to confirm]** need a decision (legal entity, jurisdiction, contact channel, log retention). It is not linked from the service (`TERMS_URL` is empty) until approved.
+>
+> It describes the gateway as it behaves once the audit fixes it relies on are deployed: payment settled only right before the work (#398), paid and owner-checked stamp extension (#397), and the payment audit trail (#411). Do not publish it before those are live.
+
+Version: draft · Effective: **[to confirm]**
 
 These terms cover the hosted Provenance Gateway at `provenance-gateway.datafund.io` and its staging instance. The software itself is MIT-licensed (see `LICENSE`); these terms are about using the hosted service.
 
@@ -14,12 +18,15 @@ Payments are made in USDC through the x402 protocol. The price for each operatio
 
 | You pay for | You get |
 |---|---|
-| A stamp purchase or extension | A Swarm postage batch, or additional time on one, of the depth and duration you requested |
-| A pooled stamp | A pre-bought batch of the size you requested, with whatever validity it has left |
-| An upload | The upload of your data using **your** stamp |
-| Bandwidth credit | Prepaid bytes for forwarding pre-stamped chunks, bound to the paying wallet |
+| A stamp purchase | A Swarm postage batch of the depth and duration you requested, registered to the paying wallet |
+| A stamp extension | Additional time on a batch registered to your wallet |
+| A pooled stamp | A pre-bought batch of the size you requested, with whatever validity it has left (at least about a day) |
+| An upload | The upload of your data using a stamp you own, or a shared one |
+| Bandwidth credit | Prepaid bytes for forwarding pre-stamped chunks. They are spent by presenting a bearer token: anyone holding the token can spend them, so keep it secret |
 
-**Storage is not permanent.** Swarm keeps data only while the stamp it was uploaded with is valid. Upload and stamp responses include `expires_at`. After that time, data can disappear from the network unless the stamp is extended. Pool stamps and free-tier stamps are short-lived (about a day).
+Stamps obtained on the free tier are **shared**: anyone can upload with them, and the space in them is used up by all users.
+
+**Storage is not permanent.** Swarm keeps data only while the stamp it was uploaded with is valid. Upload, stamp and extension responses include `expires_at`: an **estimate** at today's storage price, which can change, so extend with a margin. After a stamp runs out, data uploaded with it can disappear from the network. Pool stamps are handed out with at least about a day left. Free-tier and purchased stamps last for the duration requested.
 
 ## 3. When something goes wrong
 
@@ -34,11 +41,11 @@ A free tier is offered for evaluation, and is limited per client and per day. It
 
 ## 5. Your data
 
-Data uploaded to Swarm is public to anyone who has its reference, unless you encrypt it before uploading. Do not upload data you are not entitled to share. The gateway keeps request logs and an audit log of payments (payer address, amount, transaction, what was delivered) for operating the service and handling refunds.
+Data uploaded to Swarm is public to anyone who has its reference, unless you encrypt it before uploading. Do not upload data you are not entitled to share. The gateway keeps request logs (including client IP addresses) and an audit log of payments (payer address, amount, transaction, what was delivered) for operating the service and handling refunds. Retention period: **[to confirm]**.
 
 ## 6. Changes and contact
 
-These terms can change. The current version is always linked from the gateway's `/` response (`terms_url`).
+These terms can change. The current version is linked from the gateway's `/` response (`terms_url`), once approved.
 
 - Entity and jurisdiction: **[to confirm]**
 - Contact: **[to confirm]**

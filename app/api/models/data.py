@@ -44,7 +44,7 @@ class DataUploadResponse(BaseModel):
     expires_at: Optional[str] = Field(
         default=None,
         description=(
-            "When the stamp used runs out (ISO 8601 UTC; an estimate, null if unknown). "
+            "When the stamp used runs out (UTC, e.g. 2026-09-25T10:00:00Z; an estimate at today's price, null if unknown). "
             "Swarm keeps data only while its stamp is valid: extend the stamp before this "
             "time or the data can disappear."
         ),
@@ -78,7 +78,7 @@ class ManifestUploadResponse(BaseModel):
     expires_at: Optional[str] = Field(
         default=None,
         description=(
-            "When the stamp used runs out (ISO 8601 UTC; an estimate, null if unknown). "
+            "When the stamp used runs out (UTC, e.g. 2026-09-25T10:00:00Z; an estimate at today's price, null if unknown). "
             "Swarm keeps data only while its stamp is valid: extend the stamp before this "
             "time or the data can disappear."
         ),

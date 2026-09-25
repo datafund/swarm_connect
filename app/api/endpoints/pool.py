@@ -15,16 +15,13 @@ import logging
 
 from app.core.config import settings
 from app.services.stamp_pool import stamp_pool_manager, PoolStampStatus
+from app.services.swarm_api import get_batch_expiry
 from app.services.stamp_ownership import stamp_ownership_manager
 from app.services.metrics import pool_acquires_total
 from app.services.pool_allowance import pool_allowance_tracker
 from app.services.signed_auth import POOL_CHECK_PREFIX, authorize_signed_request
 from app.api.models.stamp import SIZE_PRESETS
 
-
-def _as_str(value):
-    """Only a real timestamp string; anything else (e.g. a test double) as unknown."""
-    return value if isinstance(value, str) else None
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -98,9 +95,9 @@ class AcquireStampResponse(BaseModel):
     fallback_used: bool = Field(False, description="True if a larger stamp was provided")
     expires_at: Optional[str] = Field(
         None,
-        description=("When the stamp runs out (ISO 8601 UTC, from its current TTL; null if unknown). "
-                     "Pool stamps are short-lived: data uploaded with it can disappear after this "
-                     "unless the stamp is extended."),
+        description=("When the stamp runs out (UTC, from its current TTL on the node; an estimate at today's "
+                     "price, null if unknown). Data uploaded with it can disappear after this unless "
+                     "the stamp is extended; extend with a margin."),
     )
 
     class Config:
@@ -376,7 +373,6 @@ async def acquire_stamp(
     if fallback_used:
         message = f"Requested size not available. {message} (larger than requested)"
 
-    from app.services import swarm_api
     return AcquireStampResponse(
         success=True,
         batch_id=released.batch_id,
@@ -384,7 +380,7 @@ async def acquire_stamp(
         size_name=size_name,
         message=message,
         fallback_used=fallback_used,
-        expires_at=_as_str(await swarm_api.get_batch_expiry(released.batch_id)),
+        expires_at=await get_batch_expiry(released.batch_id),
     )
 
 

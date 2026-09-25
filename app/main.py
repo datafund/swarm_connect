@@ -202,7 +202,7 @@ async def read_root():
         "message": f"Welcome to {settings.PROJECT_NAME}",
         # What a paid request buys, what happens on failure, and that data
         # lives only as long as its stamp (#383).
-        "terms_url": settings.TERMS_URL,
+        "terms_url": settings.TERMS_URL or None,
         # Build and process age. Both were previously only readable from /metrics,
         # which is not public any more (#188) — and they are the two fields an
         # external checker needs to tell whether the gateway was redeployed or

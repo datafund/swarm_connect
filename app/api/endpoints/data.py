@@ -47,10 +47,6 @@ logger = logging.getLogger(__name__)
 # far less than any size that would matter for the limit itself.
 MULTIPART_ENVELOPE_ALLOWANCE = 8 * 1024
 
-def _as_str(value):
-    """Only a real timestamp string; anything else (e.g. a test double) as unknown."""
-    return value if isinstance(value, str) else None
-
 router = APIRouter()
 
 
@@ -412,7 +408,7 @@ async def upload_data(
             reference=reference,
             message=f"File '{file.filename}' uploaded successfully",
             timing=timing,
-            expires_at=_as_str(await get_batch_expiry(stamp_id)),
+            expires_at=await get_batch_expiry(stamp_id),
         )
 
         # Always add Server-Timing header (useful for browser devtools)
@@ -833,7 +829,7 @@ async def upload_manifest(
             file_count=file_count,
             message=f"Collection uploaded successfully with {file_count} files",
             timing=timing,
-            expires_at=_as_str(await get_batch_expiry(stamp_id)),
+            expires_at=await get_batch_expiry(stamp_id),
         )
 
         # Always add Server-Timing header (useful for browser devtools)

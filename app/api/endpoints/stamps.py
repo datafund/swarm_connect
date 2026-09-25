@@ -7,7 +7,7 @@ import logging
 
 from app.core.config import settings
 from app.services import swarm_api
-from app.services.swarm_api import plur_to_bzz
+from app.services.swarm_api import expiry_from_amount, get_batch_expiry, plur_to_bzz
 from app.services.stamp_ownership import stamp_ownership_manager
 from app.services.stamp_tracker import record_purchase
 from app.services.spend_budget import spend_budget_tracker
@@ -549,11 +549,10 @@ async def purchase_stamp(
                 price_for_expiry = int((await swarm_api.get_chainstate())["currentPrice"])
             except Exception:
                 price_for_expiry = None
-        expires_at = swarm_api.expiry_from_amount(amount, price_for_expiry) if price_for_expiry else None
         return StampPurchaseResponse(
             batchID=batch_id,
             message="Postage stamp purchased successfully",
-            expires_at=expires_at if isinstance(expires_at, str) else None,
+            expires_at=expiry_from_amount(amount, price_for_expiry) if price_for_expiry else None,
         )
 
     except HTTPException:
@@ -692,7 +691,8 @@ async def extend_stamp(
 
         return StampExtensionResponse(
             batchID=batch_id,
-            message="Postage stamp extended successfully"
+            message="Postage stamp extended successfully",
+            expires_at=await get_batch_expiry(stamp_id),
         )
 
     except HTTPException:
