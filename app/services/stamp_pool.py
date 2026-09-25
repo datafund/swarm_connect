@@ -511,6 +511,16 @@ class StampPoolManager:
         try:
             from app.services.stamp_ownership import POOL_OWNER, stamp_ownership_manager
             for batch_id in batch_ids:
+                # Never take a batch back from a caller it was handed to. A
+                # record naming anyone else means the batch left the pool; the
+                # pool re-claiming it would strip a paying owner of exclusive use.
+                info = stamp_ownership_manager.get_stamp_info(batch_id)
+                if info and info.get("owner") != POOL_OWNER:
+                    logger.warning(
+                        f"Not re-registering {batch_id[:16]}... to the pool: it is "
+                        f"recorded to another owner ({info.get('mode')})"
+                    )
+                    continue
                 stamp_ownership_manager.register_stamp(
                     batch_id=batch_id,
                     owner=POOL_OWNER,
@@ -553,6 +563,12 @@ class StampPoolManager:
             unreadable_ids = set()
 
             with self._lock:
+                # Decide against the state as it is now, not as it was before
+                # the await above. A batch handed to a caller while Bee was
+                # answering has left the pool and the state file, but is still
+                # in the earlier read and still usable on the node; importing it
+                # would put a sold batch back up for sale.
+                known_ids &= self._load_state()
                 for batch_id in known_ids:
                     # Skip if already in pool
                     if batch_id in self._pool:
@@ -623,8 +639,10 @@ class StampPoolManager:
             # reach 50% utilisation unasked (#312).
             #
             # Idempotent, and does not disturb a batch already owned by someone:
-            # only AVAILABLE batches are in the pool, and one acquired by a caller
-            # was removed from it at release.
+            # a batch acquired by a caller was removed from the pool at release,
+            # and _register_pool_ownership skips any batch recorded to another
+            # owner. A RESERVED batch is still the pool's; the acquiring handler
+            # registers its caller only once it has been released.
             self._register_pool_ownership(valid_ids)
 
             self._last_sync_ok = True

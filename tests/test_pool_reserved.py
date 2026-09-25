@@ -181,3 +181,111 @@ async def test_concurrent_acquires_never_get_the_same_batch(tmp_path, monkeypatc
     assert [r.status_code for r in rs].count(409) == 1
     assert ["reserved", "reserved"] in during
     assert mgr._pool == {} and _state(mgr) == []
+
+
+@pytest.mark.asyncio
+async def test_sync_does_not_re_add_a_batch_released_while_bee_answers(tmp_path, monkeypatch):
+    """Pre-existing race: sync read the state file, awaited Bee, then imported
+    every ID it had read that was not in the pool. A batch handed to a caller
+    during that await was put back up for sale and re-registered to the pool."""
+    from app.services.stamp_ownership import POOL_OWNER, stamp_ownership_manager
+    batch = "a" * 64
+    mgr = _manager(tmp_path, batch)
+    monkeypatch.setitem(stamp_ownership_manager._registry, batch,
+                        {"owner": POOL_OWNER, "mode": "pool"})
+
+    async def bee_while_acquired():
+        # An acquire completes while the sync is waiting on Bee.
+        mgr.reserve_stamp(batch)
+        mgr.release_reserved_stamp(batch)
+        stamp_ownership_manager.register_stamp(batch_id=batch, owner="0xpayer",
+                                               mode="paid", source="pool_acquire")
+        return _bee(batch)
+
+    with patch("app.services.stamp_pool.swarm_api.get_all_stamps_processed",
+               new=bee_while_acquired):
+        assert await mgr.sync_from_bee_node() == 0
+    assert batch not in mgr._pool
+    assert _state(mgr) == []
+    assert stamp_ownership_manager.get_stamp_info(batch)["owner"] == "0xpayer"
+
+
+def test_pool_ownership_is_never_taken_back_from_a_caller(monkeypatch):
+    from app.services.stamp_ownership import POOL_OWNER, stamp_ownership_manager
+    mine, theirs, new = "a" * 64, "b" * 64, "c" * 64
+    monkeypatch.setitem(stamp_ownership_manager._registry, mine, {"owner": POOL_OWNER, "mode": "pool"})
+    monkeypatch.setitem(stamp_ownership_manager._registry, theirs, {"owner": "0xpayer", "mode": "paid"})
+    monkeypatch.delitem(stamp_ownership_manager._registry, new, raising=False)
+    StampPoolManager()._register_pool_ownership({mine, theirs, new})
+    assert stamp_ownership_manager.get_stamp_info(theirs)["owner"] == "0xpayer"
+    assert stamp_ownership_manager.get_stamp_info(new)["owner"] == POOL_OWNER
+    stamp_ownership_manager._registry.pop(new, None)
+
+
+async def _acquire_with_settle(tmp_path, monkeypatch, settle):
+    """One acquire through the real handler and real manager, with `settle`
+    standing in for settlement. Returns (manager, response or exception)."""
+    from app.api.endpoints import pool
+    from app.core.config import settings
+    monkeypatch.setattr(settings, "STAMP_POOL_ENABLED", True)
+    mgr = _manager(tmp_path, "a" * 64)
+    monkeypatch.setattr(pool, "stamp_pool_manager", mgr)
+    monkeypatch.setattr(mgr, "trigger_replenishment_if_needed", lambda d: False)
+    monkeypatch.setattr(pool.stamp_ownership_manager, "register_stamp", lambda **kw: None)
+    monkeypatch.setattr(pool, "settle_payment", settle)
+    app = FastAPI()
+    app.include_router(pool.router, prefix="/api/v1/pool")
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t") as c:
+        try:
+            return mgr, await c.post("/api/v1/pool/acquire", json={"size": "small"})
+        except BaseException as e:  # CancelledError is not an Exception
+            return mgr, e
+
+
+def _back_in_pool(mgr):
+    assert mgr._pool["a" * 64].status == PoolStampStatus.AVAILABLE
+    assert _state(mgr) == ["a" * 64]
+    assert mgr.get_available_stamp(17).batch_id == "a" * 64
+
+
+@pytest.mark.asyncio
+async def test_client_disconnect_during_settle_returns_the_batch(tmp_path, monkeypatch):
+    async def cancelled(request):
+        await asyncio.sleep(0)
+        raise asyncio.CancelledError()
+
+    mgr, outcome = await _acquire_with_settle(tmp_path, monkeypatch, cancelled)
+    assert isinstance(outcome, asyncio.CancelledError)
+    _back_in_pool(mgr)
+
+
+@pytest.mark.asyncio
+async def test_uncertain_settlement_returns_the_batch(tmp_path, monkeypatch, caplog):
+    from fastapi import HTTPException
+
+    async def unavailable(request):
+        raise HTTPException(status_code=502, detail={"code": "PAYMENT_SETTLEMENT_UNAVAILABLE"})
+
+    with caplog.at_level("WARNING", logger="app.api.endpoints.pool"):
+        mgr, r = await _acquire_with_settle(tmp_path, monkeypatch, unavailable)
+    assert r.status_code == 502
+    _back_in_pool(mgr)
+    # The batch is named, so a transfer that lands later can be traced to it.
+    assert any("a" * 64 in m for m in caplog.messages)
+
+
+@pytest.mark.asyncio
+async def test_paid_non_delivery_is_logged_as_an_error(tmp_path, monkeypatch, caplog):
+    from types import SimpleNamespace
+
+    async def settled(request):
+        request.state.x402_payer = "0xpayer"
+        request.state.x402_settlement = SimpleNamespace(transaction="0xtx")
+
+    from app.services.stamp_pool import StampPoolManager as M
+    monkeypatch.setattr(M, "release_reserved_stamp", lambda self, b: None)
+    with caplog.at_level("ERROR", logger="app.api.endpoints.pool"):
+        _, r = await _acquire_with_settle(tmp_path, monkeypatch, settled)
+    assert r.status_code == 409
+    err = [m for m in caplog.messages if "PAID NON-DELIVERY" in m]
+    assert err and "0xpayer" in err[0] and "0xtx" in err[0]
