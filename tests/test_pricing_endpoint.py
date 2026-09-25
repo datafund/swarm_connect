@@ -28,9 +28,9 @@ def x402_on(monkeypatch):
                  ("X402_PAY_TO_ADDRESS", "0xpayee"), ("X402_NETWORK", "base-sepolia")):
         monkeypatch.setattr(settings, k, v)
     reset_rate_limiter()
-    with patch("app.x402.pricing.get_chainstate", new=AsyncMock(return_value=CHAINSTATE)), \
+    with patch("app.services.swarm_api.get_chainstate", new=AsyncMock(return_value=CHAINSTATE)) as bee, \
          patch("app.x402.dependency.check_base_eth_balance", new=AsyncMock(return_value=OK_BALANCE)):
-        yield
+        yield bee
     reset_rate_limiter()
 
 
@@ -58,6 +58,8 @@ def test_quotes_every_enabled_operation_without_payment(client):
     body = r.json()
     assert body["x402_enabled"] is True
     assert body["currency"] == "USDC" and body["pay_to"] == "0xpayee"
+    assert body["network"] == "base-sepolia"
+    assert body["asset"] == "0x036CbD53842c5426634e7929541eC2318f3dCF7e"
     assert set(body["quotes"]) == {"stamp_purchase", "pool_acquire", "data_upload", "bandwidth_credit"}
     for q in body["quotes"].values():
         assert q["price_usd"] >= settings.X402_MIN_PRICE_USD
@@ -104,7 +106,7 @@ def test_x402_disabled_returns_no_quotes(monkeypatch):
 def test_chain_price_unavailable_is_503_with_code(x402_on):
     app = FastAPI()
     app.include_router(pricing.router, prefix="/api/v1")
-    with patch("app.x402.pricing.get_chainstate", new=AsyncMock(side_effect=RuntimeError("bee down"))):
+    with patch("app.services.swarm_api.get_chainstate", new=AsyncMock(side_effect=RuntimeError("bee down"))):
         r = TestClient(app).get("/api/v1/pricing")
     assert r.status_code == 503
     assert r.json()["detail"]["code"] == "PRICING_UNAVAILABLE"
@@ -120,3 +122,43 @@ def test_mounted_on_the_real_app_without_x402_dependency(x402_on):
     assert pricing.router.dependencies == []
     r = TestClient(app).get("/api/v1/pricing")
     assert r.status_code == 200 and r.json()["x402_enabled"] is True
+
+
+def test_chain_price_is_read_once_per_call(client, x402_on):
+    """Three chain-priced quotes (stamp, pool, upload) share one Bee read."""
+    x402_on.reset_mock()
+    client.get("/api/v1/pricing?size=medium")
+    assert x402_on.await_count == 1
+
+
+def test_pin_does_not_leak_past_the_call(client, x402_on):
+    from app.x402.pricing import _pinned_chainstate
+    client.get("/api/v1/pricing")
+    assert _pinned_chainstate.get() is None
+
+
+def test_pay_to_matches_the_402_when_unset(client, monkeypatch):
+    # The 402 substitutes the zero address when no payee is configured; the
+    # pricing response must report the same, not an empty string.
+    monkeypatch.setattr(settings, "X402_PAY_TO_ADDRESS", "")
+    body = client.get("/api/v1/pricing").json()
+    accepts = client.post("/api/v1/stamps/", json={}).json()["detail"]["accepts"][0]
+    assert body["pay_to"] == accepts["payTo"] == "0x" + "0" * 40
+
+
+def test_out_of_range_sizes_are_422_with_the_endpoints_codes(client, monkeypatch):
+    monkeypatch.setattr(settings, "MAX_UPLOAD_SIZE_MB", 1)
+    monkeypatch.setattr(settings, "BANDWIDTH_CREDIT_MAX_TOPUP_MB", 10)
+    r = client.get(f"/api/v1/pricing?upload_bytes={1024 * 1024 + 1}")
+    assert r.status_code == 422 and r.json()["detail"]["code"] == "FILE_TOO_LARGE"
+    r = client.get("/api/v1/pricing?mb=11")
+    assert r.status_code == 422 and r.json()["detail"]["code"] == "TOPUP_TOO_LARGE"
+    assert client.get(f"/api/v1/pricing?upload_bytes={1024 * 1024}&mb=10").status_code == 200
+
+
+def test_a_pricing_bug_is_not_reported_as_a_chain_outage(x402_on):
+    app = FastAPI()
+    app.include_router(pricing.router, prefix="/api/v1")
+    with patch("app.x402.dependency._calculate_price_for_request", new=AsyncMock(side_effect=OverflowError)):
+        r = TestClient(app, raise_server_exceptions=False).get("/api/v1/pricing")
+    assert r.status_code == 500

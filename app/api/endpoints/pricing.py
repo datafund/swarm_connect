@@ -14,12 +14,15 @@ maintaining a second copy of the per-route pricing rules here would let them
 drift the first time one side changes. Routing through the same function means
 any change to how an operation is priced shows up here automatically.
 
-This is a GET on an unprotected path, so it is never x402-gated, and it goes
-through the same global rate limiter as every other GET.
+This is a GET on an unprotected path, so it is never x402-gated. It is under
+the global rate limiter only when x402 is off: with x402 on that limiter is not
+installed, and no GET is rate-limited. So the chain price is read from Bee once
+per call and reused for every quote, which makes a call cost the same one Bee
+request as an unpaid POST that gets a 402. Caching it across calls is #434.
 """
 import json
 import logging
-from typing import Literal, Optional
+from typing import Any, Literal, Optional, Tuple
 
 from fastapi import APIRouter, HTTPException, Query
 from starlette.requests import Request
@@ -32,14 +35,17 @@ router = APIRouter()
 
 
 async def _quote(path: str, body: Optional[dict] = None, query: str = "",
-                 content_length: Optional[int] = None) -> dict:
+                 content_length: Optional[int] = None) -> Tuple[dict, Any]:
     """Price a POST to `path` exactly as the x402 dependency would.
+
+    Returns the quote and the PaymentRequirements the 402 would carry.
 
     Builds the request the client would send (JSON body, query string and
     Content-Length) and hands it to the dependency's pricer. Nothing is sent to
     the handler; only the price is computed.
     """
     from app.x402.dependency import _calculate_price_for_request
+    from app.x402.middleware import create_payment_requirements
 
     raw = json.dumps(body).encode() if body is not None else b""
     length = content_length if content_length is not None else len(raw)
@@ -61,17 +67,21 @@ async def _quote(path: str, body: Optional[dict] = None, query: str = "",
     async def receive():
         return {"type": "http.request", "body": raw, "more_body": False}
 
-    priced = await _calculate_price_for_request(Request(scope, receive))
-    price_usd = priced["price_usd"]
+    request = Request(scope, receive)
+    priced = await _calculate_price_for_request(request)
+    # Built by the same function as the 402's payment requirements, so the
+    # amount, network, asset and payTo here are exactly what the 402 carries.
+    requirements = create_payment_requirements(
+        request=request, price_usd=priced["price_usd"],
+        description=priced.get("description", "Gateway operation"),
+    )
     return {
         "method": "POST",
         "path": path,
-        "price_usd": price_usd,
-        # Same conversion as create_payment_requirements, so this equals the
-        # maxAmountRequired the 402 would carry.
-        "max_amount_required": str(int(price_usd * 1_000_000)),
-        "description": priced.get("description"),
-    }
+        "price_usd": priced["price_usd"],
+        "max_amount_required": requirements.max_amount_required,
+        "description": requirements.description,
+    }, requirements
 
 
 @router.get("/pricing", summary="Price quotes for paid operations")
@@ -83,7 +93,9 @@ async def get_pricing(
     duration_hours: Optional[int] = Query(
         None, ge=24, description="Stamp duration in hours, as in the purchase body."),
     upload_bytes: int = Query(
-        4096, ge=0, description="Size of the data to upload, in bytes."),
+        4096, ge=0,
+        description="Size of the upload request body in bytes: the file plus the multipart "
+                    "overhead (a few hundred bytes), which is what the 402 prices."),
     mb: Optional[int] = Query(
         None, ge=1, description="Bandwidth credit top-up in MB, as in POST /chunks/credit?mb=."),
 ):
@@ -108,25 +120,31 @@ async def get_pricing(
     if not settings.X402_ENABLED:
         return {"x402_enabled": False, "quotes": {}}
 
-    from app.x402.middleware import USDC_ADDRESSES
+    from app.x402.pricing import get_chainstate, pinned_chainstate
 
-    size_body = {k: v for k, v in (("size", size), ("depth", depth)) if v is not None}
-    stamp_body = dict(size_body)
-    if duration_hours is not None:
-        stamp_body["duration_hours"] = duration_hours
+    # Bound to what the real endpoints accept, so an out-of-range value is
+    # refused as such instead of surfacing as a pricing failure.
+    max_upload = settings.MAX_UPLOAD_SIZE_MB * 1024 * 1024
+    if upload_bytes > max_upload:
+        raise HTTPException(status_code=422, detail={
+            "code": "FILE_TOO_LARGE",
+            "message": f"upload_bytes exceeds the maximum upload size of {settings.MAX_UPLOAD_SIZE_MB} MB.",
+        })
+    if mb is not None and mb > settings.BANDWIDTH_CREDIT_MAX_TOPUP_MB:
+        raise HTTPException(status_code=422, detail={
+            "code": "TOPUP_TOO_LARGE",
+            "message": f"mb exceeds the maximum single top-up of {settings.BANDWIDTH_CREDIT_MAX_TOPUP_MB} MB.",
+        })
 
-    api = settings.API_V1_STR
+    # One Bee request per call, shared by every quote below (see the module
+    # docstring). Only this read is reported as PRICING_UNAVAILABLE; a failure
+    # while pricing is a bug, and is left to surface as a 500.
     try:
-        quotes = {"stamp_purchase": await _quote(f"{api}/stamps/", body=stamp_body)}
-        if settings.STAMP_POOL_ENABLED:
-            quotes["pool_acquire"] = await _quote(f"{api}/pool/acquire", body=size_body)
-        quotes["data_upload"] = await _quote(f"{api}/data/", content_length=upload_bytes)
-        if settings.CHUNK_UPLOAD_ENABLED:
-            query = f"mb={mb}" if mb is not None else ""
-            quotes["bandwidth_credit"] = await _quote(f"{api}/chunks/credit", query=query)
+        chainstate = await get_chainstate()
+        if int(chainstate.get("currentPrice", 0)) <= 0:
+            raise ValueError("chainstate has no usable currentPrice")
     except Exception as e:
-        # The pricer needs the current chain price from Bee.
-        logger.error(f"Pricing: failed to compute quotes: {e}")
+        logger.error(f"Pricing: failed to read the chain price: {e}")
         raise HTTPException(
             status_code=503,
             detail={
@@ -135,13 +153,28 @@ async def get_pricing(
             },
         )
 
-    network = settings.X402_NETWORK
+    size_body = {k: v for k, v in (("size", size), ("depth", depth)) if v is not None}
+    stamp_body = dict(size_body)
+    if duration_hours is not None:
+        stamp_body["duration_hours"] = duration_hours
+
+    api = settings.API_V1_STR
+    quotes = {}
+    with pinned_chainstate(chainstate):
+        quotes["stamp_purchase"], requirements = await _quote(f"{api}/stamps/", body=stamp_body)
+        if settings.STAMP_POOL_ENABLED:
+            quotes["pool_acquire"], _ = await _quote(f"{api}/pool/acquire", body=size_body)
+        quotes["data_upload"], _ = await _quote(f"{api}/data/", content_length=upload_bytes)
+        if settings.CHUNK_UPLOAD_ENABLED:
+            query = f"mb={mb}" if mb is not None else ""
+            quotes["bandwidth_credit"], _ = await _quote(f"{api}/chunks/credit", query=query)
+
     return {
         "x402_enabled": True,
         "currency": "USDC",
-        "network": network,
-        "asset": USDC_ADDRESSES.get(network, USDC_ADDRESSES["base-sepolia"]),
-        "pay_to": settings.X402_PAY_TO_ADDRESS,
+        "network": requirements.network,
+        "asset": requirements.asset,
+        "pay_to": requirements.pay_to,
         "min_price_usd": settings.X402_MIN_PRICE_USD,
         "free_tier": {
             "enabled": settings.X402_FREE_TIER_ENABLED,

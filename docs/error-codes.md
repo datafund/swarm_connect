@@ -1,7 +1,9 @@
 # Error codes
 
-Every error response from the gateway carries `code` and `message` at the top
-level of the JSON body. Branch on `code`, and show `message` to a person.
+Error responses from the gateway carry `code` and `message` at the top level
+of the JSON body. Branch on `code`, and show `message` to a person. The one
+exception is the payment settlement failure described below, which has no
+`code` yet.
 
 ```json
 {
@@ -19,7 +21,7 @@ where they matter.
 When an endpoint does not raise its own code, `code` is `HTTP_<status>`, for
 example `HTTP_404` or `HTTP_502`, and `message` is the error text.
 
-Two responses keep their own shape in addition to `code`/`message`:
+Two responses keep their own shape:
 
 - **402 Payment Required** from the x402 payment check. Its body is the x402
   payment request (`x402Version`, `error`, `accepts`, `freeTier`), currently
@@ -27,11 +29,18 @@ Two responses keep their own shape in addition to `code`/`message`:
   [x402-client-integration.md](x402-client-integration.md) for how to pay it.
   To learn a price *without* triggering a 402, call `GET /api/v1/pricing`.
 - **Payment settlement failure** (500) after a paid request. Its body is
-  `{error, detail, x402_status: "settlement_failed", message}`. Retry with a
-  new payment.
+  `{error, detail, x402_status: "settlement_failed", message}`, with **no
+  `code`**; recognise it by `x402_status`. The request was processed, and the
+  failure may be a timeout after the transfer already went through on-chain.
+  **Do not retry automatically or re-pay** because the body says to: that can
+  pay, and run the operation, twice. First check whether your payment
+  authorization's nonce was used (or your USDC balance), and if it was, contact
+  the operator with the payer address and the time of the request. Once
+  `Idempotency-Key` is supported (#422), send one with every paid request, so
+  that a retry returns the first result instead of charging again.
 
 A test (`tests/test_error_codes_doc.py`) fails if a code is raised in `app/`
-without being listed here.
+without being listed here, or listed here but no longer raised.
 
 ## Request and envelope errors
 
@@ -41,18 +50,18 @@ without being listed here.
 | `BODY_TOO_LARGE` | 413 | A JSON body is over the gateway's JSON size limit. | Send a smaller body. File uploads use multipart, which this limit does not apply to. |
 | `JSON_TOO_DEEP` | 400 | A JSON body is nested too deeply. | Flatten the body. |
 | `RATE_LIMIT_EXCEEDED` | 429 | Too many requests from this client (global limiter). `retry_after` and the `Retry-After` header say how long to wait. | Wait `retry_after` seconds, then retry. |
-| `HTTP_<status>` | any | The endpoint raised no specific code. | Act on the status: 4xx means fix the request, 502/503 means retry later. |
+| `HTTP_<status>` | any | The endpoint raised no specific code. This includes the free-tier limit on stamps and uploads (`HTTP_429`, with `detail.payment_info`). | Act on the status: 4xx means fix the request, 429 means wait or pay, 502/503 means retry later. |
 
 ## Payments and pricing
 
 | Code | Status | Meaning | What to do |
 |---|---|---|---|
-| `HTTP_402` | 402 | Payment required (x402). `detail.accepts` lists what to pay; `detail.freeTier` is present when the free tier is available. | Sign a payment for `accepts[0]` and retry with `X-PAYMENT`, or retry with `X-Payment-Mode: free`. |
+| `HTTP_402` | 402 | Payment required (x402), or the payment sent was rejected (invalid header, verification failed; see `message`). `detail.accepts` lists what to pay; `detail.freeTier` is present when the free tier is available. | Sign a payment for `accepts[0]` and retry with `X-PAYMENT`, or retry with `X-Payment-Mode: free`. |
 | `PRICING_UNAVAILABLE` | 503 | `GET /api/v1/pricing` could not read the current chain price. | Retry shortly. |
 | `PAYMENT_REQUIRED` | 402 | Bandwidth credit top-up was attempted on the free tier. | Pay with `X-PAYMENT`. The free tier cannot fund credit. |
 | `BILLING_DISABLED` | 400 | Bandwidth credit top-up needs x402, which is off on this gateway. | Use the free tier for chunk uploads, or another gateway. |
 | `TOPUP_TOO_SMALL` | 400 | The `mb` top-up is below the minimum (named in `message`). | Raise `mb` to at least the minimum. |
-| `TOPUP_TOO_LARGE` | 400 | The `mb` top-up is above the per-request maximum. | Split it into several top-ups. |
+| `TOPUP_TOO_LARGE` | 400 (422 from `/pricing`) | The `mb` top-up is above the per-request maximum. | Split it into several top-ups. |
 | `CREDIT_REQUIRED` | 402 | A chunk upload came with no credit token and no free-tier header. | Top up with `POST /api/v1/chunks/credit`, or send `X-Payment-Mode: free`. |
 | `INVALID_CREDIT_TOKEN` | 402 | The bandwidth credit token is unknown. | Top up again to obtain a valid token. |
 | `INSUFFICIENT_CREDIT` | 402 | The credit left is less than this chunk. | Top up, then retry the chunk. |
@@ -76,7 +85,7 @@ without being listed here.
 
 | Code | Status | Meaning | What to do |
 |---|---|---|---|
-| `FILE_TOO_LARGE` | 413 | The upload is over the gateway's maximum upload size. | Split the data, or use chunk uploads. |
+| `FILE_TOO_LARGE` | 413 (422 from `/pricing`) | The upload, or `upload_bytes` on `/pricing`, is over the gateway's maximum upload size. | Split the data, or use chunk uploads. |
 | `STAMP_OWNERSHIP_DENIED` | 403 | The stamp belongs to another payer, or is pool inventory that was not handed to you. | Use a stamp you bought or acquired. |
 | `NOTARY_NOT_ENABLED` | 400 | `sign=notary` was requested, but the notary is off. | Upload without `sign`. |
 | `NOTARY_NOT_CONFIGURED` | 400 | `sign=notary` was requested, but the notary has no key. | Upload without `sign`, or ask the operator. |

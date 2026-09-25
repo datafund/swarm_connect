@@ -14,16 +14,44 @@ Configuration is loaded from app/core/config.py:
 - X402_MIN_PRICE_USD: Minimum price floor
 """
 import logging
+from contextlib import contextmanager
+from contextvars import ContextVar
 from typing import Dict, Any, Optional
 
 from app.core.config import settings
+from app.services import swarm_api
 from app.services.swarm_api import (
-    get_chainstate,
     calculate_stamp_amount,
     calculate_stamp_total_cost,
 )
 
 logger = logging.getLogger(__name__)
+
+# A chainstate fixed for the duration of one caller's work, so several quotes
+# computed together read Bee once instead of once each. Used by GET /pricing
+# (#381), which prices several operations per request and is not rate-limited
+# when x402 is on. A ContextVar keeps it private to that request's task.
+_pinned_chainstate: ContextVar[Optional[Dict[str, Any]]] = ContextVar(
+    "pinned_chainstate", default=None
+)
+
+
+@contextmanager
+def pinned_chainstate(chainstate: Dict[str, Any]):
+    """Make get_chainstate() in this module return `chainstate` inside the block."""
+    token = _pinned_chainstate.set(chainstate)
+    try:
+        yield
+    finally:
+        _pinned_chainstate.reset(token)
+
+
+async def get_chainstate() -> Dict[str, Any]:
+    """The Bee chainstate: the pinned one if set, else fetched from Bee."""
+    pinned = _pinned_chainstate.get()
+    if pinned is not None:
+        return pinned
+    return await swarm_api.get_chainstate()
 
 # Conversion constants
 # Single source in app/services/swarm_api; re-exported here because callers
