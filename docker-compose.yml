@@ -21,6 +21,11 @@ services:
     volumes:
       - /opt/swarm_connect_data:/app/data
     restart: unless-stopped
+    # uvicorn stops in-flight requests after 10 s, then the gateway gives paid
+    # stamp purchases still waiting on Bee up to 25 s
+    # (SHUTDOWN_PENDING_PURCHASE_GRACE_SECONDS) before recording them for the
+    # operator. Docker's default 10 s would kill it first.
+    stop_grace_period: 40s
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/"]
       interval: 30s
@@ -41,6 +46,11 @@ services:
     volumes:
       - /opt/swarm_connect_dev_data:/app/data
     restart: unless-stopped
+    # uvicorn stops in-flight requests after 10 s, then the gateway gives paid
+    # stamp purchases still waiting on Bee up to 25 s
+    # (SHUTDOWN_PENDING_PURCHASE_GRACE_SECONDS) before recording them for the
+    # operator. Docker's default 10 s would kill it first.
+    stop_grace_period: 40s
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/"]
       interval: 30s
