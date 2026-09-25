@@ -21,7 +21,7 @@ from datetime import datetime, timezone
 from threading import Lock
 from typing import Dict, Optional, Tuple
 
-from app.core.atomic_io import atomic_write_json
+from app.core.atomic_io import atomic_write_json, load_json_state
 from app.core.config import settings
 
 logger = logging.getLogger(__name__)
@@ -98,26 +98,20 @@ class BandwidthCreditManager:
             logger.error(f"Failed to save bandwidth credit ledger to {state_file}: {e}")
 
     def _load_state(self):
-        """Load the ledger from the state file."""
+        """Load the ledger from the state file.
+
+        A missing file starts an empty ledger. An unreadable one raises
+        StateLoadError (see load_json_state): these are prepaid balances, and
+        starting empty would let the next credit or debit overwrite them.
+        """
         state_file = self._get_state_file_path()
-        try:
-            with open(state_file, 'r') as f:
-                data = json.load(f)
-            if isinstance(data, dict):
-                self._balances = data
-                logger.info(f"Loaded bandwidth credit ledger: {len(self._balances)} accounts from {state_file}")
-            else:
-                logger.warning(f"Invalid bandwidth credit ledger format in {state_file}, starting fresh")
-                self._balances = {}
-        except FileNotFoundError:
+        data = load_json_state(state_file)
+        if data is None:
             logger.info(f"No bandwidth credit ledger at {state_file}, starting fresh")
             self._balances = {}
-        except (json.JSONDecodeError, ValueError) as e:
-            logger.warning(f"Corrupt bandwidth credit ledger {state_file}: {e}, starting fresh")
-            self._balances = {}
-        except Exception as e:
-            logger.warning(f"Error loading bandwidth credit ledger from {state_file}: {e}, starting fresh")
-            self._balances = {}
+        else:
+            self._balances = data
+            logger.info(f"Loaded bandwidth credit ledger: {len(self._balances)} accounts from {state_file}")
 
         # Rebuild the token index from the loaded balances
         self._token_index = {

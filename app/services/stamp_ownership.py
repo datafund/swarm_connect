@@ -4,8 +4,8 @@ Stamp Ownership Manager for tracking and enforcing stamp access.
 
 When x402 is enabled, stamps acquired via paid requests are exclusive
 to the payer's wallet address. Free tier stamps are shared/communal.
-Pre-existing stamps (not in the registry) remain accessible for
-backward compatibility.
+Batches not in the registry are denied unless STAMP_OWNERSHIP_ALLOW_UNTRACKED
+is set (#312); the registry is loaded at startup (#349).
 """
 import json
 import logging
@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 from threading import Lock
 from typing import Dict, Optional, Set, Tuple
 
-from app.core.atomic_io import atomic_write_json
+from app.core.atomic_io import atomic_write_json, load_json_state
 from app.core.config import settings
 
 logger = logging.getLogger(__name__)
@@ -51,26 +51,20 @@ class StampOwnershipManager:
             logger.error(f"Failed to save ownership state to {state_file}: {e}")
 
     def _load_state(self):
-        """Load ownership registry from state file."""
+        """Load ownership registry from state file.
+
+        A missing file starts an empty registry. An unreadable one raises
+        StateLoadError (see load_json_state): an empty registry denies every
+        owner, and the next registration would overwrite their records.
+        """
         state_file = self._get_state_file_path()
-        try:
-            with open(state_file, 'r') as f:
-                data = json.load(f)
-            if isinstance(data, dict):
-                self._registry = data
-                logger.info(f"Loaded ownership state: {len(self._registry)} stamps from {state_file}")
-            else:
-                logger.warning(f"Invalid ownership state format in {state_file}, starting fresh")
-                self._registry = {}
-        except FileNotFoundError:
+        data = load_json_state(state_file)
+        if data is None:
             logger.info(f"No ownership state file at {state_file}, starting fresh")
             self._registry = {}
-        except (json.JSONDecodeError, ValueError) as e:
-            logger.warning(f"Corrupt ownership state file {state_file}: {e}, starting fresh")
-            self._registry = {}
-        except Exception as e:
-            logger.warning(f"Error loading ownership state from {state_file}: {e}, starting fresh")
-            self._registry = {}
+            return
+        self._registry = data
+        logger.info(f"Loaded ownership state: {len(self._registry)} stamps from {state_file}")
 
     def register_stamp(
         self,
