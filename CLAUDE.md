@@ -100,7 +100,7 @@ python -m pytest tests/test_manifest_upload.py -v
 - Calculated `expectedExpiration` field in `YYYY-MM-DD-HH-MM` UTC format
 - Calculated `utilizationPercent` field showing stamp usage as percentage (0-100%)
 - Propagation timing fields: `secondsSincePurchase`, `estimatedReadyAt`, `propagationStatus`
-- Access control field: `accessMode` (`"owned"`, `"shared"`, or `null`)
+- Access control field: `accessMode` (`"owned"`, `"shared"`, `"pool"`, or `null`)
 
 ### Environment Configuration
 
@@ -235,7 +235,7 @@ Every batch a caller can obtain is registered to them — pool acquire, direct p
 
 The gateway supports x402 payment protocol for pay-per-request access without user accounts. When enabled, clients pay in USDC on Base chain to access stamp purchase and data upload endpoints.
 
-**Current Status**: Available on `dev` branch (testnet only)
+**Current Status**: Deployed on both staging (`dev`) and production (`main`); switched per environment by the `X402_ENABLED` / `X402_NETWORK` repository variables read in `deploy.yml` (`X402_ENABLED` defaults to `false` there, so the repo variable is what turns it on; network defaults: `base-sepolia` for dev, `base` for main). `GET /` reports `x402.enabled` for a running gateway.
 
 **Parent Issue**: [datafund/provenance-fellowship#23](https://github.com/datafund/provenance-fellowship/issues/23)
 
@@ -251,26 +251,19 @@ The gateway supports x402 payment protocol for pay-per-request access without us
 ```
 app/x402/
 ├── __init__.py      # Module init
-├── middleware.py    # FastAPI middleware for payment verification
-├── preflight.py     # Gateway balance checks
+├── dependency.py    # Router dependency: 402 / free-tier opt-in / verify (require_x402_payment, settle_payment_if_offered)
+├── middleware.py    # Settlement after a 2xx + response headers; network/USDC config
+├── preflight.py     # Bee (Gnosis) wallet balance checks
+├── base_balance.py  # Base ETH balance of the pay-to address (gates protected requests)
 ├── pricing.py       # Price calculation (BZZ → USD)
-├── access.py        # IP whitelist/blacklist
-├── audit.py         # Transaction audit logging
-└── ratelimit.py     # Per-IP rate limiting
+├── access.py        # IP whitelist/blacklist (not wired into requests yet, #379)
+├── audit.py         # Audit log (JSON lines)
+└── ratelimit.py     # Per-IP rate limiting (free tier)
 ```
 
-### x402 Test Coverage (196 tests)
+### x402 Tests
 
-```
-tests/
-├── test_x402_preflight.py    # 21 tests - Balance checks
-├── test_x402_pricing.py      # 25 tests - Price calculations
-├── test_x402_middleware.py   # 39 tests - HTTP middleware + free tier
-├── test_x402_access.py       # 36 tests - IP access control
-├── test_x402_audit.py        # 29 tests - Audit logging
-├── test_x402_ratelimit.py    # 25 tests - Rate limiting
-└── test_x402_integration.py  # 21 tests - Full flow tests
-```
+`tests/test_x402_*.py` (preflight, pricing, middleware, access, audit, ratelimit, integration), plus `test_base_balance.py`. `test_x402_live.py` is opt-in (see TEST_STRATEGY.md).
 
 ### Key Configuration
 
@@ -290,7 +283,7 @@ X402_FREE_TIER_RATE_LIMIT=3  # Requests/minute for free tier (default: 3)
 | User Type | Access | Rate Limit | Headers |
 |-----------|--------|------------|---------|
 | **Paying users** | Full access | 10/min | `X-PAYMENT-RESPONSE` |
-| **Free tier** | Limited access | 3/min | `X-Payment-Mode: free-tier` |
+| **Free tier** | Limited access | 3/min | request `X-Payment-Mode: free`; response echoes `free-tier` |
 | **Whitelisted IPs** | Full access | No limit | - |
 | **Blacklisted IPs** | Blocked | - | 403 |
 
@@ -306,6 +299,7 @@ X402_FREE_TIER_RATE_LIMIT=3  # Requests/minute for free tier (default: 3)
 When `X402_FREE_TIER_ENABLED=true` (default):
 - Users without x402 payment can still access protected endpoints
 - Stricter rate limit applied (3 requests/minute by default)
+- Opt in with request header `X-Payment-Mode: free` (the canonical request value)
 - Response includes `X-Payment-Mode: free-tier` header
 - When rate limit exceeded, returns 429 with payment upgrade info
 
@@ -315,7 +309,7 @@ When `X402_FREE_TIER_ENABLED=false`:
 
 ### Development Notes
 
-- x402 code is on `dev` branch - test on staging before merging to `main`
+- x402 runs on staging and production - test on staging (`dev`) before merging to `main`
 - Python SDK is v1 only (v2 under development)
 - All x402 transactions logged to `logs/x402_audit.jsonl`
 
@@ -739,12 +733,11 @@ If the remote gateway (provenance-gateway.datafund.io) returns 503 or appears br
    ```
 
 2. **Check for Python version compatibility issues**:
-   - Docker uses Python 3.9
-   - Avoid `int | None` syntax (use `Optional[int]` instead)
-   - Avoid other Python 3.10+ features
+   - Docker uses Python 3.10 (`Dockerfile`: `python:3.10-slim`)
+   - Avoid Python 3.11+ features (e.g. `ExceptionGroup`/`except*`, `tomllib`, `typing.Self`)
+   - The codebase still writes `Optional[int]` rather than `int | None`; keep to that for consistency
 
 3. **Common issues**:
-   - `TypeError: unsupported operand type(s) for |: 'type' and 'NoneType'` → Use `Optional[T]` instead of `T | None`
    - Import errors → Check all dependencies are in requirements.txt
 
 4. **Quick fix workflow**:

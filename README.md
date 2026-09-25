@@ -393,9 +393,16 @@ When `X402_ENABLED=true`, protected endpoints (`POST /stamps/`, `POST /data/`) r
 3. **With payment** (using x402 client):
    ```bash
    curl -X POST http://localhost:8000/api/v1/stamps/ \
-        -H "X-PAYMENT: <base64-encoded-payment>"
-   # Returns 200 with stamp details
+        -H "X-PAYMENT: <base64-encoded-payment>" \
+        -H "Content-Type: application/json" -d '{"size": "small", "duration_hours": 24}'
+   # Returns 201 with {"batchID": ..., "message": ...}
    ```
+
+4. **Free tier** (when `X402_FREE_TIER_ENABLED=true`, the default): send
+   `X-Payment-Mode: free` instead of a payment. Limited to
+   `X402_FREE_TIER_RATE_LIMIT` requests per minute per IP (default **3**), then 429.
+   Responses to free-tier requests carry `X-Payment-Mode: free-tier`; send `free`
+   in requests.
 
 ### Features
 
@@ -485,7 +492,7 @@ docker compose -f monitoring/docker-compose.monitoring.yml up -d
 1. Create a [Grafana Cloud](https://grafana.com/products/cloud/) account (free tier)
 2. Create an access policy with `metrics:write` scope, generate a token
 3. Set GitHub secrets: `GRAFANA_CLOUD_PROM_USERNAME` (instance ID) and `GRAFANA_CLOUD_API_TOKEN`
-4. Alloy deploys automatically via `docker-compose.yml` on next push
+4. Alloy is defined in `docker-compose.host.yml`; the deploy workflow starts it, and recreates it on every push so config changes take effect
 
 See the [monitoring epic](https://github.com/datafund/swarm_connect/issues/179) for full details.
 
@@ -544,7 +551,7 @@ List postage stamps. Default returns only local stamps (usable for uploads).
 | `exclusive` | bool | `false` | With `wallet`: only stamps purchased by this wallet (excludes shared/untracked) |
 
 - **Response**: `{"stamps": [...], "total_count": N}`
-- Each stamp includes `accessMode`: `"owned"` (exclusive), `"shared"` (free tier), or `null` (untracked)
+- Each stamp includes `accessMode`: `"owned"` (exclusive), `"shared"` (free tier), `"pool"` (pool inventory), or `null` (untracked)
 
 #### `GET /api/v1/stamps/{stamp_id}`
 Get detailed information about a specific stamp.
