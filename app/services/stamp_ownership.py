@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 from threading import Lock
 from typing import Dict, Optional, Set, Tuple
 
-from app.core.atomic_io import atomic_write_json, load_json_state
+from app.core.atomic_io import atomic_write_json, load_json_state, unreadable_state
 from app.core.config import settings
 
 logger = logging.getLogger(__name__)
@@ -63,6 +63,9 @@ class StampOwnershipManager:
             logger.info(f"No ownership state file at {state_file}, starting fresh")
             self._registry = {}
             return
+        for batch_id, entry in data.items():
+            if not isinstance(entry, dict) or not isinstance(entry.get("owner"), str):
+                raise unreadable_state(state_file, f"entry {batch_id[:16]} has no owner")
         self._registry = data
         logger.info(f"Loaded ownership state: {len(self._registry)} stamps from {state_file}")
 

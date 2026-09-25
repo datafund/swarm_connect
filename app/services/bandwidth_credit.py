@@ -21,7 +21,7 @@ from datetime import datetime, timezone
 from threading import Lock
 from typing import Dict, Optional, Tuple
 
-from app.core.atomic_io import atomic_write_json, load_json_state
+from app.core.atomic_io import atomic_write_json, load_json_state, unreadable_state
 from app.core.config import settings
 
 logger = logging.getLogger(__name__)
@@ -110,6 +110,9 @@ class BandwidthCreditManager:
             logger.info(f"No bandwidth credit ledger at {state_file}, starting fresh")
             self._balances = {}
         else:
+            for address, entry in data.items():
+                if not isinstance(entry, dict) or not isinstance(entry.get("balance_bytes", 0), int):
+                    raise unreadable_state(state_file, f"entry {address[:12]} has no valid balance")
             self._balances = data
             logger.info(f"Loaded bandwidth credit ledger: {len(self._balances)} accounts from {state_file}")
 

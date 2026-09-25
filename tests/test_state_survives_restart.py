@@ -61,3 +61,15 @@ def test_an_unreadable_registry_stops_startup(ownership_file):
         with TestClient(app):
             pass
     assert open(ownership_file).read() == "not json"
+
+
+def test_pool_sync_does_not_reclaim_an_owned_batch(ownership_file):
+    """A batch still listed in pool state but registered to a caller stays theirs."""
+    from app.services.stamp_pool import stamp_pool_manager
+    with open(ownership_file, "w") as f:
+        json.dump({BATCH: {"owner": OWNER, "mode": "paid", "acquired_at": "x", "source": "pool_acquire"}}, f)
+
+    with TestClient(app):
+        stamp_pool_manager._register_pool_ownership({BATCH, "c" * 64})
+        assert stamp_ownership_manager.get_stamp_info(BATCH)["owner"] == OWNER
+        assert stamp_ownership_manager.get_stamp_info("c" * 64)["owner"] == "pool"

@@ -10,6 +10,8 @@ one.
 
 See GitHub Issue #212.
 """
+import filecmp
+import glob
 import json
 import os
 import shutil
@@ -17,7 +19,7 @@ import tempfile
 from datetime import datetime, timezone
 from typing import Any, Optional
 
-__all__ = ["atomic_write_json", "load_json_state", "StateLoadError"]
+__all__ = ["atomic_write_json", "load_json_state", "unreadable_state", "StateLoadError"]
 
 
 class StateLoadError(RuntimeError):
@@ -78,20 +80,32 @@ def load_json_state(path: str) -> Optional[dict]:
     except FileNotFoundError:
         return None
     except Exception as e:
-        raise StateLoadError(_unreadable(path, e)) from e
+        raise unreadable_state(path, e) from e
     if not isinstance(data, dict):
-        raise StateLoadError(_unreadable(path, f"expected a JSON object, got {type(data).__name__}"))
+        raise unreadable_state(path, f"expected a JSON object, got {type(data).__name__}")
     return data
 
 
-def _unreadable(path: str, reason: Any) -> str:
-    backup = f"{path}.corrupt-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
+def unreadable_state(path: str, reason: Any) -> StateLoadError:
+    """Build the StateLoadError for an unreadable state file, backing it up once.
+
+    The containers restart on failure, so this runs on every attempt of a crash
+    loop. A new copy is made only when no existing backup has identical
+    content, so the loop cannot fill the volume.
+    """
+    kept = None
     try:
-        shutil.copy2(path, backup)
-        kept = f"a copy was saved to {backup}"
+        for existing in sorted(glob.glob(f"{glob.escape(path)}.corrupt-*")):
+            if filecmp.cmp(path, existing, shallow=False):
+                kept = f"a copy already exists at {existing}"
+                break
+        if kept is None:
+            backup = f"{path}.corrupt-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
+            shutil.copy2(path, backup)
+            kept = f"a copy was saved to {backup}"
     except Exception as copy_error:
         kept = f"could not save a copy ({copy_error})"
-    return (
+    return StateLoadError(
         f"State file {path} could not be read ({reason}); {kept}. Refusing to start "
         f"with empty state, which would overwrite it. Repair or restore the file, "
         f"or move it away deliberately to start fresh."

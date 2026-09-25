@@ -249,6 +249,25 @@ class TestOwnershipPersistence:
         assert open(state_file).read() == "{{not valid json"
         assert glob.glob(state_file + ".corrupt-*")
 
+    def test_crash_loop_does_not_multiply_backups(self, state_file):
+        import glob
+        from app.core.atomic_io import StateLoadError
+        with open(state_file, 'w') as f:
+            f.write("{{not valid json")
+        for _ in range(3):
+            with pytest.raises(StateLoadError):
+                StateManager = StampOwnershipManager(state_file=state_file)
+                StateManager.load_on_startup()
+        assert len(glob.glob(state_file + ".corrupt-*")) == 1
+
+    def test_malformed_entry_refuses_to_load(self, state_file):
+        import json
+        from app.core.atomic_io import StateLoadError
+        with open(state_file, 'w') as f:
+            json.dump({"batch": {"mode": "paid"}}, f)
+        with pytest.raises(StateLoadError):
+            StampOwnershipManager(state_file=state_file).load_on_startup()
+
     def test_ownership_missing_file_starts_empty(self, state_file):
         mgr = StampOwnershipManager(state_file=state_file)
         mgr.load_on_startup()
