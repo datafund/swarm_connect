@@ -295,7 +295,47 @@ jobs:
           # config at startup.
           docker compose -f docker-compose.host.yml up -d --force-recreate --no-deps alloy
 
+      - name: wait for healthy
+        run: |
+          # `up -d` returns as soon as the container is created, so a gateway
+          # that refuses to start (e.g. an unsafe x402 config since #407) used
+          # to sit in a restart loop behind a green deploy. Wait for Docker's
+          # own healthcheck (docker-compose.yml) and fail the job if it does
+          # not pass. 90s, not 60: the healthcheck interval is 30s, so a first
+          # probe that lands before the app is up is only retried at ~60s.
+          cd /opt/swarm_connect
+          if [ "$GITHUB_REF_NAME" = "dev" ]; then
+            BRANCH_SERVICE=provenance_gateway_dev
+          else
+            BRANCH_SERVICE=provenance_gateway
+          fi
+          # `|| true`: if compose itself fails, fall through to the "missing"
+          # path below (annotation + logs) instead of ending the step under -e.
+          CID=$(docker compose ps -aq "$BRANCH_SERVICE" || true)
+          STATE=missing
+          for i in $(seq 1 30); do
+            # No container at all: `docker inspect ""` prints a blank line rather
+            # than failing cleanly, so check for it explicitly.
+            [ -n "$CID" ] || break
+            STATE=$(docker inspect -f '{{.State.Status}}/{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}/{{.RestartCount}}' "$CID" 2>/dev/null) || STATE=missing
+            case "$STATE" in
+              running/healthy/*) echo "$BRANCH_SERVICE is healthy"; exit 0 ;;
+              # No healthcheck defined: fall back to probing the process itself.
+              running/none/0) docker exec "$CID" curl -sf http://localhost:8000/ >/dev/null && { echo "$BRANCH_SERVICE is up"; exit 0; } ;;
+            esac
+            # A restart or a stopped container will not recover by waiting.
+            case "$STATE" in
+              missing|*/unhealthy/*|exited/*|dead/*|*/*/[1-9]*) break ;;
+            esac
+            sleep 3
+          done
+          echo "::error::$BRANCH_SERVICE did not become healthy (status/health/restarts: $STATE)"
+          docker compose logs --tail 200 "$BRANCH_SERVICE" || true
+          exit 1
+
       - name: post-deploy diagnostics
+        # Most useful exactly when the deploy failed.
+        if: always()
         run: |
           echo "=== Container status ==="
           docker ps -a --filter "name=swarm_connect" --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
