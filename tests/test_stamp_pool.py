@@ -299,7 +299,7 @@ class TestPoolAPIEndpoints:
             with patch('app.api.endpoints.pool.stamp_pool_manager') as mock_pool:
                 mock_pool.get_available_stamp.return_value = mock_stamp
                 mock_pool.get_available_stamp_any_size.return_value = None
-                mock_pool.release_stamp.return_value = None  # Race: already taken
+                mock_pool.reserve_stamp.return_value = None  # Race: already taken
 
                 response = client.post(
                     "/api/v1/pool/acquire",

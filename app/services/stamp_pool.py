@@ -57,8 +57,12 @@ def _bee_error_message(exc) -> Optional[str]:
 class PoolStampStatus(str, Enum):
     """Status of a stamp in the pool."""
     AVAILABLE = "available"  # Ready to be released
-    RESERVED = "reserved"    # Temporarily held (e.g., during release)
+    RESERVED = "reserved"    # Held while an acquiring payment settles
     RELEASED = "released"    # Released to client, no longer managed
+
+
+# Statuses that are still the pool's: they count toward the reserve target.
+_HELD = (PoolStampStatus.AVAILABLE, PoolStampStatus.RESERVED)
 
 
 @dataclass
@@ -306,20 +310,58 @@ class StampPoolManager:
             self._save_state()
             return stamp
 
-    def return_released_stamp(self, stamp: PoolStamp) -> None:
-        """Put back a batch that release_stamp() handed out but was not delivered.
+    def reserve_stamp(
+        self,
+        batch_id: str,
+        reserved_for: Optional[str] = None
+    ) -> Optional[PoolStamp]:
+        """Hold an available batch for a caller whose payment is still settling.
 
-        Used when a paid acquire claims a batch and settlement then fails: the
-        batch goes back to the pool exactly as it was, so it is neither lost to
-        the pool nor handed to a caller who did not pay.
+        The batch stays in the pool and in the state file while settlement runs,
+        which can take seconds. Taking it out instead (release first, put back on
+        failure) left a window in which a replenish check saw one batch fewer and
+        bought an extra, and in which a crash dropped the batch from pool state
+        so it sat on the node unused until it expired (#403).
+
+        A reserved batch counts toward the reserve target but is never selected
+        or sold. Finish with release_reserved_stamp() once payment has settled,
+        or unreserve_stamp() if it has not. Statuses are not persisted, so a
+        batch reserved when the process dies is simply available after restart.
+
+        Returns:
+            The reserved stamp, or None if not found/not available (another
+            request got it first)
         """
         with self._lock:
-            stamp.status = PoolStampStatus.AVAILABLE
-            stamp.released_at = None
-            stamp.released_to = None
-            self._pool[stamp.batch_id] = stamp
+            stamp = self._pool.get(batch_id)
+            if not stamp or stamp.status != PoolStampStatus.AVAILABLE:
+                return None
+            stamp.status = PoolStampStatus.RESERVED
+            stamp.released_to = reserved_for
+            return stamp
+
+    def release_reserved_stamp(self, batch_id: str) -> Optional[PoolStamp]:
+        """Hand a reserved batch to its caller: payment settled, the pool lets go."""
+        with self._lock:
+            stamp = self._pool.get(batch_id)
+            if not stamp or stamp.status != PoolStampStatus.RESERVED:
+                return None
+            stamp.status = PoolStampStatus.RELEASED
+            stamp.released_at = datetime.now(timezone.utc)
+            del self._pool[batch_id]
             self._save_state()
-        logger.info(f"Returned undelivered stamp {stamp.batch_id[:16]}... to the pool")
+        logger.info(f"Released stamp {batch_id[:16]}... (depth={stamp.depth}) to {stamp.released_to or 'unknown'}")
+        return stamp
+
+    def unreserve_stamp(self, batch_id: str) -> None:
+        """Make a reserved batch available again: its payment did not settle."""
+        with self._lock:
+            stamp = self._pool.get(batch_id)
+            if not stamp or stamp.status != PoolStampStatus.RESERVED:
+                return
+            stamp.status = PoolStampStatus.AVAILABLE
+            stamp.released_to = None
+        logger.info(f"Reservation on {batch_id[:16]}... cancelled, back in the pool")
 
     def trigger_replenishment_if_needed(self, depth: int) -> bool:
         """
@@ -347,9 +389,11 @@ class StampPoolManager:
 
         # Count current available stamps for this depth
         with self._lock:
+            # Reserved batches count: they are still the pool's until their
+            # payment settles, and go back to available if it fails.
             current_count = len([
                 s for s in self._pool.values()
-                if s.depth == depth and s.status == PoolStampStatus.AVAILABLE
+                if s.depth == depth and s.status in _HELD
             ])
             pending_count = self._pending_replenishments.get(depth, 0)
 
@@ -670,9 +714,12 @@ class StampPoolManager:
 
             # Check levels for each depth
             for depth, target_count in reserve_config.items():
+                # Reserved batches count toward the target (see reserve_stamp):
+                # counting only available ones bought an extra batch whenever a
+                # check ran while a paid acquire was settling.
                 current_count = len([
                     s for s in self._pool.values()
-                    if s.depth == depth and s.status == PoolStampStatus.AVAILABLE
+                    if s.depth == depth and s.status in _HELD
                 ])
 
                 # Purchase new stamps if below target
@@ -963,6 +1010,10 @@ class StampPoolManager:
             with self._lock:
                 to_remove = []
                 for batch_id, pool_stamp in self._pool.items():
+                    # A reserved batch belongs to an acquire whose payment is
+                    # settling; that request decides what happens to it.
+                    if pool_stamp.status == PoolStampStatus.RESERVED:
+                        continue
                     stamp_data = stamp_map.get(batch_id)
                     if stamp_data:
                         # Update TTL

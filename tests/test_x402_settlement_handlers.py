@@ -96,14 +96,16 @@ def test_pool_batch_goes_back_when_settlement_fails(x402_on, monkeypatch):
     fac = _fac(REFUSED)
     with patch("app.x402.dependency._get_facilitator_client", return_value=fac), \
          patch.object(mgr, "get_available_stamp", return_value=stamp), \
-         patch.object(mgr, "release_stamp", return_value=stamp), \
-         patch.object(mgr, "return_released_stamp") as give_back, \
+         patch.object(mgr, "reserve_stamp", return_value=stamp), \
+         patch.object(mgr, "release_reserved_stamp") as release, \
+         patch.object(mgr, "unreserve_stamp") as give_back, \
          patch.object(pool.stamp_ownership_manager, "register_stamp") as register:
         r = _client(pool.router, "/api/v1/pool", fac, dep=settle_payment_if_offered).post(
             "/api/v1/pool/acquire", json={"size": "small"},
             headers={"X-PAYMENT": create_valid_payment_header()})
     assert r.status_code == 402
-    give_back.assert_called_once_with(stamp)
+    give_back.assert_called_once_with(BATCH)
+    release.assert_not_called()
     register.assert_not_called()
 
 
@@ -116,7 +118,7 @@ def test_pool_batch_taken_by_someone_else_is_not_charged(x402_on, monkeypatch):
     fac = _fac(SettleResponse(success=True, transaction="0xtx"))
     with patch("app.x402.dependency._get_facilitator_client", return_value=fac), \
          patch.object(mgr, "get_available_stamp", return_value=stamp), \
-         patch.object(mgr, "release_stamp", return_value=None):
+         patch.object(mgr, "reserve_stamp", return_value=None):
         r = _client(pool.router, "/api/v1/pool", fac, dep=settle_payment_if_offered).post(
             "/api/v1/pool/acquire", json={"size": "small"},
             headers={"X-PAYMENT": create_valid_payment_header()})
