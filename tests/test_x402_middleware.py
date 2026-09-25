@@ -498,6 +498,7 @@ class TestProtectedEndpoints:
     def test_protected_endpoints_list(self):
         expected = [
             ("POST", "/api/v1/stamps/"),
+            ("PATCH", "/api/v1/stamps/"),
             ("POST", "/api/v1/data/"),
             ("POST", "/api/v1/data/manifest"),
             ("POST", "/api/v1/chunks/credit"),

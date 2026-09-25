@@ -60,6 +60,9 @@ USDC_TOKEN_METADATA = {
 # These endpoints will require x402 payment when X402_ENABLED=true
 PROTECTED_ENDPOINTS = [
     ("POST", "/api/v1/stamps/"),
+    # Stamp top-up spends the gateway's BZZ exactly like a purchase (#350). The
+    # only PATCH route under /stamps/ is /{id}/extend.
+    ("PATCH", "/api/v1/stamps/"),
     ("POST", "/api/v1/data/"),
     ("POST", "/api/v1/data/manifest"),
     # Bandwidth credit top-up is paid per-request. The chunk upload itself

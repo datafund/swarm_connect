@@ -170,6 +170,45 @@ async def calculate_stamp_price_usd(
     return result
 
 
+def _price_from_cost_bzz(cost_bzz: float) -> Dict[str, Any]:
+    """Apply exchange rate, markup and minimum to a BZZ cost."""
+    exchange_rate = settings.X402_BZZ_USD_RATE
+    markup_percent = settings.X402_MARKUP_PERCENT
+    min_price = settings.X402_MIN_PRICE_USD
+    with_markup = apply_markup(bzz_to_usd(cost_bzz, exchange_rate), markup_percent)
+    return {
+        "price_usd": round(apply_minimum_price(with_markup, min_price), 6),
+        "price_bzz": round(cost_bzz, 8),
+        "exchange_rate": exchange_rate,
+        "markup_percent": markup_percent,
+        "minimum_applied": with_markup < min_price,
+    }
+
+
+async def calculate_extension_price_usd(
+    depth: int,
+    duration_hours: Optional[int] = None,
+    amount: Optional[int] = None,
+) -> Dict[str, Any]:
+    """Price a stamp top-up exactly as PATCH /stamps/{id}/extend performs it.
+
+    `amount` (PLUR per chunk, legacy) wins when given; otherwise the amount is
+    derived from `duration_hours` (default 25, as in the handler) with the same
+    calculate_stamp_amount call and minimum-validity floor the handler uses.
+    """
+    if amount is None:
+        chainstate = await get_chainstate()
+        current_price = int(chainstate.get("currentPrice", 0))
+        if current_price <= 0:
+            raise ValueError("Invalid current price from chainstate")
+        amount = calculate_stamp_amount(
+            duration_hours or 25, current_price,
+            minimum_validity_blocks=chainstate.get("minimumValidityBlocks"),
+        )
+    cost_bzz = plur_to_bzz(calculate_stamp_total_cost(int(amount), depth))
+    return _price_from_cost_bzz(cost_bzz)
+
+
 async def calculate_upload_price_usd(
     size_bytes: int,
     duration_hours: int = 24,
@@ -339,6 +378,12 @@ async def get_price_quote(
         size_bytes = kwargs.get("size_bytes", 0)
         duration_hours = kwargs.get("duration_hours", 24)
         price_info = await calculate_upload_price_usd(size_bytes, duration_hours)
+    elif operation == "stamp_extension":
+        price_info = await calculate_extension_price_usd(
+            depth=kwargs.get("depth", 17),
+            duration_hours=kwargs.get("duration_hours"),
+            amount=kwargs.get("amount"),
+        )
     elif operation == "bandwidth":
         size_bytes = kwargs.get("size_bytes", 0)
         price_info = calculate_bandwidth_price_usd(size_bytes)

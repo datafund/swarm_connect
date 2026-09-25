@@ -16,6 +16,16 @@ VALID_STAMP_ID_C = "c" * 64     # another stamp (other/secondary in lists)
 NONEXISTENT_STAMP_ID = "d" * 64 # nonexistent stamp
 
 
+
+@pytest.fixture(autouse=True)
+def _chainstate(monkeypatch):
+    """Extend reads the current price for its minimum-amount check (#350)."""
+    from unittest.mock import AsyncMock
+    monkeypatch.setattr(
+        "app.services.swarm_api.get_chainstate",
+        AsyncMock(return_value={"currentPrice": "24000", "minimumValidityBlocks": 17280}),
+    )
+
 class TestStampsAPI:
     """Test suite for Stamps API endpoints."""
 

@@ -631,15 +631,53 @@ async def extend_stamp(
 
         stamp_depth = found_stamp.get("depth", 17)
 
+        # Only the batch's owner may top it up (#350). The same rule as uploads:
+        # a batch registered to a payer needs that payer, a shared batch may be
+        # extended by anyone, and pool inventory or untracked batches may not be
+        # extended through this route at all. Checked before any spend, and
+        # before the payment is settled, so a refusal costs the caller nothing.
+        if settings.X402_ENABLED:
+            allowed, reason = stamp_ownership_manager.check_access(
+                stamp_id,
+                getattr(request.state, "x402_payer", None),
+                getattr(request.state, "x402_mode", None),
+            )
+            if not allowed:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail={
+                        "code": "STAMP_OWNERSHIP_DENIED",
+                        "message": f"Cannot extend this stamp: {reason}",
+                        "stamp_id": stamp_id,
+                    },
+                )
+
         # Determine the amount to use
+        chainstate = await swarm_api.get_chainstate()
+        current_price = int(chainstate["currentPrice"])
         if extension_request.amount is not None:
-            # Legacy mode: use provided amount directly
+            # Legacy mode: use provided amount directly, but not below 24 hours'
+            # worth. Every top-up is an on-chain transaction paid in gas and holds
+            # Bee's single on-chain-operation lock, so a near-zero amount costs
+            # the gateway far more than it adds and blocks everyone else's
+            # purchases while it runs (#350).
             amount = extension_request.amount
+            minimum = current_price * 24 * swarm_api.BLOCKS_PER_HOUR
+            if amount < minimum:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail={
+                        "code": "EXTENSION_TOO_SMALL",
+                        "message": (
+                            f"An extension must add at least 24 hours: amount >= {minimum} "
+                            f"PLUR per chunk at the current price. Use duration_hours instead."
+                        ),
+                        "minimum_amount": minimum,
+                    },
+                )
         else:
             # Calculate amount from duration (default 25 hours)
             duration_hours = extension_request.duration_hours or 25
-            chainstate = await swarm_api.get_chainstate()
-            current_price = int(chainstate["currentPrice"])
             amount = swarm_api.calculate_stamp_amount(
                 duration_hours, current_price,
                 minimum_validity_blocks=chainstate.get("minimumValidityBlocks"),
@@ -650,11 +688,8 @@ async def extend_stamp(
         total_cost = swarm_api.calculate_stamp_total_cost(amount, stamp_depth)
         funds_check = await swarm_api.check_sufficient_funds(total_cost)
 
-        # Extend is NOT in PROTECTED_ENDPOINTS — is_protected_endpoint matches on
-        # method, and this route is PATCH while only POST paths are listed — so
-        # there is no payment gate and no free-tier rate limit in front of it.
-        # It also tops up any batch on the node, including ones the caller does
-        # not own. The budget is therefore the only thing bounding it.
+        # Paid or free-tier through the x402 dependency (#350), owner-checked
+        # above, and still bounded per caller by the daily budget.
         cost_bzz = plur_to_bzz(total_cost)
         charge_to = _enforce_spend_limits(request, cost_bzz, "stamp extension")
 
