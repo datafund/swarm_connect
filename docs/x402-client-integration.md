@@ -22,6 +22,15 @@ When the gateway has `X402_ENABLED=true`, protected endpoints require payment vi
 2. Parse payment requirements
 3. Sign a payment authorization
 4. Retry with `X-PAYMENT` header
+5. Treat any **2xx** as success. `POST /api/v1/stamps/` answers **201 Created**, and uploads answer 200. A client that checks only for 200 treats a successful purchase as a failure and may pay a second time.
+
+Runnable versions of the samples in this guide are in [`docs/samples/`](samples/):
+
+| Sample | What it does |
+|--------|--------------|
+| [`x402_client.py`](samples/x402_client.py) | Python: buy a stamp, upload, download. Free tier, or `--paid` with the `x402` SDK |
+| [`x402_client.mjs`](samples/x402_client.mjs) | The same in Node.js (18+). `--paid` uses the `x402` npm package |
+| [`x402_curl.sh`](samples/x402_curl.sh) | curl + jq: show the 402, then the free-tier round trip |
 
 ## Protected Endpoints
 
@@ -40,7 +49,20 @@ These endpoints require payment (when x402 is enabled and free tier exhausted):
 
 ## HTTP 402 Response Format
 
-When payment is required, the gateway returns:
+When payment is required, the gateway returns a 402 whose body is the x402
+payment request. **Where the body sits depends on the gateway version:**
+
+- The x402 v1 spec puts `x402Version`, `accepts`, `error` and `freeTier` at the **top level** (shown below). Standard x402 clients read it there.
+- Current gateway releases nest the same object under `detail`: `{"detail": {"x402Version": 1, "accepts": [...], ...}}`.
+
+Read the top level first and fall back to `detail`. That works with both:
+
+```python
+body = response.json()
+accepts = body["accepts"] if "accepts" in body else body["detail"]["accepts"]
+```
+
+The spec shape:
 
 ```http
 HTTP/1.1 402 Payment Required
@@ -84,91 +106,94 @@ Content-Type: application/json
 | `payTo` | Gateway's receiving wallet address |
 | `asset` | USDC contract address on the network |
 
+The price is at least the gateway's minimum (`X402_MIN_PRICE_USD`, $0.01 by
+default), so sign exactly `maxAmountRequired`, never less.
+
 ## Payment Flow
 
 ### Using the x402 Python SDK
 
+The SDK is `x402` 1.0.0 (`pip install "x402==1.0.0"`, which is the version the
+gateway pins). There is no `X402Client` class. The pieces a client needs are:
+
+- `x402.clients.requests.x402_requests(account)`: a `requests.Session` that answers 402s automatically. It parses the 402 at the **top level**, so it only works with gateways that return the spec shape. Against a gateway that nests the body under `detail`, it raises `PaymentError`.
+- `x402.clients.base.x402Client(account).create_payment_header(requirements, 1)`: signs one payment. Use this when you handle the 402 yourself, which works with both shapes.
+
+Automatic, for spec-shape gateways:
+
 ```python
-from x402.client import X402Client
+from eth_account import Account
+from x402.clients.requests import x402_requests
 
-# Initialize client with wallet
-client = X402Client(
-    private_key="0xYOUR_PRIVATE_KEY",
-    network="base-sepolia",
-)
-
-# Make request - client handles 402 automatically
-response = client.post(
+session = x402_requests(Account.from_key(PRIVATE_KEY), max_value=100_000)  # refuse > $0.10
+response = session.post(
     "https://gateway.example.com/api/v1/stamps/",
-    json={"amount": 1000000, "depth": 17}
+    json={"size": "small", "duration_hours": 25},
 )
-
-# Response is the final result after payment
-print(response.json())
+assert response.status_code == 201
 ```
 
-### Manual Implementation
+### Handling the 402 yourself
 
-If implementing without the SDK:
+This works with both 402 shapes. It is the core of
+[`samples/x402_client.py`](samples/x402_client.py):
 
 ```python
 import requests
-import json
-from eth_account import Account
-from eth_account.messages import encode_typed_data
+from x402.clients.base import x402Client
+from x402.types import PaymentRequirements
 
-def make_paid_request(url, method="POST", data=None, private_key=None):
-    """Make a request with x402 payment handling."""
+USDC_UNITS = 1_000_000  # "10000" means $0.01
 
-    # Step 1: Initial request
-    response = requests.request(method, url, json=data)
 
-    # Step 2: Check if payment required
-    if response.status_code != 402:
-        return response
+def payment_requirements(resp):
+    body = resp.json()
+    return body["accepts"] if "accepts" in body else body["detail"]["accepts"]
 
-    # Step 3: Parse payment requirements
-    req_data = response.json()
-    payment_req = req_data["accepts"][0]
 
-    # Step 4: Create payment authorization (EIP-3009 transferWithAuthorization)
-    account = Account.from_key(private_key)
+def paid_request(method, url, account, max_usd=0.10, **kwargs):
+    resp = requests.request(method, url, **kwargs)
+    if resp.status_code != 402:
+        resp.raise_for_status()          # any 2xx is success (purchase is 201)
+        return resp
 
-    authorization = {
-        "from": account.address,
-        "to": payment_req["payTo"],
-        "value": payment_req["maxAmountRequired"],
-        "validAfter": 0,
-        "validBefore": int(time.time()) + 300,  # 5 min validity
-        "nonce": os.urandom(32).hex(),
-    }
+    requirement = payment_requirements(resp)[0]
+    price = int(requirement["maxAmountRequired"]) / USDC_UNITS
+    if price > max_usd:
+        raise RuntimeError(f"price ${price} above budget ${max_usd}")
 
-    # Step 5: Sign the authorization
-    # (Actual signing requires EIP-712 typed data - see x402 SDK)
-    signature = sign_eip3009_authorization(authorization, private_key)
-
-    # Step 6: Create payment payload
-    payment_payload = {
-        "x402Version": 1,
-        "scheme": "exact",
-        "network": payment_req["network"],
-        "payload": {
-            "signature": signature,
-            "authorization": authorization,
-        }
-    }
-
-    # Step 7: Encode and retry
-    import base64
-    payment_header = base64.b64encode(
-        json.dumps(payment_payload).encode()
-    ).decode()
-
-    return requests.request(
-        method, url, json=data,
-        headers={"X-PAYMENT": payment_header}
-    )
+    header = x402Client(account).create_payment_header(PaymentRequirements(**requirement), 1)
+    resp = requests.request(method, url, headers={"X-PAYMENT": header}, **kwargs)
+    resp.raise_for_status()
+    return resp
 ```
+
+`create_payment_header` fills in the EIP-3009 authorization (payer, `payTo`,
+`maxAmountRequired`, validity window, random nonce) and signs it with the USDC
+EIP-712 domain from `extra`. Each call makes a new nonce. Never reuse a header.
+
+### Node.js
+
+With the `x402` npm package (1.x speaks x402 v1) and `viem`:
+
+```js
+import { createPaymentHeader } from "x402/client";
+import { createSigner } from "x402/types";
+
+const body = await res.json();                       // the 402
+const requirement = (body.accepts ?? body.detail.accepts)[0];
+const signer = await createSigner(requirement.network, process.env.X402_PRIVATE_KEY);
+const header = await createPaymentHeader(signer, 1, requirement);
+res = await fetch(url, { ...init, headers: { ...init.headers, "X-PAYMENT": header } });
+if (!res.ok) throw new Error(`HTTP ${res.status}`);  // 2xx is success
+```
+
+See [`samples/x402_client.mjs`](samples/x402_client.mjs) for the full flow.
+
+### Request bodies
+
+- **Stamp purchase** (`POST /api/v1/stamps/`): send `size` (`small`, `medium` or `large`) or `depth`, and `duration_hours` (at least 24). The gateway computes the amount. The legacy `amount` field is in PLUR per chunk, and small values produce a batch that expires almost at once, so avoid it.
+- **Upload** (`POST /api/v1/data/?stamp_id=...`): a `multipart/form-data` body with the content in a field named `file`. A JSON body such as `{"data": "..."}` is rejected with 422.
 
 ## CLI Integration Requirements
 
@@ -190,22 +215,24 @@ x402:
 
 ```python
 def upload_data(file_path, stamp_id):
-    response = api.post("/api/v1/data/", files={"file": open(file_path)})
+    with open(file_path, "rb") as f:          # binary, multipart field "file"
+        content = f.read()
+    files = {"file": (os.path.basename(file_path), content)}
+    params = {"stamp_id": stamp_id}
+    response = api.post("/api/v1/data/", params=params, files=files)
 
     if response.status_code == 402:
-        payment_req = response.json()
-        price_usd = int(payment_req["accepts"][0]["maxAmountRequired"]) / 1_000_000
+        requirement = payment_requirements(response)[0]   # top level or detail
+        price_usd = int(requirement["maxAmountRequired"]) / 1_000_000
 
-        if config.auto_pay and price_usd <= config.max_auto_pay_usd:
-            # Auto-pay
-            response = make_paid_request(...)
-        else:
-            # Prompt user
-            if click.confirm(f"Payment required: ${price_usd:.4f} USDC. Pay?"):
-                response = make_paid_request(...)
-            else:
-                raise click.Abort("Payment declined")
+        if not (config.auto_pay and price_usd <= config.max_auto_pay_usd):
+            if not click.confirm(f"Payment required: ${price_usd:.4f} USDC. Pay?"):
+                raise click.Abort()
+        header = x402Client(account).create_payment_header(PaymentRequirements(**requirement), 1)
+        response = api.post("/api/v1/data/", params=params, files=files,
+                            headers={"X-PAYMENT": header})
 
+    response.raise_for_status()                # any 2xx is success
     return response
 ```
 
@@ -257,23 +284,24 @@ For MCP (Model Context Protocol) servers, x402 support enables AI agents to make
 
 ```python
 async def handle_swarm_upload(data: str, stamp_id: str, allow_payment: bool = False):
-    response = await gateway_client.post(
-        "/api/v1/data/",
-        json={"data": data},
-        params={"stamp_id": stamp_id}
-    )
+    # Uploads are multipart with the content in the "file" field (not JSON).
+    files = {"file": ("data.txt", data.encode(), "text/plain")}
+    params = {"stamp_id": stamp_id, "content_type": "text/plain"}
+    response = await gateway_client.post("/api/v1/data/", params=params, files=files)
 
     if response.status_code == 402:
+        requirement = payment_requirements(response)[0]   # top level or detail
         if not allow_payment:
             return {
                 "error": "payment_required",
-                "price_usd": parse_price(response),
+                "price_usd": int(requirement["maxAmountRequired"]) / 1_000_000,
                 "message": "Set allow_payment=true to authorize payment"
             }
+        header = x402Client(account).create_payment_header(PaymentRequirements(**requirement), 1)
+        response = await gateway_client.post("/api/v1/data/", params=params, files=files,
+                                             headers={"X-PAYMENT": header})
 
-        # Make paid request
-        response = await make_paid_request(...)
-
+    response.raise_for_status()                # any 2xx is success
     return {"reference": response.json()["reference"]}
 ```
 
@@ -301,7 +329,7 @@ class X402Budget:
 
 ## Free Tier Handling
 
-When `X402_FREE_TIER_ENABLED=true` on the gateway, clients can choose between paid and free access. The gateway **always returns HTTP 402 first** with both payment requirements and free tier availability.
+When `X402_FREE_TIER_ENABLED=true` on the gateway, clients can choose between paid and free access. A request with neither `X-PAYMENT` nor `X-Payment-Mode: free` gets HTTP 402 with both the payment requirements and the free tier availability. A client that already knows it wants the free tier can send `X-Payment-Mode: free` on the first request.
 
 ### Client Decision Flow
 
@@ -325,6 +353,7 @@ To use free tier, add the `X-Payment-Mode: free` header:
 # Check 402 response for free tier availability
 if response.status_code == 402:
     data = response.json()
+    data = data if "accepts" in data else data["detail"]   # top level or detail
     free_tier = data.get("freeTier", {})
 
     if free_tier.get("available") and free_tier.get("requestsRemaining", 0) > 0:
@@ -336,15 +365,15 @@ if response.status_code == 402:
         )
     else:
         # Must pay - no free tier or exhausted
-        response = make_paid_request(url, **kwargs)
+        response = paid_request("POST", url, account, **kwargs)
 ```
 
 ### Free Tier Response
 
-Successful free tier responses include rate limit headers:
+Successful free tier responses (2xx: 201 for a stamp purchase, 200 for an upload) include rate limit headers:
 
 ```
-HTTP/1.1 200 OK
+HTTP/1.1 201 Created
 X-Payment-Mode: free-tier
 X-RateLimit-Limit: 5
 X-RateLimit-Remaining: 4
@@ -362,17 +391,19 @@ if response.headers.get("X-Payment-Mode") == "free-tier":
 
 ### Rate Limit Exceeded (429)
 
-When free tier rate limit is exhausted:
+When free tier rate limit is exhausted (the body is under `detail`):
 
 ```json
 {
-  "error": "Rate limit exceeded",
-  "detail": "Rate limit exceeded (free tier): 6/5 requests per minute",
-  "message": "Free tier rate limit exceeded. Use x402 payment for higher limits.",
-  "payment_info": {
-    "price_usd": 0.01,
-    "network": "base-sepolia",
-    "pay_to": "0x..."
+  "detail": {
+    "error": "Rate limit exceeded",
+    "detail": "Rate limit exceeded (free tier): 6/5 requests per minute",
+    "message": "Free tier rate limit exceeded. Use x402 payment for higher limits.",
+    "payment_info": {
+      "price_usd": 0.01,
+      "network": "base-sepolia",
+      "pay_to": "0x..."
+    }
   }
 }
 ```
@@ -388,55 +419,57 @@ def smart_request(url, prefer_free=True, **kwargs):
         return response
 
     data = response.json()
+    data = data if "accepts" in data else data["detail"]   # top level or detail
     free_tier = data.get("freeTier", {})
 
     # Try free tier first if available and preferred
     if prefer_free and free_tier.get("available") and free_tier.get("requestsRemaining", 0) > 0:
         response = requests.post(url, headers={"X-Payment-Mode": "free"}, **kwargs)
-        if response.status_code == 200:
+        if response.ok:              # 2xx: a purchase answers 201, not 200
             return response
-        # Fall through to payment if free tier failed
+        if response.status_code != 429:
+            response.raise_for_status()  # a real error: paying would not help
+        # Free tier just ran out: fall through to payment
 
     # Make paid request
-    return make_paid_request(url, data["accepts"][0], **kwargs)
+    return paid_request("POST", url, account, **kwargs)
 ```
 
 ## Dependencies
 
 Required packages for x402 client:
 
+Python:
+
 ```
-x402>=0.1.0
-eth-account>=0.8.0
-web3>=6.0.0
+x402==1.0.0     # pulls in eth-account; the gateway speaks x402 v1
+requests
 ```
 
-Or just:
+Node.js (18+):
+
 ```
-x402  # Includes all dependencies
+npm install x402@1 viem
 ```
 
 ## Testing
 
-### Mock Mode
+### Running the samples
 
-For testing without real payments:
+Point the samples at a local gateway (see the [Testing Guide](./x402-testing-guide.md)):
 
-```python
-class MockX402Client:
-    """Mock client that simulates x402 flow without blockchain."""
-
-    def post(self, url, **kwargs):
-        # Simulate successful payment
-        response = requests.post(url, **kwargs)
-        if response.status_code == 402:
-            # Pretend we paid
-            response = requests.post(
-                url, **kwargs,
-                headers={"X-PAYMENT": "mock-payment-header"}
-            )
-        return response
+```bash
+python docs/samples/x402_client.py --gateway http://localhost:8000            # free tier
+X402_PRIVATE_KEY=0x... python docs/samples/x402_client.py --gateway http://localhost:8000 --paid
+node docs/samples/x402_client.mjs http://localhost:8000 [--paid]
+docs/samples/x402_curl.sh http://localhost:8000
 ```
+
+Each one buys a stamp, waits for it to become usable, uploads a small file,
+downloads it and compares the bytes. It exits non-zero on any failure, so it
+can be used as a smoke test. `--paid` spends real (testnet or mainnet) USDC
+through the gateway's facilitator. `--max-usd` (Python) and `MAX_USD` (Node)
+cap what it will sign.
 
 ### Testnet Mode
 
