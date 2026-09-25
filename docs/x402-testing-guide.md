@@ -115,61 +115,74 @@ X402_ENABLED=true X402_PAY_TO_ADDRESS=0x... python run.py
 
 ### 6. Test Without Payment (verify 402)
 
-```bash
-# Should return HTTP 402 with payment requirements
-curl -X POST http://localhost:8000/api/v1/stamps/ | jq
+Only do this with `X402_ENABLED=true`. With x402 off, the same unpaid request
+is served, not refused, and buys a stamp. Check the status code, not just the
+body. Where the gateway has `GET /api/v1/pricing`, that shows the same prices
+without the risk.
 
-# Expected response:
+```bash
+# Should print 402, then the payment requirements
+curl -s -o /tmp/402.json -w '%{http_code}\n' -X POST http://localhost:8000/api/v1/stamps/ \
+  -H 'Content-Type: application/json' -d '{}'
+jq . /tmp/402.json
+
+# Expected response. The x402 spec puts these fields at the top level; current
+# gateway releases nest them under "detail", so read `.accepts // .detail.accepts`.
 # {
-#   "x402Version": 1,
-#   "accepts": [{
-#     "scheme": "exact",
-#     "network": "base-sepolia",
-#     "maxAmountRequired": "10000",  # 0.01 USDC
-#     "resource": "http://localhost:8000/api/v1/stamps/",
-#     "payTo": "0xYOUR_GATEWAY_WALLET",
-#     ...
-#   }],
-#   "error": "X-PAYMENT header is required"
+#   "detail": {
+#     "x402Version": 1,
+#     "accepts": [{
+#       "scheme": "exact",
+#       "network": "base-sepolia",
+#       "maxAmountRequired": "10000",  # 0.01 USDC, the minimum price
+#       "resource": "http://localhost:8000/api/v1/stamps/",
+#       "payTo": "0xYOUR_GATEWAY_WALLET",
+#       ...
+#     }],
+#     "error": "Payment required. Use X-PAYMENT header for paid access or X-Payment-Mode: free for free tier."
+#   }
 # }
 ```
 
 ### 7. Test With x402 Client
 
-**Install x402 client:**
+**Install the x402 SDK** (the gateway speaks x402 v1; `x402` 1.0.0 is the
+matching Python SDK, and it has no `X402Client` class):
 ```bash
-pip install x402
+pip install "x402==1.0.0" requests
 ```
 
-**Python test script:**
-```python
-# test_payment.py
-import os
-from x402.client import X402Client
+**Run the client sample.** [`docs/samples/x402_client.py`](samples/x402_client.py)
+buys a stamp, waits until it is usable, uploads a file and downloads it again.
+With `--paid` it answers each 402 by signing a USDC payment with your key:
 
-# Your client wallet private key (with testnet USDC)
-PRIVATE_KEY = os.environ.get("TEST_WALLET_PRIVATE_KEY")
-
-# Create client
-client = X402Client(
-    private_key=PRIVATE_KEY,
-    network="base-sepolia",
-)
-
-# Make paid request
-response = client.post(
-    "http://localhost:8000/api/v1/stamps/",
-    json={"amount": 1000000, "depth": 17}
-)
-
-print(f"Status: {response.status_code}")
-print(f"Body: {response.json()}")
-```
-
-**Run it:**
 ```bash
-TEST_WALLET_PRIVATE_KEY=0x... python test_payment.py
+TEST_WALLET_PRIVATE_KEY=0x...   # client wallet with testnet USDC
+X402_PRIVATE_KEY=$TEST_WALLET_PRIVATE_KEY \
+  python docs/samples/x402_client.py --gateway http://localhost:8000 --paid --network base-sepolia
 ```
+
+Expected output (the purchase answers **201 Created**, the upload 200):
+```
+Paying from 0x...
+  402: paying $0.010000 USDC on base-sepolia to 0xYOUR_GATEWAY_WALLET
+  settled: {'success': True, 'transaction': '0x...', 'network': 'base-sepolia', 'payer': '0x...'}
+Stamp purchase: HTTP 201, batchID ...
+Stamp is usable
+  402: paying $0.010000 USDC on base-sepolia to 0xYOUR_GATEWAY_WALLET
+  settled: {...}
+Upload: HTTP 200, reference ...
+Download: HTTP 200, 44 bytes, matches upload
+Spent $0.020000 USDC on base-sepolia
+```
+
+The sample signs only USDC payments on `--network` (default `base-sepolia`)
+and refuses anything else, so a mainnet gateway gets no signature from a
+testnet run. `--pay-to 0xYOUR_GATEWAY_WALLET` also pins the payee.
+
+Without `--paid` it uses the free tier (`X-Payment-Mode: free`), which needs
+`X402_FREE_TIER_ENABLED=true`. The Node.js and curl versions are next to it in
+[`docs/samples/`](samples/).
 
 ### 8. Run Live Tests
 
@@ -233,12 +246,12 @@ If you want to monitor transactions:
 - Verify `X402_FACILITATOR_URL` is correct
 
 ### "402 but no accepts array"
-- Gateway may not be configured correctly
-- Check `X402_PAY_TO_ADDRESS` is set
+- Look under `detail`: current gateway releases nest the 402 body there (`.detail.accepts`)
+- Otherwise the gateway may not be configured correctly; check `X402_PAY_TO_ADDRESS` is set
 
-### Gateway returns 200 instead of 402
-- Free tier is enabled
-- Set `X402_FREE_TIER_ENABLED=false` for payment testing
+### Gateway returns 2xx instead of 402
+- The request carried `X-Payment-Mode: free` and the free tier is enabled
+- Send no free-tier header, or set `X402_FREE_TIER_ENABLED=false`, for payment testing
 
 ## Cost Summary
 

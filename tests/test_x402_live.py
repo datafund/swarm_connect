@@ -44,6 +44,13 @@ live_test = pytest.mark.skipif(
 )
 
 
+def payment_required_body(response) -> dict:
+    """The x402 402 body. The spec puts it at the top level; older gateway
+    versions nest it under "detail", so accept either."""
+    data = response.json()
+    return data if "accepts" in data else data["detail"]
+
+
 def get_test_config():
     """Get test configuration from environment."""
     return {
@@ -89,11 +96,11 @@ class TestX402ResponseFormat:
 
         response = requests.post(f"{config['gateway_url']}/api/v1/stamps/")
 
-        # Should be 402 (if free tier disabled) or 200 (if free tier enabled)
-        assert response.status_code in [402, 200, 429], f"Unexpected status: {response.status_code}"
+        # Without a payment or free-tier header this is always 402
+        assert response.status_code == 402, f"Unexpected status: {response.status_code}"
 
         if response.status_code == 402:
-            data = response.json()
+            data = payment_required_body(response)
             print(f"402 Response: {json.dumps(data, indent=2)}")
 
             # Verify x402 protocol fields
@@ -111,25 +118,18 @@ class TestX402ResponseFormat:
 
             print(f"Payment required: {int(req['maxAmountRequired']) / 1_000_000} USDC on {req['network']}")
 
-        elif response.status_code == 200:
-            print("Free tier is enabled - got 200 OK")
-            assert "X-Payment-Mode" in response.headers or True  # May or may not have header
-
-        elif response.status_code == 429:
-            print("Rate limited (free tier) - got 429")
 
     @live_test
     def test_402_contains_valid_payment_address(self):
         """Verify 402 contains a valid Ethereum address."""
         config = get_test_config()
 
-        response = requests.post(f"{config['gateway_url']}/api/v1/data/")
+        response = requests.post(f"{config['gateway_url']}/api/v1/stamps/", json={})
 
         if response.status_code != 402:
-            pytest.skip(f"Got {response.status_code}, not 402 (free tier may be enabled)")
+            pytest.skip(f"Got {response.status_code}, not 402")
 
-        data = response.json()
-        req = data["accepts"][0]
+        req = payment_required_body(response)["accepts"][0]
 
         pay_to = req.get("payTo", req.get("receiver", ""))
         assert pay_to.startswith("0x"), f"Invalid payTo address: {pay_to}"
@@ -155,32 +155,29 @@ class TestX402PaymentFlow:
         if not config["wallet_private_key"]:
             pytest.skip("TEST_WALLET_PRIVATE_KEY not set")
 
-        try:
-            from x402.client import X402Client
-        except ImportError:
-            pytest.skip("x402 client not installed. Run: pip install x402")
+        # Uses the runnable client sample, so the documented flow is what is tested.
+        import sys
+        from pathlib import Path
+        from eth_account import Account
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "docs" / "samples"))
+        from x402_client import Budget, call
 
-        # Create x402 client with test wallet
-        client = X402Client(
-            private_key=config["wallet_private_key"],
-            network=config["network"],
-        )
-
-        # Make a paid request to stamps endpoint
-        response = client.post(
-            f"{config['gateway_url']}/api/v1/stamps/",
-            json={"amount": 1000000, "depth": 17}  # Minimal stamp
+        response = call(
+            "POST", f"{config['gateway_url']}/api/v1/stamps/",
+            json={"size": "small", "duration_hours": 25},
+            paid=True, account=Account.from_key(config["wallet_private_key"]),
+            budget=Budget(0.10, 0.10), network=config["network"], pay_to=None,
         )
 
         print(f"Response status: {response.status_code}")
         print(f"Response body: {response.text}")
 
-        # Should succeed with payment
-        assert response.status_code == 200, f"Payment failed: {response.text}"
+        # Stamp purchase answers 201 Created
+        assert response.status_code == 201, f"Payment failed: {response.text}"
+        assert "X-PAYMENT-RESPONSE" in response.headers, "Missing settlement proof"
 
-        # Verify response contains stamp info
         data = response.json()
-        assert "stamp_id" in data or "batchID" in data, "Missing stamp ID in response"
+        assert "batchID" in data, "Missing batchID in response"
 
         print(f"Successfully purchased stamp: {data}")
 
@@ -193,14 +190,18 @@ class TestFreeTierFlow:
         """Test that free tier allows limited access."""
         config = get_test_config()
 
-        # Make request without payment
-        response = requests.post(f"{config['gateway_url']}/api/v1/stamps/")
+        # Opt in to the free tier
+        response = requests.post(
+            f"{config['gateway_url']}/api/v1/stamps/",
+            json={"size": "small", "duration_hours": 25},
+            headers={"X-Payment-Mode": "free"},
+        )
 
         if response.status_code == 402:
             print("Free tier is DISABLED - got 402")
             return
 
-        if response.status_code == 200:
+        if response.ok:
             print("Free tier request succeeded")
             # Check for free tier header
             payment_mode = response.headers.get("X-Payment-Mode")
@@ -215,8 +216,9 @@ class TestFreeTierFlow:
         elif response.status_code == 429:
             print("Free tier rate limit exceeded")
             data = response.json()
-            assert "payment_info" in data, "429 should include payment upgrade info"
-            print(f"Upgrade info: {data.get('payment_info')}")
+            info = data.get("payment_info") or data.get("detail", {}).get("payment_info")
+            assert info, "429 should include payment upgrade info"
+            print(f"Upgrade info: {info}")
 
     @live_test
     def test_free_tier_rate_limit(self):
@@ -226,7 +228,13 @@ class TestFreeTierFlow:
         # Make multiple requests quickly
         results = []
         for i in range(10):
-            response = requests.post(f"{config['gateway_url']}/api/v1/stamps/")
+            # An invalid body is refused (422) after the free-tier check, so
+            # this spends nothing while still counting against the limit.
+            response = requests.post(
+                f"{config['gateway_url']}/api/v1/stamps/",
+                json={"depth": 99},
+                headers={"X-Payment-Mode": "free"},
+            )
             results.append(response.status_code)
             print(f"Request {i+1}: {response.status_code}")
 
