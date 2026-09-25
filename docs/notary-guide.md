@@ -369,7 +369,7 @@ Use the private key (without `0x` prefix) as `NOTARY_PRIVATE_KEY`.
 
 3. **Key rotation**
    - Plan for periodic key rotation
-   - Document your key rotation procedure
+   - Follow the procedure in [key-rotation.md](key-rotation.md)
    - Consider a grace period where both old and new keys are valid
 
 4. **Access control**
