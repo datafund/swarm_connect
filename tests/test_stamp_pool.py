@@ -553,6 +553,28 @@ class TestPoolStatePersistence:
         loaded = manager._load_state()
         assert loaded == set()
 
+    @pytest.mark.asyncio
+    async def test_unreadable_state_is_a_failed_sync_not_a_first_run(self, state_file):
+        """A state file that exists but cannot be read (e.g. left root-owned 0600
+        by a container that ran as root) must not read as "no stamps": that
+        would mark the sync OK, let replenishment buy a fresh reserve, and the
+        next save would overwrite the pool's batch list."""
+        with open(state_file, 'w') as f:
+            json.dump(["batch_keep"], f)
+
+        manager = StampPoolManager(state_file=state_file)
+        denied = PermissionError(13, "Permission denied")
+        with patch('app.services.stamp_pool.open', side_effect=denied, create=True), \
+             patch('app.services.stamp_pool.swarm_api.get_all_stamps_processed',
+                   new_callable=AsyncMock) as mock_stamps:
+            synced = await manager.sync_from_bee_node()
+
+        assert synced == 0
+        assert manager._last_sync_ok is False  # blocks purchasing until a sync succeeds
+        mock_stamps.assert_not_called()
+        with open(state_file) as f:
+            assert json.load(f) == ["batch_keep"]
+
     def test_add_stamp_saves_state(self, manager, state_file):
         """Test that adding a stamp to pool persists it."""
         manager.add_stamp_to_pool("batch_123", 17, 1000000, 604800)

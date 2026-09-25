@@ -35,6 +35,16 @@ X_PAYMENT_HEADER = "X-PAYMENT"
 X_PAYMENT_RESPONSE_HEADER = "X-PAYMENT-RESPONSE"
 X_PAYMENT_MODE_HEADER = "X-Payment-Mode"
 
+
+def is_free_tier_opt_in(request) -> bool:
+    """Whether the caller asked for the free tier.
+
+    Responses have always echoed "free-tier", and clients reasonably send back
+    what they were shown, so it is accepted alongside "free" (#385). One
+    function so every route that reads the header agrees.
+    """
+    return request.headers.get(X_PAYMENT_MODE_HEADER, "").strip().lower() in ("free", "free-tier")
+
 # USDC contract addresses by network
 USDC_ADDRESSES = {
     "base": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
@@ -92,6 +102,27 @@ def is_protected_endpoint(method: str, path: str) -> bool:
 from app.core.client_ip import get_client_ip  # noqa: F401,E402
 
 
+def public_url(request: Request) -> str:
+    """The URL the caller used, as seen from outside the reverse proxy.
+
+    Behind Caddy the gateway receives plain HTTP, so `request.url` reads
+    `http://...` and a 402's `resource` named a URL the client never called
+    (#385). Caddy sets X-Forwarded-Proto and passes the original Host through;
+    the proto is honoured only when TRUSTED_PROXY_HOPS says a proxy is there,
+    because without one any caller could set it.
+
+    Uvicorn's --proxy-headers would do this too, but it also rewrites the
+    client address from X-Forwarded-For, which app.core.client_ip already
+    interprets by its own rules.
+    """
+    url = request.url
+    if int(settings.TRUSTED_PROXY_HOPS) > 0:
+        proto = request.headers.get("X-Forwarded-Proto", "").split(",")[-1].strip().lower()
+        if proto in ("http", "https"):
+            url = url.replace(scheme=proto)
+    return str(url)
+
+
 def create_payment_requirements(
     request: Request,
     price_usd: float,
@@ -126,8 +157,7 @@ def create_payment_requirements(
     # This is required for clients to construct proper EIP-3009 signatures
     token_metadata = USDC_TOKEN_METADATA.get(network, USDC_TOKEN_METADATA["base-sepolia"])
 
-    # Build resource path
-    resource = str(request.url)
+    resource = public_url(request)
 
     return PaymentRequirements(
         scheme="exact",

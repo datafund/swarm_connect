@@ -29,7 +29,7 @@ from app.x402.middleware import (
     create_payment_requirements,
     decode_payment_header,
     X_PAYMENT_HEADER,
-    X_PAYMENT_MODE_HEADER,
+    is_free_tier_opt_in,
     X402_VERSION,
 )
 
@@ -343,7 +343,7 @@ async def require_x402_payment(request: Request) -> None:
 
     # Get X-PAYMENT header and payment mode
     payment_header = request.headers.get(X_PAYMENT_HEADER)
-    payment_mode = request.headers.get(X_PAYMENT_MODE_HEADER, "").lower()
+    payment_mode = "free" if is_free_tier_opt_in(request) else ""
 
     # If no payment header AND no free tier opt-in, return 402
     if not payment_header and payment_mode != "free":
@@ -398,7 +398,10 @@ async def require_x402_payment(request: Request) -> None:
                         "pay_to": settings.X402_PAY_TO_ADDRESS,
                     }
                 },
-                headers=get_rate_limit_headers(stats)
+                # Retry-After too, as the global limiter's 429 sends: the
+                # window length is the longest the caller has to wait.
+                headers={**get_rate_limit_headers(stats),
+                         "Retry-After": str(stats.get("window_seconds", 60))},
             )
 
     # At this point, we have an X-PAYMENT header - verify payment

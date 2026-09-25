@@ -60,6 +60,9 @@ jobs:
         if: github.ref == 'refs/heads/dev'
         run: |
           mkdir -p /opt/swarm_connect_dev_data
+          # This file holds signing keys: make it owner-only BEFORE writing.
+          # umask alone would not narrow a file that already exists as 0644.
+          touch /opt/swarm_connect_dev.env && chmod 600 /opt/swarm_connect_dev.env
           cat > /opt/swarm_connect_dev.env << 'EOF'
           X402_ENABLED=${{ vars.X402_ENABLED || 'false' }}
           X402_PAY_TO_ADDRESS=${{ vars.X402_PAY_TO_ADDRESS || '' }}
@@ -130,6 +133,9 @@ jobs:
         if: github.ref == 'refs/heads/main'
         run: |
           mkdir -p /opt/swarm_connect_data
+          # This file holds signing keys: make it owner-only BEFORE writing.
+          # umask alone would not narrow a file that already exists as 0644.
+          touch /opt/swarm_connect.env && chmod 600 /opt/swarm_connect.env
           cat > /opt/swarm_connect.env << 'EOF'
           X402_ENABLED=${{ vars.X402_ENABLED || 'false' }}
           X402_PAY_TO_ADDRESS=${{ vars.X402_PAY_TO_ADDRESS || '' }}
@@ -223,6 +229,8 @@ jobs:
           mv swarm_connect.new swarm_connect
           rm -rf swarm_connect.old
           cd swarm_connect
+          # Monitoring credentials: owner-only, like the gateway env files.
+          touch .env && chmod 600 .env
           cat > .env << EOF
           GRAFANA_CLOUD_PROM_USERNAME=${{ secrets.GRAFANA_CLOUD_PROM_USERNAME }}
           GRAFANA_CLOUD_API_TOKEN=${{ secrets.GRAFANA_CLOUD_API_TOKEN }}
@@ -260,10 +268,28 @@ jobs:
           # in through depends_on.
           if [ "$GITHUB_REF_NAME" = "dev" ]; then
             BRANCH_SERVICE=provenance_gateway_dev
+            DATA_DIR=/opt/swarm_connect_dev_data
           else
             BRANCH_SERVICE=provenance_gateway
+            DATA_DIR=/opt/swarm_connect_data
           fi
           echo "Recreating $BRANCH_SERVICE (branch $GITHUB_REF_NAME)"
+          # The new container runs as UID 10001 (see Dockerfile), not root, so
+          # hand it the state dir, including files written by earlier root
+          # containers. Stop the old container FIRST: while it runs it can still
+          # write state files as root with mode 0600, which the new one could not
+          # read. The chown runs through the image so it works whatever user the
+          # runner is; the extra downtime is the chown itself.
+          docker compose stop "$BRANCH_SERVICE"
+          if ! docker run --rm --user 0 --entrypoint chown \
+            -v "$DATA_DIR:/app/data" "swarm_connect:$GITHUB_REF_NAME" -R 10001:10001 /app/data; then
+            # Do not leave a payment-taking gateway down: bring the old
+            # container back (it runs as root, so a partial chown is harmless
+            # to it) and fail the job.
+            echo "::error::chown of $DATA_DIR failed; restarting the previous container"
+            docker compose start "$BRANCH_SERVICE"
+            exit 1
+          fi
           docker compose up -d --force-recreate --no-deps "$BRANCH_SERVICE"
 
           # Host-level services (the bundled Bee nodes and the metrics agent) live
@@ -295,7 +321,47 @@ jobs:
           # config at startup.
           docker compose -f docker-compose.host.yml up -d --force-recreate --no-deps alloy
 
+      - name: wait for healthy
+        run: |
+          # `up -d` returns as soon as the container is created, so a gateway
+          # that refuses to start (e.g. an unsafe x402 config since #407) used
+          # to sit in a restart loop behind a green deploy. Wait for Docker's
+          # own healthcheck (docker-compose.yml) and fail the job if it does
+          # not pass. 90s, not 60: the healthcheck interval is 30s, so a first
+          # probe that lands before the app is up is only retried at ~60s.
+          cd /opt/swarm_connect
+          if [ "$GITHUB_REF_NAME" = "dev" ]; then
+            BRANCH_SERVICE=provenance_gateway_dev
+          else
+            BRANCH_SERVICE=provenance_gateway
+          fi
+          # `|| true`: if compose itself fails, fall through to the "missing"
+          # path below (annotation + logs) instead of ending the step under -e.
+          CID=$(docker compose ps -aq "$BRANCH_SERVICE" || true)
+          STATE=missing
+          for i in $(seq 1 30); do
+            # No container at all: `docker inspect ""` prints a blank line rather
+            # than failing cleanly, so check for it explicitly.
+            [ -n "$CID" ] || break
+            STATE=$(docker inspect -f '{{.State.Status}}/{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}/{{.RestartCount}}' "$CID" 2>/dev/null) || STATE=missing
+            case "$STATE" in
+              running/healthy/*) echo "$BRANCH_SERVICE is healthy"; exit 0 ;;
+              # No healthcheck defined: fall back to probing the process itself.
+              running/none/0) docker exec "$CID" curl -sf http://localhost:8000/ >/dev/null && { echo "$BRANCH_SERVICE is up"; exit 0; } ;;
+            esac
+            # A restart or a stopped container will not recover by waiting.
+            case "$STATE" in
+              missing|*/unhealthy/*|exited/*|dead/*|*/*/[1-9]*) break ;;
+            esac
+            sleep 3
+          done
+          echo "::error::$BRANCH_SERVICE did not become healthy (status/health/restarts: $STATE)"
+          docker compose logs --tail 200 "$BRANCH_SERVICE" || true
+          exit 1
+
       - name: post-deploy diagnostics
+        # Most useful exactly when the deploy failed.
+        if: always()
         run: |
           echo "=== Container status ==="
           docker ps -a --filter "name=swarm_connect" --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"

@@ -58,7 +58,25 @@ STAMP_POOL_LOW_RESERVE_THRESHOLD=1     # Alert when reserve at this level
 
 # Duration for new pool stamps
 STAMP_POOL_DEFAULT_DURATION_HOURS=168  # 1 week
+
+# Spend ceiling for the pool's own purchases (a blast radius, not a tuning knob)
+STAMP_POOL_MAX_PURCHASES_PER_HOUR=10
+
+# Daily free allowance of acquires, per calling Origin and per size
+POOL_DAILY_ALLOWANCES=https://app.example=50   # comma-separated origin=limit
+POOL_DEFAULT_DAILY_ALLOWANCE=-1                # ONE bucket shared by all unlisted origins and no-Origin callers; -1 = unlimited
+
+# x402 (only when X402_ENABLED=true)
+X402_POOL_MARKUP_PERCENT=100            # premium on a paid acquire (100 = double the batch cost)
+X402_ALLOW_TESTNET_PAID_BYPASS=false    # let a testnet payment bypass the allowance
+
+# Operator-only manual maintenance (POST /pool/check); empty = endpoint returns 404
+POOL_ADMIN_ADDRESSES=0xYourOperatorAddress
 ```
+
+The allowance is keyed on the `Origin` header. That stops other *websites* from
+spending your pool, but any non-browser client can send any origin, so the budget
+is what protects the pool — the origin only selects which budget applies.
 
 ### Size Presets
 
@@ -129,6 +147,25 @@ Or with explicit depth, which must be one of the pool sizes: 17 (small), 20 (med
   }
 }
 ```
+Another request taking the same stamp at the same moment also returns 409
+(`"Stamp was acquired by another request."`); retrying is safe.
+
+**Response (daily allowance used up): HTTP 429**
+```json
+{
+  "detail": {
+    "code": "DAILY_STAMP_ALLOWANCE_EXHAUSTED",
+    "size": "small",
+    "allowance": 50,
+    "used": 50,
+    "resets_at": "...",
+    "alternative": {"endpoint": "POST /api/v1/stamps/", "note": "..."},
+    "message": "The daily free allowance of 50 small stamps for this application has been used up. ..."
+  }
+}
+```
+`alternative` points to paying for the acquire with x402 instead where a payment
+is allowed to bypass the allowance (see below), otherwise to a direct purchase.
 
 **Response (fallback to larger)**, for free acquires only. The daily allowance is charged for the size actually handed out. If that larger size's allowance is used up, the response is 409 `REQUESTED_SIZE_UNAVAILABLE`. A paid acquire always gets exactly the size it paid for, or a 409 without being charged.
 ```json
@@ -141,6 +178,13 @@ Or with explicit depth, which must be one of the pool sizes: 17 (small), 20 (med
   "fallback_used": true
 }
 ```
+
+**Payment (when x402 is enabled):** acquire does not require payment and ignores
+`X-Payment-Mode`. Without an `X-PAYMENT` header the request draws on the daily
+allowance and the stamp is registered as `shared`. With one, the payment is
+verified and settled (price: the batch cost plus `X402_POOL_MARKUP_PERCENT`) and
+the stamp is registered to the payer. The settled payment bypasses the allowance
+only on a mainnet network, or on a testnet with `X402_ALLOW_TESTNET_PAID_BYPASS=true`.
 
 ### GET /api/v1/pool/available
 
@@ -161,16 +205,18 @@ List all available stamps in the pool.
 
 ### POST /api/v1/pool/check
 
-Manually trigger pool maintenance (sync, purchase, top-up).
+Schedule pool maintenance (sync, purchase, top-up). **Operator only**: this spends
+BZZ, so it requires an EIP-191 `personal_sign` signature over
+`swarm-connect-pool-check:<unix_ts>` from an address in `POOL_ADMIN_ADDRESSES`,
+sent as `X-Debug-Signature` with `X-Debug-Timestamp`. It returns 404 when
+`POOL_ADMIN_ADDRESSES` is empty, 401 for a missing, stale or invalid signature,
+and 403 for a signer not on the list.
 
-**Response:**
+**Response: HTTP 202** (the work runs in the background)
 ```json
 {
-  "checked_at": "2026-01-21T10:05:00Z",
-  "stamps_purchased": 1,
-  "stamps_topped_up": 0,
-  "stamps_synced": 2,
-  "errors": []
+  "scheduled_at": "2026-01-21T10:05:00+00:00",
+  "message": "Pool maintenance scheduled. Poll GET /api/v1/pool/status for the result; `last_check` advances and `errors` reports any failure."
 }
 ```
 
@@ -197,10 +243,10 @@ The background task runs every `STAMP_POOL_CHECK_INTERVAL_SECONDS`:
 
 ### Stamp Release
 
-When a client acquires a stamp:
+When a client acquires a stamp (within its allowance, or paid):
 
 1. Stamp is immediately returned
-2. Stamp is removed from pool tracking
+2. Stamp is removed from pool tracking and registered to the caller (`shared` if free, the payer's wallet if paid)
 3. Client is now responsible for the stamp
 4. Background task will eventually replenish the reserve
 
@@ -213,6 +259,11 @@ Once a stamp is released from the pool:
   - Managing utilization
   - Extending TTL if needed
   - Monitoring capacity
+
+An acquired stamp keeps whatever TTL it had left in the pool, which can be well
+under `STAMP_POOL_DEFAULT_DURATION_HOURS` (the pool tops stamps up only once they
+fall below `STAMP_POOL_MIN_TTL_HOURS`). Check `GET /api/v1/stamps/{id}` and extend
+it if you need the data kept longer.
 
 ## Monitoring
 
@@ -229,20 +280,10 @@ Check the `errors` array in status response for:
 - Failed top-ups
 - Bee node connectivity issues
 
-### Health Check Integration
+### Health and Metrics
 
-The pool status is included in `/health` when enabled:
-
-```json
-{
-  "status": "ok",
-  "stamp_pool": {
-    "enabled": true,
-    "total_stamps": 2,
-    "low_reserve_warning": false
-  }
-}
-```
+`/health` does not include pool state. Use `GET /api/v1/pool/status`, or the
+pool metrics on `/metrics` (availability by size, minimum TTL, acquires by status).
 
 ## Business Considerations
 
@@ -274,7 +315,7 @@ This cost should be factored into service pricing (e.g., via x402 payments or su
 1. Check BZZ wallet balance on Bee node
 2. Check Bee node connectivity
 3. Check `errors` in pool status
-4. Manually trigger `/api/v1/pool/check`
+4. As an operator, schedule `POST /api/v1/pool/check` (signed, see above) and watch `last_check` in the status
 
 ### Stamps Not Becoming Usable
 
