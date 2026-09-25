@@ -96,8 +96,14 @@ from app.middleware.body_limit import BodyLimitMiddleware
 app.add_middleware(BodyLimitMiddleware)
 logger.info(f"JSON body limits enabled: max {settings.MAX_JSON_BODY_BYTES} bytes, max depth {settings.MAX_JSON_DEPTH}")
 
-# Add global rate limiting if enabled and x402 is disabled (x402 has its own limiter)
-if settings.RATE_LIMIT_ENABLED and not settings.X402_ENABLED:
+# Global per-IP rate limiting, whether or not x402 is enabled (#352).
+#
+# It used to be installed only when x402 was off, on the grounds that x402 has
+# its own limiter. That limiter only covers free-tier requests to the protected
+# POST routes, so with x402 on (as in production) every other route, including
+# downloads and paid requests, had no limit at all. The x402 free-tier limit
+# still applies on top, as the stricter inner limit for free writes.
+if settings.RATE_LIMIT_ENABLED:
     from app.middleware.rate_limit import RateLimitMiddleware
     app.add_middleware(RateLimitMiddleware)
     logger.info(f"Global rate limiting enabled: {settings.RATE_LIMIT_PER_MINUTE}/min + {settings.RATE_LIMIT_BURST} burst")
