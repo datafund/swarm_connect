@@ -279,6 +279,10 @@ async def require_x402_payment(request: Request) -> None:
     # Get X-PAYMENT header and payment mode
     payment_header = request.headers.get(X_PAYMENT_HEADER)
     payment_mode = request.headers.get(X_PAYMENT_MODE_HEADER, "").lower()
+    # Responses have always echoed "free-tier", and clients reasonably send back
+    # what they were shown; accept it as the same opt-in as "free" (#385).
+    if payment_mode == "free-tier":
+        payment_mode = "free"
 
     # If no payment header AND no free tier opt-in, return 402
     if not payment_header and payment_mode != "free":
