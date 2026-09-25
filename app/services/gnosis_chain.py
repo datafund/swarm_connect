@@ -20,12 +20,14 @@ from __future__ import annotations
 import asyncio
 import logging
 import secrets
+import threading
 import time
 from typing import Any, Dict, Optional
 
 from eth_abi import encode as abi_encode
 from eth_utils import keccak, to_checksum_address
 from web3 import Web3
+from web3.exceptions import TimeExhausted
 
 from app.core.config import settings
 
@@ -33,6 +35,11 @@ logger = logging.getLogger(__name__)
 
 BUCKET_DEPTH = 16  # fixed by the Swarm protocol
 from app.services.swarm_api import PLUR_PER_BZZ  # noqa: F401
+
+RECEIPT_TIMEOUT_SECONDS = 180
+
+# The standing allowance, in largest-possible batches. See _ensure_allowance.
+APPROVE_BUFFER_BATCHES = 10
 
 # Verified contract/token addresses per chain (ethersphere/go-storage-incentives-abi).
 CHAIN_DEFAULTS = {
@@ -75,10 +82,41 @@ class GnosisChainError(Exception):
     """Raised on chain-client configuration or transaction failures."""
 
 
+class TransactionPending(Exception):
+    """createBatch was broadcast but no receipt arrived in time (#368).
+
+    Deliberately NOT a GnosisChainError: that means the batch was not created,
+    and this does not. The transaction may still mine and spend the BZZ, so a
+    caller must treat the outcome as unknown, never as "not charged".
+    """
+
+    def __init__(self, tx_hash: str, batch_id: str, owner: str):
+        super().__init__(f"transaction {tx_hash} not confirmed within {RECEIPT_TIMEOUT_SECONDS}s")
+        self.tx_hash = tx_hash
+        self.batch_id = batch_id
+        self.owner = owner
+
+
 def compute_batch_id(sender: str, nonce: bytes) -> str:
     """batchId = keccak256(abi.encode(msg.sender, nonce)) — derived from the CALLER."""
     encoded = abi_encode(["address", "bytes32"], [to_checksum_address(sender), nonce])
     return "0x" + keccak(encoded).hex()
+
+
+class _NotConfirmed(Exception):
+    """A sent transaction had no receipt within RECEIPT_TIMEOUT_SECONDS."""
+
+    def __init__(self, tx_hash: str):
+        super().__init__(tx_hash)
+        self.tx_hash = tx_hash
+
+
+def _hex(tx_hash: Any) -> str:
+    """Transaction hash as 0x-hex, whatever web3 handed back."""
+    if isinstance(tx_hash, (bytes, bytearray)):
+        return "0x" + bytes(tx_hash).hex()
+    h = tx_hash.hex() if hasattr(tx_hash, "hex") else str(tx_hash)
+    return h if h.startswith("0x") else "0x" + h
 
 
 class GnosisChainClient:
@@ -97,6 +135,12 @@ class GnosisChainClient:
         self._acct = None
         self._bal_cache = None
         self._bal_ts = 0.0
+        # One transaction sequence at a time per signer (#368). create_batch
+        # runs in a worker thread (asyncio.to_thread), so this is a threading
+        # lock: an asyncio.Lock would not be seen by the thread doing the work.
+        # Without it, two requests read the same `pending` nonce, and one
+        # replaces or fails the other.
+        self._signer_lock = threading.Lock()
 
     def __repr__(self):  # never leak the key
         return f"<GnosisChainClient chain_id={self._chain_id} configured={self.is_configured}>"
@@ -136,7 +180,10 @@ class GnosisChainClient:
         signed = acct.sign_transaction(tx)
         raw = getattr(signed, "raw_transaction", None) or getattr(signed, "rawTransaction")
         txh = w3.eth.send_raw_transaction(raw)
-        receipt = w3.eth.wait_for_transaction_receipt(txh, timeout=180)
+        try:
+            receipt = w3.eth.wait_for_transaction_receipt(txh, timeout=RECEIPT_TIMEOUT_SECONDS)
+        except TimeExhausted as e:
+            raise _NotConfirmed(_hex(txh)) from e
         if receipt.status != 1:
             raise GnosisChainError(f"transaction reverted: {receipt.transactionHash.hex()}")
         return receipt
@@ -150,21 +197,54 @@ class GnosisChainClient:
         postage = w3.eth.contract(address=postage_addr, abi=POSTAGE_STAMP_ABI)
 
         total_cost = int(initial_balance_per_chunk) * (2 ** int(depth))
+        batch_id = compute_batch_id(acct.address, nonce)
 
-        # ensure allowance (skip if already sufficient)
-        allowance = bzz.functions.allowance(acct.address, postage_addr).call()
-        if allowance < total_cost:
-            self._build_and_send(w3, acct, bzz.functions.approve(postage_addr, total_cost))
+        # Held from the nonce read to the createBatch receipt, so the approve and
+        # createBatch of one request are never interleaved with another's.
+        with self._signer_lock:
+            try:
+                self._ensure_allowance(w3, acct, bzz, postage_addr, total_cost)
+            except _NotConfirmed as e:
+                # approve moves no BZZ, and createBatch was never sent.
+                raise GnosisChainError(f"approve {e.tx_hash} not confirmed in time") from e
 
-        receipt = self._build_and_send(w3, acct, postage.functions.createBatch(
-            owner, int(initial_balance_per_chunk), int(depth), int(bucket_depth), nonce, bool(immutable)
-        ))
+            fn = postage.functions.createBatch(
+                owner, int(initial_balance_per_chunk), int(depth), int(bucket_depth), nonce, bool(immutable)
+            )
+            try:
+                receipt = self._build_and_send(w3, acct, fn)
+            except _NotConfirmed as e:
+                # Broadcast, not confirmed. It may still mine, so this must not
+                # look like a failure (#368).
+                raise TransactionPending(e.tx_hash, batch_id, owner) from e
 
         return {
-            "batch_id": compute_batch_id(acct.address, nonce),
+            "batch_id": batch_id,
             "tx_hash": receipt.transactionHash.hex(),
             "owner": owner,
         }
+
+    def _ensure_allowance(self, w3, acct, bzz, postage_addr, total_cost: int) -> None:
+        """Keep a standing allowance that one uncertain createBatch cannot exhaust.
+
+        Approving the exact cost was only safe for one request at a time. The
+        lock gives that, except after a receipt timeout: the timed-out
+        createBatch may still be pending and will consume its share later. If
+        the next request then skipped approving because the allowance looked
+        sufficient, or set it to its own exact cost, one of the two createBatch
+        calls would revert and waste its gas.
+
+        So the allowance is topped up to APPROVE_BUFFER_BATCHES of the largest
+        batch the gateway may create, whenever it falls below half of that.
+        That leaves room for several unconfirmed batches, while bounding what
+        the PostageStamp contract may draw to a fixed multiple of the per-batch
+        cap rather than the whole wallet.
+        """
+        largest = max(total_cost, int(settings.STAMP_FOR_OTHERS_MAX_BZZ * PLUR_PER_BZZ))
+        target = largest * APPROVE_BUFFER_BATCHES
+        allowance = bzz.functions.allowance(acct.address, postage_addr).call()
+        if allowance < target // 2:
+            self._build_and_send(w3, acct, bzz.functions.approve(postage_addr, target))
 
     async def create_batch(self, owner: str, initial_balance_per_chunk: int, depth: int,
                            bucket_depth: int = BUCKET_DEPTH, immutable: bool = False,

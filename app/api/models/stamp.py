@@ -221,6 +221,11 @@ class StampForOwnerResponse(BaseModel):
     secondsSincePurchase: Optional[int] = Field(None, description="Seconds since creation.")
     estimatedReadyAt: Optional[str] = Field(None, description="ISO timestamp when the batch should be usable.")
     propagationStatus: Optional[str] = Field(None, description="'propagating' / 'ready' / 'unknown'.")
+    confirmed: bool = Field(
+        default=True,
+        description="False (with HTTP 202) when createBatch was broadcast but not confirmed in time: "
+                    "the batch may still be created. Check txHash before retrying.",
+    )
     message: str = Field(default="Batch created for owner", description="Success message.")
 
 

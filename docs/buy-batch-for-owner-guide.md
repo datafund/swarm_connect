@@ -47,6 +47,17 @@ Response `201`:
 The batch is created on-chain immediately but needs ~1–2 min to propagate before stamps
 are usable — poll the propagation fields or `GET /api/v1/stamps/{batchID}`.
 
+Response `202` (`"confirmed": false`): `createBatch` was broadcast but no receipt arrived
+within 180 s. The transaction is **pending and may still mine**, so the request is not
+treated as failed and a payment is settled. `batchID` is already fixed (it derives from
+the signer and nonce). Look up `txHash` on Gnosis before retrying; a retry creates a
+second batch.
+
+Concurrency: the gateway sends one transaction sequence at a time from its signer
+(nonce → `approve` → `createBatch` → receipt), and keeps a standing BZZ allowance of
+10× the per-batch cap (`STAMP_FOR_OTHERS_MAX_BZZ`), topped up when it falls below half.
+So a timed-out batch that mines later cannot starve the next one of allowance.
+
 ## Guards (all enforced BEFORE any on-chain spend)
 
 | Guard | Env var | Default | Failure |
@@ -103,7 +114,7 @@ so it never burns gas on a call that would revert. Warn thresholds
 
 | Metric | Meaning |
 |--------|---------|
-| `gateway_for_owner_batches_total{status}` | attempts by outcome (`success`, `error`, `insufficient_funds`, `payment_required`) |
+| `gateway_for_owner_batches_total{status}` | attempts by outcome (`success`, `pending`, `error`, `insufficient_funds`, `payment_required`) |
 | `gateway_for_owner_bzz_spent_total` | cumulative PLUR spent creating batches |
 | `gateway_gnosis_signer_xbzz_balance` | signer wallet xBZZ (BZZ) — alert when low |
 | `gateway_gnosis_signer_xdai_balance` | signer wallet xDAI — alert when low |
