@@ -60,6 +60,7 @@ X402_NETWORK=base-sepolia                            # Network identifier
 X402_BZZ_USD_RATE=0.50               # Manual BZZ/USD rate
 X402_MARKUP_PERCENT=50               # 50% markup on BZZ cost
 X402_MIN_PRICE_USD=0.01              # Minimum $0.01 per request
+X402_BANDWIDTH_USD_PER_GB=0.10       # Paid uploads and chunk credit, per GB of bandwidth
 
 # === Gnosis Wallet Thresholds (warnings) ===
 X402_XBZZ_WARN_THRESHOLD=10          # Warn if xBZZ wallet < 10
@@ -111,6 +112,21 @@ Example for a 24-hour stamp at depth 17:
 - Final price: 0.1 × $0.50 × 1.5 = $0.075
 
 The minimum price (`X402_MIN_PRICE_USD`) ensures you always cover costs.
+
+**Uploads are priced as bandwidth, not storage.** A paid `POST /api/v1/data/`
+(or `/data/manifest`) writes with a stamp the caller supplies, so storage is
+already paid for. The price is:
+
+```
+Upload Price = max(Content-Length / 10^9 × X402_BANDWIDTH_USD_PER_GB × (1 + MARKUP_PERCENT/100), X402_MIN_PRICE_USD)
+```
+
+A request without `Content-Length` is priced at `MAX_UPLOAD_SIZE_MB`. With the
+defaults ($0.10/GB, 50% markup, 10 MB cap) every upload costs the $0.01
+minimum. There is no setting for the upload price alone:
+`X402_BANDWIDTH_USD_PER_GB` also prices chunk-credit top-ups, and
+`X402_MIN_PRICE_USD` also floors stamp purchases. Before #365 an upload cost
+the price of a new 24-hour stamp sized to it.
 
 ## Access Control
 
@@ -175,7 +191,7 @@ When a client hits a protected endpoint without proper headers:
       "network": "base-sepolia",
       "maxAmountRequired": "10000",
       "resource": "http://localhost:8000/api/v1/data/",
-      "description": "Data upload (1024 bytes, 24h)",
+      "description": "Upload bandwidth (1024 bytes, stored with the stamp you supplied)",
       "mimeType": "application/json",
       "payTo": "0xYourAddress...",
       "maxTimeoutSeconds": 300,

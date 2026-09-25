@@ -472,7 +472,7 @@ class TestUploadRequestPricing:
         monkeypatch.setattr(settings, "X402_MIN_PRICE_USD", 0.0)
         quote = await _calculate_price_for_request(self._request({"Content-Length": "4000000"}))
         assert quote["price_usd"] == calculate_bandwidth_price_usd(4_000_000)["price_usd"]
-        assert "own stamp" in quote["description"]
+        assert "stamp you supplied" in quote["description"]
 
     @pytest.mark.asyncio
     async def test_without_content_length_the_largest_upload_is_priced(self, monkeypatch):

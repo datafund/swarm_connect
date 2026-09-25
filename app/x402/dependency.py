@@ -178,7 +178,7 @@ async def _calculate_price_for_request(request: Request) -> dict:
         quote = await get_price_quote(operation="upload", size_bytes=size_bytes)
         return {
             "price_usd": quote["price_usd"],
-            "description": f"Upload bandwidth ({size_bytes} bytes, stored with your own stamp)"
+            "description": f"Upload bandwidth ({size_bytes} bytes, stored with the stamp you supplied)"
         }
 
     return {
