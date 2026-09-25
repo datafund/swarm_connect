@@ -170,82 +170,6 @@ async def calculate_stamp_price_usd(
     return result
 
 
-async def calculate_upload_price_usd(
-    size_bytes: int,
-    duration_hours: int = 24,
-    include_breakdown: bool = True
-) -> Dict[str, Any]:
-    """
-    Calculate the USD price for a data upload.
-
-    This calculates the price for uploading data of a given size.
-    The price is based on the stamp cost required to store the data.
-
-    For uploads, we use a default depth based on the data size.
-    Depth determines capacity: 2^depth chunks of 4096 bytes each.
-    - depth 17 = 512 MB capacity
-    - depth 20 = 4 GB capacity
-    - depth 24 = 64 GB capacity
-
-    Args:
-        size_bytes: Size of data to upload in bytes
-        duration_hours: How long to store the data (default 24 hours)
-        include_breakdown: Whether to include detailed breakdown
-
-    Returns:
-        Dict containing price calculation details
-    """
-    # Calculate appropriate depth based on size
-    # Each chunk is 4096 bytes, depth gives 2^depth chunks
-    chunk_size = 4096
-    chunks_needed = (size_bytes + chunk_size - 1) // chunk_size  # Ceiling division
-
-    # Find minimum depth to fit the data
-    # depth 17 = 2^17 = 131,072 chunks = 512 MB
-    # We add some buffer for overhead
-    min_depth = 17
-    max_depth = 32
-
-    depth = min_depth
-    while depth < max_depth:
-        capacity_chunks = 2 ** depth
-        if capacity_chunks >= chunks_needed * 1.1:  # 10% buffer
-            break
-        depth += 1
-
-    # Calculate stamp price for this depth and duration
-    stamp_price = await calculate_stamp_price_usd(
-        duration_hours=duration_hours,
-        depth=depth,
-        include_breakdown=include_breakdown
-    )
-
-    result = {
-        "price_usd": stamp_price["price_usd"],
-        "price_bzz": stamp_price["price_bzz"],
-        "exchange_rate": stamp_price["exchange_rate"],
-        "markup_percent": stamp_price["markup_percent"],
-        "minimum_applied": stamp_price["minimum_applied"],
-    }
-
-    if include_breakdown:
-        result["breakdown"] = {
-            "size_bytes": size_bytes,
-            "chunks_needed": chunks_needed,
-            "depth_used": depth,
-            "capacity_chunks": 2 ** depth,
-            "duration_hours": duration_hours,
-            "stamp_breakdown": stamp_price.get("breakdown", {}),
-        }
-
-    logger.info(
-        f"Calculated upload price: {size_bytes} bytes for {duration_hours}h -> "
-        f"depth={depth}, ${stamp_price['price_usd']:.4f} USD"
-    )
-
-    return result
-
-
 def calculate_bandwidth_price_usd(
     size_bytes: int,
     include_breakdown: bool = True
@@ -316,7 +240,7 @@ async def get_price_quote(
     This is the main entry point for generating x402 PaymentRequired responses.
 
     Args:
-        operation: Type of operation ("stamp_purchase", "upload")
+        operation: Type of operation ("stamp_purchase", "upload", "bandwidth")
         **kwargs: Operation-specific parameters
 
     Returns:
@@ -335,11 +259,11 @@ async def get_price_quote(
         duration_hours = kwargs.get("duration_hours", 24)
         depth = kwargs.get("depth", 17)
         price_info = await calculate_stamp_price_usd(duration_hours, depth)
-    elif operation == "upload":
-        size_bytes = kwargs.get("size_bytes", 0)
-        duration_hours = kwargs.get("duration_hours", 24)
-        price_info = await calculate_upload_price_usd(size_bytes, duration_hours)
-    elif operation == "bandwidth":
+    elif operation in ("upload", "bandwidth"):
+        # An upload is written with the caller's own stamp, so storage is
+        # already paid for; the gateway's cost is the bandwidth. It used to be
+        # priced as a new stamp sized to the upload, charging for storage twice
+        # (#365).
         size_bytes = kwargs.get("size_bytes", 0)
         price_info = calculate_bandwidth_price_usd(size_bytes)
     else:

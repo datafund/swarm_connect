@@ -166,17 +166,19 @@ async def _calculate_price_for_request(request: Request) -> dict:
         }
 
     elif "/data/" in path:
-        content_length = request.headers.get("Content-Length", "0")
-        size_bytes = int(content_length) if content_length.isdigit() else 1024
+        # Without a Content-Length (a chunked body) the size is unknown until
+        # it has been read, so price the largest upload accepted rather than a
+        # token amount the body could then exceed by any factor.
+        content_length = request.headers.get("Content-Length", "")
+        if content_length.isdigit():
+            size_bytes = int(content_length)
+        else:
+            size_bytes = settings.MAX_UPLOAD_SIZE_MB * 1024 * 1024
 
-        quote = await get_price_quote(
-            operation="upload",
-            size_bytes=size_bytes,
-            duration_hours=24
-        )
+        quote = await get_price_quote(operation="upload", size_bytes=size_bytes)
         return {
             "price_usd": quote["price_usd"],
-            "description": f"Data upload ({size_bytes} bytes, 24h)"
+            "description": f"Upload bandwidth ({size_bytes} bytes, stored with your own stamp)"
         }
 
     return {
