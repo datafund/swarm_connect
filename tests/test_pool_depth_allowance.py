@@ -3,7 +3,7 @@ and a paid acquire priced from the same parse it is served from (#351, #362).
 """
 import asyncio
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
@@ -102,9 +102,21 @@ def test_pool_price_uses_the_same_parse_as_the_handler(monkeypatch):
     assert price["price_usd"] == float(2 ** 22)
 
 
+# These call the handler directly with a hand-built request, so request.state
+# says "paid" without carrying the payment payload the dependency would have put
+# there. The handler settles immediately before handing over a batch (#398), and
+# settle_payment then reached the real facilitator with payment=None — raising
+# AttributeError, which it converts into a 502. Patching settlement keeps these
+# tests about what they are named for: which acquires draw on the allowance.
+def _no_settlement(monkeypatch):
+    import app.api.endpoints.pool as pool_ep
+    monkeypatch.setattr(pool_ep, "settle_payment", AsyncMock())
+
+
 def test_paid_acquire_of_an_available_size_uses_no_allowance(pool, monkeypatch):
     from app.api.endpoints.pool import AcquireStampRequest, acquire_stamp
     monkeypatch.setattr(settings, "X402_NETWORK", "base")  # paid bypass honoured
+    _no_settlement(monkeypatch)
     req = SimpleNamespace(headers={}, client=None,
                           state=SimpleNamespace(x402_mode="paid", x402_payer="0xp"))
     resp = asyncio.run(acquire_stamp(AcquireStampRequest(size="medium"), req))
@@ -112,11 +124,20 @@ def test_paid_acquire_of_an_available_size_uses_no_allowance(pool, monkeypatch):
     assert pool.tracker.snapshot()["used"] == {}
 
 
-def test_refused_paid_acquire_uses_no_allowance(pool):
+def test_refused_paid_acquire_uses_no_allowance(pool, monkeypatch):
+    """An empty pool must refuse without charging the allowance.
+
+    This was passing for the wrong reason: settle_payment was raising a 502
+    before the pool was ever consulted, and `pytest.raises(HTTPException)` was
+    satisfied by that. It now asserts the 409 it means, so a settlement failure
+    can no longer stand in for the behaviour under test.
+    """
     from app.api.endpoints.pool import AcquireStampRequest, acquire_stamp
     from fastapi import HTTPException
+    _no_settlement(monkeypatch)
     req = SimpleNamespace(headers={}, client=None,
                           state=SimpleNamespace(x402_mode="paid", x402_payer="0xp"))
-    with pytest.raises(HTTPException):
+    with pytest.raises(HTTPException) as e:
         asyncio.run(acquire_stamp(AcquireStampRequest(size="small"), req))
+    assert e.value.status_code == 409, e.value.detail
     assert pool.tracker.snapshot()["used"] == {}
