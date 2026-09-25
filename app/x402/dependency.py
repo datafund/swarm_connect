@@ -48,6 +48,14 @@ def _get_facilitator_client() -> FacilitatorClient:
     return _facilitator_client
 
 
+def _request_method(request) -> str:
+    """HTTP method, tolerating minimal request stand-ins without a method."""
+    scope = getattr(request, "scope", None)
+    if isinstance(scope, dict):
+        return scope.get("method", "") or ""
+    return getattr(request, "method", "") or ""
+
+
 async def _calculate_price_for_request(request: Request) -> dict:
     """
     Calculate price based on the request type.
@@ -75,6 +83,38 @@ async def _calculate_price_for_request(request: Request) -> dict:
         return {
             "price_usd": quote["price_usd"],
             "description": f"Bandwidth credit top-up ({mb} MB)",
+        }
+
+    if _request_method(request) == "PATCH" and path.rstrip("/").endswith("/extend"):
+        # Stamp top-up (#350). Priced from the SAME model the endpoint parses and
+        # the depth of the batch it will top up, so the quote and the spend
+        # cannot describe different things (the #260/#261 lesson). A batch that
+        # does not exist is refused by the endpoint with 404, so it is never
+        # charged; price it at the smallest depth.
+        from app.api.models.stamp import StampExtensionRequest
+        from app.services import swarm_api
+        try:
+            b = await request.json()
+        except Exception:
+            b = {}
+        try:
+            parsed = StampExtensionRequest.model_validate(b)
+        except Exception:
+            parsed = StampExtensionRequest()
+        batch_id = path.rstrip("/").split("/")[-2]
+        depth = 17
+        for stamp in await swarm_api.get_all_stamps_processed():
+            if stamp.get("batchID") == batch_id:
+                depth = int(stamp.get("depth", 17))
+                break
+        quote = await get_price_quote(
+            operation="stamp_extension", depth=depth,
+            duration_hours=parsed.duration_hours, amount=parsed.amount,
+        )
+        what = f"{parsed.amount} PLUR/chunk" if parsed.amount is not None else f"{parsed.duration_hours or 25}h"
+        return {
+            "price_usd": quote["price_usd"],
+            "description": f"Extend stamp (depth {depth}, {what})",
         }
 
     if "/stamps/for-owner" in path:
@@ -154,15 +194,37 @@ async def _calculate_price_for_request(request: Request) -> dict:
             ),
         }
 
-    if "/stamps/" in path:
+    if path.rstrip("/") == "/api/v1/stamps":
+        # Direct purchase (#361). This used to quote a fixed 24h depth-17 batch
+        # whatever the body asked for, while the handler bought the requested
+        # depth and duration (or legacy amount) up to X402_MAX_STAMP_BZZ: on a
+        # network where a paid purchase skips the daily budget, a minimum
+        # payment bought a batch many times its price. Priced now from the same
+        # model the handler parses, with the same amount calculation. A body the
+        # model rejects is refused with 422 and never charged.
+        from app.api.models.stamp import StampPurchaseRequest
+        try:
+            b = await request.json()
+        except Exception:
+            b = {}
+        try:
+            parsed = StampPurchaseRequest.model_validate(b)
+        except Exception:
+            parsed = StampPurchaseRequest()
+        depth = parsed.get_effective_depth()
         quote = await get_price_quote(
-            operation="stamp_purchase",
-            duration_hours=24,
-            depth=17
+            operation="stamp_batch", depth=depth,
+            duration_hours=parsed.duration_hours, amount=parsed.amount,
         )
+        what = f"{parsed.amount} PLUR/chunk" if parsed.amount is not None else f"{parsed.duration_hours or 25}h"
+        # The handler buys exactly this amount and depth, rather than
+        # recalculating from a second chainstate read that may have moved.
+        details = quote.get("details") or {}
+        if "amount" in details and "depth" in details:
+            request.state.x402_priced_batch = {"amount": details["amount"], "depth": details["depth"]}
         return {
             "price_usd": quote["price_usd"],
-            "description": "Postage stamp purchase (24h, depth 17)"
+            "description": f"Postage stamp purchase (depth {depth}, {what})",
         }
 
     elif "/data/" in path:
