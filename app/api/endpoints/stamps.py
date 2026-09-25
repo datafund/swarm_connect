@@ -466,8 +466,13 @@ async def purchase_stamp(
         # Get effective depth from size preset or explicit depth
         effective_depth = stamp_request.get_effective_depth()
 
-        # Determine the amount to use
-        if stamp_request.amount is not None:
+        # A paid purchase buys exactly the batch its price was computed for
+        # (#361): the pricer parsed this same body, and recalculating here from
+        # a second chainstate read could buy more than was paid for.
+        priced = getattr(request.state, "x402_priced_batch", None)
+        if priced and getattr(request.state, "x402_mode", None) == "paid" and priced["depth"] == effective_depth:
+            amount = priced["amount"]
+        elif stamp_request.amount is not None:
             # Legacy mode: use provided amount directly
             amount = stamp_request.amount
         else:

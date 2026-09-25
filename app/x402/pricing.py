@@ -185,16 +185,17 @@ def _price_from_cost_bzz(cost_bzz: float) -> Dict[str, Any]:
     }
 
 
-async def calculate_extension_price_usd(
+async def calculate_batch_price_usd(
     depth: int,
     duration_hours: Optional[int] = None,
     amount: Optional[int] = None,
 ) -> Dict[str, Any]:
-    """Price a stamp top-up exactly as PATCH /stamps/{id}/extend performs it.
+    """Price a batch purchase or top-up exactly as the stamp handlers perform it.
 
+    Used for POST /stamps/ (#361) and PATCH /stamps/{id}/extend (#350).
     `amount` (PLUR per chunk, legacy) wins when given; otherwise the amount is
-    derived from `duration_hours` (default 25, as in the handler) with the same
-    calculate_stamp_amount call and minimum-validity floor the handler uses.
+    derived from `duration_hours` (default 25, as in both handlers) with the
+    same calculate_stamp_amount call and minimum-validity floor they use.
     """
     if amount is None:
         chainstate = await get_chainstate()
@@ -206,7 +207,11 @@ async def calculate_extension_price_usd(
             minimum_validity_blocks=chainstate.get("minimumValidityBlocks"),
         )
     cost_bzz = plur_to_bzz(calculate_stamp_total_cost(int(amount), depth))
-    return _price_from_cost_bzz(cost_bzz)
+    return {**_price_from_cost_bzz(cost_bzz), "amount": int(amount), "depth": depth}
+
+
+# The extension quote is the same calculation over the batch's own depth.
+calculate_extension_price_usd = calculate_batch_price_usd
 
 
 async def calculate_upload_price_usd(
@@ -378,8 +383,8 @@ async def get_price_quote(
         size_bytes = kwargs.get("size_bytes", 0)
         duration_hours = kwargs.get("duration_hours", 24)
         price_info = await calculate_upload_price_usd(size_bytes, duration_hours)
-    elif operation == "stamp_extension":
-        price_info = await calculate_extension_price_usd(
+    elif operation in ("stamp_extension", "stamp_batch"):
+        price_info = await calculate_batch_price_usd(
             depth=kwargs.get("depth", 17),
             duration_hours=kwargs.get("duration_hours"),
             amount=kwargs.get("amount"),

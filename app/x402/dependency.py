@@ -194,15 +194,37 @@ async def _calculate_price_for_request(request: Request) -> dict:
             ),
         }
 
-    if "/stamps/" in path:
+    if path.rstrip("/") == "/api/v1/stamps":
+        # Direct purchase (#361). This used to quote a fixed 24h depth-17 batch
+        # whatever the body asked for, while the handler bought the requested
+        # depth and duration (or legacy amount) up to X402_MAX_STAMP_BZZ: on a
+        # network where a paid purchase skips the daily budget, a minimum
+        # payment bought a batch many times its price. Priced now from the same
+        # model the handler parses, with the same amount calculation. A body the
+        # model rejects is refused with 422 and never charged.
+        from app.api.models.stamp import StampPurchaseRequest
+        try:
+            b = await request.json()
+        except Exception:
+            b = {}
+        try:
+            parsed = StampPurchaseRequest.model_validate(b)
+        except Exception:
+            parsed = StampPurchaseRequest()
+        depth = parsed.get_effective_depth()
         quote = await get_price_quote(
-            operation="stamp_purchase",
-            duration_hours=24,
-            depth=17
+            operation="stamp_batch", depth=depth,
+            duration_hours=parsed.duration_hours, amount=parsed.amount,
         )
+        what = f"{parsed.amount} PLUR/chunk" if parsed.amount is not None else f"{parsed.duration_hours or 25}h"
+        # The handler buys exactly this amount and depth, rather than
+        # recalculating from a second chainstate read that may have moved.
+        details = quote.get("details") or {}
+        if "amount" in details and "depth" in details:
+            request.state.x402_priced_batch = {"amount": details["amount"], "depth": details["depth"]}
         return {
             "price_usd": quote["price_usd"],
-            "description": "Postage stamp purchase (24h, depth 17)"
+            "description": f"Postage stamp purchase (depth {depth}, {what})",
         }
 
     elif "/data/" in path:
