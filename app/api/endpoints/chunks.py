@@ -6,6 +6,7 @@ from typing import Optional
 import httpx
 from fastapi import APIRouter, Header, HTTPException, Query, Request, status
 
+from app.core.client_ip import get_client_key
 from app.api.models.chunk import ChunkUploadResponse, CreditTopUpResponse
 from app.core.config import settings
 from app.services.bandwidth_credit import (
@@ -277,7 +278,7 @@ async def upload_chunk(
                         "payment_info": _topup_info(),
                     },
                 )
-            free_ip = get_client_ip(request)
+            free_ip = get_client_key(request)
             daily_limit = settings.CHUNK_UPLOAD_FREE_TIER_MB_PER_DAY * BYTES_PER_MB
             allowed, remaining = free_tier_tracker.try_consume(free_ip, chunk_len, daily_limit)
             if not allowed:

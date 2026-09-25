@@ -53,6 +53,11 @@
 		respond 404
 	}
 
+	# Cap request bodies at the edge (#354): uploads are limited to 10 MB by
+	# the gateway, which only notices after reading the body.
+	request_body {
+		max_size 12MB
+	}
 	reverse_proxy 127.0.0.1:8899 {
 		# Swarm uploads can be slow; do not cut them off mid-transfer.
 		transport http {
@@ -94,6 +99,9 @@
 		respond 404
 	}
 
+	request_body {
+		max_size 12MB
+	}
 	reverse_proxy 127.0.0.1:8900 {
 		transport http {
 			read_timeout 300s

@@ -101,7 +101,7 @@ _counter = SlidingWindowCounter()
 # callers and tests import it from this module. Both copies used to take the
 # FIRST X-Forwarded-For entry, which is the one furthest from us and is
 # caller-controlled if any proxy appends rather than replaces.
-from app.core.client_ip import get_client_ip  # noqa: F401,E402
+from app.core.client_ip import client_key, get_client_ip  # noqa: F401,E402
 
 
 class RateLimitMiddleware(BaseHTTPMiddleware):
@@ -135,8 +135,9 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
 
         client_ip = get_client_ip(request)
         limit = settings.RATE_LIMIT_PER_MINUTE + settings.RATE_LIMIT_BURST
+        key = client_key(client_ip)
 
-        allowed, stats = self._counter.is_allowed(client_ip, limit)
+        allowed, stats = self._counter.is_allowed(key, limit)
 
         if not allowed:
             rate_limit_hits_total.inc()

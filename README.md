@@ -36,7 +36,7 @@ swarm_connect/
 │       ├── dependency.py   # FastAPI dependency for payment checks
 │       ├── middleware.py    # Post-response settlement + headers
 │       ├── pricing.py      # BZZ → USD price calculation
-│       ├── access.py       # IP whitelist/blacklist
+│       ├── access.py       # IP list parsing (blocklist)
 │       ├── audit.py        # Transaction audit logging
 │       └── ratelimit.py    # Per-IP rate limiting for x402
 │
@@ -399,7 +399,7 @@ When `X402_ENABLED=true`, protected endpoints (`POST /stamps/`, `POST /data/`) r
 ### Features
 
 - **Pay-per-request**: No accounts, no subscriptions
-- **Access control**: IP whitelist/blacklist with CIDR support
+- **Access control**: IP blocklist (`X402_BLACKLIST_IPS`, IPs and CIDR ranges, 403 on every route); there is no payment allowlist
 - **Rate limiting**: Per-IP request throttling (default: 10/min)
 - **Audit logging**: JSON lines format for all transactions
 - **Pre-flight checks**: Validates gateway wallet balances before accepting payments
@@ -428,9 +428,7 @@ X402_MARKUP_PERCENT=50          # Profit margin
 X402_MIN_PRICE_USD=0.01         # Minimum charge
 
 # Access Control
-X402_WHITELIST_IPS=127.0.0.1    # Free access
-X402_BLACKLIST_IPS=             # Blocked IPs
-X402_RATE_LIMIT_PER_IP=10       # Requests/min per IP
+X402_BLACKLIST_IPS=             # Blocked IPs / CIDR ranges (403 on every route)
 
 # Audit
 X402_AUDIT_LOG_PATH=logs/x402_audit.jsonl
