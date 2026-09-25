@@ -95,6 +95,16 @@ class Settings(BaseSettings):
     # STAMP_PURCHASE_BACKGROUND_LOOKUP_SECONDS in the background.
     SWARM_STAMP_PURCHASE_TIMEOUT_SECONDS: float = 120.0
     STAMP_PURCHASE_BEE_TIMEOUT_SECONDS: float = 900.0
+    # Paid purchases waiting on Bee at once. Each holds a connection of the
+    # shared Bee client (100) for up to STAMP_PURCHASE_BEE_TIMEOUT_SECONDS; the
+    # cap keeps a hung Bee from starving uploads and health checks. Checked
+    # before the payment is settled: a caller refused here is not charged.
+    STAMP_MAX_CONCURRENT_PAID_PURCHASES: int = 10
+    # On shutdown, how long to let paid purchases still waiting on Bee finish
+    # before cutting them off. Keep the container's stop grace period (docker
+    # stop_grace_period, systemd TimeoutStopSec) above uvicorn's graceful
+    # shutdown timeout plus this.
+    SHUTDOWN_PENDING_PURCHASE_GRACE_SECONDS: float = 25.0
     STAMP_PURCHASE_LOOKUP_SECONDS: float = 30.0
     STAMP_PURCHASE_BACKGROUND_LOOKUP_SECONDS: float = 900.0
     X402_RATE_LIMIT_PER_IP: int = 10  # Requests per minute per IP (for paying users)

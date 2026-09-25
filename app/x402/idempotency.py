@@ -315,15 +315,23 @@ class IdempotencyStore:
     def resolve(self, eid: str, token: str, status: int, body: bytes) -> None:
         """Replace a stored interim result (a 202) with the final one.
 
-        If the interim result has not been stored yet, it is replaced when it is.
+        If the request is still running, its interim result is replaced when
+        it is stored. If it ended without storing one (the caller disconnected
+        before the 202), the paid entry is finalised with this result, so a
+        retry gets the outcome rather than SETTLED_PENDING.
         """
         with self._lock:
             if not self._owns(eid, token):
                 return
             entry = self._entries.get(eid)
-            if entry is None or entry.get("state") != DONE:
+            if eid in self._pending or entry is None:
                 self._resolved[eid] = (status, body)
                 return
+            if entry.get("state") != DONE:
+                entry["state"] = DONE
+                entry["headers"] = {"content-type": "application/json"}
+                if entry.get("transaction"):
+                    entry["headers"]["x-payment-transaction"] = entry["transaction"]
             entry["status"] = status
             entry["body"] = base64.b64encode(body).decode("ascii")
             self._save()

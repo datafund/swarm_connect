@@ -180,7 +180,8 @@ class TestLabelValidation:
 
         # Refused before any payment (#400): control characters, Bee's label for
         # recovered batches, and the gateway's own prefixes.
-        invalid_labels = ["line\nbreak", "tab\there", "recovered", "paid-1", "pool-17", "synced-17"]
+        invalid_labels = ["line\nbreak", "tab\there", "c1\x85control", "bidi\u202eflip", "zero\u200bwidth",
+                          "recovered", "paid-1", "pool-17", "synced-17"]
         for label in invalid_labels:
             purchase_data = {"amount": 8000000000, "depth": 17, "label": label}
             response = client.post("/api/v1/stamps/", json=purchase_data)

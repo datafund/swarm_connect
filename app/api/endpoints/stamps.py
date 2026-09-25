@@ -433,6 +433,33 @@ _PENDING_FIRST_WAIT_SECONDS = 10
 # Background lookups in flight. The event loop keeps only weak references to
 # tasks, so one nobody holds can be garbage-collected mid-search.
 _PENDING_TASKS: set = set()
+# Paid purchases between settlement and Bee's answer (STAMP_MAX_CONCURRENT_PAID_PURCHASES).
+_paid_purchases_in_flight = 0
+
+
+def _release_paid_slot(_=None) -> None:
+    global _paid_purchases_in_flight
+    _paid_purchases_in_flight = max(0, _paid_purchases_in_flight - 1)
+
+
+async def drain_pending_purchases(grace_seconds: float) -> None:
+    """Shutdown: let Bee requests and background halves finish, then stop them.
+
+    Called before the shared HTTP client is closed. Whatever is still running
+    after the grace period is cancelled and awaited, so each writes its refund
+    record (naming a purchase still in flight at Bee) before the process exits.
+    """
+    if not _PENDING_TASKS:
+        return
+    logger.info(f"Waiting up to {grace_seconds}s for {len(_PENDING_TASKS)} pending purchase task(s)")
+    _, still = await asyncio.wait(set(_PENDING_TASKS), timeout=grace_seconds)
+    if still:
+        logger.error(f"{len(still)} pending purchase task(s) still running at shutdown; cancelling")
+        # Background halves first, so they record the shutdown while the Bee
+        # request they await is still, for them, in flight.
+        for t in sorted(still, key=lambda t: getattr(t, "_is_bee_request", False)):
+            t.cancel()
+        await asyncio.gather(*still, return_exceptions=True)
 
 
 def _is_registered(batch_id: str) -> bool:
@@ -476,21 +503,35 @@ def _purchase_pending(request: Request, label: str, depth: int, amount: int,
     the payer when it appears; with an Idempotency-Key, a retry then gets the
     201 instead of this 202.
     """
-    from app.x402.audit import AuditEventType, log_audit_event
+    from app.x402.audit import AuditEventType, log_audit_event, log_payment_failed
     payer = getattr(request.state, "x402_payer", None)
     tx = getattr(getattr(request.state, "x402_settlement", None), "transaction", None)
-    stamp_purchases_total.labels(size="custom", status="pending").inc()
-    # Everything needed to find the batch by hand, should the search below be
-    # interrupted: it is otherwise only in the client's response.
-    log_audit_event(event_type=AuditEventType.PURCHASE_PENDING, client_ip=get_client_ip(request),
-                    wallet_address=payer,
-                    data={"transaction_hash": tx, "label": label, "depth": depth, "amount": str(amount),
-                          "start_block": start_block, "network": settings.X402_NETWORK})
-    task = asyncio.get_running_loop().create_task(_finish_pending_purchase(
-        request, label, depth, amount, start_block, payer, tx,
-        getattr(request.state, "x402_idempotency_id", None), purchase, taken))
-    _PENDING_TASKS.add(task)
-    task.add_done_callback(_PENDING_TASKS.discard)
+    try:
+        stamp_purchases_total.labels(size="custom", status="pending").inc()
+        # Everything needed to find the batch by hand, should the search below
+        # be interrupted: it is otherwise only in the client's response.
+        log_audit_event(event_type=AuditEventType.PURCHASE_PENDING, client_ip=get_client_ip(request),
+                        wallet_address=payer,
+                        data={"transaction_hash": tx, "label": label, "depth": depth, "amount": str(amount),
+                              "start_block": start_block, "network": settings.X402_NETWORK})
+    except Exception as e:
+        logger.error(f"Could not record a pending purchase (label {label}, tx {tx}): {e}", exc_info=True)
+    try:
+        task = asyncio.get_running_loop().create_task(_finish_pending_purchase(
+            request, label, depth, amount, start_block, payer, tx,
+            getattr(request.state, "x402_idempotency_id", None), purchase, taken))
+        _PENDING_TASKS.add(task)
+        task.add_done_callback(_PENDING_TASKS.discard)
+    except Exception as e:
+        # Nobody will finish this purchase: record it for the operator, and
+        # still observe Bee's request so its outcome is not silently dropped.
+        logger.error(f"Could not start the pending purchase task (label {label}): {e}", exc_info=True)
+        log_payment_failed(client_ip=get_client_ip(request),
+                           reason=f"stamp purchase pending but not followed up ({type(e).__name__}); "
+                                  f"a batch may exist on-chain; label={label}; tx={tx}",
+                           stage="delivery_after_settlement", wallet_address=payer)
+        if purchase is not None:
+            purchase.add_done_callback(lambda t: t.cancelled() or t.exception())
     return JSONResponse(status_code=status.HTTP_202_ACCEPTED, content={
         "code": "PURCHASE_PENDING",
         "message": ("Payment received, but the Bee node did not confirm the purchase in time. "
@@ -520,7 +561,7 @@ async def _finish_pending_purchase(request: Request, label: str, depth: int, amo
 
     def refund_needed(why: str) -> None:
         log_payment_failed(client_ip=client_ip,
-                           reason=f"stamp purchase {why} after settlement; label={label}; tx={tx}",
+                           reason=f"stamp purchase after settlement: {why}; label={label}; tx={tx}",
                            stage="delivery_after_settlement", wallet_address=payer)
         # A retry with the key is told the final outcome, not "pending" for 24 h.
         resolve_idempotent_result(idem, status.HTTP_500_INTERNAL_SERVER_ERROR, json.dumps({
@@ -532,6 +573,7 @@ async def _finish_pending_purchase(request: Request, label: str, depth: int, amo
         }).encode())
 
     batch_id = None
+    in_flight = False
     try:
         if taken:
             refund_needed(f"found ({taken}) but already registered to someone else")
@@ -540,7 +582,9 @@ async def _finish_pending_purchase(request: Request, label: str, depth: int, amo
             # Bee's own answer, from the request kept open for it. Shielded so
             # that cancelling this task alone does not cut Bee's request off.
             try:
+                in_flight = True
                 batch_id = await asyncio.shield(purchase)
+                in_flight = False
             except httpx.HTTPError as e:
                 if not _outcome_unknown(e):
                     refund_needed(f"refused by Bee ({_bee_error_detail(e)[1] or type(e).__name__})")
@@ -560,7 +604,13 @@ async def _finish_pending_purchase(request: Request, label: str, depth: int, amo
             refund_needed(f"found ({batch_id}) but already registered to someone else")
             return
     except asyncio.CancelledError:
-        refund_needed("lookup interrupted (shutdown)")
+        if in_flight:
+            # Bee's request is being cut off with the process: if its
+            # transaction was sent, the batch exists on-chain, unlabelled.
+            refund_needed("Bee purchase in flight at shutdown, a batch may exist on-chain unlabelled "
+                          "(Bee's 'recovered'): check the node's transactions")
+        else:
+            refund_needed("lookup interrupted (shutdown)")
         raise
     except Exception as e:
         logger.error(f"Lost purchase lookup failed: {e}", exc_info=True)
@@ -680,16 +730,33 @@ async def purchase_stamp(
 
         # Collect the payment immediately before the purchase: every check
         # above can refuse the request, and a refusal must not cost anything.
-        await settle_payment(request)
         found_by_lookup = False
         try:
-            if getattr(request.state, "x402_settlement", None) is None:
+            if not paid:
+                await settle_payment(request)   # a no-op unless paid
                 batch_id = await swarm_api.purchase_postage_stamp(
                     amount=amount,
                     depth=effective_depth,
                     label=label
                 )
             else:
+                # A bounded number of paid purchases wait on Bee at once
+                # (checked before settlement, so a refusal costs nothing).
+                global _paid_purchases_in_flight
+                if _paid_purchases_in_flight >= max(1, settings.STAMP_MAX_CONCURRENT_PAID_PURCHASES):
+                    raise HTTPException(
+                        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                        headers={"Retry-After": "30"},
+                        detail={"code": "PURCHASE_CAPACITY",
+                                "message": ("Too many stamp purchases are waiting on the Bee node. "
+                                            "You were not charged; retry shortly."),
+                                })
+                _paid_purchases_in_flight += 1
+                try:
+                    await settle_payment(request)
+                except BaseException:
+                    _release_paid_slot()
+                    raise
                 # Paid: Bee's request runs as a task of its own with a long
                 # timeout, and is never cut off by ours. Bee names the batch only
                 # after the receipt, on that request's context; closed early, the
@@ -699,8 +766,10 @@ async def purchase_stamp(
                 purchase = asyncio.get_running_loop().create_task(swarm_api.purchase_postage_stamp(
                     amount=amount, depth=effective_depth, label=label,
                     timeout=settings.STAMP_PURCHASE_BEE_TIMEOUT_SECONDS))
+                purchase._is_bee_request = True
                 _PENDING_TASKS.add(purchase)
                 purchase.add_done_callback(_PENDING_TASKS.discard)
+                purchase.add_done_callback(_release_paid_slot)
                 try:
                     batch_id = await asyncio.wait_for(asyncio.shield(purchase),
                                                       settings.SWARM_STAMP_PURCHASE_TIMEOUT_SECONDS)

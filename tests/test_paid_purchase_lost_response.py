@@ -161,7 +161,7 @@ def test_never_found_records_a_refund_and_a_final_result(env):
     first, retry = _run_pending(app, None, key="k-never")
     assert first.status_code == 202
     failed = _audit("payment_failed")[0]
-    assert "not found after settlement" in failed["data"]["reason"]
+    assert "after settlement: not found" in failed["data"]["reason"]
     assert retry.status_code == 500
     assert retry.json()["code"] == "DELIVERY_FAILED_AFTER_PAYMENT"
     assert fac.settle.await_count == 1
@@ -357,3 +357,93 @@ def test_taken_batch_is_recorded_as_taken(env):
     first, _ = _run_pending(app, None, key="k-taken")
     assert first.status_code == 202
     assert "already registered" in _audit("payment_failed")[0]["data"]["reason"]
+
+
+def test_paid_purchases_waiting_on_bee_are_capped_before_payment(env, monkeypatch):
+    from app.api.endpoints import stamps
+    app, fac, buy, find = env
+    monkeypatch.setattr(settings, "STAMP_MAX_CONCURRENT_PAID_PURCHASES", 1)
+    monkeypatch.setattr(settings, "SWARM_STAMP_PURCHASE_TIMEOUT_SECONDS", 0.05)
+    gate = asyncio.Event()
+
+    async def slow(**kw):
+        await gate.wait()
+        return BATCH
+    buy.side_effect = slow
+
+    async def run():
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t") as c:
+            first = await c.post("/api/v1/stamps/", json=BODY, headers={"X-PAYMENT": pay()})
+            second = await c.post("/api/v1/stamps/", json=BODY, headers={"X-PAYMENT": pay()})
+            gate.set()
+            for _ in range(200):
+                if not stamps._PENDING_TASKS:
+                    break
+                await asyncio.sleep(0.01)
+            return first, second
+    first, second = asyncio.run(run())
+    assert first.status_code == 202
+    assert second.status_code == 503 and second.json()["detail"]["code"] == "PURCHASE_CAPACITY"
+    assert fac.settle.await_count == 1          # the refused one was not charged
+    assert stamps._paid_purchases_in_flight == 0
+
+
+def test_shutdown_waits_then_records_a_purchase_still_at_bee(env, monkeypatch):
+    from app.api.endpoints import stamps
+    app, fac, buy, find = env
+    monkeypatch.setattr(settings, "SWARM_STAMP_PURCHASE_TIMEOUT_SECONDS", 0.05)
+
+    async def hung(**kw):
+        await asyncio.sleep(3600)
+    buy.side_effect = hung
+
+    async def run():
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t") as c:
+            r = await c.post("/api/v1/stamps/", json=BODY, headers={"X-PAYMENT": pay()})
+            await stamps.drain_pending_purchases(0.05)
+            return r
+    assert asyncio.run(run()).status_code == 202
+    reason = _audit("payment_failed")[0]["data"]["reason"]
+    assert "in flight at shutdown" in reason and "paid-" in reason
+    assert not stamps._PENDING_TASKS
+
+
+def test_shutdown_lets_a_purchase_finish_within_the_grace(env, monkeypatch):
+    from app.api.endpoints import stamps
+    app, fac, buy, find = env
+    monkeypatch.setattr(settings, "SWARM_STAMP_PURCHASE_TIMEOUT_SECONDS", 0.05)
+    buy.side_effect = _slow_bee(BATCH, delay=0.2)
+
+    async def run():
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t") as c:
+            await c.post("/api/v1/stamps/", json=BODY, headers={"X-PAYMENT": pay()})
+            await stamps.drain_pending_purchases(5)
+    asyncio.run(run())
+    assert stamp_ownership_manager.get_stamp_info(BATCH)["owner"] == PAYER
+
+
+def test_pending_setup_failure_is_still_recorded(env, monkeypatch):
+    from app.api.endpoints import stamps
+    app, fac, buy, find = env
+    find.return_value = None
+
+    def broken(*a, **kw):
+        raise TypeError("cannot start")
+    monkeypatch.setattr(stamps, "_finish_pending_purchase", broken)
+    r = TestClient(app).post("/api/v1/stamps/", json=BODY, headers={"X-PAYMENT": pay()})
+    assert r.status_code == 202
+    assert "not followed up" in _audit("payment_failed")[0]["data"]["reason"]
+
+
+def test_late_result_reaches_a_key_whose_request_ended_before_the_202(tmp_path):
+    """Client gone before the 202: the key's entry is still 'settled'. The late
+    201 must finalise it, not leave SETTLED_PENDING (ask for a refund)."""
+    from app.x402.idempotency import IdempotencyStore
+    s = IdempotencyStore(state_file=str(tmp_path / "idem.json"))
+    _, _, token = s.begin("e", "h", "a1")
+    s.mark_settled("e", token, "a1", "0xtx")
+    s.abandon("e", token)                      # the request ended without a response
+    s.resolve("e", token, 201, b'{"batchID": "b"}')
+    state, entry, _ = s.begin("e", "h", "a2")
+    assert state == "done" and entry["status"] == 201
+    assert entry["headers"]["x-payment-transaction"] == "0xtx"

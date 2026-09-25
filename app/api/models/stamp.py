@@ -1,4 +1,6 @@
 # app/api/models/stamp.py
+import unicodedata
+
 from pydantic import BaseModel, Field, field_validator, model_validator
 from typing import Optional, List, Literal
 
@@ -151,8 +153,8 @@ class StampPurchaseRequest(BaseModel):
     # characters out. 100 is what published clients (the MCP tool) allow.
     # Labels are stored on the node and appear in public stamp listings.
     label: Optional[str] = Field(
-        default=None, max_length=100, pattern=r"^[^\x00-\x1f\x7f]*$",
-        description=("Optional human-readable label, up to 100 characters, no control characters. "
+        default=None, max_length=100,
+        description=("Optional human-readable label, up to 100 characters, no control or format characters. "
                      "Visible to anyone listing stamps. For a paid purchase the gateway appends "
                      "'-<random>' so the batch can be found if the node's answer is lost."),
     )
@@ -174,6 +176,11 @@ class StampPurchaseRequest(BaseModel):
         # caller label must not be mistaken for either.
         if v == "":
             return None     # no label, as before
+        # Control and format characters (C0/C1 controls, bidi overrides,
+        # zero-width characters): labels appear in public listings, where
+        # these can disguise one label as another.
+        if v is not None and any(unicodedata.category(c) in ("Cc", "Cf") for c in v):
+            raise ValueError("label must not contain control or format characters")
         if v is not None and (v == "recovered" or v.startswith(RESERVED_LABEL_PREFIXES)):
             raise ValueError(f"label must not be 'recovered' or start with {', '.join(RESERVED_LABEL_PREFIXES)}")
         return v
