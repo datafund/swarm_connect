@@ -904,6 +904,8 @@ When the limit is exceeded, the gateway returns **429**:
 {"error": "Rate limit exceeded", "detail": "Too many requests. Try again in 42 seconds.", "retry_after": 42}
 ```
 
+**x402 startup checks** (#370): with `X402_ENABLED=true` the gateway refuses to start on an unknown `X402_NETWORK` (only `base` and `base-sepolia`), a missing, zero or mis-checksummed `X402_PAY_TO_ADDRESS`, a mainnet paired with the public x402.org facilitator (test networks only), or inconsistent facilitator credentials (`X402_FACILITATOR_CDP_API_KEY_ID`/`_SECRET` or `X402_FACILITATOR_BEARER_TOKEN`). The pay-to wallet's Base ETH balance is shown on `/health` for information only; the facilitator pays settlement gas.
+
 **Exempt paths** (never rate-limited): `/`, `/health`, `/docs`, `/redoc`, `/openapi.json`
 
 **Note**: Rate limiting is automatically disabled when x402 payment is enabled (x402 has its own rate limiting).

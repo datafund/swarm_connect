@@ -657,8 +657,11 @@ class TestHealthEndpointWithX402:
         }
         from app.main import read_root
         response = await read_root()
-        assert response["status"] == "degraded"
-        assert len(response["x402"]["warnings"]) == 1
+        # The pay-to balance is informational (#371): a low one is reported but
+        # does not degrade the gateway.
+        assert response["status"] == "ok"
+        assert response["x402"]["base_wallet"]["balance_eth"] == 0.003
+        assert response["x402"]["warnings"] == []
 
     @patch("app.x402.preflight.check_preflight_balances", new_callable=AsyncMock)
     @patch("app.x402.base_balance.check_base_eth_balance", new_callable=AsyncMock)
@@ -683,8 +686,10 @@ class TestHealthEndpointWithX402:
         }
         from app.main import read_root
         response = await read_root()
-        assert response["status"] == "critical"
-        assert len(response["x402"]["errors"]) == 1
+        # A (near-)empty pay-to wallet is correct for a cold mainnet address (#371).
+        assert response["status"] == "ok"
+        assert response["x402"]["base_wallet"]["is_critical"] is True
+        assert response["x402"]["errors"] == []
 
     @patch("app.x402.preflight.check_preflight_balances", new_callable=AsyncMock)
     @patch("app.x402.base_balance.check_base_eth_balance", new_callable=AsyncMock)

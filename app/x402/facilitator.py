@@ -35,6 +35,14 @@ _client: Optional[FacilitatorClient] = None
 PUBLIC_TESTNET_FACILITATOR = "x402.org"
 
 
+CDP_HOST = "api.cdp.coinbase.com"
+
+
+def _host(url: str) -> str:
+    from urllib.parse import urlparse
+    return (urlparse(url).hostname or "").lower()
+
+
 def _config() -> FacilitatorConfig:
     url = settings.X402_FACILITATOR_URL
     if settings.X402_FACILITATOR_CDP_API_KEY_ID:
@@ -52,9 +60,10 @@ def _config() -> FacilitatorConfig:
             headers = cdp_headers()
             return await headers if hasattr(headers, "__await__") else headers
 
-        # CDP supplies its own URL unless one is configured explicitly.
-        explicit = url and PUBLIC_TESTNET_FACILITATOR not in url
-        return {"url": url if explicit else cdp["url"], "create_headers": create_headers}
+        # CDP signs its tokens for its own host, so only its own URL (or an
+        # explicit URL on that host) is used; validate_x402_config() refuses
+        # any other host rather than sending CDP credentials there.
+        return {"url": url if url and _host(url) == CDP_HOST else cdp["url"], "create_headers": create_headers}
 
     config: FacilitatorConfig = {"url": url}
     token = settings.X402_FACILITATOR_BEARER_TOKEN
@@ -85,31 +94,50 @@ def validate_x402_config() -> None:
     from app.x402.middleware import USDC_ADDRESSES
 
     problems = []
-    network = (settings.X402_NETWORK or "").strip()
+    network = settings.X402_NETWORK or ""
     if network not in USDC_ADDRESSES:
         problems.append(
             f"X402_NETWORK={network!r} is not one of {sorted(USDC_ADDRESSES)}; payments would "
             f"be requested in an unknown asset"
         )
-    if not re.fullmatch(r"0x[0-9a-fA-F]{40}", settings.X402_PAY_TO_ADDRESS or ""):
+    pay_to = settings.X402_PAY_TO_ADDRESS or ""
+    if not re.fullmatch(r"0x[0-9a-fA-F]{40}", pay_to):
         problems.append("X402_PAY_TO_ADDRESS must be a 0x-prefixed 20-byte address")
+    elif int(pay_to, 16) == 0:
+        problems.append("X402_PAY_TO_ADDRESS is the zero address; payments would be burned")
+    elif pay_to != pay_to.lower() and pay_to[2:] != pay_to[2:].upper():
+        from eth_utils import is_checksum_address
+        if not is_checksum_address(pay_to):
+            problems.append("X402_PAY_TO_ADDRESS has mixed case but an invalid checksum (likely a typo)")
+
     url = settings.X402_FACILITATOR_URL or ""
-    if not url.startswith(("http://", "https://")):
-        problems.append("X402_FACILITATOR_URL must be an http(s) URL")
     uses_cdp = bool(settings.X402_FACILITATOR_CDP_API_KEY_ID)
-    if network and not is_testnet_network(network) and PUBLIC_TESTNET_FACILITATOR in url and not uses_cdp:
-        problems.append(
-            f"X402_NETWORK={network!r} is a mainnet, but X402_FACILITATOR_URL points at the public "
-            f"test-network facilitator ({url}); configure a mainnet facilitator"
-        )
+    uses_bearer = bool(settings.X402_FACILITATOR_BEARER_TOKEN)
+    mainnet = bool(network) and not is_testnet_network(network)
+    if uses_cdp and uses_bearer:
+        problems.append("set either CDP credentials or X402_FACILITATOR_BEARER_TOKEN, not both")
     if uses_cdp:
+        if url and _host(url) != CDP_HOST:
+            problems.append(f"CDP credentials are set but X402_FACILITATOR_URL points at {_host(url)!r}; "
+                            f"leave it empty or use {CDP_HOST}")
         if not settings.X402_FACILITATOR_CDP_API_KEY_SECRET:
             problems.append("X402_FACILITATOR_CDP_API_KEY_SECRET is required with X402_FACILITATOR_CDP_API_KEY_ID")
         try:
             import cdp.x402  # noqa: F401
         except ImportError:
             problems.append("CDP facilitator credentials are set but the cdp-sdk package is not installed")
+    else:
+        if not url.startswith(("http://", "https://")):
+            problems.append("X402_FACILITATOR_URL must be an http(s) URL")
+        if mainnet and PUBLIC_TESTNET_FACILITATOR in _host(url):
+            problems.append(
+                f"X402_NETWORK={network!r} is a mainnet, but X402_FACILITATOR_URL points at the public "
+                f"test-network facilitator ({url}); configure a mainnet facilitator"
+            )
+        if (mainnet or uses_bearer) and url.startswith("http://"):
+            problems.append("X402_FACILITATOR_URL must use https on a mainnet or with credentials")
     if problems:
         raise RuntimeError("Refusing to start with x402 enabled: " + "; ".join(problems))
-    logger.info(f"x402 configuration OK: network={network}, facilitator={url}"
+    used = get_facilitator_client().config["url"] if uses_cdp else url
+    logger.info(f"x402 configuration OK: network={network}, facilitator={used}"
                 + (" (CDP auth)" if uses_cdp else " (bearer auth)" if settings.X402_FACILITATOR_BEARER_TOKEN else ""))

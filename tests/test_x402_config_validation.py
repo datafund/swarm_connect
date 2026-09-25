@@ -99,6 +99,7 @@ def test_cdp_config_is_used_when_available(x402):
     x402.setattr(settings, "X402_FACILITATOR_CDP_API_KEY_ID", "id")
     x402.setattr(settings, "X402_FACILITATOR_CDP_API_KEY_SECRET", "secret")
     x402.setattr(settings, "X402_NETWORK", "base")
+    x402.setattr(settings, "X402_FACILITATOR_URL", "")  # production: no default URL
     facilitator.validate_x402_config()
     client = facilitator.get_facilitator_client()
     assert calls["args"] == ("id", "secret")
@@ -106,3 +107,68 @@ def test_cdp_config_is_used_when_available(x402):
     # The x402 client awaits create_headers; cdp-sdk's is synchronous.
     headers = asyncio.run(client.config["create_headers"]())
     assert headers["verify"]["Authorization"] == "Bearer jwt"
+
+
+
+def _fake_cdp(x402):
+    def create_facilitator_config(key_id, secret):
+        return {"url": "https://api.cdp.coinbase.com/platform/v2/x402", "create_headers": lambda: {}}
+    fake = types.ModuleType("cdp.x402")
+    fake.create_facilitator_config = create_facilitator_config
+    x402.setitem(sys.modules, "cdp", types.ModuleType("cdp"))
+    x402.setitem(sys.modules, "cdp.x402", fake)
+    x402.setattr(settings, "X402_FACILITATOR_CDP_API_KEY_ID", "id")
+    x402.setattr(settings, "X402_FACILITATOR_CDP_API_KEY_SECRET", "secret")
+
+
+def test_cdp_credentials_are_never_sent_to_another_host(x402):
+    _fake_cdp(x402)
+    x402.setattr(settings, "X402_FACILITATOR_URL", "https://facilitator.example.com")
+    with pytest.raises(RuntimeError, match="CDP credentials"):
+        facilitator.validate_x402_config()
+
+
+def test_cdp_and_bearer_together_are_refused(x402):
+    _fake_cdp(x402)
+    x402.setattr(settings, "X402_FACILITATOR_URL", "")
+    x402.setattr(settings, "X402_FACILITATOR_BEARER_TOKEN", "t")
+    with pytest.raises(RuntimeError, match="not both"):
+        facilitator.validate_x402_config()
+
+
+@pytest.mark.parametrize("pay_to,ok", [
+    ("0x0000000000000000000000000000000000000000", False),
+    ("0xc87688A40CE2ff1765BA54497c7471c892755489", False),   # checksum typo
+    ("0xc87688a40ce2ff1765ba54497c7471c892755488", True),    # all lowercase: no checksum to check
+    (PAY_TO, True),
+])
+def test_pay_to_zero_and_checksum(x402, pay_to, ok):
+    x402.setattr(settings, "X402_PAY_TO_ADDRESS", pay_to)
+    if ok:
+        facilitator.validate_x402_config()
+    else:
+        with pytest.raises(RuntimeError, match="X402_PAY_TO_ADDRESS"):
+            facilitator.validate_x402_config()
+
+
+def test_plain_http_is_refused_on_mainnet_or_with_a_token(x402):
+    x402.setattr(settings, "X402_NETWORK", "base")
+    x402.setattr(settings, "X402_FACILITATOR_URL", "http://facilitator.example.com")
+    with pytest.raises(RuntimeError, match="https"):
+        facilitator.validate_x402_config()
+
+
+def test_network_whitespace_is_normalised_by_settings():
+    from app.core.config import Settings
+    s = Settings(SWARM_BEE_API_URL="http://localhost:1", X402_NETWORK=" base-sepolia ")
+    assert s.X402_NETWORK == "base-sepolia"
+
+
+def test_startup_runs_the_check(x402):
+    """The app lifespan calls validate_x402_config()."""
+    from fastapi.testclient import TestClient
+    from app.main import app
+    x402.setattr(settings, "X402_NETWORK", "nonsense")
+    with pytest.raises(RuntimeError, match="Refusing to start"):
+        with TestClient(app):
+            pass

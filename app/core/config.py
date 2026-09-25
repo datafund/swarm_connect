@@ -38,6 +38,11 @@ class Settings(BaseSettings):
     X402_ENABLED: bool = False  # Master switch - gateway works as today when false
     X402_FACILITATOR_URL: str = "https://x402.org/facilitator"  # Testnet facilitator
     X402_PAY_TO_ADDRESS: Optional[str] = None  # Wallet address for USDC receipts (Base)
+    # Optional facilitator authentication (#369), one of the two. CDP needs the
+    # cdp-sdk package; store the CDP secret on a single line in env files.
+    X402_FACILITATOR_CDP_API_KEY_ID: Optional[str] = None
+    X402_FACILITATOR_CDP_API_KEY_SECRET: Optional[str] = None
+    X402_FACILITATOR_BEARER_TOKEN: Optional[str] = None
     X402_NETWORK: str = "base-sepolia"  # Network identifier (v1 style)
 
     # === x402 Pricing Settings ===
@@ -92,10 +97,6 @@ class Settings(BaseSettings):
     X402_AUDIT_LOG_PATH: str = "logs/x402_audit.jsonl"
 
     # === Base Chain Settings (for monitoring USDC receipts) ===
-    # Optional facilitator authentication (#369). CDP needs the cdp-sdk package.
-    X402_FACILITATOR_CDP_API_KEY_ID: Optional[str] = None
-    X402_FACILITATOR_CDP_API_KEY_SECRET: Optional[str] = None
-    X402_FACILITATOR_BEARER_TOKEN: Optional[str] = None
     BASE_RPC_URL: str = "https://sepolia.base.org"
 
     # === Base Sepolia Gateway Wallet Monitoring ===
@@ -328,6 +329,14 @@ class Settings(BaseSettings):
         if self.CORS_ALLOWED_ORIGINS == "*":
             return ["*"]
         return [origin.strip() for origin in self.CORS_ALLOWED_ORIGINS.split(",") if origin.strip()]
+
+    @field_validator("X402_NETWORK", "X402_FACILITATOR_URL", "X402_PAY_TO_ADDRESS", mode="before")
+    @classmethod
+    def strip_x402_strings(cls, v):
+        """Normalise once, so the startup check and the payment code see the
+        same value: a trailing space passed validation and then broke every
+        payment with a KeyError (#370)."""
+        return v.strip() if isinstance(v, str) else v
 
     @field_validator("X402_BLACKLIST_IPS", "X402_WHITELIST_IPS", mode="before")
     @classmethod

@@ -21,7 +21,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import JSONResponse
 
 from x402.types import PaymentRequirements, PaymentPayload, SettleResponse
-from x402.facilitator import FacilitatorClient, FacilitatorConfig
+from x402.facilitator import FacilitatorClient
 from x402.encoding import safe_base64_decode, safe_base64_encode
 
 from app.core.config import settings
