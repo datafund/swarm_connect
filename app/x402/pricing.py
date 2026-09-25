@@ -207,7 +207,7 @@ async def calculate_batch_price_usd(
             minimum_validity_blocks=chainstate.get("minimumValidityBlocks"),
         )
     cost_bzz = plur_to_bzz(calculate_stamp_total_cost(int(amount), depth))
-    return _price_from_cost_bzz(cost_bzz)
+    return {**_price_from_cost_bzz(cost_bzz), "amount": int(amount), "depth": depth}
 
 
 # The extension quote is the same calculation over the batch's own depth.
