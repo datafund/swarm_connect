@@ -1,8 +1,8 @@
 """
 Global rate limiting middleware using in-memory sliding window.
 
-Provides per-IP rate limiting independent of x402 payment middleware.
-When x402 is enabled, this middleware is skipped (x402 has its own limiter).
+Provides per-IP rate limiting on every non-exempt route, whether or not
+x402 is enabled. The x402 free-tier limit applies on top for free writes.
 """
 import logging
 import time
@@ -108,8 +108,8 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
     """
     Global rate limiting middleware.
 
-    Applies per-IP sliding window rate limiting to all non-exempt endpoints.
-    Skipped when x402 is enabled (x402 has its own rate limiter).
+    Applies per-IP sliding window rate limiting to all non-exempt endpoints,
+    with or without x402.
     """
 
     def __init__(self, app, counter: Optional[SlidingWindowCounter] = None):
