@@ -221,14 +221,16 @@ class BandwidthCreditManager:
         with self._lock:
             return sum(int(e.get("balance_bytes", 0)) for e in self._balances.values())
 
-    def issue_token(self, address: str) -> str:
+    def issue_token(self, address: str, rotate: bool = False) -> str:
         """
         Return a bearer credit token bound to an address, creating one if needed.
 
         The token is the credit account's API key: it is established at x402 top-up
         time (the address is the verified x402 payer) and presented on subsequent
         chunk uploads to spend the prepaid balance. Idempotent — repeated calls for
-        the same address return the same token.
+        the same address return the same token — unless `rotate` is set, which
+        replaces it and revokes the old one. A rotation is saved before it is
+        returned; if the save fails it is undone and the error propagates.
 
         Args:
             address: Client address (the x402 payer that funded the credit).
@@ -252,13 +254,34 @@ class BandwidthCreditManager:
                 }
                 self._balances[key] = entry
             existing = entry.get("token")
-            if existing:
+            if existing and not rotate:
                 return existing
+            if existing:
+                # Rotation revokes the old token at once (#380): the point is
+                # to cut off whoever else may hold it.
+                self._token_index.pop(existing, None)
             token = secrets.token_urlsafe(32)
+            previous_updated = entry.get("updated_at")
             entry["token"] = token
             entry["updated_at"] = datetime.now(timezone.utc).isoformat()
             self._token_index[token] = key
-            self._save_state()
+            if not rotate:
+                self._save_state()
+                return token
+            # A rotation that is not on disk is undone by the next restart,
+            # which would bring the possibly leaked token back and invalidate
+            # the one just handed out. Only report success once it is saved.
+            try:
+                atomic_write_json(self._get_state_file_path(), self._balances)
+            except Exception:
+                self._token_index.pop(token, None)
+                entry["token"] = existing
+                entry["updated_at"] = previous_updated
+                if existing:
+                    self._token_index[existing] = key
+                elif not entry.get("token"):
+                    entry.pop("token", None)
+                raise
             return token
 
     def resolve_token(self, token: str) -> Optional[str]:

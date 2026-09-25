@@ -16,6 +16,7 @@ See GitHub Issue #63 for full specification.
 """
 import asyncio
 import json
+import os
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -113,6 +114,7 @@ class StampPoolManager:
         self._errors: List[str] = []
         self._pending_replenishments: Dict[int, int] = {}  # depth -> count of pending purchases
         self._state_file = state_file  # Allow override for testing
+        self._spend_times = self._load_spend_times()
         # False until a sync has actually read the node. Starts False so the very
         # first check cannot purchase against an unverified (empty) pool.
         self._last_sync_ok: bool = False
@@ -806,6 +808,39 @@ class StampPoolManager:
     def _record_spend(self) -> None:
         with self._lock:
             self._spend_times.append(datetime.now(timezone.utc))
+            self._persist_spend_times_locked()
+
+    def _persist_spend_times_locked(self) -> None:
+        """Write the spend record; call with self._lock held, after ANY change
+        to self._spend_times (a merge that adds reserve/release paths must call
+        it too, or the ceiling stops surviving restarts)."""
+        try:
+            atomic_write_json(self._spend_times_path(), [t.isoformat() for t in self._spend_times])
+        except Exception as e:
+            logger.error(f"Could not persist the pool's hourly spend record: {e}")
+
+    # The hourly ceiling is persisted (#380). Kept in memory only, every deploy
+    # or crash-restart granted a fresh hour of spending, and a restart loop is
+    # one of the ways the ceiling exists to bound.
+
+    def _spend_times_path(self) -> str:
+        base, _ = os.path.splitext(self._get_state_file_path())
+        return f"{base}_spend_times.json"
+
+    def _load_spend_times(self) -> List[datetime]:
+        path = self._spend_times_path()
+        try:
+            with open(path) as f:
+                raw = json.load(f)
+            cutoff = datetime.now(timezone.utc) - timedelta(hours=1)
+            return [t for t in (datetime.fromisoformat(x) for x in raw) if t > cutoff]
+        except FileNotFoundError:
+            return []
+        except Exception as e:
+            # Unknown spending in the last hour: assume the ceiling was reached
+            # rather than grant a fresh one. It clears on its own within the hour.
+            logger.error(f"Unreadable pool spend record {path} ({e}); pausing pool spending for an hour")
+            return [datetime.now(timezone.utc)] * settings.STAMP_POOL_MAX_PURCHASES_PER_HOUR
 
     async def _purchase_stamp(self, depth: int, max_retries: int = 3) -> Optional[str]:
         """Purchase a new stamp for the pool. Retries on 429 rate limiting.
