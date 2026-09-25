@@ -52,6 +52,9 @@ jobs:
           X402_PAY_TO_ADDRESS=${{ vars.X402_PAY_TO_ADDRESS || '' }}
           X402_NETWORK=${{ vars.X402_NETWORK || 'base-sepolia' }}
           X402_FACILITATOR_URL=${{ vars.X402_FACILITATOR_URL || 'https://x402.org/facilitator' }}
+          X402_FACILITATOR_CDP_API_KEY_ID=${{ secrets.X402_FACILITATOR_CDP_API_KEY_ID || '' }}
+          X402_FACILITATOR_CDP_API_KEY_SECRET=${{ secrets.X402_FACILITATOR_CDP_API_KEY_SECRET || '' }}
+          X402_FACILITATOR_BEARER_TOKEN=${{ secrets.X402_FACILITATOR_BEARER_TOKEN || '' }}
           X402_FREE_TIER_ENABLED=${{ vars.X402_FREE_TIER_ENABLED || 'true' }}
           STAMP_POOL_ENABLED=${{ vars.STAMP_POOL_ENABLED || 'false' }}
           STAMP_POOL_RESERVE_SMALL=${{ vars.STAMP_POOL_RESERVE_SMALL || '1' }}
@@ -119,8 +122,13 @@ jobs:
           cat > /opt/swarm_connect.env << 'EOF'
           X402_ENABLED=${{ vars.X402_ENABLED || 'false' }}
           X402_PAY_TO_ADDRESS=${{ vars.X402_PAY_TO_ADDRESS || '' }}
-          X402_NETWORK=${{ vars.X402_NETWORK || 'base' }}
-          X402_FACILITATOR_URL=${{ vars.X402_FACILITATOR_URL || 'https://x402.org/facilitator' }}
+          # No defaults for production (#370): a missing variable must stop the
+          # gateway at startup (validate_x402_config), not silently pick a network.
+          X402_NETWORK=${{ vars.X402_NETWORK }}
+          X402_FACILITATOR_URL=${{ vars.X402_FACILITATOR_URL }}
+          X402_FACILITATOR_CDP_API_KEY_ID=${{ secrets.X402_FACILITATOR_CDP_API_KEY_ID || '' }}
+          X402_FACILITATOR_CDP_API_KEY_SECRET=${{ secrets.X402_FACILITATOR_CDP_API_KEY_SECRET || '' }}
+          X402_FACILITATOR_BEARER_TOKEN=${{ secrets.X402_FACILITATOR_BEARER_TOKEN || '' }}
           X402_FREE_TIER_ENABLED=${{ vars.X402_FREE_TIER_ENABLED || 'true' }}
           STAMP_POOL_ENABLED=${{ vars.STAMP_POOL_ENABLED || 'false' }}
           STAMP_POOL_RESERVE_SMALL=${{ vars.STAMP_POOL_RESERVE_SMALL || '1' }}
@@ -304,4 +312,4 @@ jobs:
           curl -s "http://localhost:${PORT}/health" 2>&1 || echo "Cannot reach container"
           echo ""
           echo "=== Env file (redacted) ==="
-          cat "$ENV_FILE" 2>/dev/null | grep -v PRIVATE_KEY | head -20 || echo "Env file not found"
+          cat "$ENV_FILE" 2>/dev/null | grep -vE 'PRIVATE_KEY|SECRET|TOKEN' | head -20 || echo "Env file not found"

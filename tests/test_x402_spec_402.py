@@ -35,8 +35,7 @@ def client():
     app.include_router(router)
     app.add_api_route("/api/v1/chunks/", own_402, methods=["POST"])
     app.add_middleware(X402Middleware)
-    with patch("app.x402.dependency.check_base_eth_balance", new=AsyncMock(return_value=OK_BALANCE)), \
-         patch("app.x402.dependency._calculate_price_for_request",
+    with patch("app.x402.dependency._calculate_price_for_request",
                new=AsyncMock(return_value={"price_usd": 0.02, "description": "t"})), \
          patch("app.x402.middleware.settings") as mw, patch("app.x402.dependency.settings") as dep:
         _configure(dep, mw, free_tier=True)
@@ -119,8 +118,7 @@ def test_every_payment_required_is_spec_shaped_and_keeps_cors(case):
         headers["X-PAYMENT"] = "not-base64!"
     elif case != "no_header":
         headers["X-PAYMENT"] = create_valid_payment_header()
-    with patch("app.x402.dependency.check_base_eth_balance", new=AsyncMock(return_value=OK_BALANCE)), \
-         patch("app.x402.dependency._calculate_price_for_request",
+    with patch("app.x402.dependency._calculate_price_for_request",
                new=AsyncMock(return_value={"price_usd": 0.02, "description": "t"})), \
          patch("app.x402.dependency._get_facilitator_client", return_value=fac), \
          patch("app.x402.middleware.settings") as mw, patch("app.x402.dependency.settings") as dep:

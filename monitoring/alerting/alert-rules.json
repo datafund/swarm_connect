@@ -232,8 +232,8 @@
   },
   {
     "annotations": {
-      "description": "The x402 payment wallet is low on ETH for gas. Payment settlement fails once it runs out.\n\nFund this wallet on BASE \u2014 not Gnosis, a different chain and a different wallet:\n{{ if $labels.wallet }}{{ $labels.wallet }}{{ else }}not reported by this deployment yet \u2014 open the health URL below and read x402.base_wallet.address{{ end }}\n\nFull status: {{ if eq $labels.environment \"main\" }}https://provenance-gateway.datafund.io/health{{ else if eq $labels.environment \"development\" }}https://provenance-gateway.dev.datafund.io/health{{ else }}https://provenance-gateway.datafund.io/health (or the .dev. host \u2014 environment label was \"{{ $labels.environment }}\"){{ end }}",
-      "summary": "Base ETH below 0.05 (current: {{ printf \"%.2f\" $values.B.Value }})"
+      "description": "Informational only, paused (#371). The x402 facilitator pays settlement gas; the pay-to wallet never sends a transaction, so its ETH balance does not affect payments. A cold mainnet pay-to wallet correctly holds 0 ETH.",
+      "summary": "Pay-to wallet Base ETH (informational): {{ printf \"%.4f\" $values.B.Value }}"
     },
     "condition": "C",
     "data": [
@@ -299,7 +299,7 @@
     ],
     "execErrState": "Error",
     "for": "1m",
-    "isPaused": false,
+    "isPaused": true,
     "labels": {
       "severity": "warning"
     },

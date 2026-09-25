@@ -21,6 +21,12 @@ _STARTED_MONOTONIC = time.monotonic()
 async def lifespan(app: FastAPI):
     """Application lifespan handler for startup/shutdown tasks."""
     # === Startup ===
+    # Refuse to start with an x402 configuration that cannot take payment
+    # safely: an unknown network, a missing pay-to address, or a mainnet
+    # paired with the public test-network facilitator (#370).
+    from app.x402.facilitator import validate_x402_config
+    validate_x402_config()
+
     # Initialize shared HTTP client (must be first — other services depend on it)
     from app.services.http_client import init_client, close_client
     await init_client()
@@ -245,13 +251,9 @@ async def read_root():
         warnings = []
         errors = []
 
-        # Collect warnings and errors
-        if base_eth.get("warning"):
-            if base_eth.get("is_critical"):
-                errors.append(base_eth["warning"])
-            else:
-                warnings.append(base_eth["warning"])
-
+        # The pay-to balance is informational only (#371): the facilitator pays
+        # settlement gas and the pay-to address never sends a transaction, so a
+        # low or zero balance (correct for a cold mainnet wallet) is not a fault.
         warnings.extend(gnosis.get("warnings", []))
         errors.extend(gnosis.get("errors", []))
 
@@ -260,9 +262,9 @@ async def read_root():
         # operators can see what's wrong. Docker healthcheck and reverse
         # proxy rely on 200; returning 503 causes a cascading failure
         # where the container is marked unhealthy and users see nothing.
-        if base_eth.get("is_critical") or len(errors) > 0:
+        if len(errors) > 0:
             response_data["status"] = "critical"
-        elif not base_eth["ok"] or not gnosis["can_accept"]:
+        elif not gnosis["can_accept"]:
             response_data["status"] = "degraded"
 
         # Add x402 details

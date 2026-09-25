@@ -16,13 +16,12 @@ from typing import Optional
 from fastapi import HTTPException, Request
 
 from x402.types import PaymentPayload
-from x402.facilitator import FacilitatorClient, FacilitatorConfig
+from x402.facilitator import FacilitatorClient
 
 from app.core.config import settings
 from app.services.metrics import x402_payments_total
 from app.x402.pricing import get_price_quote
 from app.x402.ratelimit import check_rate_limit, get_rate_limit_headers, get_free_tier_stats
-from app.x402.base_balance import check_base_eth_balance
 from app.x402.middleware import (
     is_protected_endpoint,
     get_client_ip,
@@ -35,17 +34,11 @@ from app.x402.middleware import (
 
 logger = logging.getLogger(__name__)
 
-# Lazy-initialized facilitator client
-_facilitator_client: Optional[FacilitatorClient] = None
-
-
 def _get_facilitator_client() -> FacilitatorClient:
-    """Get or create the facilitator client singleton."""
-    global _facilitator_client
-    if _facilitator_client is None:
-        config: FacilitatorConfig = {"url": settings.X402_FACILITATOR_URL}
-        _facilitator_client = FacilitatorClient(config=config)
-    return _facilitator_client
+    """The shared facilitator client (verify here, settle in settlement.py and
+    the middleware). Built once, with authentication when configured (#369)."""
+    from app.x402.facilitator import get_facilitator_client
+    return get_facilitator_client()
 
 
 async def _calculate_price_for_request(request: Request) -> dict:
@@ -234,22 +227,11 @@ async def require_x402_payment(request: Request) -> None:
     if not is_protected_endpoint(request.method, request.url.path):
         return
 
-    # Check gateway ETH balance
-    base_balance = await check_base_eth_balance()
-    if base_balance.get("is_critical"):
-        logger.error(
-            f"x402: Gateway ETH critically low ({base_balance.get('balance_eth', 0):.6f} ETH). "
-            f"Cannot process payments."
-        )
-        raise HTTPException(
-            status_code=503,
-            detail={
-                "error": "Gateway temporarily unavailable",
-                "detail": "Gateway wallet has insufficient ETH for gas. Please try again later.",
-                "x402_status": "critical",
-                "balance_eth": base_balance.get("balance_eth", 0),
-            }
-        )
+    # No pay-to balance check here (#371). With x402 the facilitator submits
+    # the transfer and pays its gas; the pay-to address never sends anything.
+    # The check made every protected request, free tier included, depend on a
+    # Base RPC lookup, and would have taken the service down with a correctly
+    # cold (0 ETH) mainnet pay-to address. The balance is still on /health.
 
     client_ip = get_client_ip(request)
     logger.info(f"x402: Processing protected request from {client_ip}: {request.method} {request.url.path}")
