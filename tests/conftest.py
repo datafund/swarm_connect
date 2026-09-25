@@ -42,6 +42,7 @@ for _var, _name in (
     ("STAMP_OWNERSHIP_FILE", "stamp_owners.json"),
     ("BANDWIDTH_CREDIT_STATE_FILE", "bandwidth_credit.json"),
     ("STAMP_SPEND_BUDGET_STATE_FILE", "stamp_spend_budget.json"),
+    ("X402_AUDIT_LOG_PATH", "x402_audit.jsonl"),
 ):
     os.environ[_var] = os.path.join(_STATE_DIR, _name)
 
