@@ -5,10 +5,13 @@ FROM python:3.10-slim
 # Set the working directory in the container
 WORKDIR /app
 
-# Copy the requirements file and install dependencies
-COPY requirements.txt .
+# Install from the lockfile, not requirements.txt. requirements.txt only sets
+# floors, so every build used to re-resolve and could ship a new major version
+# nobody had tested (web3 6 -> 8). The lockfile pins every package, transitive
+# ones included, with hashes; --require-hashes makes pip refuse anything else.
+COPY requirements.lock .
 RUN apt-get update && apt-get install -y curl && rm -rf /var/lib/apt/lists/*
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir --require-hashes -r requirements.lock
 
 # Copy the rest of the application code
 COPY . .
@@ -16,6 +19,21 @@ COPY . .
 # Version is passed as build arg and written to VERSION file
 ARG VERSION=0.0.0-unknown
 RUN echo "${VERSION}" > VERSION
+
+# The code is read-only to the runtime user below, so Python could never cache
+# bytecode at run time; compile it once here instead.
+RUN python -m compileall -q app
+
+# Run as an unprivileged user rather than root. The UID/GID are fixed so a host
+# directory bind-mounted over /app/data can be given to this user by number
+# (the deploy workflow chowns /opt/swarm_connect*_data to 10001). The code stays
+# root-owned and therefore read-only to the process; only the state and log
+# directories are writable.
+RUN groupadd --system --gid 10001 app \
+    && useradd --system --uid 10001 --gid app --home-dir /app --no-create-home app \
+    && mkdir -p /app/data /app/logs \
+    && chown app:app /app/data /app/logs
+USER app
 
 # Command to run the application
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--no-server-header"]

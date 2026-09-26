@@ -193,17 +193,19 @@ async def acquire_stamp(
     """
     Acquire a stamp from the pool for immediate use (~5 seconds vs >1 minute).
 
-    **x402 Payment** (when gateway has x402 enabled):
-    This endpoint requires payment OR free tier access. Check `GET /health` for availability.
-    - **Free tier**: Add header `X-Payment-Mode: free` (rate limited)
-    - **Paid**: Include x402 payment header (higher rate limit)
-    - Without either header, returns **HTTP 402** with payment instructions and free tier info
+    **Free, within a daily allowance.** No payment header is needed: each
+    calling origin (or the shared bucket for unlisted origins and non-browser
+    callers) has a daily allowance per size. `X-Payment-Mode` is ignored here.
+    When the allowance is spent the response is **429** with
+    `DAILY_STAMP_ALLOWANCE_EXHAUSTED` and what to do instead.
 
-    **Quick start** (free tier):
+    **Paid (optional, x402).** An `X-PAYMENT` header is settled and, on a
+    mainnet network, bypasses the allowance. See `docs/stamp-pool-guide.md`.
+
+    **Quick start**:
     ```bash
     curl -X POST http://gateway/api/v1/pool/acquire \\
          -H "Content-Type: application/json" \\
-         -H "X-Payment-Mode: free" \\
          -d '{"size": "small"}'
     ```
 
