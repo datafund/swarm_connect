@@ -126,10 +126,15 @@ class GnosisChainClient:
         # Provide an explicit nonce (web3 build_transaction doesn't fill it reliably),
         # but let it set gas + EIP-1559 fees. Do NOT add gasPrice — mixing legacy and
         # EIP-1559 fee fields is rejected by the node.
-        tx = fn.build_transaction({
-            "from": acct.address,
-            "nonce": w3.eth.get_transaction_count(acct.address, "pending"),
-        })
+        try:
+            tx = fn.build_transaction({
+                "from": acct.address,
+                "nonce": w3.eth.get_transaction_count(acct.address, "pending"),
+            })
+        except Exception as e:
+            # Nothing was sent (gas estimation or nonce lookup failed). Raised
+            # as GnosisChainError so callers know no BZZ can have moved.
+            raise GnosisChainError(f"could not prepare transaction: {e}") from e
         return self._send(w3, acct, tx)
 
     def _send(self, w3, acct, tx) -> Any:

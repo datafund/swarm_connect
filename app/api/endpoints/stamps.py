@@ -11,9 +11,12 @@ from app.services import swarm_api
 from app.services.swarm_api import plur_to_bzz
 from app.services.stamp_ownership import stamp_ownership_manager
 from app.services.stamp_tracker import record_purchase
-from app.services.spend_budget import spend_budget_tracker
+from app.services.spend_budget import (
+    GIVEAWAY_KEY, GLOBAL_KEY, spend_budget_tracker, spend_certainly_did_not_happen,
+)
 from app.x402.middleware import get_client_ip
 from app.services.metrics import (
+    gateway_spend_uncertain_bzz_total,
     stamp_purchases_total,
     stamp_spend_refusals_total,
     stamp_spend_bzz_total,
@@ -34,20 +37,55 @@ router = APIRouter()
 logger = logging.getLogger(__name__)
 
 
-def _enforce_spend_limits(request: Request, cost_bzz: float, operation: str) -> Optional[str]:
-    """Bound what one request, and one caller in a day, may spend.
+class SpendReservation:
+    """BZZ reserved against the spending limits for one purchase or extension.
 
-    Both stamp endpoints spend the gateway's BZZ for whoever asks. Two limits
-    apply, and they answer different questions:
+    Charged when the request is admitted (#363): the limits used to be checked
+    first and charged only after the Bee call returned, so concurrent requests
+    all passed the check before any was charged. release_if_unspent() gives it
+    back only when the spend certainly did not happen.
+    """
+
+    def __init__(self, operation: str, cost_bzz: float, caller: Optional[str], hold):
+        self.operation = operation
+        self.cost_bzz = cost_bzz
+        self.caller = caller  # None: not charged to a caller's budget (paid)
+        self.hold = hold
+
+    def release_if_unspent(self, exc: BaseException) -> None:
+        if spend_certainly_did_not_happen(exc):
+            spend_budget_tracker.release_hold(self.hold)
+        else:
+            gateway_spend_uncertain_bzz_total.labels(operation=self.operation).inc(self.cost_bzz)
+            logger.warning(
+                "%s failed with %s; the outcome is uncertain, so its %.6f BZZ stays "
+                "charged against the spending limits", self.operation, type(exc).__name__, self.cost_bzz,
+            )
+
+    def record(self) -> None:
+        stamp_spend_bzz_total.labels(
+            operation=self.operation, charged="budget" if self.caller is not None else "paid"
+        ).inc(self.cost_bzz)
+
+
+def _enforce_spend_limits(request: Request, cost_bzz: float, operation: str) -> SpendReservation:
+    """Bound what one request, one caller in a day, and the gateway in a day may spend.
+
+    Both stamp endpoints spend the gateway's BZZ for whoever asks. The limits
+    answer different questions:
 
     - `X402_MAX_STAMP_BZZ` bounds a SINGLE request, so no one call can take a
       large share of the wallet however it is shaped.
     - `STAMP_DAILY_BZZ_PER_CALLER` bounds a caller over a day, so the first
       limit cannot simply be applied repeatedly.
+    - `GATEWAY_DAILY_BZZ_FREE_CEILING` bounds all unpaid spending in a day,
+      whatever the callers look like, leaving headroom for the pool.
+    - `GATEWAY_DAILY_BZZ_CEILING` bounds the gateway's total over a day, paid
+      or not.
 
-    Returns the caller key to charge once the money is actually spent, or None
-    when the spend is not charged to anyone (a settled payment). Raises rather
-    than returning a failure, because every caller of this must stop.
+    All applicable limits are reserved together, atomically. Returns the
+    reservation; the caller must release_if_unspent() it on failure. Raises
+    rather than returning a failure, because every caller of this must stop.
     """
     max_single = settings.X402_MAX_STAMP_BZZ
     if max_single > 0 and cost_bzz > max_single:
@@ -70,45 +108,67 @@ def _enforce_spend_limits(request: Request, cost_bzz: float, operation: str) -> 
             },
         )
 
-    # A settled payment is not drawn from the giveaway budget — the caller has
+    caller = None
+    # A settled payment is not drawn from the giveaway budgets — the caller has
     # funded it. Withheld on a test network for the same reason as the pool:
     # testnet currency is free from a faucet, so honouring it there would
     # replace a bounded giveaway with an unbounded one.
-    if getattr(request.state, "x402_mode", None) == "paid":
-        if settings.paid_bypass_is_honoured():
-            stamp_spend_bzz_total.labels(operation=operation, charged="paid").inc(cost_bzz)
-            return None
+    paid = getattr(request.state, "x402_mode", None) == "paid"
+    if paid and not settings.paid_bypass_is_honoured():
         logger.warning(
             "Payment for %s settled on %s, which is a test network: the daily "
             "spend budget still applies.", operation, settings.X402_NETWORK,
         )
+    if not (paid and settings.paid_bypass_is_honoured()):
+        caller = get_client_ip(request)
 
-    caller = get_client_ip(request)
-    allowed, info = spend_budget_tracker.check(caller, cost_bzz)
-    if not allowed:
-        logger.info(
-            "Daily spend budget exhausted for %s: %.6f of %.6f BZZ used, request needs %.6f",
-            caller, info["spent_bzz"], info["daily_budget_bzz"], cost_bzz,
+    hold, refused, info = spend_budget_tracker.reserve_spend(cost_bzz, caller)
+    if hold is not None:
+        return SpendReservation(operation, cost_bzz, caller, hold)
+
+    if refused in (GLOBAL_KEY, GIVEAWAY_KEY):
+        which = "gateway_daily" if refused == GLOBAL_KEY else "gateway_free_daily"
+        logger.error(
+            "Gateway %s spend ceiling reached: %.6f of %.6f BZZ today, %s needs %.6f",
+            "total" if refused == GLOBAL_KEY else "free", info["spent_bzz"],
+            info["daily_budget_bzz"], operation, cost_bzz,
         )
-        stamp_spend_refusals_total.labels(operation=operation, limit="daily_budget").inc()
+        stamp_spend_refusals_total.labels(operation=operation, limit=which).inc()
         raise HTTPException(
-            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail={
-                "code": "DAILY_SPEND_BUDGET_EXHAUSTED",
+                "code": "GATEWAY_DAILY_SPEND_CEILING",
                 "message": (
-                    f"This {operation} would cost {cost_bzz:.6f} BZZ and only "
-                    f"{info['remaining_bzz']:.6f} BZZ remains of today's "
-                    f"{info['daily_budget_bzz']:.6f} BZZ allowance. It resets at "
-                    f"{info['resets_at']}. A smaller or shorter batch may still fit."
+                    ("The gateway has reached its daily spending limit" if refused == GLOBAL_KEY
+                     else "Today's free spending on this gateway is used up; paid requests still work")
+                    + f". It resets at {info['resets_at']}."
                 ),
-                "cost_bzz": info["request_cost_bzz"],
-                "daily_budget_bzz": info["daily_budget_bzz"],
-                "spent_bzz": info["spent_bzz"],
-                "remaining_bzz": info["remaining_bzz"],
                 "resets_at": info["resets_at"],
             },
         )
-    return caller
+
+    logger.info(
+        "Daily spend budget exhausted for %s: %.6f of %.6f BZZ used, request needs %.6f",
+        caller, info["spent_bzz"], info["daily_budget_bzz"], cost_bzz,
+    )
+    stamp_spend_refusals_total.labels(operation=operation, limit="daily_budget").inc()
+    raise HTTPException(
+        status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+        detail={
+            "code": "DAILY_SPEND_BUDGET_EXHAUSTED",
+            "message": (
+                f"This {operation} would cost {cost_bzz:.6f} BZZ and only "
+                f"{info['remaining_bzz']:.6f} BZZ remains of today's "
+                f"{info['daily_budget_bzz']:.6f} BZZ allowance. It resets at "
+                f"{info['resets_at']}. A smaller or shorter batch may still fit."
+            ),
+            "cost_bzz": info["request_cost_bzz"],
+            "daily_budget_bzz": info["daily_budget_bzz"],
+            "spent_bzz": info["spent_bzz"],
+            "remaining_bzz": info["remaining_bzz"],
+            "resets_at": info["resets_at"],
+        },
+    )
 
 
 def _bee_error_detail(exc: httpx.HTTPError):
@@ -496,35 +556,41 @@ async def purchase_stamp(
         # for "insufficient funds" told the caller the wallet was the only limit,
         # which was true and is the defect this closes.
         cost_bzz = plur_to_bzz(total_cost)
-        charge_to = _enforce_spend_limits(request, cost_bzz, "stamp purchase")
+        reservation = _enforce_spend_limits(request, cost_bzz, "stamp purchase")
 
-        if not funds_check["sufficient"]:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=(
-                    f"Insufficient funds to purchase stamp. "
-                    f"Required: {funds_check['required_bzz']:.6f} BZZ, "
-                    f"Available: {funds_check['wallet_balance_bzz']:.6f} BZZ, "
-                    f"Shortfall: {funds_check['shortfall_bzz']:.6f} BZZ"
+        # Charged already; handed back if the purchase does not happen.
+        try:
+            if not funds_check["sufficient"]:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=(
+                        f"Insufficient funds to purchase stamp. "
+                        f"Required: {funds_check['required_bzz']:.6f} BZZ, "
+                        f"Available: {funds_check['wallet_balance_bzz']:.6f} BZZ, "
+                        f"Shortfall: {funds_check['shortfall_bzz']:.6f} BZZ"
+                    )
                 )
+
+            # Collect the payment immediately before the purchase: every check
+            # above can refuse the request, and a refusal must not cost anything.
+            #
+            # Inside the try, so a settlement failure releases the reservation.
+            # That is safe and intended: settle_payment raises HTTPException,
+            # which spend_certainly_did_not_happen() treats as "spent nothing",
+            # and a retry of the same authorization is only delivered if its own
+            # settlement succeeds — a transfer that did go through has spent the
+            # nonce, so it cannot.
+            await settle_payment(request)
+
+            batch_id = await swarm_api.purchase_postage_stamp(
+                amount=amount,
+                depth=effective_depth,
+                label=stamp_request.label
             )
-
-        # Collect the payment immediately before the purchase: every check
-        # above can refuse the request, and a refusal must not cost anything.
-        await settle_payment(request)
-        batch_id = await swarm_api.purchase_postage_stamp(
-            amount=amount,
-            depth=effective_depth,
-            label=stamp_request.label
-        )
-
-        # Charged only now: a purchase that failed downstream must not cost the
-        # caller their budget.
-        if charge_to is not None:
-            spend_budget_tracker.consume(charge_to, cost_bzz)
-            stamp_spend_bzz_total.labels(
-                operation="stamp purchase", charged="budget"
-            ).inc(cost_bzz)
+        except BaseException as exc:
+            reservation.release_if_unspent(exc)
+            raise
+        reservation.record()
 
         # Record purchase time for propagation tracking
         record_purchase(batch_id)
@@ -715,30 +781,33 @@ async def extend_stamp(
         # Paid or free-tier through the x402 dependency (#350), owner-checked
         # above, and still bounded per caller by the daily budget.
         cost_bzz = plur_to_bzz(total_cost)
-        charge_to = _enforce_spend_limits(request, cost_bzz, "stamp extension")
+        reservation = _enforce_spend_limits(request, cost_bzz, "stamp extension")
 
-        if not funds_check["sufficient"]:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=(
-                    f"Insufficient funds to extend stamp. "
-                    f"Required: {funds_check['required_bzz']:.6f} BZZ, "
-                    f"Available: {funds_check['wallet_balance_bzz']:.6f} BZZ, "
-                    f"Shortfall: {funds_check['shortfall_bzz']:.6f} BZZ"
+        try:
+            if not funds_check["sufficient"]:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=(
+                        f"Insufficient funds to extend stamp. "
+                        f"Required: {funds_check['required_bzz']:.6f} BZZ, "
+                        f"Available: {funds_check['wallet_balance_bzz']:.6f} BZZ, "
+                        f"Shortfall: {funds_check['shortfall_bzz']:.6f} BZZ"
+                    )
                 )
+
+            # Same ordering as the purchase path: settle immediately before the
+            # irreversible call, inside the try so a settlement failure gives the
+            # reservation back.
+            await settle_payment(request)
+
+            batch_id = await swarm_api.extend_postage_stamp(
+                stamp_id=stamp_id,
+                amount=amount
             )
-
-        await settle_payment(request)
-        batch_id = await swarm_api.extend_postage_stamp(
-            stamp_id=stamp_id,
-            amount=amount
-        )
-
-        if charge_to is not None:
-            spend_budget_tracker.consume(charge_to, cost_bzz)
-            stamp_spend_bzz_total.labels(
-                operation="stamp extension", charged="budget"
-            ).inc(cost_bzz)
+        except BaseException as exc:
+            reservation.release_if_unspent(exc)
+            raise
+        reservation.record()
 
         return StampExtensionResponse(
             batchID=batch_id,
