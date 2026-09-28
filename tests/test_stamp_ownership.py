@@ -231,15 +231,46 @@ class TestOwnershipPersistence:
         assert info_b is not None
         assert info_b["owner"] == "shared"
 
-    def test_ownership_corrupt_file_recovery(self, state_file):
-        """Corrupt JSON -> start fresh."""
+    def test_ownership_corrupt_file_refuses_to_load(self, state_file):
+        """Corrupt JSON -> refuse to start, keep the file and a backup (#378).
+
+        Starting empty would deny every owner and the next registration would
+        overwrite the only copy of their records.
+        """
+        import glob
+        from app.core.atomic_io import StateLoadError
         with open(state_file, 'w') as f:
             f.write("{{not valid json")
 
         mgr = StampOwnershipManager(state_file=state_file)
-        mgr.load_on_startup()
+        with pytest.raises(StateLoadError):
+            mgr.load_on_startup()
 
-        # Should be empty after corrupt file
+        assert open(state_file).read() == "{{not valid json"
+        assert glob.glob(state_file + ".corrupt-*")
+
+    def test_crash_loop_does_not_multiply_backups(self, state_file):
+        import glob
+        from app.core.atomic_io import StateLoadError
+        with open(state_file, 'w') as f:
+            f.write("{{not valid json")
+        for _ in range(3):
+            with pytest.raises(StateLoadError):
+                StateManager = StampOwnershipManager(state_file=state_file)
+                StateManager.load_on_startup()
+        assert len(glob.glob(state_file + ".corrupt-*")) == 1
+
+    def test_malformed_entry_refuses_to_load(self, state_file):
+        import json
+        from app.core.atomic_io import StateLoadError
+        with open(state_file, 'w') as f:
+            json.dump({"batch": {"mode": "paid"}}, f)
+        with pytest.raises(StateLoadError):
+            StampOwnershipManager(state_file=state_file).load_on_startup()
+
+    def test_ownership_missing_file_starts_empty(self, state_file):
+        mgr = StampOwnershipManager(state_file=state_file)
+        mgr.load_on_startup()
         assert mgr.get_stamp_info("anything") is None
 
     def test_cleanup_expired_stamps(self, state_file):

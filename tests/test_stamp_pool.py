@@ -57,9 +57,14 @@ class TestStampPoolManager:
     """Test the StampPoolManager class."""
 
     @pytest.fixture
-    def manager(self):
-        """Create a fresh StampPoolManager for each test."""
-        return StampPoolManager()
+    def manager(self, tmp_path):
+        """Create a fresh StampPoolManager for each test.
+
+        With an explicit state file: several tests patch `settings` with a
+        MagicMock, and a manager that resolves its path from settings then
+        saves to a directory literally named after the mock (#335).
+        """
+        return StampPoolManager(state_file=str(tmp_path / "pool_state.json"))
 
     @pytest.fixture
     def sample_stamp(self):
@@ -363,9 +368,14 @@ class TestImmediateReplenishment:
     """Test immediate replenishment after stamp release."""
 
     @pytest.fixture
-    def manager(self):
-        """Create a fresh StampPoolManager for each test."""
-        return StampPoolManager()
+    def manager(self, tmp_path):
+        """Create a fresh StampPoolManager for each test.
+
+        With an explicit state file: several tests patch `settings` with a
+        MagicMock, and a manager that resolves its path from settings then
+        saves to a directory literally named after the mock (#335).
+        """
+        return StampPoolManager(state_file=str(tmp_path / "pool_state.json"))
 
     def test_trigger_replenishment_when_below_target(self, manager):
         """Test that replenishment is triggered when pool drops below target."""
@@ -460,9 +470,9 @@ class TestImmediateReplenishment:
 class TestLowReserveWarning:
     """Test low reserve warning logic."""
 
-    def test_low_reserve_warning_triggered(self):
+    def test_low_reserve_warning_triggered(self, tmp_path):
         """Test that low reserve warning is triggered correctly."""
-        manager = StampPoolManager()
+        manager = StampPoolManager(state_file=str(tmp_path / "pool_state.json"))
 
         # Add one stamp at depth 17
         manager.add_stamp_to_pool("stamp17", 17, 1000000, 604800)
@@ -476,9 +486,9 @@ class TestLowReserveWarning:
                 # because current (1) <= threshold (1) AND current (1) < target (2)
                 assert status.low_reserve_warning is True
 
-    def test_no_warning_when_above_threshold(self):
+    def test_no_warning_when_above_threshold(self, tmp_path):
         """Test no warning when levels are adequate."""
-        manager = StampPoolManager()
+        manager = StampPoolManager(state_file=str(tmp_path / "pool_state.json"))
 
         # Add enough stamps
         manager.add_stamp_to_pool("stamp17a", 17, 1000000, 604800)
@@ -542,6 +552,28 @@ class TestPoolStatePersistence:
         manager = StampPoolManager(state_file=state_file)
         loaded = manager._load_state()
         assert loaded == set()
+
+    @pytest.mark.asyncio
+    async def test_unreadable_state_is_a_failed_sync_not_a_first_run(self, state_file):
+        """A state file that exists but cannot be read (e.g. left root-owned 0600
+        by a container that ran as root) must not read as "no stamps": that
+        would mark the sync OK, let replenishment buy a fresh reserve, and the
+        next save would overwrite the pool's batch list."""
+        with open(state_file, 'w') as f:
+            json.dump(["batch_keep"], f)
+
+        manager = StampPoolManager(state_file=state_file)
+        denied = PermissionError(13, "Permission denied")
+        with patch('app.services.stamp_pool.open', side_effect=denied, create=True), \
+             patch('app.services.stamp_pool.swarm_api.get_all_stamps_processed',
+                   new_callable=AsyncMock) as mock_stamps:
+            synced = await manager.sync_from_bee_node()
+
+        assert synced == 0
+        assert manager._last_sync_ok is False  # blocks purchasing until a sync succeeds
+        mock_stamps.assert_not_called()
+        with open(state_file) as f:
+            assert json.load(f) == ["batch_keep"]
 
     def test_add_stamp_saves_state(self, manager, state_file):
         """Test that adding a stamp to pool persists it."""
@@ -1410,9 +1442,16 @@ class TestTopUpRespectsTheSpendCeiling:
     def state_file(self, tmp_path):
         return str(tmp_path / "pool_state.json")
 
+    @staticmethod
+    def _in_pool(manager, n):
+        # Only pool inventory is topped up (its depth prices the ceiling hold).
+        for i in range(n):
+            manager.add_stamp_to_pool(f"{i:064x}", 17, 1_000_000, 604800)
+
     @pytest.mark.asyncio
     async def test_topups_stop_at_the_ceiling(self, state_file):
         manager = StampPoolManager(state_file=state_file)
+        self._in_pool(manager, 8)
         extended = []
 
         async def fake_extend(batch_id, amount):
@@ -1438,6 +1477,7 @@ class TestTopUpRespectsTheSpendCeiling:
         spending it.
         """
         manager = StampPoolManager(state_file=state_file)
+        self._in_pool(manager, 6)
         bought, extended = [], []
 
         async def fake_buy(amount, depth, label):
@@ -1470,20 +1510,40 @@ class TestTopUpRespectsTheSpendCeiling:
         """Recorded when Bee accepts the extension, because that is when the
         money is spent. Counting attempts would let a failing extend exhaust the
         ceiling and block the purchases the pool actually needs."""
+        import httpx
         manager = StampPoolManager(state_file=state_file)
+        self._in_pool(manager, 3)
+        refused = httpx.HTTPStatusError(
+            "400", request=httpx.Request("PATCH", "http://bee/stamps/topup"),
+            response=httpx.Response(400, json={"message": "insufficient funds"}))
 
         with patch('app.services.stamp_pool.settings.STAMP_POOL_MAX_PURCHASES_PER_HOUR', 3):
             with patch('app.services.stamp_pool.swarm_api.get_chainstate',
                        new=AsyncMock(return_value={"currentPrice": "24000"})):
                 with patch('app.services.stamp_pool.swarm_api.extend_postage_stamp',
-                           side_effect=RuntimeError("bee said no")):
+                           side_effect=refused):
                     for i in range(3):
-                        with pytest.raises(RuntimeError):
+                        with pytest.raises(httpx.HTTPStatusError):
                             await manager._topup_stamp(f"{i:064x}")
 
         # Asserted on the recorded spends rather than the remaining budget, which
         # would read the real configured ceiling once the patch has exited.
-        assert manager._spend_times == [], "failed top-ups consumed the ceiling"
+        assert manager._spend_times == [], "refused top-ups consumed the ceiling"
+
+    @pytest.mark.asyncio
+    async def test_an_uncertain_topup_failure_stays_counted(self, state_file):
+        """A timeout after the call was sent may have spent money: fail closed."""
+        import httpx
+        manager = StampPoolManager(state_file=state_file)
+        self._in_pool(manager, 1)
+        with patch('app.services.stamp_pool.settings.STAMP_POOL_MAX_PURCHASES_PER_HOUR', 3):
+            with patch('app.services.stamp_pool.swarm_api.get_chainstate',
+                       new=AsyncMock(return_value={"currentPrice": "24000"})):
+                with patch('app.services.stamp_pool.swarm_api.extend_postage_stamp',
+                           side_effect=httpx.ReadTimeout("waiting for the transaction")):
+                    with pytest.raises(httpx.ReadTimeout):
+                        await manager._topup_stamp(f"{0:064x}")
+        assert len(manager._spend_times) == 1
 
     @pytest.mark.asyncio
     async def test_a_refusal_is_reported_in_pool_status(self, state_file):
@@ -1511,3 +1571,119 @@ class TestTopUpRespectsTheSpendCeiling:
                 await manager._topup_stamp("a" * 64)
 
         chainstate.assert_not_called()
+
+
+
+class TestSpendReservation:
+    """The hourly slot and the gateway ceiling are taken before the Bee call (#363)."""
+
+    def test_concurrent_purchases_cannot_exceed_the_hourly_ceiling(self, tmp_path, monkeypatch):
+        import asyncio
+        from app.core.config import settings as real
+        monkeypatch.setattr(real, "STAMP_POOL_MAX_PURCHASES_PER_HOUR", 2)
+        monkeypatch.setattr(real, "STAMP_POOL_DEFAULT_DURATION_HOURS", 24)
+        mgr = StampPoolManager(state_file=str(tmp_path / "pool.json"))
+        bought = []
+
+        async def slow_buy(amount, depth, label):
+            await asyncio.sleep(0.05)
+            bought.append(depth)
+            return f"{len(bought):064x}"
+
+        async def run():
+            return await asyncio.gather(*[mgr._purchase_stamp(17) for _ in range(5)])
+
+        with patch("app.services.swarm_api.get_chainstate",
+                   new=AsyncMock(return_value={"currentPrice": "24000"})), \
+             patch("app.services.swarm_api.purchase_postage_stamp", new=slow_buy), \
+             patch.object(mgr, "_wait_for_stamp_usable", new=AsyncMock(return_value=False)):
+            asyncio.run(run())
+        assert len(bought) == 2
+
+    def test_failed_purchase_gives_the_slot_back(self, tmp_path, monkeypatch):
+        import asyncio
+        from app.core.config import settings as real
+        monkeypatch.setattr(real, "STAMP_POOL_MAX_PURCHASES_PER_HOUR", 1)
+        mgr = StampPoolManager(state_file=str(tmp_path / "pool.json"))
+        import httpx
+        from app.services import spend_budget
+        tracker = spend_budget.SpendBudgetTracker(state_file=str(tmp_path / "s.json"))
+        monkeypatch.setattr(spend_budget, "spend_budget_tracker", tracker)
+        monkeypatch.setattr(real, "GATEWAY_DAILY_BZZ_CEILING", 1.0)
+        refused = httpx.HTTPStatusError(
+            "400", request=httpx.Request("POST", "http://bee/stamps"),
+            response=httpx.Response(400, json={"message": "insufficient funds"}))
+        with patch("app.services.swarm_api.get_chainstate",
+                   new=AsyncMock(return_value={"currentPrice": "24000"})), \
+             patch("app.services.swarm_api.purchase_postage_stamp", new=AsyncMock(side_effect=refused)):
+            with pytest.raises(httpx.HTTPStatusError):
+                asyncio.run(mgr._purchase_stamp(17))
+        assert mgr._spend_budget_remaining() == 1
+        assert tracker.snapshot()["gateway_spent"] == 0.0
+
+    def test_gateway_ceiling_stops_pool_purchases(self, tmp_path, monkeypatch):
+        import asyncio
+        from app.core.config import settings as real
+        from app.services import spend_budget
+        monkeypatch.setattr(real, "GATEWAY_DAILY_BZZ_CEILING", 0.000001)
+        tracker = spend_budget.SpendBudgetTracker(state_file=str(tmp_path / "s.json"))
+        monkeypatch.setattr(spend_budget, "spend_budget_tracker", tracker)
+        mgr = StampPoolManager(state_file=str(tmp_path / "pool.json"))
+        buy = AsyncMock(return_value="b" * 64)
+        with patch("app.services.swarm_api.get_chainstate",
+                   new=AsyncMock(return_value={"currentPrice": "24000"})), \
+             patch("app.services.swarm_api.purchase_postage_stamp", new=buy):
+            assert asyncio.run(mgr._purchase_stamp(17)) is None
+        buy.assert_not_called()
+        assert mgr._spend_budget_remaining() == real.STAMP_POOL_MAX_PURCHASES_PER_HOUR
+
+
+
+class TestPoolSpendOutcomes:
+    @staticmethod
+    def _mgr(tmp_path, monkeypatch, ceiling=10.0):
+        from app.core.config import settings as real
+        from app.services import spend_budget
+        monkeypatch.setattr(real, "GATEWAY_DAILY_BZZ_CEILING", ceiling)
+        monkeypatch.setattr(real, "STAMP_POOL_MAX_PURCHASES_PER_HOUR", 5)
+        tracker = spend_budget.SpendBudgetTracker(state_file=str(tmp_path / "s.json"))
+        monkeypatch.setattr(spend_budget, "spend_budget_tracker", tracker)
+        return StampPoolManager(state_file=str(tmp_path / "pool.json")), tracker
+
+    def test_a_read_timeout_during_purchase_stays_counted(self, tmp_path, monkeypatch):
+        import asyncio
+        import httpx
+        mgr, tracker = self._mgr(tmp_path, monkeypatch)
+        with patch("app.services.swarm_api.get_chainstate", new=AsyncMock(return_value={"currentPrice": "24000"})), \
+             patch("app.services.swarm_api.purchase_postage_stamp",
+                   new=AsyncMock(side_effect=httpx.ReadTimeout("mining"))):
+            with pytest.raises(httpx.ReadTimeout):
+                asyncio.run(mgr._purchase_stamp(17))
+        assert tracker.snapshot()["gateway_spent"] > 0
+        assert mgr._spend_budget_remaining() == 4
+
+    def test_a_cancelled_purchase_stays_counted(self, tmp_path, monkeypatch):
+        import asyncio
+        mgr, tracker = self._mgr(tmp_path, monkeypatch)
+        with patch("app.services.swarm_api.get_chainstate", new=AsyncMock(return_value={"currentPrice": "24000"})), \
+             patch("app.services.swarm_api.purchase_postage_stamp",
+                   new=AsyncMock(side_effect=asyncio.CancelledError())):
+            with pytest.raises(asyncio.CancelledError):
+                asyncio.run(mgr._purchase_stamp(17))
+        assert tracker.snapshot()["gateway_spent"] > 0
+
+    def test_ceiling_refusals_reach_pool_status(self, tmp_path, monkeypatch):
+        """Through check_and_replenish, whose results replace _errors."""
+        import asyncio
+        mgr, _ = self._mgr(tmp_path, monkeypatch, ceiling=0.000001)
+        mgr.add_stamp_to_pool("a" * 64, 17, 1_000_000, 60)
+        with patch.object(mgr, "sync_from_bee_node", new=AsyncMock(return_value=1)), \
+             patch.object(mgr, "_update_stamp_ttls", new=AsyncMock()), \
+             patch.object(mgr, "_get_stamp_ttl", new=AsyncMock(return_value=60)), \
+             patch.object(mgr, "get_reserve_config", return_value={17: 2}), \
+             patch("app.services.swarm_api.get_chainstate", new=AsyncMock(return_value={"currentPrice": "24000"})):
+            mgr._last_sync_ok = True
+            results = asyncio.run(mgr._check_and_replenish_locked(
+                {"checked_at": "", "stamps_purchased": 0, "stamps_topped_up": 0, "errors": []}))
+        assert results["stamps_topped_up"] == 0
+        assert any("daily spending ceiling" in e for e in mgr._errors), mgr._errors

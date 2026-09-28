@@ -123,16 +123,17 @@ class TestStampsErrorSanitization:
         assert "internal-api" not in detail
         assert "1633" not in detail
 
+    @patch('app.services.swarm_api.get_chainstate', return_value={"currentPrice": "1", "minimumValidityBlocks": 17280})
     @patch('app.services.swarm_api.extend_postage_stamp')
     @patch('app.services.swarm_api.check_sufficient_funds', return_value={"sufficient": True, "required_bzz": 0.01, "wallet_balance_bzz": 100.0, "shortfall_bzz": 0})
     @patch('app.services.swarm_api.calculate_stamp_total_cost', return_value=1000)
     @patch('app.services.swarm_api.get_all_stamps_processed', return_value=[{"batchID": "a" * 64, "depth": 17, "local": True}])
-    def test_extend_stamp_error_sanitized(self, mock_stamps, mock_cost, mock_funds, mock_extend):
+    def test_extend_stamp_error_sanitized(self, mock_stamps, mock_cost, mock_funds, mock_extend, mock_chainstate):
         """Extend error should not expose internal details."""
         mock_extend.side_effect = httpx.ConnectError(
             "PATCH https://bee.internal:1633/stamps/topup/test_id/500 failed"
         )
-        response = client.patch(f"/api/v1/stamps/{VALID_STAMP_ID}/extend", json={"amount": 500})
+        response = client.patch(f"/api/v1/stamps/{VALID_STAMP_ID}/extend", json={"amount": 50000})
         assert response.status_code == 502
         detail = response.json()["detail"]
         assert "bee.internal" not in detail
