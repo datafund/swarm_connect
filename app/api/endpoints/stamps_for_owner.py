@@ -117,15 +117,41 @@ async def create_batch_for_owner(body: StampForOwnerRequest, request: Request) -
             "message": "Gateway signer wallet has insufficient funds to create this batch.",
             "warnings": pf["warnings"]})
 
+    # --- gateway-wide daily ceiling (#363), charged before the on-chain spend ---
+    from app.services.spend_budget import spend_budget_tracker
+    from app.core.config import settings as config
+    caller = None
+    if not (x402_mode == "paid" and config.paid_bypass_is_honoured()):
+        # Unpaid (free tier, when enabled) or testnet-paid: a giveaway, bounded
+        # like direct purchases by the free ceiling and the caller's budget.
+        from app.core.client_ip import get_client_ip
+        caller = get_client_ip(request)
+    hold, _refused, ceiling = spend_budget_tracker.reserve_spend(cost_bzz, caller)
+    if hold is None:
+        metrics.for_owner_batches_total.labels(status="ceiling").inc()
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail={
+            "code": "GATEWAY_DAILY_SPEND_CEILING",
+            "message": f"A daily spending limit is reached. It resets at {ceiling['resets_at']}.",
+            "resets_at": ceiling["resets_at"]})
+
     # --- on-chain createBatch(owner=...) ---
     try:
         await settle_payment(request)
         result = await gnosis_chain_client.create_batch(owner, amount, depth, immutable=body.immutable)
     except GnosisChainError as e:
+        # Raised for a connection that was never made or a transaction that
+        # reverted: no BZZ moved. A receipt timeout is not a GnosisChainError
+        # (web3 raises TimeExhausted) and keeps the hold: it may still mine.
+        spend_budget_tracker.release_hold(hold)
         metrics.for_owner_batches_total.labels(status="error").inc()
         logger.error(f"for-owner: createBatch failed: {e}")
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY,
                             detail=f"createBatch failed: {e}")
+    except BaseException:
+        # Outcome uncertain (e.g. receipt timeout: the transaction may still
+        # mine): the hold stays, and is counted as such.
+        metrics.gateway_spend_uncertain_bzz_total.labels(operation="for-owner").inc(cost_bzz)
+        raise
 
     batch_id = result["batch_id"]
     bid = batch_id[2:] if batch_id.startswith("0x") else batch_id  # Bee uses 64-hex, no 0x

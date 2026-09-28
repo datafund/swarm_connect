@@ -169,6 +169,24 @@ stamp_spend_callers = Gauge(
     "gateway_stamp_spend_callers",
     "Distinct callers holding a non-zero spend balance today",
 )
+gateway_spend_bzz_today = Gauge(
+    "gateway_spend_bzz_today",
+    "BZZ reserved against the gateway-wide daily ceilings today (#363): "
+    "scope=total (everything) or scope=free (unpaid spending)",
+    ["scope"],
+)
+gateway_spend_uncertain_bzz_total = Counter(
+    "gateway_spend_uncertain_bzz_total",
+    "BZZ kept charged against the spending limits after a failure whose outcome "
+    "was uncertain (timeout after sending, cancellation, 5xx); may or may not "
+    "have been spent (#363)",
+    ["operation"],
+)
+gateway_spend_ceiling_bzz = Gauge(
+    "gateway_spend_ceiling_bzz",
+    "Configured gateway-wide daily ceilings (-1 = unlimited)",
+    ["scope"],
+)
 stamp_spend_bzz_today = Gauge(
     "gateway_stamp_spend_bzz_today",
     "Total BZZ charged to daily budgets today, across all callers",
@@ -350,9 +368,14 @@ async def _poll_balances():
             # climbing while the underlying balances reset at midnight UTC.
             try:
                 from app.services.spend_budget import spend_budget_tracker
-                spent = spend_budget_tracker.snapshot()["spent"]
+                snap = spend_budget_tracker.snapshot()
+                spent = snap["spent"]
                 stamp_spend_callers.set(len(spent))
                 stamp_spend_bzz_today.set(sum(spent.values()))
+                gateway_spend_bzz_today.labels(scope="total").set(snap["gateway_spent"])
+                gateway_spend_bzz_today.labels(scope="free").set(snap["giveaway_spent"])
+                gateway_spend_ceiling_bzz.labels(scope="total").set(settings.GATEWAY_DAILY_BZZ_CEILING)
+                gateway_spend_ceiling_bzz.labels(scope="free").set(settings.GATEWAY_DAILY_BZZ_FREE_CEILING)
             except Exception as e:
                 logger.debug(f"Metrics: failed to get spend budget state: {e}")
 
