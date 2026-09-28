@@ -44,6 +44,13 @@ class Settings(BaseSettings):
     X402_BZZ_USD_RATE: float = 0.50  # Manual BZZ/USD rate (1 BZZ = $0.50)
     X402_MARKUP_PERCENT: float = 50.0  # Markup percentage
     X402_MIN_PRICE_USD: float = 0.01  # Minimum charge per request
+    # Optional market price feed for BZZ/USD, used only to watch for drift
+    # (#364): prices stay on the configured X402_BZZ_USD_RATE, reviewed by a
+    # person, and an alert fires when it is more than 2x away from the market.
+    # Any JSON endpoint whose first numeric "usd" field is the price works, e.g.
+    # https://api.coingecko.com/api/v3/simple/price?ids=swarm-bzz&vs_currencies=usd
+    X402_BZZ_PRICE_FEED_URL: str = ""
+    X402_BZZ_PRICE_FEED_INTERVAL_SECONDS: int = 900
 
     # === x402 Threshold Settings (Gnosis wallet - warnings) ===
     X402_XBZZ_WARN_THRESHOLD: float = 10.0  # Warn if xBZZ < threshold
