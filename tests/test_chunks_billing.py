@@ -93,7 +93,8 @@ class TestTopUp:
     async def test_topup_credits_payer_and_returns_token(self):
         from app.api.endpoints import chunks
 
-        req = SimpleNamespace(state=SimpleNamespace(x402_mode="paid", x402_payer="0xPAYER"))
+        req = SimpleNamespace(state=SimpleNamespace(x402_mode="paid", x402_payer="0xPAYER",
+                                                x402_settlement=SimpleNamespace(success=True)))
         mock_mgr = MagicMock()
         mock_mgr.credit.return_value = 100_000_000
         mock_mgr.issue_token.return_value = "tok_abc"
@@ -125,7 +126,8 @@ class TestTopUp:
         from app.api.endpoints import chunks
         from fastapi import HTTPException
 
-        req = SimpleNamespace(state=SimpleNamespace(x402_mode="paid", x402_payer="0xP"))
+        req = SimpleNamespace(state=SimpleNamespace(x402_mode="paid", x402_payer="0xP",
+                                                x402_settlement=SimpleNamespace(success=True)))
         with patch("app.api.endpoints.chunks.settings", _enabled_settings(min_topup_mb=100)):
             with patch("app.api.endpoints.chunks.bandwidth_credit_manager", MagicMock()):
                 with pytest.raises(HTTPException) as exc:
@@ -138,7 +140,8 @@ class TestTopUp:
         from app.api.endpoints import chunks
         from fastapi import HTTPException
 
-        req = SimpleNamespace(state=SimpleNamespace(x402_mode="paid", x402_payer="0xP"))
+        req = SimpleNamespace(state=SimpleNamespace(x402_mode="paid", x402_payer="0xP",
+                                                x402_settlement=SimpleNamespace(success=True)))
         with patch("app.api.endpoints.chunks.settings", _enabled_settings(x402=False)):
             with pytest.raises(HTTPException) as exc:
                 await chunks.top_up_credit(req, mb=100)

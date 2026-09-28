@@ -1,0 +1,25 @@
+# Keep the build context to what the image runs. Without this, `COPY . .`
+# baked the checkout's .git (full history) into the image, along with anything
+# else lying in the directory -- e.g. a local .env when building by hand.
+.git
+.github
+.claude
+.mcp.json
+.env
+.env.*
+.DS_Store
+
+# Local and runtime state: mounted or generated at run time, never baked in.
+data/
+logs/
+VERSION
+
+# Development-only
+tests/
+MagicMock/
+.pytest_cache/
+__pycache__/
+*.py[cod]
+venv/
+.venv/
+env/

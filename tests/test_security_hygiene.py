@@ -53,7 +53,11 @@ class TestPoolSpendCeilingPersists:
         monkeypatch.setattr(settings, "STAMP_POOL_MAX_PURCHASES_PER_HOUR", 3)
         path = str(tmp_path / "pool_state.json")
         a = StampPoolManager(state_file=path)
-        a._record_spend(); a._record_spend()
+        # #363 replaced record-after-the-Bee-call with reserve-before-it, so the
+        # slot is taken by _reserve_spend_slot rather than recorded by
+        # _record_spend. Both mutation paths persist, which is what this asserts.
+        assert a._reserve_spend_slot() is not None
+        assert a._reserve_spend_slot() is not None
         b = StampPoolManager(state_file=path)
         assert b._spend_budget_remaining() == 1
 
@@ -109,7 +113,16 @@ class TestPaidRotation:
         monkeypatch.setattr(chunks, "bandwidth_credit_manager", m)
         stolen = m.issue_token(ADDR)
         attackers = m.issue_token(ADDR, rotate=True)          # the thief rotates first
-        req = SimpleNamespace(state=SimpleNamespace(x402_mode="paid", x402_payer=ADDR.upper().replace("0X", "0x")))
+        # top_up_credit settles immediately before delivering credit (#398), and
+        # this request is hand-built, so it carries no payment payload for the
+        # facilitator. Patch settlement out and give the stand-in the attributes
+        # get_client_ip reads, so the test stays about token rotation.
+        from unittest.mock import AsyncMock
+        monkeypatch.setattr(chunks, "settle_payment", AsyncMock())
+        req = SimpleNamespace(
+            headers={}, client=None,
+            state=SimpleNamespace(x402_mode="paid", x402_payer=ADDR.upper().replace("0X", "0x")),
+        )
         mb = str(settings.BANDWIDTH_CREDIT_MIN_TOPUP_MB)
         resp = await chunks.top_up_credit(req, mb=mb, rotate_token=True)
         assert resp.token not in (stolen, attackers)
