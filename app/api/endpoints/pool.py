@@ -237,6 +237,20 @@ async def acquire_stamp(
     allowed_by_budget, budget = pool_allowance_tracker.check(origin, requested_size)
     if paid:
         logger.info("Pool acquire paid via x402, bypassing the daily allowance")
+    elif budget.get("state_unreadable"):
+        # Today's allowance record could not be read (#378): refuse free
+        # acquires rather than guess, and say so instead of "used up".
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={
+                "code": "POOL_ALLOWANCE_UNAVAILABLE",
+                "message": (
+                    "Free pooled stamps are paused until the operator restores the "
+                    f"gateway's allowance records, or until {budget['resets_at']}. "
+                    "Buying a stamp directly with POST /api/v1/stamps/ still works."
+                ),
+            },
+        )
     elif not allowed_by_budget:
         logger.info(
             "Pool allowance exhausted for origin %s (%s/%s today)",
