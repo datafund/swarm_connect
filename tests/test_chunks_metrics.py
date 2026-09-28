@@ -80,7 +80,8 @@ class TestChunkMetrics:
         before = bandwidth_topups_total.labels(status="success")._value.get()
         before_bytes = bandwidth_topup_bytes_total._value.get()
 
-        req = SimpleNamespace(state=SimpleNamespace(x402_mode="paid", x402_payer="0xP"))
+        req = SimpleNamespace(state=SimpleNamespace(x402_mode="paid", x402_payer="0xP",
+                                                x402_settlement=SimpleNamespace(success=True)))
         mock_mgr = MagicMock()
         mock_mgr.credit.return_value = 100_000_000
         mock_mgr.issue_token.return_value = "tok"

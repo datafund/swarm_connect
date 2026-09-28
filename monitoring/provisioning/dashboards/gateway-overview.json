@@ -425,6 +425,34 @@
           { "datasource": { "type": "loki", "uid": "grafanacloud-logs" }, "expr": "sum by (level) (rate({job=\"swarm_connect/gateway\", environment=~\"$environment\"}[5m]))", "queryType": "range", "legendFormat": "{{level}}" }
         ],
         "fieldConfig": { "defaults": { "unit": "logs/s", "custom": { "drawStyle": "line", "lineInterpolation": "smooth", "fillOpacity": 10 } } }
+      },
+      {
+        "id": 100, "title": "Requests by Client Type", "type": "timeseries",
+        "description": "Which clients the gateway is actually serving. Derived from a fixed User-Agent table, never from the header directly — a label that took a caller-supplied value would let anyone mint unlimited series. mcp is the MCP plugin used by AI agents, cli the Python CLI, sdk-js the JS SDK, http-lib a bare HTTP client (usually our own test suite), none a caller sending no User-Agent at all. Scrapes of /metrics and healthchecks of / are excluded — they are the two most frequent requests the gateway sees and would bury everything else.",
+        "gridPos": { "h": 8, "w": 12, "x": 0, "y": 135 },
+        "targets": [{ "expr": "sum by (client_type) (rate(gateway_requests_by_client_total{environment=~\"$environment\"}[30m]) * 3600)", "legendFormat": "{{client_type}}" }],
+        "fieldConfig": { "defaults": { "unit": "short", "custom": { "drawStyle": "line", "lineInterpolation": "smooth", "fillOpacity": 10 } } }
+      },
+      {
+        "id": 101, "title": "Clients Being Turned Away", "type": "timeseries",
+        "description": "Requests refused by policy rather than for a mistake: rate_limited is the free tier's per-minute limit, payment_required is a 402 with no payment offered. This panel exists because 37 of the MCP plugin's 84 production requests were being refused with 429 and nobody could see it — the free tier allows three requests a minute and an agent making several calls in sequence exceeds it. A sustained line here for a client we want to serve is a limit that needs raising, not abuse being blocked.",
+        "gridPos": { "h": 8, "w": 12, "x": 12, "y": 135 },
+        "targets": [{ "expr": "sum by (client_type, outcome) (rate(gateway_requests_by_client_total{environment=~\"$environment\",outcome=~\"rate_limited|payment_required\"}[30m]) * 3600)", "legendFormat": "{{client_type}} / {{outcome}}" }],
+        "fieldConfig": { "defaults": { "unit": "short", "custom": { "drawStyle": "line", "lineInterpolation": "smooth", "fillOpacity": 20 } } }
+      },
+      {
+        "id": 102, "title": "Success Rate by Client Type", "type": "timeseries",
+        "description": "Share of each client's requests that succeeded. Answers whether a client is being served well, independently of how much traffic it sends — a small client at 40% is a worse problem than a large one at 99%, and a volume graph hides that.",
+        "gridPos": { "h": 8, "w": 12, "x": 0, "y": 143 },
+        "targets": [{ "expr": "sum by (client_type) (rate(gateway_requests_by_client_total{environment=~\"$environment\",outcome=\"ok\"}[30m])) / sum by (client_type) (rate(gateway_requests_by_client_total{environment=~\"$environment\"}[30m])) * 100", "legendFormat": "{{client_type}}" }],
+        "fieldConfig": { "defaults": { "unit": "percent", "min": 0, "max": 100, "custom": { "drawStyle": "line", "lineInterpolation": "smooth", "fillOpacity": 5 } } }
+      },
+      {
+        "id": 103, "title": "Distinct Callers Today", "type": "timeseries",
+        "description": "How many separate callers have been seen since midnight UTC. A COUNT, not a list — the gateway holds a salted per-process hash to recognise a repeat caller and exports only the total, so there is no caller identity here or anywhere else in the metrics. Resets daily, and on restart. Rising while request volume is flat means more people are trying it; flat while volume rises means existing users are doing more.",
+        "gridPos": { "h": 8, "w": 12, "x": 12, "y": 143 },
+        "targets": [{ "expr": "sum by (environment) (gateway_distinct_callers{environment=~\"$environment\"})", "legendFormat": "{{environment}}" }],
+        "fieldConfig": { "defaults": { "unit": "short", "custom": { "drawStyle": "line", "lineInterpolation": "smooth", "fillOpacity": 10 } } }
       }
     ],
     "schemaVersion": 39

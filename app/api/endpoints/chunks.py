@@ -6,6 +6,7 @@ from typing import Optional
 import httpx
 from fastapi import APIRouter, Header, HTTPException, Query, Request, status
 
+from app.x402.settlement import settle_payment
 from app.api.models.chunk import ChunkUploadResponse, CreditTopUpResponse
 from app.core.config import settings
 from app.services.bandwidth_credit import (
@@ -161,6 +162,7 @@ async def top_up_credit(
             },
         )
 
+    await settle_payment(request)
     credited_bytes = mb * BYTES_PER_MB
     new_balance = bandwidth_credit_manager.credit(payer, credited_bytes)
     token = bandwidth_credit_manager.issue_token(payer)
@@ -265,9 +267,9 @@ async def upload_chunk(
     credit_balance: Optional[int] = None
 
     if settings.X402_ENABLED:
-        payment_mode = request.headers.get("X-Payment-Mode", "").lower()
+        from app.x402.middleware import is_free_tier_opt_in
 
-        if payment_mode == "free":
+        if is_free_tier_opt_in(request):
             if not settings.CHUNK_UPLOAD_FREE_TIER_ENABLED:
                 raise HTTPException(
                     status_code=402,

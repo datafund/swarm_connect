@@ -14,16 +14,44 @@ Configuration is loaded from app/core/config.py:
 - X402_MIN_PRICE_USD: Minimum price floor
 """
 import logging
+from contextlib import contextmanager
+from contextvars import ContextVar
 from typing import Dict, Any, Optional
 
 from app.core.config import settings
+from app.services import swarm_api
 from app.services.swarm_api import (
-    get_chainstate,
     calculate_stamp_amount,
     calculate_stamp_total_cost,
 )
 
 logger = logging.getLogger(__name__)
+
+# A chainstate fixed for the duration of one caller's work, so several quotes
+# computed together read Bee once instead of once each. Used by GET /pricing
+# (#381), which prices several operations per request and is not rate-limited
+# when x402 is on. A ContextVar keeps it private to that request's task.
+_pinned_chainstate: ContextVar[Optional[Dict[str, Any]]] = ContextVar(
+    "pinned_chainstate", default=None
+)
+
+
+@contextmanager
+def pinned_chainstate(chainstate: Dict[str, Any]):
+    """Make get_chainstate() in this module return `chainstate` inside the block."""
+    token = _pinned_chainstate.set(chainstate)
+    try:
+        yield
+    finally:
+        _pinned_chainstate.reset(token)
+
+
+async def get_chainstate() -> Dict[str, Any]:
+    """The Bee chainstate: the pinned one if set, else fetched from Bee."""
+    pinned = _pinned_chainstate.get()
+    if pinned is not None:
+        return pinned
+    return await swarm_api.get_chainstate()
 
 # Conversion constants
 # Single source in app/services/swarm_api; re-exported here because callers
@@ -168,6 +196,50 @@ async def calculate_stamp_price_usd(
     )
 
     return result
+
+
+def _price_from_cost_bzz(cost_bzz: float) -> Dict[str, Any]:
+    """Apply exchange rate, markup and minimum to a BZZ cost."""
+    exchange_rate = settings.X402_BZZ_USD_RATE
+    markup_percent = settings.X402_MARKUP_PERCENT
+    min_price = settings.X402_MIN_PRICE_USD
+    with_markup = apply_markup(bzz_to_usd(cost_bzz, exchange_rate), markup_percent)
+    return {
+        "price_usd": round(apply_minimum_price(with_markup, min_price), 6),
+        "price_bzz": round(cost_bzz, 8),
+        "exchange_rate": exchange_rate,
+        "markup_percent": markup_percent,
+        "minimum_applied": with_markup < min_price,
+    }
+
+
+async def calculate_batch_price_usd(
+    depth: int,
+    duration_hours: Optional[int] = None,
+    amount: Optional[int] = None,
+) -> Dict[str, Any]:
+    """Price a batch purchase or top-up exactly as the stamp handlers perform it.
+
+    Used for POST /stamps/ (#361) and PATCH /stamps/{id}/extend (#350).
+    `amount` (PLUR per chunk, legacy) wins when given; otherwise the amount is
+    derived from `duration_hours` (default 25, as in both handlers) with the
+    same calculate_stamp_amount call and minimum-validity floor they use.
+    """
+    if amount is None:
+        chainstate = await get_chainstate()
+        current_price = int(chainstate.get("currentPrice", 0))
+        if current_price <= 0:
+            raise ValueError("Invalid current price from chainstate")
+        amount = calculate_stamp_amount(
+            duration_hours or 25, current_price,
+            minimum_validity_blocks=chainstate.get("minimumValidityBlocks"),
+        )
+    cost_bzz = plur_to_bzz(calculate_stamp_total_cost(int(amount), depth))
+    return {**_price_from_cost_bzz(cost_bzz), "amount": int(amount), "depth": depth}
+
+
+# The extension quote is the same calculation over the batch's own depth.
+calculate_extension_price_usd = calculate_batch_price_usd
 
 
 async def calculate_upload_price_usd(
@@ -339,6 +411,12 @@ async def get_price_quote(
         size_bytes = kwargs.get("size_bytes", 0)
         duration_hours = kwargs.get("duration_hours", 24)
         price_info = await calculate_upload_price_usd(size_bytes, duration_hours)
+    elif operation in ("stamp_extension", "stamp_batch"):
+        price_info = await calculate_batch_price_usd(
+            depth=kwargs.get("depth", 17),
+            duration_hours=kwargs.get("duration_hours"),
+            amount=kwargs.get("amount"),
+        )
     elif operation == "bandwidth":
         size_bytes = kwargs.get("size_bytes", 0)
         price_info = calculate_bandwidth_price_usd(size_bytes)

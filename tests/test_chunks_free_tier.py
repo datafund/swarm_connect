@@ -98,6 +98,20 @@ class TestFreeTierEndpoint:
         assert r.status_code == 201
         assert r.json()["bytes_charged"] == 8
 
+    def test_the_echoed_free_tier_value_also_opts_in(self, client):
+        """Responses echo "free-tier"; sending it back must not fall into the credit path (#385)."""
+        tracker = BandwidthFreeTierTracker()
+        with patch("app.api.endpoints.chunks.settings", _settings(mb_per_day=1)):
+            with patch("app.api.endpoints.chunks.free_tier_tracker", tracker):
+                with patch("app.api.endpoints.chunks.upload_chunk_to_swarm",
+                           new=AsyncMock(return_value="ref")):
+                    r = client.post(
+                        "/api/v1/chunks/",
+                        content=b"x" * 8,
+                        headers={"Swarm-Postage-Stamp": VALID_STAMP, "X-Payment-Mode": "free-tier"},
+                    )
+        assert r.status_code == 201
+
     def test_free_over_quota_429(self, client):
         tracker = BandwidthFreeTierTracker()
         with patch("app.api.endpoints.chunks.settings", _settings(mb_per_day=0)):  # zero quota
