@@ -444,6 +444,46 @@ Use Base Sepolia for integration testing:
 - Free testnet USDC from [Circle Faucet](https://faucet.circle.com/)
 - No real money involved
 
+## Retries and Idempotency-Key
+
+A paid stamp purchase can take a minute or more (Bee buys the batch on-chain, then the payment settles). A client that times out earlier and retries with a new payment can pay twice and get two batches. To retry safely:
+
+1. Generate a unique `Idempotency-Key` (a UUID) per logical operation and send it on every paid POST (`/api/v1/stamps/`, `/api/v1/stamps/for-owner`, `/api/v1/data/`, `/api/v1/data/manifest`, `/api/v1/chunks/credit`, `/api/v1/pool/acquire`).
+2. On a timeout, retry with the **same key and the same request**, signing a fresh `X-PAYMENT` as usual.
+3. Set client timeouts well above the gateway's worst case for stamp purchases, e.g. 180 s: the gateway waits up to 120 s for the node after settling the payment, and then answers `202` (see below).
+
+What the gateway does with the key (payments with `X-PAYMENT` only; the free tier ignores it):
+
+| Situation | Response |
+|-----------|----------|
+| First request with the key | Processed and paid as normal; a 2xx result is stored for 24 h |
+| Same key, same payer, same request, first one finished | The stored response, with `Idempotent-Replayed: true`. The new payment is verified (to prove it is the same payer) but **never settled** |
+| Same key while the first is still running | `409` `IDEMPOTENCY_KEY_IN_PROGRESS`, `Retry-After: 5`. Not charged; retry with the same key |
+| Same key, different body or query | `422` `IDEMPOTENCY_KEY_REUSED`. Not charged |
+| Key longer than 255 characters or not printable ASCII | `400` `IDEMPOTENCY_KEY_INVALID`. Not charged |
+| First request paid, but failed or was interrupted afterwards (including a gateway restart) | `409` `IDEMPOTENCY_KEY_SETTLED_PENDING` with the `transaction`. Not charged again; contact the operator with that transaction for the result or a refund |
+| The first payment was sent for settlement but no answer came back (facilitator error or timeout, or the request was cut off while waiting) | `409` `IDEMPOTENCY_KEY_SETTLEMENT_UNKNOWN` with the first authorization's `nonce`. Not charged. The first payment may or may not have been collected: check whether that nonce was used on-chain (USDC `authorizationState(from, nonce)`) before paying again with a new key; if it was, contact the operator |
+| First request succeeded, but its response was too large to keep (over 64 KB) | `409` `IDEMPOTENCY_KEY_DELIVERED_NOT_STORED` with the `transaction`. It was delivered and paid once; look the result up through the resource itself |
+| The facilitator refused the first payment, or the request failed before settlement | Nothing stored; a retry is a new, paid attempt |
+| The retry presents the same `X-PAYMENT` that paid for the original | `402`: sign a new payment. Only a new, unused authorization gets the stored result |
+| The gateway cannot read its idempotency store | `503` `IDEMPOTENCY_UNAVAILABLE`. Not charged; retry later with the same key |
+
+Keys are scoped to the payer (the verified signer of `X-PAYMENT`), the method and the path, so another wallet's request with the same key is unaffected.
+
+What to know about the retry's payment:
+
+- **It must still pass verification.** The facilitator verifies the retry's payment (that is what proves it comes from the same payer), and verification checks the amount against the current price and the wallet's balance. If the first purchase drained the wallet, or the price has risen since, the retry gets a `402` instead of the stored result. You are not charged; sign again from that `402` (at the new price) with the same key, or top up the wallet.
+- **Credit top-ups.** A replayed `POST /api/v1/chunks/credit` response carries the account's **current** bearer token (the gateway does not store the token, and a replay never issues or rotates one).
+- **It is not spent.** A replayed response leaves the retry's signed authorization unsettled but valid until its `validBefore`. Keep `validBefore` short. `Idempotent-Replayed: true` means the response, including its `X-PAYMENT-RESPONSE` and `X-Payment-Transaction`, belongs to the **original** payment; do not treat it as proof that the retry's authorization settled.
+
+## Stamp labels
+
+`label` on `POST /api/v1/stamps/` is optional: up to 100 characters, no control characters, not `recovered` and not starting with `paid-`, `pool-` or `synced-`. Labels are stored on the Bee node and **appear in public stamp listings**: do not put anything identifying in them. For a paid purchase the gateway appends `-<12 hex characters>` so the batch can be found if the node's answer is lost.
+
+## 202 Accepted from a paid stamp purchase
+
+If the Bee node has not confirmed a paid purchase within the gateway's deadline (120 s by default), the gateway, having already collected the payment, answers `202` with `code: PURCHASE_PENDING`, the payment `transaction`, and the batch `label`. The batch is registered to the paying wallet as soon as the node reports it: list `GET /api/v1/stamps/?wallet=<your address>` and look for that label, or retry with the same `Idempotency-Key`, which returns the `201` with the `batchID` once it is found (or, if it is never found within 15 minutes, `500 DELIVERY_FAILED_AFTER_PAYMENT` with the transaction for a refund). Do not pay again. A `202` is not a failure. A `503` with `code: PURCHASE_CAPACITY` means too many purchases are waiting on the node; nothing was charged, retry shortly.
+
 ## Error Handling
 
 | Error | Cause | Resolution |
@@ -453,6 +493,12 @@ Use Base Sepolia for integration testing:
 | "Insufficient balance" | Wallet lacks USDC | Fund wallet |
 | "Invalid signature" | Wrong private key or network | Check configuration |
 | "Payment verification failed" | Facilitator rejected | Check payment amount |
+| 409 `IDEMPOTENCY_KEY_IN_PROGRESS` | Retry of a paid request still running | Retry with the same key after `Retry-After` |
+| 409 `IDEMPOTENCY_KEY_SETTLEMENT_UNKNOWN` | The first payment's settlement returned no answer | Check the `nonce` on-chain before paying again |
+| 409 `IDEMPOTENCY_KEY_DELIVERED_NOT_STORED` | The first request succeeded; its response was too large to replay | Look up the result; do not pay again |
+| 422 `IDEMPOTENCY_KEY_REUSED` | Same `Idempotency-Key` for a different request | Use a new key |
+| 409 `IDEMPOTENCY_KEY_SETTLED_PENDING` | The first request was paid but produced no stored result | Contact the operator with the `transaction` |
+| 503 `IDEMPOTENCY_UNAVAILABLE` | The gateway's idempotency store is unreadable | Retry later; not charged |
 
 ## References
 

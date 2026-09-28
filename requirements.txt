@@ -1,5 +1,5 @@
 fastapi>=0.95.0
-uvicorn[standard]>=0.21.0  # ASGI server with performance extras
+uvicorn[standard]>=0.24.0  # ASGI server with performance extras; --timeout-graceful-shutdown
 httpx>=0.24.0              # Async HTTP client for Swarm Bee API calls
 python-dotenv>=1.0.0      # For loading .env files
 pydantic[email]>=1.10.0   # Used by FastAPI, explicitly listed

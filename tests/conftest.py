@@ -43,6 +43,7 @@ for _var, _name in (
     ("BANDWIDTH_CREDIT_STATE_FILE", "bandwidth_credit.json"),
     ("STAMP_SPEND_BUDGET_STATE_FILE", "stamp_spend_budget.json"),
     ("X402_AUDIT_LOG_PATH", "x402_audit.jsonl"),
+    ("X402_IDEMPOTENCY_STATE_FILE", "x402_idempotency.json"),
 ):
     os.environ[_var] = os.path.join(_STATE_DIR, _name)
 
@@ -92,6 +93,9 @@ def _reset_payment_replay_guard():
     tests reuse the same signed test authorization.
     """
     from app.x402.settlement import replay_guard
+    from app.x402.idempotency import idempotency_store
     replay_guard.reset()
+    idempotency_store.reset()
     yield
     replay_guard.reset()
+    idempotency_store.reset()

@@ -768,5 +768,82 @@
     "noDataState": "Alerting",
     "ruleGroup": "critical",
     "title": "No Data \u2014 System May Be Down"
+  },
+  {
+    "annotations": {
+      "summary": "{{ $labels.environment }}: x402 settlement {{ $labels.result }} ({{ printf \"%.0f\" $values.B.Value }} in 15 min)",
+      "description": "Payments were refused by the facilitator, errored with an unknown outcome, or were settled without the request being delivered (refund needed). See docs/mainnet-runbook.md section 3: search data/x402_audit.jsonl for payment_settled with success=false, payment_failed stage=settle, and stage=delivery_after_settlement. On a test network, refusals are expected noise."
+    },
+    "condition": "C",
+    "data": [
+      {
+        "datasourceUid": "grafanacloud-prom",
+        "model": {
+          "expr": "sum by (environment, host, result) (increase(gateway_x402_settlements_total{result!=\"settled\"}[15m]))",
+          "instant": true,
+          "intervalMs": 1000,
+          "maxDataPoints": 43200,
+          "refId": "A"
+        },
+        "queryType": "",
+        "refId": "A",
+        "relativeTimeRange": {
+          "from": 300,
+          "to": 0
+        }
+      },
+      {
+        "datasourceUid": "__expr__",
+        "model": {
+          "expression": "A",
+          "intervalMs": 1000,
+          "maxDataPoints": 43200,
+          "reducer": "last",
+          "refId": "B",
+          "type": "reduce"
+        },
+        "queryType": "",
+        "refId": "B",
+        "relativeTimeRange": {
+          "from": 0,
+          "to": 0
+        }
+      },
+      {
+        "datasourceUid": "__expr__",
+        "model": {
+          "conditions": [
+            {
+              "evaluator": {
+                "params": [
+                  0
+                ],
+                "type": "gt"
+              }
+            }
+          ],
+          "expression": "B",
+          "intervalMs": 1000,
+          "maxDataPoints": 43200,
+          "refId": "C",
+          "type": "threshold"
+        },
+        "queryType": "",
+        "refId": "C",
+        "relativeTimeRange": {
+          "from": 0,
+          "to": 0
+        }
+      }
+    ],
+    "execErrState": "Error",
+    "for": "0s",
+    "isPaused": false,
+    "labels": {
+      "severity": "critical"
+    },
+    "noDataState": "OK",
+    "ruleGroup": "critical",
+    "title": "x402 settlement problems"
   }
 ]

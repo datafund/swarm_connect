@@ -74,6 +74,12 @@ async def lifespan(app: FastAPI):
         logger.info("Stopping stamp pool background task")
         await stamp_pool_manager.stop_background_task()
 
+    # Paid stamp purchases still waiting on Bee (#400): give them a grace
+    # period, then stop them with a refund record, before the client they use
+    # is closed.
+    from app.api.endpoints.stamps import drain_pending_purchases
+    await drain_pending_purchases(settings.SHUTDOWN_PENDING_PURCHASE_GRACE_SECONDS)
+
     # Close shared HTTP client (must be last)
     await close_client()
 

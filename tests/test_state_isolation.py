@@ -27,6 +27,7 @@ STATE_SETTINGS = [
     "STAMP_OWNERSHIP_FILE",
     "BANDWIDTH_CREDIT_STATE_FILE",
     "STAMP_SPEND_BUDGET_STATE_FILE",
+    "X402_IDEMPOTENCY_STATE_FILE",
 ]
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
