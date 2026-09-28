@@ -100,7 +100,7 @@ python -m pytest tests/test_manifest_upload.py -v
 - Calculated `expectedExpiration` field in `YYYY-MM-DD-HH-MM` UTC format
 - Calculated `utilizationPercent` field showing stamp usage as percentage (0-100%)
 - Propagation timing fields: `secondsSincePurchase`, `estimatedReadyAt`, `propagationStatus`
-- Access control field: `accessMode` (`"owned"`, `"shared"`, or `null`)
+- Access control field: `accessMode` (`"owned"`, `"shared"`, `"pool"`, or `null`)
 
 ### Environment Configuration
 
@@ -147,7 +147,7 @@ CORS (browser access):
 - `GET /api/v1/stamps/`: List stamps (default: local only). Supports `?global=true` for all stamps, `?wallet=0x...` for wallet-filtered view (x402)
 - `GET /api/v1/stamps/{stamp_id}`: Retrieve specific stamp batch details including propagation timing
 - `GET /api/v1/stamps/{stamp_id}/check`: Check stamp health for uploads (errors, warnings, can_upload status, propagation status)
-- `PATCH /api/v1/stamps/{stamp_id}/extend`: Extend existing stamps with additional funds. Subject to the same two bounds. Note this route is **not** payment-gated: `is_protected_endpoint` matches on method and `PROTECTED_ENDPOINTS` lists only POST paths, so a PATCH never sees x402 or the free-tier rate limit. It also tops up any batch on the node, including ones the caller does not own.
+- `PATCH /api/v1/stamps/{stamp_id}/extend`: Extend existing stamps with additional funds. Subject to the same two bounds. Payment-gated like a purchase (`("PATCH", "/api/v1/stamps/")` is in `PROTECTED_ENDPOINTS`) and priced from the parsed request and the batch's own depth. Only the batch's owner may extend it (same `check_access` rule as uploads: payer-owned needs that payer, `shared` is open, pool inventory and untracked batches are refused), and a legacy `amount` below 24 hours' worth is refused with `EXTENSION_TOO_SMALL` (#350).
 - `POST /api/v1/stamps/for-owner` (Flow B #228/#230): create a postage batch owned by an arbitrary address via `GnosisChainClient.create_batch` (PostageStamp.createBatch on Gnosis), so the owner can sign its own stamps off-node. Body: `owner` (0x, never assumed = payer), `size`/`depth`, `duration_hours`, `immutable`. Returns `batchID` (64-hex, no 0x) + `txHash` + propagation info; records the batch in the ownership registry (`source="created_for_owner"`, informational — on-chain ownership is source of truth). **Spends the gateway's Gnosis funds**, so: OFF by default (`STAMP_PURCHASE_FOR_OTHERS_ENABLED`, router 404s when off); owner **allow-list** (`STAMP_FOR_OTHERS_REQUIRE_WHITELIST` + `_OWNER_WHITELIST`); hard caps `STAMP_FOR_OTHERS_MAX_DEPTH` / `_MAX_BZZ` / `_MAX_DURATION_HOURS` — ALL enforced before any on-chain spend. Plus a signer-wallet **preflight** (#231): refuses `503 SIGNER_INSUFFICIENT_FUNDS` if the gateway can't fund the batch (gas/xBZZ), checked after the caps and before createBatch. **x402 (#229):** mounted WITH the x402 dependency, so when `X402_ENABLED` the caller pays via the `/stamps/` protected prefix (priced from the actual depth/duration by reading the body in `_calculate_price_for_request`); free-tier creation is OFF by default (`STAMP_FOR_OTHERS_FREE_TIER_ENABLED`, else `402 FREE_TIER_DISABLED`). Payer (x402) ≠ owner (`body.owner`). Emits `gateway_for_owner_batches_total{status}` + `_bzz_spent_total` and audits each creation. **Concurrency (#368):** `GnosisChainClient` holds a `threading.Lock` (create_batch runs in `asyncio.to_thread`) from the nonce read through the createBatch receipt, acquired with a 30 s timeout (`SIGNER_LOCK_TIMEOUT_SECONDS`). Inside it, if the signer's `pending` nonce is above `latest` (an earlier tx unconfirmed), it refuses before sending anything. Both refusals raise `SignerBusy` (a `GnosisChainError`: nothing spent) → **503 `SIGNER_BUSY`**, not settled. Receipt waiting is bounded at 120 s total for approve + createBatch (`RECEIPT_TIMEOUT_SECONDS`), inside the 300 s x402 authorization and Caddy's 300 s `read_timeout`. It keeps a standing allowance of `APPROVE_BUFFER_BATCHES` (10) × the per-batch cap, topped up below half (logged with tx hash), instead of approving the exact cost. createBatch gas limit = max(estimate × 1.3, 1,000,000), capped at 3M and never below the estimate (`CREATE_BATCH_GAS_MARGIN` / `_FLOOR` / `_CAP`). The tree insert costs more when the batch lands in a later block than the estimate assumed. On bee-factory the bare estimate ran out of gas about every second batch, using up to ~2× the estimate, so margins alone (1.3×, 2×) were not enough. A createBatch receipt timeout raises `TransactionPending` (deliberately not a `GnosisChainError`) and the endpoint answers **202** with `txHash`, `confirmed: false` and a "may still mine" message; being 2xx, the x402 payment settles (fail closed). A pending batch is registered like a created one; if it never mines, the record stays (no cleanup is wired). An approve timeout is a plain `GnosisChainError` (502). See `docs/buy-batch-for-owner-guide.md`.
 
 **Stamp list query parameters**:
@@ -235,7 +235,7 @@ Every batch a caller can obtain is registered to them — pool acquire, direct p
 
 The gateway supports x402 payment protocol for pay-per-request access without user accounts. When enabled, clients pay in USDC on Base chain to access stamp purchase and data upload endpoints.
 
-**Current Status**: Available on `dev` branch (testnet only)
+**Current Status**: Deployed on both staging (`dev`) and production (`main`); switched per environment by the `X402_ENABLED` / `X402_NETWORK` repository variables read in `deploy.yml` (`X402_ENABLED` defaults to `false` there, so the repo variable is what turns it on; network defaults: `base-sepolia` for dev, `base` for main). `GET /` reports `x402.enabled` for a running gateway.
 
 **Parent Issue**: [datafund/provenance-fellowship#23](https://github.com/datafund/provenance-fellowship/issues/23)
 
@@ -251,26 +251,19 @@ The gateway supports x402 payment protocol for pay-per-request access without us
 ```
 app/x402/
 ├── __init__.py      # Module init
-├── middleware.py    # FastAPI middleware for payment verification
-├── preflight.py     # Gateway balance checks
+├── dependency.py    # Router dependency: 402 / free-tier opt-in / verify (require_x402_payment, settle_payment_if_offered)
+├── middleware.py    # Settlement after a 2xx + response headers; network/USDC config
+├── preflight.py     # Bee (Gnosis) wallet balance checks
+├── base_balance.py  # Base ETH balance of the pay-to address (gates protected requests)
 ├── pricing.py       # Price calculation (BZZ → USD)
-├── access.py        # IP whitelist/blacklist
-├── audit.py         # Transaction audit logging
-└── ratelimit.py     # Per-IP rate limiting
+├── access.py        # IP whitelist/blacklist (not wired into requests yet, #379)
+├── audit.py         # Audit log (JSON lines)
+└── ratelimit.py     # Per-IP rate limiting (free tier)
 ```
 
-### x402 Test Coverage (196 tests)
+### x402 Tests
 
-```
-tests/
-├── test_x402_preflight.py    # 21 tests - Balance checks
-├── test_x402_pricing.py      # 25 tests - Price calculations
-├── test_x402_middleware.py   # 39 tests - HTTP middleware + free tier
-├── test_x402_access.py       # 36 tests - IP access control
-├── test_x402_audit.py        # 29 tests - Audit logging
-├── test_x402_ratelimit.py    # 25 tests - Rate limiting
-└── test_x402_integration.py  # 21 tests - Full flow tests
-```
+`tests/test_x402_*.py` (preflight, pricing, middleware, access, audit, ratelimit, integration), plus `test_base_balance.py`. `test_x402_live.py` is opt-in (see TEST_STRATEGY.md).
 
 ### Key Configuration
 
@@ -290,7 +283,7 @@ X402_FREE_TIER_RATE_LIMIT=3  # Requests/minute for free tier (default: 3)
 | User Type | Access | Rate Limit | Headers |
 |-----------|--------|------------|---------|
 | **Paying users** | Full access | 10/min | `X-PAYMENT-RESPONSE` |
-| **Free tier** | Limited access | 3/min | `X-Payment-Mode: free-tier` |
+| **Free tier** | Limited access | 3/min | request `X-Payment-Mode: free`; response echoes `free-tier` |
 | **Whitelisted IPs** | Full access | No limit | - |
 | **Blacklisted IPs** | Blocked | - | 403 |
 
@@ -306,6 +299,7 @@ X402_FREE_TIER_RATE_LIMIT=3  # Requests/minute for free tier (default: 3)
 When `X402_FREE_TIER_ENABLED=true` (default):
 - Users without x402 payment can still access protected endpoints
 - Stricter rate limit applied (3 requests/minute by default)
+- Opt in with request header `X-Payment-Mode: free` (the canonical request value)
 - Response includes `X-Payment-Mode: free-tier` header
 - When rate limit exceeded, returns 429 with payment upgrade info
 
@@ -315,7 +309,7 @@ When `X402_FREE_TIER_ENABLED=false`:
 
 ### Development Notes
 
-- x402 code is on `dev` branch - test on staging before merging to `main`
+- x402 runs on staging and production - test on staging (`dev`) before merging to `main`
 - Python SDK is v1 only (v2 under development)
 - All x402 transactions logged to `logs/x402_audit.jsonl`
 
@@ -398,6 +392,7 @@ The gateway exposes a `/metrics` endpoint (Prometheus text format) when `METRICS
 - `gateway_pool_acquires_total{size, status}`
 - `gateway_stamp_spend_refusals_total{operation, limit}` — purchases and extends refused by a spending limit (`limit` = `per_request` or `daily_budget`)
 - `gateway_stamp_spend_bzz_total{operation, charged}` — BZZ committed through the stamp endpoints (`charged` = `budget` or `paid`)
+- `gateway_requests_by_client_total{client_type, outcome}` — which clients are served and whether they are (`client_type` = `mcp`/`cli`/`sdk-js`/`browser`/`curl`/`http-lib`/`bot`/`other`/`none`; `outcome` = `ok`/`client_error`/`rate_limited`/`payment_required`/`server_error`)
 - `gateway_notary_signatures_total{status}`
 - `gateway_x402_payments_total{mode}` (paid/free/rejected)
 - `gateway_rate_limit_hits_total`
@@ -411,8 +406,19 @@ The gateway exposes a `/metrics` endpoint (Prometheus text format) when `METRICS
 - `gateway_stamp_min_ttl_seconds`, `gateway_uptime_seconds`
 - `gateway_bandwidth_credit_accounts`, `gateway_bandwidth_credit_bytes_total` (when `CHUNK_UPLOAD_ENABLED`)
 - `gateway_stamp_spend_callers`, `gateway_stamp_spend_bzz_today` — callers holding a spend balance today, and the BZZ charged to budgets so far. Polled rather than accumulated, because the day rolls over inside the tracker and a counter would keep climbing past midnight UTC.
+- `gateway_distinct_callers` — how many separate callers today. A count, not a list.
 
 **Info**: `gateway_info{version, environment, x402_enabled, pool_enabled, notary_enabled, chunk_upload_enabled}`
+
+**Who we serve, and the line on caller data (#347).** Production traffic turned out to be almost entirely one client — the MCP plugin, run by AI agents in cloud sandboxes — and 37 of its 84 production requests were being refused with 429, because the free tier allows three requests a minute and an agent making several calls in sequence exceeds it. Finding that meant reading reverse-proxy access logs by hand on the host. `gateway_requests_by_client_total` makes it a dashboard panel.
+
+`client_type` comes from a fixed table in `app/services/client_type.py`, **never from the `User-Agent` directly**. A metric label must not take a value the caller chooses, or anyone can mint unlimited time series — a cost attack on the metrics bill and a Prometheus instance that slows for everyone. Anything unrecognised becomes `other`.
+
+The rule this follows: **counts and buckets, never per-user records.** No hashed or truncated IP appears in any label — a hashed IP is pseudonymised, not anonymised, so it is still personal data, *and* still high-cardinality, failing on privacy and cost at once. `gateway_distinct_callers` needs to recognise a repeat caller to count distinctness, so the middleware keeps a salted hash in memory with a random per-process salt, and exports only the total: the values cannot be reversed, cannot be checked against a precomputed table, and cannot be correlated across restarts or between the two gateways. Nothing is persisted. A test asserts no caller string reaches `/metrics`.
+
+Per-caller detail stays in the logs, where retention is short and access is controlled, and is read when someone is investigating rather than exported continuously to a third party.
+
+`ClientMetricsMiddleware` is registered **after** the rate limiter and x402 so that it wraps them — Starlette runs the most recently added middleware outermost, so it sees the final response including their 429s and 402s, which are the outcomes the counter exists for. It is plain ASGI rather than a `BaseHTTPMiddleware` subclass: that base class wraps each request in an anyio task group and re-plumbs the streams, which deadlocked the entire test suite when stacked behind the existing middleware. `/metrics`, `/health` and `/` are excluded — Alloy scrapes and Docker healthchecks are the two most frequent requests the gateway sees and would bury everything else.
 
 **Bee chain-backend metrics** (scraped from the bundled Bee nodes, not produced by the gateway):
 - `bee_eth_backend_total_rpc_calls` / `bee_eth_backend_total_rpc_errors` — Gnosis RPC volume and failures
@@ -727,12 +733,11 @@ If the remote gateway (provenance-gateway.datafund.io) returns 503 or appears br
    ```
 
 2. **Check for Python version compatibility issues**:
-   - Docker uses Python 3.9
-   - Avoid `int | None` syntax (use `Optional[int]` instead)
-   - Avoid other Python 3.10+ features
+   - Docker uses Python 3.10 (`Dockerfile`: `python:3.10-slim`)
+   - Avoid Python 3.11+ features (e.g. `ExceptionGroup`/`except*`, `tomllib`, `typing.Self`)
+   - The codebase still writes `Optional[int]` rather than `int | None`; keep to that for consistency
 
 3. **Common issues**:
-   - `TypeError: unsupported operand type(s) for |: 'type' and 'NoneType'` → Use `Optional[T]` instead of `T | None`
    - Import errors → Check all dependencies are in requirements.txt
 
 4. **Quick fix workflow**:

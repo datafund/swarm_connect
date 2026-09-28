@@ -19,6 +19,16 @@ STAMP_ID_3 = "c" * 64
 STAMP_ID_NONEXISTENT = "d" * 64
 
 
+
+@pytest.fixture(autouse=True)
+def _chainstate(monkeypatch):
+    """Extend reads the current price for its minimum-amount check (#350)."""
+    from unittest.mock import AsyncMock
+    monkeypatch.setattr(
+        "app.services.swarm_api.get_chainstate",
+        AsyncMock(return_value={"currentPrice": "24000", "minimumValidityBlocks": 17280}),
+    )
+
 class TestStampPurchaseEdgeCases:
     """Edge cases and boundary tests for POST /api/v1/stamps/"""
 
@@ -320,9 +330,13 @@ class TestStampExtensionEdgeCases:
 
         extension_data = {"amount": 1}
 
+        # Below 24 hours' worth at the current price: refused before any spend.
+        # Each top-up is an on-chain transaction and holds Bee's single
+        # on-chain lock, so dust amounts cost far more than they add (#350).
         response = client.patch(f"/api/v1/stamps/{STAMP_ID_1}/extend", json=extension_data)
-        assert response.status_code == 200
-        mock_extend.assert_called_once_with(stamp_id=STAMP_ID_1, amount=1)
+        assert response.status_code == 400
+        assert response.json()["detail"]["code"] == "EXTENSION_TOO_SMALL"
+        mock_extend.assert_not_called()
 
     @patch('app.services.swarm_api.extend_postage_stamp')
     @patch('app.services.swarm_api.check_sufficient_funds', return_value={"sufficient": True, "required_bzz": 0.01, "wallet_balance_bzz": 100.0, "shortfall_bzz": 0})

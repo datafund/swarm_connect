@@ -19,6 +19,16 @@ client = TestClient(app)
 VALID_STAMP_ID = "a" * 64
 
 
+
+@pytest.fixture(autouse=True)
+def _chainstate(monkeypatch):
+    """Extend reads the current price for its minimum-amount check (#350)."""
+    from unittest.mock import AsyncMock
+    monkeypatch.setattr(
+        "app.services.swarm_api.get_chainstate",
+        AsyncMock(return_value={"currentPrice": "24000", "minimumValidityBlocks": 17280}),
+    )
+
 class TestAmountValidation:
     """Tests for amount field validation in stamp operations."""
 
@@ -397,9 +407,9 @@ class TestBusinessRuleValidation:
     def test_stamp_extension_business_rules(self, mock_stamps, mock_funds, mock_extend):
         """Test business rules for stamp extension."""
         # Extension amount should follow same rules as purchase amount
-        extend_data = {"amount": 1}  # Minimum extension
+        extend_data = {"amount": 1}  # Below 24 hours' worth (#350)
         response = client.patch(f"/api/v1/stamps/{VALID_STAMP_ID}/extend", json=extend_data)
-        assert response.status_code in [200, 404], "Minimum extension should be valid"
+        assert response.status_code in [400, 404], "Dust extensions are refused"
 
         # Very large extension
         extend_data = {"amount": 999999999999}
@@ -513,6 +523,6 @@ class TestDurationAmountExclusivity:
              patch('app.services.swarm_api.extend_postage_stamp', return_value=VALID_STAMP_ID):
             response = client.patch(
                 f"/api/v1/stamps/{VALID_STAMP_ID}/extend",
-                json={"amount": 10000000}
+                json={"amount": 500000000}
             )
             assert response.status_code == 200

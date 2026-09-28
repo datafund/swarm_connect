@@ -7,6 +7,7 @@ task that periodically polls wallet balances and stamp pool state.
 """
 import asyncio
 import logging
+import math
 import time
 
 from prometheus_client import Counter, Gauge, Info
@@ -66,6 +67,19 @@ node_stamp_min_ttl_seconds = Gauge(
 pool_stamp_min_ttl_seconds = Gauge(
     "gateway_pool_stamp_min_ttl_seconds", "Lowest TTL among pooled stamps"
 )
+bzz_usd_rate_configured = Gauge(
+    "gateway_bzz_usd_rate_configured",
+    "BZZ/USD rate the gateway prices with (X402_BZZ_USD_RATE)",
+)
+bzz_usd_rate_market = Gauge(
+    "gateway_bzz_usd_rate_market",
+    "BZZ/USD market rate from X402_BZZ_PRICE_FEED_URL; 0 when there is no feed "
+    "or it has failed repeatedly (the drift alert ignores 0)",
+)
+bzz_usd_rate_market_updated = Gauge(
+    "gateway_bzz_usd_rate_market_updated_timestamp_seconds",
+    "Unix time of the last successful BZZ/USD feed read (0 = never)",
+)
 uptime_seconds = Gauge(
     "gateway_uptime_seconds", "Process uptime in seconds"
 )
@@ -115,6 +129,35 @@ bandwidth_topup_bytes_total = Counter(
     "gateway_bandwidth_topup_bytes_total", "Total bytes of bandwidth credit sold via top-ups"
 )
 
+# ── Who we are serving, and whether we are serving them (#347) ──────────────
+#
+# Production traffic turned out to be almost entirely one client — the MCP
+# plugin, run by AI agents in cloud sandboxes — and 37 of its 84 production
+# requests were refused with 429. That was invisible until someone read the
+# reverse-proxy access logs by hand.
+#
+# Deliberately a NEW counter rather than a client_type label on the existing
+# ones. A dashboard panel graphs rate(gateway_rate_limit_hits_total[5m])
+# unaggregated; adding a label there would turn one line into six and silently
+# change what the panel means. Existing series stay as they are.
+#
+# client_type comes from a fixed table (app/services/client_type.py), never from
+# the User-Agent directly — a label must not take a value the caller chooses, or
+# anyone can mint unlimited series. Eight client types by five outcomes bounds
+# this at 40 series per environment.
+requests_by_client_total = Counter(
+    "gateway_requests_by_client_total",
+    "API requests by client type and outcome",
+    ["client_type", "outcome"],
+)
+
+# A COUNT of callers seen today, not their identities. Reset daily by the
+# tracker that feeds it.
+distinct_callers = Gauge(
+    "gateway_distinct_callers",
+    "Distinct callers seen so far today",
+)
+
 # ── Spending limits (#102) ──────────────────────────────────────────────────
 #
 # Refusals are the signal that matters. The daily budget is a number chosen
@@ -139,6 +182,24 @@ stamp_spend_bzz_total = Counter(
 stamp_spend_callers = Gauge(
     "gateway_stamp_spend_callers",
     "Distinct callers holding a non-zero spend balance today",
+)
+gateway_spend_bzz_today = Gauge(
+    "gateway_spend_bzz_today",
+    "BZZ reserved against the gateway-wide daily ceilings today (#363): "
+    "scope=total (everything) or scope=free (unpaid spending)",
+    ["scope"],
+)
+gateway_spend_uncertain_bzz_total = Counter(
+    "gateway_spend_uncertain_bzz_total",
+    "BZZ kept charged against the spending limits after a failure whose outcome "
+    "was uncertain (timeout after sending, cancellation, 5xx); may or may not "
+    "have been spent (#363)",
+    ["operation"],
+)
+gateway_spend_ceiling_bzz = Gauge(
+    "gateway_spend_ceiling_bzz",
+    "Configured gateway-wide daily ceilings (-1 = unlimited)",
+    ["scope"],
 )
 stamp_spend_bzz_today = Gauge(
     "gateway_stamp_spend_bzz_today",
@@ -200,10 +261,75 @@ async def update_node_stamp_metrics():
         logger.debug(f"Metrics: failed to get node-owned stamp info: {e}")
 
 
+_last_price_fetch = 0.0
+_price_feed_failures = 0
+# After this many consecutive failed reads the market gauge goes back to 0, so a
+# dead feed stops the drift alert from judging against a stale price.
+PRICE_FEED_MAX_FAILURES = 3
+
+
+def _first_usd_value(data):
+    """The first numeric "usd" value anywhere in a JSON document."""
+    if isinstance(data, dict):
+        v = data.get("usd")
+        if isinstance(v, (int, float)) and not isinstance(v, bool):
+            return float(v)
+        for child in data.values():
+            found = _first_usd_value(child)
+            if found is not None:
+                return found
+    elif isinstance(data, list):
+        for child in data:
+            found = _first_usd_value(child)
+            if found is not None:
+                return found
+    return None
+
+
+async def _update_bzz_rates() -> None:
+    """Configured rate always; market rate from the feed when one is set (#364)."""
+    global _last_price_fetch, _price_feed_failures
+    bzz_usd_rate_configured.set(settings.X402_BZZ_USD_RATE)
+    url = settings.X402_BZZ_PRICE_FEED_URL
+    if not url or time.monotonic() - _last_price_fetch < settings.X402_BZZ_PRICE_FEED_INTERVAL_SECONDS:
+        return
+    _last_price_fetch = time.monotonic()
+    try:
+        import httpx
+        async with httpx.AsyncClient(timeout=httpx.Timeout(5.0, connect=3.0)) as client:
+            response = await client.get(url)
+            response.raise_for_status()
+            if len(response.content) > 64 * 1024:
+                raise ValueError("price feed response too large")
+            price = _first_usd_value(response.json())
+        if price is None or not math.isfinite(price) or price <= 0:
+            raise ValueError(f"no usable positive 'usd' value in the feed response ({price!r})")
+    except Exception as e:
+        _price_feed_failures += 1
+        logger.warning(f"BZZ price feed read failed ({_price_feed_failures} in a row): {e}")
+        if _price_feed_failures >= PRICE_FEED_MAX_FAILURES:
+            bzz_usd_rate_market.set(0)
+        return
+    _price_feed_failures = 0
+    bzz_usd_rate_market.set(price)
+    bzz_usd_rate_market_updated.set(time.time())
+    ratio = settings.X402_BZZ_USD_RATE / price
+    if ratio > 2 or ratio < 0.5:
+        logger.warning(
+            f"BZZ/USD pricing rate {settings.X402_BZZ_USD_RATE} is {ratio:.1f}x the market "
+            f"price {price}; review X402_BZZ_USD_RATE"
+        )
+
+
 async def _poll_balances():
     """Periodically poll wallet balances and update Prometheus gauges."""
     while True:
         try:
+            # Isolated: a pricing-metric problem must not skip the balance polls.
+            try:
+                await _update_bzz_rates()
+            except Exception as e:
+                logger.debug(f"Metrics: BZZ rate update failed: {e}")
             # Update uptime
             if _start_time is not None:
                 uptime_seconds.set(time.monotonic() - _start_time)
@@ -321,9 +447,14 @@ async def _poll_balances():
             # climbing while the underlying balances reset at midnight UTC.
             try:
                 from app.services.spend_budget import spend_budget_tracker
-                spent = spend_budget_tracker.snapshot()["spent"]
+                snap = spend_budget_tracker.snapshot()
+                spent = snap["spent"]
                 stamp_spend_callers.set(len(spent))
                 stamp_spend_bzz_today.set(sum(spent.values()))
+                gateway_spend_bzz_today.labels(scope="total").set(snap["gateway_spent"])
+                gateway_spend_bzz_today.labels(scope="free").set(snap["giveaway_spent"])
+                gateway_spend_ceiling_bzz.labels(scope="total").set(settings.GATEWAY_DAILY_BZZ_CEILING)
+                gateway_spend_ceiling_bzz.labels(scope="free").set(settings.GATEWAY_DAILY_BZZ_FREE_CEILING)
             except Exception as e:
                 logger.debug(f"Metrics: failed to get spend budget state: {e}")
 
