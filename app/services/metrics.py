@@ -6,6 +6,7 @@ Defines custom business metrics (gauges, counters, info) and a background
 task that periodically polls wallet balances and stamp pool state.
 """
 import asyncio
+from typing import Optional
 import logging
 import math
 import time
@@ -261,7 +262,12 @@ async def update_node_stamp_metrics():
         logger.debug(f"Metrics: failed to get node-owned stamp info: {e}")
 
 
-_last_price_fetch = 0.0
+# None means never fetched. NOT 0.0: the throttle below compares against
+# time.monotonic(), which is time since boot, so a sentinel of 0.0 reads as
+# "fetched at boot" and suppresses the first read for a whole interval on any
+# host whose uptime is under X402_BZZ_PRICE_FEED_INTERVAL_SECONDS. That is every
+# freshly booted machine, and every CI runner — which is how this was found.
+_last_price_fetch: Optional[float] = None
 _price_feed_failures = 0
 # After this many consecutive failed reads the market gauge goes back to 0, so a
 # dead feed stops the drift alert from judging against a stale price.
@@ -291,7 +297,10 @@ async def _update_bzz_rates() -> None:
     global _last_price_fetch, _price_feed_failures
     bzz_usd_rate_configured.set(settings.X402_BZZ_USD_RATE)
     url = settings.X402_BZZ_PRICE_FEED_URL
-    if not url or time.monotonic() - _last_price_fetch < settings.X402_BZZ_PRICE_FEED_INTERVAL_SECONDS:
+    if not url:
+        return
+    if (_last_price_fetch is not None
+            and time.monotonic() - _last_price_fetch < settings.X402_BZZ_PRICE_FEED_INTERVAL_SECONDS):
         return
     _last_price_fetch = time.monotonic()
     try:
