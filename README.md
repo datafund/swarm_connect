@@ -260,12 +260,13 @@ Swarm Connect is a FastAPI-based API gateway that provides comprehensive access 
 
 #### 🛡️ Security & Rate Limiting
 - **Upload Size Limits**: Configurable maximum upload size (default: 10 MB) with clear 413 errors
+- **Download Size Limits**: `GET /api/v1/data/{ref}` streams from Bee and refuses content over `MAX_DOWNLOAD_SIZE_MB` (default 25 MB) with 413 `DOWNLOAD_TOO_LARGE`; a transfer taking longer than `DOWNLOAD_TIMEOUT_SECONDS` (default 120) gets 504
 - **Global Rate Limiting**: Per-IP sliding window rate limiter with burst capacity (default: 60 req/min + 10 burst)
-- **Spending Limits**: Stamp purchases and extensions are bounded per request and per caller per day, so no caller can drain the gateway's BZZ
+- **Spending Limits**: Stamp purchases and extensions are bounded per request and per caller per day, so no caller can drain the gateway's BZZ. All spending (purchases, extensions, pool buys and top-ups, for-owner batches) also counts against one gateway-wide daily ceiling, `GATEWAY_DAILY_BZZ_CEILING` (default 20 BZZ), of which unpaid spending may use `GATEWAY_DAILY_BZZ_FREE_CEILING` (default 10 BZZ), so the pool keeps headroom; 503 `GATEWAY_DAILY_SPEND_CEILING` when reached. Limits are reserved when a request is admitted, so concurrent requests cannot overrun them, and are given back only when the spend certainly did not happen (a timeout after the request was sent stays counted). Metrics: `gateway_spend_bzz_today{scope}`, `gateway_spend_ceiling_bzz{scope}` and `gateway_spend_uncertain_bzz_total{operation}` (charges kept after an uncertain failure). A spend admitted just before midnight UTC counts on the day it was admitted. To clear kept charges before midnight (after confirming on-chain that nothing was spent), stop the gateway, remove or lower the `"(gateway total)"` / `"(gateway giveaway)"` entries in `data/stamp_spend_budget.json`, and start it again.
 - **Input Validation**: Strict regex validation on stamp IDs (64-char hex) and references (64-128 char hex)
 - **Error Sanitization**: Internal details (IPs, ports, file paths) are never exposed in error responses
 - **Server Header Suppression**: `Server` header removed to prevent version fingerprinting
-- **Rate Limit Headers**: `X-RateLimit-Limit` and `X-RateLimit-Remaining` on every response
+- **Rate Limit Headers**: `X-RateLimit-Limit` and `X-RateLimit-Remaining` on rate-limited routes (free-tier writes report the stricter free-tier limit)
 
 #### 🛡️ Reliability Features
 - **Request Timeouts**: 10-second timeout for external API calls
@@ -392,9 +393,16 @@ When `X402_ENABLED=true`, protected endpoints (`POST /stamps/`, `POST /data/`) r
 3. **With payment** (using x402 client):
    ```bash
    curl -X POST http://localhost:8000/api/v1/stamps/ \
-        -H "X-PAYMENT: <base64-encoded-payment>"
-   # Returns 200 with stamp details
+        -H "X-PAYMENT: <base64-encoded-payment>" \
+        -H "Content-Type: application/json" -d '{"size": "small", "duration_hours": 24}'
+   # Returns 201 with {"batchID": ..., "message": ...}
    ```
+
+4. **Free tier** (when `X402_FREE_TIER_ENABLED=true`, the default): send
+   `X-Payment-Mode: free` instead of a payment. Limited to
+   `X402_FREE_TIER_RATE_LIMIT` requests per minute per IP (default **3**), then 429.
+   Responses to free-tier requests carry `X-Payment-Mode: free-tier`; send `free`
+   in requests.
 
 ### Features
 
@@ -413,6 +421,7 @@ When `X402_ENABLED=true`, protected endpoints (`POST /stamps/`, `POST /data/`) r
 | `POST /api/v1/data/manifest` | Yes |
 | `GET /api/v1/data/{ref}` | No (free) |
 | `GET /api/v1/stamps/` | No (free) |
+| `GET /api/v1/pricing` | No (free): current price quotes for the paid operations, so a client can learn a price without triggering a 402 |
 
 ### Configuration
 
@@ -440,6 +449,7 @@ X402_AUDIT_LOG_PATH=logs/x402_audit.jsonl
 ### Documentation
 
 See [x402 Operator Guide](docs/x402-operator-guide.md) for complete setup instructions.
+Every error carries `code` and `message` at the top level; the codes are listed in [Error codes](docs/error-codes.md).
 
 ## Monitoring
 
@@ -485,7 +495,7 @@ docker compose -f monitoring/docker-compose.monitoring.yml up -d
 1. Create a [Grafana Cloud](https://grafana.com/products/cloud/) account (free tier)
 2. Create an access policy with `metrics:write` scope, generate a token
 3. Set GitHub secrets: `GRAFANA_CLOUD_PROM_USERNAME` (instance ID) and `GRAFANA_CLOUD_API_TOKEN`
-4. Alloy deploys automatically via `docker-compose.yml` on next push
+4. Alloy is defined in `docker-compose.host.yml`; the deploy workflow starts it, and recreates it on every push so config changes take effect
 
 See the [monitoring epic](https://github.com/datafund/swarm_connect/issues/179) for full details.
 
@@ -544,7 +554,7 @@ List postage stamps. Default returns only local stamps (usable for uploads).
 | `exclusive` | bool | `false` | With `wallet`: only stamps purchased by this wallet (excludes shared/untracked) |
 
 - **Response**: `{"stamps": [...], "total_count": N}`
-- Each stamp includes `accessMode`: `"owned"` (exclusive), `"shared"` (free tier), or `null` (untracked)
+- Each stamp includes `accessMode`: `"owned"` (exclusive), `"shared"` (free tier), `"pool"` (pool inventory), or `null` (untracked)
 
 #### `GET /api/v1/stamps/{stamp_id}`
 Get detailed information about a specific stamp.
@@ -905,9 +915,9 @@ When the limit is exceeded, the gateway returns **429**:
 {"error": "Rate limit exceeded", "detail": "Too many requests. Try again in 42 seconds.", "retry_after": 42}
 ```
 
-**Exempt paths** (never rate-limited): `/`, `/health`, `/docs`, `/redoc`, `/openapi.json`
+**Exempt paths** (never rate-limited): `/`, `/health`, `/docs`, `/redoc`, `/api/v1/openapi.json`, `/metrics`. With x402 billing on, pre-stamped chunk uploads (`POST /api/v1/chunks/`) are also exempt, because each chunk is already paid for per byte (prepaid credit or the free daily quota).
 
-**Note**: Rate limiting is automatically disabled when x402 payment is enabled (x402 has its own rate limiting).
+**With x402 enabled** the global limit still applies to every other route. Free-tier writes additionally meet the x402 free-tier limit (`X402_FREE_TIER_RATE_LIMIT`, default 3/min), and count against both. Callers sharing one IP (NAT, CI runners, a shared backend) share one budget.
 
 ### Input Validation
 

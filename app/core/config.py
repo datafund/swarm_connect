@@ -2,7 +2,7 @@
 import os
 from typing import Optional, List
 from pydantic_settings import BaseSettings, SettingsConfigDict
-from pydantic import AnyHttpUrl, field_validator
+from pydantic import Field, AnyHttpUrl, field_validator
 from functools import lru_cache
 from dotenv import load_dotenv
 
@@ -44,6 +44,13 @@ class Settings(BaseSettings):
     X402_BZZ_USD_RATE: float = 0.50  # Manual BZZ/USD rate (1 BZZ = $0.50)
     X402_MARKUP_PERCENT: float = 50.0  # Markup percentage
     X402_MIN_PRICE_USD: float = 0.01  # Minimum charge per request
+    # Optional market price feed for BZZ/USD, used only to watch for drift
+    # (#364): prices stay on the configured X402_BZZ_USD_RATE, reviewed by a
+    # person, and an alert fires when it is more than 2x away from the market.
+    # Any JSON endpoint whose first numeric "usd" field is the price works, e.g.
+    # https://api.coingecko.com/api/v3/simple/price?ids=swarm-bzz&vs_currencies=usd
+    X402_BZZ_PRICE_FEED_URL: str = ""
+    X402_BZZ_PRICE_FEED_INTERVAL_SECONDS: int = 900
 
     # === x402 Threshold Settings (Gnosis wallet - warnings) ===
     X402_XBZZ_WARN_THRESHOLD: float = 10.0  # Warn if xBZZ < threshold
@@ -77,6 +84,16 @@ class Settings(BaseSettings):
     # any observed legitimate caller and far less than the wallet.
     STAMP_DAILY_BZZ_PER_CALLER: float = 0.5
     STAMP_SPEND_BUDGET_STATE_FILE: str = "data/stamp_spend_budget.json"
+    # Ceiling on everything the gateway spends in one UTC day, across every
+    # path: direct purchases and extensions (paid or not), pool purchases and
+    # top-ups, and batches bought for an external owner (#363). Every other
+    # limit is per caller, per origin or per hour; this one bounds the total,
+    # including through any bypass not yet found. -1 disables it.
+    GATEWAY_DAILY_BZZ_CEILING: float = 20.0
+    # Part of that ceiling open to unpaid spending (free-tier purchases and
+    # extensions, and testnet-paid ones). Keeps headroom for the pool's own
+    # purchases and top-ups, so free callers cannot starve it. -1 disables.
+    GATEWAY_DAILY_BZZ_FREE_CEILING: float = 10.0
     X402_RATE_LIMIT_PER_IP: int = 10  # Requests per minute per IP (for paying users)
 
     # === x402 Free Tier Settings ===
@@ -253,6 +270,14 @@ class Settings(BaseSettings):
 
     # === Upload Limits ===
     MAX_UPLOAD_SIZE_MB: int = 10  # Maximum file upload size in megabytes
+    # Largest body GET /data/{ref} will fetch from Bee and return (#353). The
+    # download is buffered to detect the content type, and it can be any Swarm
+    # reference, not only ones uploaded here, so without a cap a few requests
+    # for large content could exhaust memory and the chequebook.
+    MAX_DOWNLOAD_SIZE_MB: int = Field(25, ge=1)
+    # Total time allowed for fetching one download from Bee. httpx timeouts
+    # apply per read, so a slow trickle could otherwise hold the request open.
+    DOWNLOAD_TIMEOUT_SECONDS: int = Field(120, ge=1)
 
     # === Chunk Upload (stamped-chunk forwarding, Flow A) ===
     # When enabled, the gateway forwards a single client-supplied PRE-STAMPED chunk
@@ -411,6 +436,10 @@ class Settings(BaseSettings):
         env_file=".env",
         case_sensitive=True,
         extra="ignore",  # Ignore extra fields from .env
+        # A validation error otherwise echoes its input, and for a missing
+        # required field that input is every setting, signing keys included.
+        # Startup errors end up in container logs and the deploy job's log tail.
+        hide_input_in_errors=True,
     )
 
 

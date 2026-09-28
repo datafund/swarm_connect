@@ -77,7 +77,7 @@ X402_RATE_LIMIT_PER_IP=10            # 10 requests/minute per IP
 
 # === Free Tier ===
 X402_FREE_TIER_ENABLED=true          # Enable rate-limited free tier (default: true)
-X402_FREE_TIER_RATE_LIMIT=5          # Free tier requests per minute per IP (default: 5)
+X402_FREE_TIER_RATE_LIMIT=3          # Free tier requests per minute per IP (default: 3)
 
 # === Access Control ===
 X402_BLACKLIST_IPS=                  # Comma-separated: 192.168.1.100,10.0.0.50
@@ -128,6 +128,10 @@ minimum. There is no setting for the upload price alone:
 `X402_MIN_PRICE_USD` also floors stamp purchases. Before #365 an upload cost
 the price of a new 24-hour stamp sized to it.
 
+### Keeping the BZZ/USD rate honest (#364)
+
+Every price is computed from `X402_BZZ_USD_RATE`. It is **not** updated automatically. Set it explicitly per environment (GitHub variable `X402_BZZ_USD_RATE`, also `X402_MARKUP_PERCENT` and `X402_MIN_PRICE_USD`) and review it regularly. To be warned when it drifts, set `X402_BZZ_PRICE_FEED_URL`, for example `https://api.coingecko.com/api/v3/simple/price?ids=swarm-bzz&vs_currencies=usd`. The gateway then exports `gateway_bzz_usd_rate_configured` and `gateway_bzz_usd_rate_market`, logs a warning, and the Grafana alert "BZZ pricing rate off market" fires when the configured rate is more than 2× away from the market (above: overcharging; below 0.5×: sales can lose money).
+
 ## Access Control
 
 ### Whitelist (Free Access)
@@ -164,7 +168,7 @@ The gateway supports a rate-limited free tier that allows clients to use protect
 ```bash
 # === Free Tier ===
 X402_FREE_TIER_ENABLED=true           # Enable free tier (default: true)
-X402_FREE_TIER_RATE_LIMIT=5           # Requests per minute for free tier (default: 5)
+X402_FREE_TIER_RATE_LIMIT=3           # Requests per minute for free tier (default: 3)
 ```
 
 ### How It Works
@@ -213,15 +217,15 @@ When a client hits a protected endpoint without proper headers:
 | Header | Value | Purpose |
 |--------|-------|---------|
 | `X-PAYMENT` | Base64-encoded payment payload | Use paid tier |
-| `X-Payment-Mode` | `free` | Use free tier |
+| `X-Payment-Mode` | `free` (or `free-tier`) | Use free tier |
 
 ### Free Tier Response Headers
 
 When using free tier, responses include rate limit headers:
 
 ```
-X-RateLimit-Limit: 5
-X-RateLimit-Remaining: 4
+X-RateLimit-Limit: 3
+X-RateLimit-Remaining: 2
 X-RateLimit-Reset: 60
 X-Payment-Mode: free-tier
 ```
@@ -233,7 +237,7 @@ When free tier rate limit is exceeded:
 ```json
 {
   "error": "Rate limit exceeded",
-  "detail": "Rate limit exceeded (free tier): 6/5 requests per minute",
+  "detail": "Rate limit exceeded (free tier): 4/3 requests per minute",
   "message": "Free tier rate limit exceeded. Use x402 payment for higher limits.",
   "payment_info": {
     "price_usd": 0.01,

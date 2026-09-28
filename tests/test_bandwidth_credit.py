@@ -112,12 +112,17 @@ class TestPersistence:
         assert mgr2.balance("0xA") == 750
         assert mgr2.balance("0xB") == 2000
 
-    def test_corrupt_file_starts_fresh(self, state_file):
+    def test_corrupt_file_refuses_to_load(self, state_file):
+        """Prepaid balances must not be replaced by an empty ledger (#378)."""
+        import glob
+        from app.core.atomic_io import StateLoadError
         with open(state_file, "w") as f:
             f.write("{{not valid json")
         mgr = BandwidthCreditManager(state_file=state_file)
-        mgr.load_on_startup()
-        assert mgr.balance("0xanything") == 0
+        with pytest.raises(StateLoadError):
+            mgr.load_on_startup()
+        assert open(state_file).read() == "{{not valid json"
+        assert glob.glob(state_file + ".corrupt-*")
 
     def test_missing_file_starts_fresh(self, state_file):
         mgr = BandwidthCreditManager(state_file=state_file)
