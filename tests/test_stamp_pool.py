@@ -536,22 +536,71 @@ class TestPoolStatePersistence:
         assert loaded == set()
 
     def test_load_state_corrupt_file(self, state_file):
-        """Test loading corrupt state file returns empty set and logs warning."""
+        """Corrupt JSON must NOT read as a first run (#440).
+
+        These two tests asserted `== set()`, which is the defect: the gateway
+        would buy a fresh reserve it already owned, and the next _save_state
+        would overwrite the only record of the originals. They now assert the
+        fail-closed behaviour the permission case has had since #416.
+        """
+        from app.core.atomic_io import StateLoadError
         with open(state_file, 'w') as f:
             f.write("not valid json {{{")
 
         manager = StampPoolManager(state_file=state_file)
-        loaded = manager._load_state()
-        assert loaded == set()
+        with pytest.raises(StateLoadError):
+            manager._load_state()
 
     def test_load_state_wrong_type(self, state_file):
-        """Test loading state file with wrong JSON type returns empty set."""
+        """A JSON object where a list belongs is corruption, not an empty pool."""
+        from app.core.atomic_io import StateLoadError
         with open(state_file, 'w') as f:
             json.dump({"not": "a list"}, f)
 
         manager = StampPoolManager(state_file=state_file)
-        loaded = manager._load_state()
-        assert loaded == set()
+        with pytest.raises(StateLoadError):
+            manager._load_state()
+
+    def test_load_state_non_string_entries(self, state_file):
+        """A list containing something other than batch IDs is also corruption.
+
+        Checked explicitly rather than left to set(), which raises an opaque
+        "unhashable type" from a later line and reads as a bug in the pool.
+        """
+        from app.core.atomic_io import StateLoadError
+        with open(state_file, 'w') as f:
+            json.dump(["a" * 64, {"nested": "object"}], f)
+
+        manager = StampPoolManager(state_file=state_file)
+        with pytest.raises(StateLoadError):
+            manager._load_state()
+
+    def test_a_corrupt_file_is_copied_aside_and_left_in_place(self, state_file):
+        """The original must survive: it is the only record of the pool's batches.
+
+        unreadable_state keeps one copy per distinct content, so a crash loop
+        cannot fill the volume.
+        """
+        import glob
+        from app.core.atomic_io import StateLoadError
+        with open(state_file, 'w') as f:
+            f.write("not valid json {{{")
+
+        manager = StampPoolManager(state_file=state_file)
+        for _ in range(3):  # a restart loop
+            with pytest.raises(StateLoadError):
+                manager._load_state()
+
+        assert open(state_file).read() == "not valid json {{{", "the original was modified"
+        copies = glob.glob(f"{state_file}.corrupt-*")
+        assert len(copies) == 1, f"expected one backup across three attempts, got {len(copies)}"
+
+    def test_a_missing_file_is_still_a_first_run(self, state_file):
+        """The one case where starting empty is correct, and it must keep working."""
+        import os
+        if os.path.exists(state_file):
+            os.unlink(state_file)
+        assert StampPoolManager(state_file=state_file)._load_state() == set()
 
     @pytest.mark.asyncio
     async def test_unreadable_state_is_a_failed_sync_not_a_first_run(self, state_file):
@@ -1687,3 +1736,65 @@ class TestPoolSpendOutcomes:
                 {"checked_at": "", "stamps_purchased": 0, "stamps_topped_up": 0, "errors": []}))
         assert results["stamps_topped_up"] == 0
         assert any("daily spending ceiling" in e for e in mgr._errors), mgr._errors
+
+
+class TestCorruptPoolStateStopsSpending:
+    """A corrupt state file must pause spending, not trigger a fresh reserve (#440).
+
+    The loader raising is only half the fix. What matters operationally is the
+    consequence: the sync fails, _last_sync_ok stays False, and replenishment
+    therefore does not read the empty pool as a real deficit and buy against it.
+    Without that second half the gateway still spends, which is the actual cost
+    of the defect.
+    """
+
+    @pytest.fixture
+    def state_file(self, tmp_path):
+        return str(tmp_path / "pool_state.json")
+
+    @pytest.mark.asyncio
+    async def test_corrupt_state_makes_the_sync_fail_and_stops_replenishment(self, state_file):
+        with open(state_file, 'w') as f:
+            f.write("{ truncated")
+
+        manager = StampPoolManager(state_file=state_file)
+        bought = []
+
+        async def fake_buy(amount, depth, label):
+            bought.append(depth)
+            return "b" * 64
+
+        with patch('app.services.stamp_pool.settings.STAMP_POOL_ENABLED', True), \
+             patch('app.services.stamp_pool.swarm_api.get_all_stamps_processed',
+                   new=AsyncMock(return_value=[])), \
+             patch('app.services.stamp_pool.swarm_api.get_chainstate',
+                   new=AsyncMock(return_value={"currentPrice": "24000"})), \
+             patch('app.services.stamp_pool.swarm_api.purchase_postage_stamp',
+                   side_effect=fake_buy):
+            synced = await manager.sync_from_bee_node()
+            assert synced == 0
+            assert manager._last_sync_ok is False, "a corrupt file read as a successful sync"
+            await manager.check_and_replenish()
+
+        assert bought == [], f"bought {len(bought)} batches against an unknown pool"
+        assert any("pool state" in e.lower() or "corrupt" in e.lower() or "sync error" in e.lower()
+                   for e in manager._errors), manager._errors
+
+    @pytest.mark.asyncio
+    async def test_the_corrupt_file_is_not_overwritten_by_a_save(self, state_file):
+        """The failure must happen before anything writes.
+
+        Starting empty and then saving replaces the only list of the pool's
+        batches with an empty one — the irreversible half of the defect.
+        """
+        original = '["' + "a" * 64 + '", truncated'
+        with open(state_file, 'w') as f:
+            f.write(original)
+
+        manager = StampPoolManager(state_file=state_file)
+        with patch('app.services.stamp_pool.settings.STAMP_POOL_ENABLED', True), \
+             patch('app.services.stamp_pool.swarm_api.get_all_stamps_processed',
+                   new=AsyncMock(return_value=[])):
+            await manager.sync_from_bee_node()
+
+        assert open(state_file).read() == original, "the state file was overwritten"
