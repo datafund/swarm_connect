@@ -447,3 +447,41 @@ def test_late_result_reaches_a_key_whose_request_ended_before_the_202(tmp_path):
     state, entry, _ = s.begin("e", "h", "a2")
     assert state == "done" and entry["status"] == 201
     assert entry["headers"]["x-payment-transaction"] == "0xtx"
+
+
+# --- with the spend reservation (#408) --------------------------------------
+
+def _gateway_spent():
+    from app.api.endpoints import stamps
+    return stamps.spend_budget_tracker.snapshot()["gateway_spent"]
+
+
+def test_pending_paid_purchase_keeps_its_spend_hold(env):
+    """A 202 is not a refusal: the batch may still be bought, so the BZZ stays reserved."""
+    app, fac, buy, find = env
+    find.return_value = None
+    r = TestClient(app).post("/api/v1/stamps/", json=BODY, headers={"X-PAYMENT": pay()})
+    assert r.status_code == 202
+    assert _gateway_spent() > 0
+
+
+def test_refused_paid_purchase_releases_its_spend_hold(env):
+    """Bee's own 4xx answer: nothing was bought, so nothing stays reserved."""
+    app, fac, buy, find = env
+    req = httpx.Request("POST", "http://bee/stamps/1/17")
+    buy.side_effect = httpx.HTTPStatusError("x", request=req, response=httpx.Response(400, request=req))
+    r = TestClient(app).post("/api/v1/stamps/", json=BODY, headers={"X-PAYMENT": pay()})
+    assert r.status_code == 400
+    find.assert_not_called()
+    assert _gateway_spent() == 0
+
+
+def test_capacity_refusal_releases_its_spend_hold(env, monkeypatch):
+    from app.api.endpoints import stamps
+    app, fac, buy, find = env
+    monkeypatch.setattr(stamps, "_paid_purchases_in_flight", 1)
+    monkeypatch.setattr(settings, "STAMP_MAX_CONCURRENT_PAID_PURCHASES", 1)
+    r = TestClient(app).post("/api/v1/stamps/", json=BODY, headers={"X-PAYMENT": pay()})
+    assert r.status_code == 503
+    assert fac.settle.await_count == 0
+    assert _gateway_spent() == 0

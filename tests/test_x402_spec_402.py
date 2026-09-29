@@ -132,3 +132,14 @@ def test_every_payment_required_is_spec_shaped_and_keeps_cors(case):
     x402PaymentRequiredResponse.model_validate(r.json())
     assert r.headers.get("access-control-allow-origin") == "*"
     assert int(r.headers["content-length"]) == len(r.content)
+
+
+def test_top_level_402_keeps_the_error_envelope(client):
+    """With the app's error envelope (#381), code and message stay at the top level too."""
+    from starlette.exceptions import HTTPException as StarletteHTTPException
+    from app.main import http_exception_handler
+    client.app.add_exception_handler(StarletteHTTPException, http_exception_handler)
+    body = client.post("/api/v1/stamps/").json()
+    assert body["code"] == "HTTP_402" and body["message"] == body["error"]
+    assert body["x402Version"] == 1 and body["detail"]["accepts"] == body["accepts"]
+    x402PaymentRequiredResponse.model_validate(body)
