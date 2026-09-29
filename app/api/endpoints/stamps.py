@@ -14,7 +14,7 @@ from app.services.stamp_tracker import record_purchase
 from app.services.spend_budget import (
     GIVEAWAY_KEY, GLOBAL_KEY, spend_budget_tracker, spend_certainly_did_not_happen,
 )
-from app.x402.middleware import get_client_ip
+from app.core.client_ip import get_client_key
 from app.services.metrics import (
     gateway_spend_uncertain_bzz_total,
     stamp_purchases_total,
@@ -120,7 +120,7 @@ def _enforce_spend_limits(request: Request, cost_bzz: float, operation: str) -> 
             "spend budget still applies.", operation, settings.X402_NETWORK,
         )
     if not (paid and settings.paid_bypass_is_honoured()):
-        caller = get_client_ip(request)
+        caller = get_client_key(request)
 
     hold, refused, info = spend_budget_tracker.reserve_spend(cost_bzz, caller)
     if hold is not None:
