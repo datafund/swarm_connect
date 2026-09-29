@@ -198,7 +198,7 @@ async def test_sync_does_not_re_add_a_batch_released_while_bee_answers(tmp_path,
         # An acquire completes while the sync is waiting on Bee.
         mgr.reserve_stamp(batch)
         mgr.release_reserved_stamp(batch)
-        stamp_ownership_manager.register_stamp(batch_id=batch, owner="0xpayer",
+        stamp_ownership_manager.register_stamp(batch_id=batch, owner="0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
                                                mode="paid", source="pool_acquire")
         return _bee(batch)
 
@@ -207,17 +207,17 @@ async def test_sync_does_not_re_add_a_batch_released_while_bee_answers(tmp_path,
         assert await mgr.sync_from_bee_node() == 0
     assert batch not in mgr._pool
     assert _state(mgr) == []
-    assert stamp_ownership_manager.get_stamp_info(batch)["owner"] == "0xpayer"
+    assert stamp_ownership_manager.get_stamp_info(batch)["owner"] == "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
 
 
 def test_pool_ownership_is_never_taken_back_from_a_caller(monkeypatch):
     from app.services.stamp_ownership import POOL_OWNER, stamp_ownership_manager
     mine, theirs, new = "a" * 64, "b" * 64, "c" * 64
     monkeypatch.setitem(stamp_ownership_manager._registry, mine, {"owner": POOL_OWNER, "mode": "pool"})
-    monkeypatch.setitem(stamp_ownership_manager._registry, theirs, {"owner": "0xpayer", "mode": "paid"})
+    monkeypatch.setitem(stamp_ownership_manager._registry, theirs, {"owner": "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1", "mode": "paid"})
     monkeypatch.delitem(stamp_ownership_manager._registry, new, raising=False)
     StampPoolManager()._register_pool_ownership({mine, theirs, new})
-    assert stamp_ownership_manager.get_stamp_info(theirs)["owner"] == "0xpayer"
+    assert stamp_ownership_manager.get_stamp_info(theirs)["owner"] == "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
     assert stamp_ownership_manager.get_stamp_info(new)["owner"] == POOL_OWNER
     stamp_ownership_manager._registry.pop(new, None)
 
@@ -279,7 +279,7 @@ async def test_paid_non_delivery_is_logged_as_an_error(tmp_path, monkeypatch, ca
     from types import SimpleNamespace
 
     async def settled(request):
-        request.state.x402_payer = "0xpayer"
+        request.state.x402_payer = "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
         request.state.x402_settlement = SimpleNamespace(transaction="0xtx")
 
     from app.services.stamp_pool import StampPoolManager as M
@@ -288,4 +288,4 @@ async def test_paid_non_delivery_is_logged_as_an_error(tmp_path, monkeypatch, ca
         _, r = await _acquire_with_settle(tmp_path, monkeypatch, settled)
     assert r.status_code == 409
     err = [m for m in caplog.messages if "PAID NON-DELIVERY" in m]
-    assert err and "0xpayer" in err[0] and "0xtx" in err[0]
+    assert err and "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1" in err[0] and "0xtx" in err[0]
