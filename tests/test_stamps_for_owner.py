@@ -91,3 +91,37 @@ def test_chain_client_not_configured_503(client):
          patch("app.services.swarm_api.get_chainstate", AsyncMock(return_value={"currentPrice": "100000"})):
         r = client.post("/api/v1/stamps/for-owner", json={"owner": OWNER, "size": "small"})
     assert r.status_code == 503
+
+
+def test_receipt_timeout_returns_202_with_tx_hash(client, env):
+    """Broadcast but unconfirmed: 202 + txHash, not an error that implies no charge (#368)."""
+    from app.services.gnosis_chain import TransactionPending
+    env["gc"].create_batch = AsyncMock(side_effect=TransactionPending("0xfeed", "0x" + "cd" * 32, OWNER))
+    with patch("app.api.endpoints.stamps_for_owner.settings", _settings()):
+        r = client.post("/api/v1/stamps/for-owner", json={"owner": OWNER, "size": "small"})
+    assert r.status_code == 202, r.text
+    b = r.json()
+    assert b["txHash"] == "0xfeed"
+    assert b["batchID"] == "cd" * 32
+    assert b["confirmed"] is False
+    assert "may still mine" in b["message"]
+    # Recorded like a created batch, so the record exists if it mines.
+    env["rp"].assert_called_once_with("cd" * 32)
+    assert env["own"].register_stamp.call_args.kwargs["batch_id"] == "cd" * 32
+
+
+def test_confirmed_batch_reports_confirmed(client, env):
+    with patch("app.api.endpoints.stamps_for_owner.settings", _settings()):
+        r = client.post("/api/v1/stamps/for-owner", json={"owner": OWNER, "size": "small"})
+    assert r.status_code == 201 and r.json()["confirmed"] is True
+
+
+def test_signer_busy_returns_503_and_is_not_a_success(client, env):
+    """Nothing was sent; a 5xx is not settled by the x402 middleware."""
+    from app.services.gnosis_chain import SignerBusy
+    env["gc"].create_batch = AsyncMock(side_effect=SignerBusy("signer has an unconfirmed transaction (nonce 7)"))
+    with patch("app.api.endpoints.stamps_for_owner.settings", _settings()):
+        r = client.post("/api/v1/stamps/for-owner", json={"owner": OWNER, "size": "small"})
+    assert r.status_code == 503
+    assert r.json()["detail"]["code"] == "SIGNER_BUSY"
+    env["own"].register_stamp.assert_not_called()
