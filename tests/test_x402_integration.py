@@ -472,7 +472,9 @@ class TestFullPaymentFlow:
         assert response.status_code == 402
         assert "Insufficient balance" in response.json()["detail"]["error"]
 
-    @patch("app.x402.dependency.check_base_eth_balance", return_value=OK_BALANCE)
+    # create=True: the balance gate is removed by the settlement-stack catch-up
+    # (#371); this test must pass with or without it.
+    @patch("app.x402.dependency.check_base_eth_balance", return_value=OK_BALANCE, create=True)
     @patch("app.x402.dependency._get_facilitator_client")
     @patch("app.x402.dependency.get_price_quote")
     @patch("app.x402.middleware.settings")
