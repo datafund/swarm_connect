@@ -245,6 +245,7 @@ def test_an_empty_pool_is_reported_before_a_spent_allowance(pool, monkeypatch):
 def test_a_paid_acquire_leaves_the_per_client_counter_alone(pool, monkeypatch):
     monkeypatch.setattr(settings, "X402_NETWORK", "base")
     monkeypatch.setattr(settings, "POOL_ALLOWANCE_PER_IP", 1)
+    _no_settlement(monkeypatch)   # a hand-built paid request carries no payment (#398)
     pool.inventory["available"] = [17]
     from app.api.endpoints.pool import acquire_stamp, AcquireStampRequest
     req = SimpleNamespace(headers={}, client=SimpleNamespace(host="198.51.100.7"),
@@ -258,3 +259,19 @@ def test_no_per_client_keys_are_written_when_the_limit_is_off(pool, monkeypatch)
     pool.inventory["available"] = [17]
     assert TestClient(app).post("/api/v1/pool/acquire", json={"size": "small"}).status_code == 200
     assert pool.tracker.snapshot()["used"] == {"(unlisted)|small": 1}
+
+
+def test_per_client_limit_groups_an_ipv6_client_by_its_64(pool, monkeypatch):
+    """Keyed like every per-caller limit (#367): a fresh address in the same /64 is the same client."""
+    monkeypatch.setattr(settings, "TRUSTED_PROXY_HOPS", 1)
+    monkeypatch.setattr(settings, "POOL_DEFAULT_DAILY_ALLOWANCE", 10)
+    monkeypatch.setattr(settings, "POOL_ALLOWANCE_PER_IP", 1)
+    pool.inventory["available"] = [17]
+    client = TestClient(app)
+    first = client.post("/api/v1/pool/acquire", json={"size": "small"},
+                        headers={"X-Forwarded-For": "2001:db8:1:2::a"})
+    second = client.post("/api/v1/pool/acquire", json={"size": "small"},
+                         headers={"X-Forwarded-For": "2001:db8:1:2::b"})
+    other = client.post("/api/v1/pool/acquire", json={"size": "small"},
+                        headers={"X-Forwarded-For": "2001:db8:1:3::a"})
+    assert (first.status_code, second.status_code, other.status_code) == (200, 429, 200)

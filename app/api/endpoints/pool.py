@@ -20,7 +20,7 @@ from app.services.swarm_api import get_batch_expiry
 from app.services.stamp_ownership import stamp_ownership_manager
 from app.services.metrics import pool_acquires_total
 from app.services.pool_allowance import pool_allowance_tracker
-from app.core.client_ip import get_client_ip
+from app.core.client_ip import get_client_key
 from app.services.signed_auth import POOL_CHECK_PREFIX, authorize_signed_request
 from app.api.models.stamp import SIZE_PRESETS
 
@@ -358,7 +358,9 @@ async def acquire_stamp(
             }
         )
 
-    client_address = get_client_ip(http_request)
+    # Grouped like every other per-caller limit (#367): an IPv6 client is one
+    # /64, so it cannot take a fresh allowance per address.
+    client_address = get_client_key(http_request)
     if paid:
         logger.info("Pool acquire paid via x402, bypassing the daily allowance")
     else:
