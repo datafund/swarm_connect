@@ -472,6 +472,43 @@ class TestFullPaymentFlow:
         assert response.status_code == 402
         assert "Insufficient balance" in response.json()["detail"]["error"]
 
+    @patch("app.x402.dependency.check_base_eth_balance", return_value=OK_BALANCE)
+    @patch("app.x402.dependency._get_facilitator_client")
+    @patch("app.x402.dependency.get_price_quote")
+    @patch("app.x402.middleware.settings")
+    @patch("app.x402.dependency.settings")
+    def test_payer_that_is_not_an_address_refused_before_the_handler(
+        self, mock_dep, mock_mw, mock_price, mock_get_fac, mock_balance
+    ):
+        """The payer becomes a batch owner; an invalid one is refused before any spend (#384)."""
+        _configure(mock_dep, mock_mw)
+        mock_dep.X402_FACILITATOR_URL = "https://x402.org/facilitator"
+        mock_price.return_value = {"price_usd": 0.05, "description": "Test stamp"}
+
+        mock_fac = MagicMock()
+        mock_fac.verify = AsyncMock(return_value=VerifyResponse(
+            is_valid=True, invalid_reason=None, payer="0xnot-an-address"
+        ))
+        mock_get_fac.return_value = mock_fac
+        mock_mw_fac = MagicMock()
+        mock_mw_fac.settle = AsyncMock()
+
+        handler_calls = []
+
+        async def spend():
+            handler_calls.append(1)
+            return {"status": "created"}
+
+        app = _make_app(("POST", "/api/v1/stamps/", spend), facilitator_client=mock_mw_fac)
+        response = TestClient(app).post(
+            "/api/v1/stamps/", headers={"X-PAYMENT": create_valid_payment_header()}
+        )
+
+        assert response.status_code == 402
+        assert "payer is not a valid address" in response.json()["detail"]["error"]
+        assert handler_calls == []
+        mock_mw_fac.settle.assert_not_called()
+
 
 class TestProtectedEndpoints:
     """Test all protected endpoints are properly gated."""

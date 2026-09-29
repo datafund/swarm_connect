@@ -126,6 +126,21 @@ def _enforce_spend_limits(request: Request, cost_bzz: float, operation: str) -> 
     if hold is not None:
         return SpendReservation(operation, cost_bzz, caller, hold)
 
+    if info.get("state_unreadable"):
+        # Today's spend record could not be read (#378); refuse rather than
+        # guess, and say so plainly instead of claiming a limit is reached.
+        stamp_spend_refusals_total.labels(operation=operation, limit="state_unreadable").inc()
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={
+                "code": "SPEND_BUDGET_UNAVAILABLE",
+                "message": (
+                    "Stamp purchases are paused until the operator restores the "
+                    f"gateway's spend records, or until {info['resets_at']}."
+                ),
+            },
+        )
+
     if refused in (GLOBAL_KEY, GIVEAWAY_KEY):
         which = "gateway_daily" if refused == GLOBAL_KEY else "gateway_free_daily"
         logger.error(
