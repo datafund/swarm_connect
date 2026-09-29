@@ -126,6 +126,9 @@ class TestEndpointBehaviour:
         import app.api.endpoints.pool as pool_ep
         monkeypatch.setattr(pool_ep, "pool_allowance_tracker",
                             pool_allowance.pool_allowance_tracker)
+        # Stock the pool: an empty pool is answered with 409 before any allowance.
+        monkeypatch.setattr(pool_ep.stamp_pool_manager, "get_available_stamp",
+                            lambda d: type("S", (), {"depth": 17})())
 
         resp = TestClient(app).post("/api/v1/pool/acquire", json={"size": "small"},
                                     headers={"Origin": APP})
@@ -302,7 +305,10 @@ class TestPaidAcquireBypassesTheAllowance:
         monkeypatch.setattr(settings, "POOL_DAILY_ALLOWANCES", f"{APP}=0")
         monkeypatch.setattr(settings, "POOL_DEFAULT_DAILY_ALLOWANCE", 0)
         tracker = PoolAllowanceTracker(state_file=str(tmp_path / "a.json"))
-        self._client(monkeypatch, tmp_path, tracker)
+        pool_ep = self._client(monkeypatch, tmp_path, tracker)
+        # Stock the pool: an empty pool is answered with 409 before any allowance.
+        monkeypatch.setattr(pool_ep.stamp_pool_manager, "get_available_stamp",
+                            lambda d: type("S", (), {"depth": 17})())
 
         resp = TestClient(app).post("/api/v1/pool/acquire", json={"size": "small"},
                                     headers={"Origin": APP})

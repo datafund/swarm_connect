@@ -118,7 +118,10 @@ class PoolAllowanceTracker:
                 data = json.load(f)
             if data.get("day") == self._day:
                 self._used = {k: int(v) for k, v in (data.get("used") or {}).items()}
-                logger.info("Loaded pool allowance state for %s: %s", self._day, self._used)
+                # Counts only: per-client keys carry client addresses, which do
+                # not belong in logs.
+                logger.info("Loaded pool allowance state for %s: %d counters, %d batches",
+                            self._day, len(self._used), sum(self._used.values()))
         except Exception as e:
             # Never fail startup over a counter. Worst case the allowance resets,
             # and the hourly purchase ceiling still bounds the damage.
@@ -156,6 +159,17 @@ class PoolAllowanceTracker:
             return configured[origin_key]
         return settings.POOL_DEFAULT_DAILY_ALLOWANCE
 
+    def check_address(self, origin: Optional[str], size: str, address: str) -> Tuple[bool, dict]:
+        """Whether one client address may take another batch within its origin's bucket (#366)."""
+        limit = settings.POOL_ALLOWANCE_PER_IP
+        key = f"{_key(origin, size)}|{address}"
+        with self._lock:
+            self._roll_day()
+            used = self._used.get(key, 0)
+        info = {"address_allowance": limit, "address_used": used,
+                "resets_at": f"{_today()}T24:00:00Z", "size": size}
+        return (limit == UNLIMITED or used < limit), info
+
     def check(self, origin: Optional[str], size: str = "small") -> Tuple[bool, dict]:
         """Whether this origin may take another batch, and the numbers behind it.
 
@@ -185,11 +199,17 @@ class PoolAllowanceTracker:
             return True, info
         return used < limit, info
 
-    def consume(self, origin: Optional[str], size: str = "small") -> None:
+    def consume(self, origin: Optional[str], size: str = "small",
+                address: Optional[str] = None) -> None:
+        """Count one batch against the origin and, when a per-client limit is
+        set, against the client address too, in one write."""
         key = _key(origin, size)
         with self._lock:
             self._roll_day()
             self._used[key] = self._used.get(key, 0) + 1
+            if address and settings.POOL_ALLOWANCE_PER_IP != UNLIMITED:
+                address_key = f"{key}|{address}"
+                self._used[address_key] = self._used.get(address_key, 0) + 1
             self._save()
 
     def snapshot(self) -> dict:
