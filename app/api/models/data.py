@@ -41,6 +41,14 @@ class DataUploadResponse(BaseModel):
     """Response model for successful data upload."""
     reference: str = Field(..., description="Swarm reference hash of uploaded data")
     message: str = Field(default="Data uploaded successfully", description="Success message")
+    expires_at: Optional[str] = Field(
+        default=None,
+        description=(
+            "When the stamp used runs out (UTC, e.g. 2026-09-25T10:00:00Z; an estimate at today's price, null if unknown). "
+            "Swarm keeps data only while its stamp is valid: extend the stamp before this "
+            "time or the data can disappear."
+        ),
+    )
     timing: Optional[UploadTiming] = Field(
         default=None,
         description="Timing breakdown (only included if include_timing=true)"
@@ -66,6 +74,14 @@ class ManifestUploadResponse(BaseModel):
         ...,
         description="Number of files in the uploaded collection",
         example=50
+    )
+    expires_at: Optional[str] = Field(
+        default=None,
+        description=(
+            "When the stamp used runs out (UTC, e.g. 2026-09-25T10:00:00Z; an estimate at today's price, null if unknown). "
+            "Swarm keeps data only while its stamp is valid: extend the stamp before this "
+            "time or the data can disappear."
+        ),
     )
     message: str = Field(
         default="Collection uploaded successfully",

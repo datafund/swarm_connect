@@ -22,6 +22,7 @@ from app.services.swarm_api import (
     upload_data_to_swarm,
     download_data_from_swarm,
     DownloadTooLargeError,
+    get_batch_expiry,
     upload_collection_to_swarm,
     validate_tar,
     count_tar_files,
@@ -48,6 +49,7 @@ logger = logging.getLogger(__name__)
 # uploaded file. 8 KB is far more than a boundary plus part headers need, and
 # far less than any size that would matter for the limit itself.
 MULTIPART_ENVELOPE_ALLOWANCE = 8 * 1024
+
 router = APIRouter()
 
 
@@ -445,7 +447,8 @@ async def upload_data(
         response = DataUploadResponse(
             reference=reference,
             message=f"File '{file.filename}' uploaded successfully",
-            timing=timing
+            timing=timing,
+            expires_at=await get_batch_expiry(stamp_id),
         )
 
         # Always add Server-Timing header (useful for browser devtools)
@@ -876,7 +879,8 @@ async def upload_manifest(
             reference=reference,
             file_count=file_count,
             message=f"Collection uploaded successfully with {file_count} files",
-            timing=timing
+            timing=timing,
+            expires_at=await get_batch_expiry(stamp_id),
         )
 
         # Always add Server-Timing header (useful for browser devtools)
