@@ -173,6 +173,13 @@ class StampPurchaseResponse(BaseModel):
     """Response model for successful stamp purchase."""
     batchID: str = Field(..., description="The unique identifier of the purchased stamp batch.")
     message: str = Field(..., description="Success message.")
+    expires_at: Optional[str] = Field(
+        default=None,
+        description=("Estimated time the stamp runs out (UTC, e.g. 2026-09-25T10:00:00Z), from the amount "
+                     "funded at today's price; it includes the 5% amount margin, so a 24 h request shows "
+                     "about 25 h. The price moves, so extend with a margin: data uploaded with the stamp "
+                     "can disappear once it runs out."),
+    )
 
     model_config = {
         "json_schema_extra": {
@@ -221,6 +228,11 @@ class StampForOwnerResponse(BaseModel):
     secondsSincePurchase: Optional[int] = Field(None, description="Seconds since creation.")
     estimatedReadyAt: Optional[str] = Field(None, description="ISO timestamp when the batch should be usable.")
     propagationStatus: Optional[str] = Field(None, description="'propagating' / 'ready' / 'unknown'.")
+    confirmed: bool = Field(
+        default=True,
+        description="False (with HTTP 202) when createBatch was broadcast but not confirmed in time: "
+                    "the batch may still be created. Check txHash before retrying.",
+    )
     message: str = Field(default="Batch created for owner", description="Success message.")
 
 
@@ -261,6 +273,11 @@ class StampExtensionResponse(BaseModel):
     """Response model for successful stamp extension."""
     batchID: str = Field(..., description="The unique identifier of the extended stamp batch.")
     message: str = Field(..., description="Success message.")
+    expires_at: Optional[str] = Field(
+        default=None,
+        description=("Estimated new expiry from the batch's TTL on the node (UTC; null if the node has "
+                     "not reported it yet). An estimate at today's price."),
+    )
 
     model_config = {
         "json_schema_extra": {

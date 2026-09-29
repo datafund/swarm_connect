@@ -31,6 +31,9 @@ def is_testnet_network(network: str) -> bool:
 
 class Settings(BaseSettings):
     PROJECT_NAME: str = "Provenance Gateway"
+    # Where the approved service terms are published; shown on / as terms_url
+    # (#383). Empty (null) until the terms are approved: TERMS.md is a draft.
+    TERMS_URL: str = ""
     API_V1_STR: str = "/api/v1"
     SWARM_BEE_API_URL: AnyHttpUrl  # validates that it's a URL
 

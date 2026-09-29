@@ -46,6 +46,7 @@ without being listed here, or listed here but no longer raised.
 
 | Code | Status | Meaning | What to do |
 |---|---|---|---|
+| `ACCESS_BLOCKED` | 403 | The operator has blocked this address. Applied before any other handling, so it is the one refusal that says nothing about the request itself. IPv6 is matched by its `/64` and IPv4-mapped IPv6 by the IPv4 address, so switching addresses within one allocation does not evade it. | Nothing the caller can change. Contact the operator if you believe it is wrong. |
 | `VALIDATION_ERROR` | 422 | The request body, query or path failed validation. `detail` is the list of field errors. | Fix the fields named in `detail`. Do not retry unchanged. |
 | `BODY_TOO_LARGE` | 413 | A JSON body is over the gateway's JSON size limit. | Send a smaller body. File uploads use multipart, which this limit does not apply to. |
 | `JSON_TOO_DEEP` | 400 | A JSON body is nested too deeply. | Flatten the body. |
@@ -87,6 +88,7 @@ without being listed here, or listed here but no longer raised.
 | `OWNER_NOT_ALLOWLISTED` | 403 | Buy-batch-for-owner: the owner address is not allowed. | Ask the operator to allow-list the address. |
 | `COST_TOO_HIGH` | 400 | Buy-batch-for-owner: the batch would cost more than the configured maximum. | Use a smaller depth or a shorter duration. |
 | `SIGNER_INSUFFICIENT_FUNDS` | 503 | Buy-batch-for-owner: the gateway's signer wallet cannot fund the batch. | Retry later; the operator must refill the wallet. |
+| `SIGNER_BUSY` | 503 | Buy-batch-for-owner: another batch creation holds the signer, or an earlier transaction from it is still unconfirmed. **Nothing was sent and nothing was charged** — the gateway serialises signer use so two creations cannot share a nonce. | Retry in a minute. If it persists, an earlier transaction is stuck; the operator should check the signer wallet. |
 | `CREATE_BATCH_FAILED` | 502 | Buy-batch-for-owner: the on-chain createBatch did not succeed. The reason is deliberately **not** in the response — it is RPC and contract internals, logged for the operator only. No BZZ moved for a reverted or unsent transaction; a receipt timeout answers 202 instead, not this. | Retry. If it repeats, the operator has the detail in the logs. |
 
 ## Uploads

@@ -60,6 +60,7 @@ X402_NETWORK=base-sepolia                            # Network identifier
 X402_BZZ_USD_RATE=0.50               # Manual BZZ/USD rate
 X402_MARKUP_PERCENT=50               # 50% markup on BZZ cost
 X402_MIN_PRICE_USD=0.01              # Minimum $0.01 per request
+X402_BANDWIDTH_USD_PER_GB=0.10       # Paid uploads and chunk credit, per GB of bandwidth
 
 # === Gnosis Wallet Thresholds (warnings) ===
 X402_XBZZ_WARN_THRESHOLD=10          # Warn if xBZZ wallet < 10
@@ -72,7 +73,8 @@ X402_BASE_ETH_CRITICAL_THRESHOLD=0.001  # Block if Base ETH < 0.001 (~10 txs)
 
 # === Limits ===
 X402_MAX_STAMP_BZZ=5                 # Max 5 BZZ per stamp purchase
-X402_RATE_LIMIT_PER_IP=10            # 10 requests/minute per IP
+# X402_RATE_LIMIT_PER_IP is not enforced. Paid requests are bounded by the global limiter
+# (RATE_LIMIT_PER_MINUTE + RATE_LIMIT_BURST) once it runs alongside x402 (#401).
 
 # === Free Tier ===
 X402_FREE_TIER_ENABLED=true          # Enable rate-limited free tier (default: true)
@@ -80,7 +82,7 @@ X402_FREE_TIER_RATE_LIMIT=3          # Free tier requests per minute per IP (def
 
 # === Access Control ===
 X402_BLACKLIST_IPS=                  # Comma-separated: 192.168.1.100,10.0.0.50
-X402_WHITELIST_IPS=127.0.0.1         # Free access for these IPs
+# X402_WHITELIST_IPS has no effect (no payment allowlist; see Access Control)
 
 # === Audit ===
 X402_AUDIT_LOG_PATH=logs/x402_audit.jsonl
@@ -112,31 +114,37 @@ Example for a 24-hour stamp at depth 17:
 
 The minimum price (`X402_MIN_PRICE_USD`) ensures you always cover costs.
 
+**Uploads are priced as bandwidth, not storage.** A paid `POST /api/v1/data/`
+(or `/data/manifest`) writes with a stamp the caller supplies, so storage is
+already paid for. The price is:
+
+```
+Upload Price = max(Content-Length / 10^9 × X402_BANDWIDTH_USD_PER_GB × (1 + MARKUP_PERCENT/100), X402_MIN_PRICE_USD)
+```
+
+A request without `Content-Length` is priced at `MAX_UPLOAD_SIZE_MB`. With the
+defaults ($0.10/GB, 50% markup, 10 MB cap) every upload costs the $0.01
+minimum. There is no setting for the upload price alone:
+`X402_BANDWIDTH_USD_PER_GB` also prices chunk-credit top-ups, and
+`X402_MIN_PRICE_USD` also floors stamp purchases. Before #365 an upload cost
+the price of a new 24-hour stamp sized to it.
+
 ### Keeping the BZZ/USD rate honest (#364)
 
 Every price is computed from `X402_BZZ_USD_RATE`. It is **not** updated automatically. Set it explicitly per environment (GitHub variable `X402_BZZ_USD_RATE`, also `X402_MARKUP_PERCENT` and `X402_MIN_PRICE_USD`) and review it regularly. To be warned when it drifts, set `X402_BZZ_PRICE_FEED_URL`, for example `https://api.coingecko.com/api/v3/simple/price?ids=swarm-bzz&vs_currencies=usd`. The gateway then exports `gateway_bzz_usd_rate_configured` and `gateway_bzz_usd_rate_market`, logs a warning, and the Grafana alert "BZZ pricing rate off market" fires when the configured rate is more than 2× away from the market (above: overcharging; below 0.5×: sales can lose money).
 
 ## Access Control
 
-### Whitelist (Free Access)
+### No payment allowlist
 
-IPs in the whitelist bypass x402 payment entirely:
-
-```bash
-X402_WHITELIST_IPS=192.168.1.100,10.0.0.1
-```
-
-Use for:
-- Internal services
-- Trusted partners
-- Development/testing
+There is no allowlist that bypasses payment. `X402_WHITELIST_IPS` has no effect, and the gateway logs a warning at startup if it is set: an address-based bypass would give paid operations away to anyone who can appear from a listed address. Trusted internal callers should pay, or use the free tier.
 
 ### Blacklist (Blocked)
 
-IPs in the blacklist receive 403 Forbidden:
+Addresses in the blocklist receive 403 `ACCESS_BLOCKED` on every route, before any other work. IPs and CIDR ranges are accepted; IPv6 clients are best blocked by their /64. The list is read at startup, so a change takes a restart. For an immediate block, use the proxy (see `docs/mainnet-runbook.md`).
 
 ```bash
-X402_BLACKLIST_IPS=203.0.113.50
+X402_BLACKLIST_IPS=203.0.113.50,2001:db8:1234:5678::/64
 ```
 
 Use for:
@@ -179,7 +187,7 @@ When a client hits a protected endpoint without proper headers:
       "network": "base-sepolia",
       "maxAmountRequired": "10000",
       "resource": "http://localhost:8000/api/v1/data/",
-      "description": "Data upload (1024 bytes, 24h)",
+      "description": "Upload bandwidth (1024 bytes, stored with the stamp you supplied)",
       "mimeType": "application/json",
       "payTo": "0xYourAddress...",
       "maxTimeoutSeconds": 300,

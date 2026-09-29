@@ -716,7 +716,7 @@ class TestReservation:
             with patch("app.services.swarm_api.get_chainstate", new=AsyncMock(return_value=CHAINSTATE)), \
                  patch("app.services.swarm_api.check_sufficient_funds", new=AsyncMock(return_value=FUNDS_OK)), \
                  patch("app.services.swarm_api.purchase_postage_stamp", new=AsyncMock(return_value=STAMP_ID)), \
-                 patch("app.api.endpoints.stamps.get_client_ip", return_value=ip):
+                 patch("app.api.endpoints.stamps.get_client_key", return_value=ip):
                 codes.append(TestClient(app).post("/api/v1/stamps/", json={"depth": 17, "duration_hours": 24}).status_code)
         assert 503 in codes
         assert tracker.snapshot()["gateway_spent"] <= 0.01 + 1e-9
@@ -764,7 +764,7 @@ class TestHolds:
             with patch("app.services.swarm_api.get_chainstate", new=AsyncMock(return_value=CHAINSTATE)), \
                  patch("app.services.swarm_api.check_sufficient_funds", new=AsyncMock(return_value=FUNDS_OK)), \
                  patch("app.services.swarm_api.purchase_postage_stamp", new=AsyncMock(return_value=STAMP_ID)), \
-                 patch("app.api.endpoints.stamps.get_client_ip", return_value=ip):
+                 patch("app.api.endpoints.stamps.get_client_key", return_value=ip):
                 codes.append(TestClient(app).post("/api/v1/stamps/", json={"depth": 17, "duration_hours": 24}).status_code)
         assert 503 in codes
         # The pool can still reserve from the remaining gateway ceiling.

@@ -169,11 +169,27 @@ class TestOneImplementation:
         from app.core.client_ip import get_client_ip as canonical
         from app.middleware.rate_limit import get_client_ip as rate_limit_copy
         from app.x402.middleware import get_client_ip as x402_copy
-        from app.api.endpoints.stamps import get_client_ip as stamps_copy
 
         assert rate_limit_copy is canonical
         assert x402_copy is canonical
-        assert stamps_copy is canonical
+
+    def test_the_spend_limits_key_on_the_grouped_value(self):
+        """The stamp handlers must use get_client_key, not get_client_ip (#367).
+
+        An IPv6 client is normally handed a whole /64, so a per-caller budget
+        keyed on the full address can be defeated by presenting fresh addresses
+        from the same allocation. This asserts the module imports the grouped
+        helper and not the raw one — the original divergence check looked for
+        get_client_ip here and would have passed while the limit was bypassable.
+        """
+        import app.api.endpoints.stamps as stamps_ep
+        from app.core.client_ip import get_client_key as canonical_key
+
+        assert stamps_ep.get_client_key is canonical_key
+        assert not hasattr(stamps_ep, "get_client_ip"), (
+            "stamps imports the ungrouped helper again; per-caller limits must "
+            "key on get_client_key"
+        )
 
 
 class TestTheLimitsUseIt:

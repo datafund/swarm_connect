@@ -176,6 +176,18 @@ if settings.RATE_LIMIT_ENABLED:
     app.add_middleware(RateLimitMiddleware)
     logger.info(f"Global rate limiting enabled: {settings.RATE_LIMIT_PER_MINUTE}/min + {settings.RATE_LIMIT_BURST} burst")
 
+# Blocklist (#379). Added after the rate limiter, so it runs before it (outer).
+if settings.X402_BLACKLIST_IPS.strip():
+    from app.middleware.access_list import AccessListMiddleware
+    app.add_middleware(AccessListMiddleware, blocked=settings.X402_BLACKLIST_IPS)
+    logger.info("IP blocklist enabled")
+# Documented but deliberately not implemented: an allowlist that skips payment
+# would give paid operations away to anyone who can appear from a listed
+# address. Say so rather than silently ignore it.
+if settings.X402_WHITELIST_IPS.strip():
+    logger.warning("X402_WHITELIST_IPS is set but has no effect: listed IPs do not bypass payment. "
+                   "Remove it to silence this warning.")
+
 # Add x402 payment middleware if enabled (must be added before CORS)
 if settings.X402_ENABLED:
     from app.x402.middleware import X402Middleware
@@ -308,6 +320,9 @@ async def read_root():
     response_data = {
         "status": "ok",
         "message": f"Welcome to {settings.PROJECT_NAME}",
+        # What a paid request buys, what happens on failure, and that data
+        # lives only as long as its stamp (#383).
+        "terms_url": settings.TERMS_URL or None,
         # Build and process age. Both were previously only readable from /metrics,
         # which is not public any more (#188) — and they are the two fields an
         # external checker needs to tell whether the gateway was redeployed or
