@@ -438,6 +438,7 @@ X402_NETWORK=base-sepolia       # or "base" for mainnet
 X402_BZZ_USD_RATE=0.50          # BZZ to USD rate
 X402_MARKUP_PERCENT=50          # Profit margin
 X402_MIN_PRICE_USD=0.01         # Minimum charge
+X402_BANDWIDTH_USD_PER_GB=0.10  # Paid uploads and chunk credit (bandwidth)
 
 # Access Control
 X402_BLACKLIST_IPS=             # Blocked IPs / CIDR ranges (403 on every route)

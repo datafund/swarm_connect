@@ -11,7 +11,6 @@ from app.x402.pricing import (
     apply_markup,
     apply_minimum_price,
     calculate_stamp_price_usd,
-    calculate_upload_price_usd,
     get_price_quote,
     PLUR_PER_BZZ,
 )
@@ -207,76 +206,28 @@ class TestCalculateStampPriceUSD:
         assert "breakdown" not in result
 
 
-class TestCalculateUploadPriceUSD:
-    """Test upload price calculations."""
+class TestUploadPricedAsBandwidth:
+    """An upload uses the caller's own stamp: only bandwidth is charged (#365)."""
 
-    @patch("app.x402.pricing.settings")
-    @patch("app.x402.pricing.get_chainstate", new_callable=AsyncMock)
     @pytest.mark.asyncio
-    async def test_small_upload(self, mock_chainstate, mock_settings):
-        """Calculate price for small upload (fits in minimum depth)."""
-        mock_settings.X402_BZZ_USD_RATE = 0.50
-        mock_settings.X402_MARKUP_PERCENT = 50.0
-        mock_settings.X402_MIN_PRICE_USD = 0.01
+    async def test_upload_quote_is_the_bandwidth_price(self, monkeypatch):
+        from app.core.config import settings
+        from app.x402.pricing import calculate_bandwidth_price_usd
+        monkeypatch.setattr(settings, "X402_BANDWIDTH_USD_PER_GB", 0.10)
+        monkeypatch.setattr(settings, "X402_MIN_PRICE_USD", 0.0001)
+        size = 5 * 10 ** 8
+        quote = await get_price_quote(operation="upload", size_bytes=size)
+        assert quote["price_usd"] == calculate_bandwidth_price_usd(size)["price_usd"]
 
-        mock_chainstate.return_value = {"currentPrice": "1000"}
-
-        # 1 KB upload
-        result = await calculate_upload_price_usd(
-            size_bytes=1024,
-            duration_hours=24,
-            include_breakdown=True
-        )
-
-        assert "price_usd" in result
-        assert "breakdown" in result
-        assert result["breakdown"]["depth_used"] == 17  # Minimum depth
-
-    @patch("app.x402.pricing.settings")
-    @patch("app.x402.pricing.get_chainstate", new_callable=AsyncMock)
     @pytest.mark.asyncio
-    async def test_large_upload_increases_depth(self, mock_chainstate, mock_settings):
-        """Large uploads should use higher depth."""
-        mock_settings.X402_BZZ_USD_RATE = 0.50
-        mock_settings.X402_MARKUP_PERCENT = 50.0
-        mock_settings.X402_MIN_PRICE_USD = 0.01
-
-        mock_chainstate.return_value = {"currentPrice": "1000"}
-
-        # 1 GB upload - should need depth > 17
-        result = await calculate_upload_price_usd(
-            size_bytes=1024 * 1024 * 1024,  # 1 GB
-            duration_hours=24,
-            include_breakdown=True
-        )
-
-        # 1 GB needs more than 2^17 chunks
-        assert result["breakdown"]["depth_used"] > 17
-
-    @patch("app.x402.pricing.settings")
-    @patch("app.x402.pricing.get_chainstate", new_callable=AsyncMock)
-    @pytest.mark.asyncio
-    async def test_upload_breakdown_structure(self, mock_chainstate, mock_settings):
-        """Verify upload breakdown contains expected fields."""
-        mock_settings.X402_BZZ_USD_RATE = 0.50
-        mock_settings.X402_MARKUP_PERCENT = 50.0
-        mock_settings.X402_MIN_PRICE_USD = 0.01
-
-        mock_chainstate.return_value = {"currentPrice": "1000"}
-
-        result = await calculate_upload_price_usd(
-            size_bytes=1024,
-            duration_hours=24,
-            include_breakdown=True
-        )
-
-        breakdown = result["breakdown"]
-        assert "size_bytes" in breakdown
-        assert "chunks_needed" in breakdown
-        assert "depth_used" in breakdown
-        assert "capacity_chunks" in breakdown
-        assert "duration_hours" in breakdown
-        assert "stamp_breakdown" in breakdown
+    async def test_a_small_upload_does_not_cost_a_stamp(self, monkeypatch):
+        """Priced as a depth-17 stamp before, whatever the size."""
+        from app.core.config import settings
+        monkeypatch.setattr(settings, "X402_MIN_PRICE_USD", 0.01)
+        with patch("app.x402.pricing.get_chainstate", new_callable=AsyncMock) as chain:
+            quote = await get_price_quote(operation="upload", size_bytes=1024)
+        chain.assert_not_called()
+        assert quote["price_usd"] == 0.01
 
 
 class TestGetPriceQuote:
@@ -312,6 +263,7 @@ class TestGetPriceQuote:
     @pytest.mark.asyncio
     async def test_upload_quote(self, mock_chainstate, mock_settings):
         """Generate quote for upload."""
+        mock_settings.X402_BANDWIDTH_USD_PER_GB = 0.10
         mock_settings.X402_BZZ_USD_RATE = 0.50
         mock_settings.X402_MARKUP_PERCENT = 50.0
         mock_settings.X402_MIN_PRICE_USD = 0.01
@@ -502,3 +454,33 @@ async def _price(pricing, body, full=False):
     with patch.object(pricing, "get_chainstate", AsyncMock(return_value={"currentPrice": "78187"})):
         q = await _calculate_price_for_request(Req())
     return q if full else q["price_usd"]
+
+
+class TestUploadRequestPricing:
+    """How the payment dependency sizes an upload (#365)."""
+
+    def _request(self, headers):
+        from starlette.requests import Request
+        return Request({"type": "http", "method": "POST", "path": "/api/v1/data/",
+                        "query_string": b"", "headers": [(k.lower().encode(), v.encode()) for k, v in headers.items()]})
+
+    @pytest.mark.asyncio
+    async def test_priced_from_content_length_as_bandwidth(self, monkeypatch):
+        from app.core.config import settings
+        from app.x402.dependency import _calculate_price_for_request
+        from app.x402.pricing import calculate_bandwidth_price_usd
+        monkeypatch.setattr(settings, "X402_MIN_PRICE_USD", 0.0)
+        quote = await _calculate_price_for_request(self._request({"Content-Length": "4000000"}))
+        assert quote["price_usd"] == calculate_bandwidth_price_usd(4_000_000)["price_usd"]
+        assert "stamp you supplied" in quote["description"]
+
+    @pytest.mark.asyncio
+    async def test_without_content_length_the_largest_upload_is_priced(self, monkeypatch):
+        """A chunked body could otherwise be any size for a 1 KB price."""
+        from app.core.config import settings
+        from app.x402.dependency import _calculate_price_for_request
+        from app.x402.pricing import calculate_bandwidth_price_usd
+        monkeypatch.setattr(settings, "X402_MIN_PRICE_USD", 0.0)
+        quote = await _calculate_price_for_request(self._request({}))
+        cap = settings.MAX_UPLOAD_SIZE_MB * 1024 * 1024
+        assert quote["price_usd"] == calculate_bandwidth_price_usd(cap)["price_usd"]
