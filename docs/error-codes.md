@@ -65,6 +65,7 @@ without being listed here, or listed here but no longer raised.
 | `TOPUP_TOO_LARGE` | 400 (422 from `/pricing`) | The `mb` top-up is above the per-request maximum. | Split it into several top-ups. |
 | `CREDIT_REQUIRED` | 402 | A chunk upload came with no credit token and no free-tier header. | Top up with `POST /api/v1/chunks/credit`, or send `X-Payment-Mode: free`. |
 | `INVALID_CREDIT_TOKEN` | 402 | The bandwidth credit token is unknown. | Top up again to obtain a valid token. |
+| `TOKEN_ROTATION_FAILED` | 503 | The bandwidth credit token could not be rotated. **The current token is unchanged and still valid**, so nothing is lost. | Keep using the existing token and retry the rotation later. |
 | `INSUFFICIENT_CREDIT` | 402 | The credit left is less than this chunk. | Top up, then retry the chunk. |
 | `FREE_TIER_DISABLED` | 402 | The free tier is off for this operation (chunk upload, or buy-batch-for-owner). | Pay with `X-PAYMENT`, or for chunks, top up credit. |
 | `FREE_QUOTA_EXCEEDED` | 429 | The free-tier chunk quota for this client is used up. | Wait for the daily quota to reset, or top up credit. |
@@ -88,6 +89,7 @@ without being listed here, or listed here but no longer raised.
 | `COST_TOO_HIGH` | 400 | Buy-batch-for-owner: the batch would cost more than the configured maximum. | Use a smaller depth or a shorter duration. |
 | `SIGNER_INSUFFICIENT_FUNDS` | 503 | Buy-batch-for-owner: the gateway's signer wallet cannot fund the batch. | Retry later; the operator must refill the wallet. |
 | `SIGNER_BUSY` | 503 | Buy-batch-for-owner: another batch creation holds the signer, or an earlier transaction from it is still unconfirmed. **Nothing was sent and nothing was charged** — the gateway serialises signer use so two creations cannot share a nonce. | Retry in a minute. If it persists, an earlier transaction is stuck; the operator should check the signer wallet. |
+| `CREATE_BATCH_FAILED` | 502 | Buy-batch-for-owner: the on-chain createBatch did not succeed. The reason is deliberately **not** in the response — it is RPC and contract internals, logged for the operator only. No BZZ moved for a reverted or unsent transaction; a receipt timeout answers 202 instead, not this. | Retry. If it repeats, the operator has the detail in the logs. |
 
 ## Uploads
 

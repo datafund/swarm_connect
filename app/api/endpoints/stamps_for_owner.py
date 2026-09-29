@@ -176,8 +176,11 @@ async def create_batch_for_owner(body: StampForOwnerRequest, request: Request) -
         spend_budget_tracker.release_hold(hold)
         metrics.for_owner_batches_total.labels(status="error").inc()
         logger.error(f"for-owner: createBatch failed: {e}")
-        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY,
-                            detail=f"createBatch failed: {e}")
+        # The exception text is RPC and contract internals (#104, #380); it is
+        # logged above for the operator and not returned to the caller.
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail={
+            "code": "CREATE_BATCH_FAILED",
+            "message": "The batch could not be created on chain. Try again later."})
     except BaseException:
         # Outcome uncertain (e.g. receipt timeout: the transaction may still
         # mine): the hold stays, and is counted as such.

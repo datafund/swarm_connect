@@ -125,3 +125,14 @@ def test_signer_busy_returns_503_and_is_not_a_success(client, env):
     assert r.status_code == 503
     assert r.json()["detail"]["code"] == "SIGNER_BUSY"
     env["own"].register_stamp.assert_not_called()
+
+
+def test_chain_failure_does_not_return_rpc_internals(client, env):
+    """#380: the exception text (RPC URLs, revert data) is logged, not returned."""
+    from app.services.gnosis_chain import GnosisChainError
+    env["gc"].create_batch.side_effect = GnosisChainError("rpc https://secret-rpc.example/key123 reverted: 0xdeadbeef")
+    with patch("app.api.endpoints.stamps_for_owner.settings", _settings()):
+        r = client.post("/api/v1/stamps/for-owner", json={"owner": OWNER, "size": "small"})
+    assert r.status_code == 502
+    assert r.json()["detail"]["code"] == "CREATE_BATCH_FAILED"
+    assert "secret-rpc" not in r.text and "0xdeadbeef" not in r.text

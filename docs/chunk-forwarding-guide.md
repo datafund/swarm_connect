@@ -116,7 +116,9 @@ Default is **non-deferred** (direct upload). The gateway does not verify your st
 | 404 | — | Feature disabled (`CHUNK_UPLOAD_ENABLED=false`). |
 | 400 | `MISSING_STAMP` / `INVALID_STAMP` / `EMPTY_CHUNK` | Bad/absent stamp header or empty body. |
 | 413 | `CHUNK_TOO_LARGE` | Body exceeds `CHUNK_UPLOAD_MAX_BYTES_PER_REQUEST`. |
-| 402 | `CREDIT_REQUIRED` / `INVALID_CREDIT_TOKEN` / `INSUFFICIENT_CREDIT` | Missing/unknown token, or balance too low — top up. |
+| 402 | `CREDIT_REQUIRED` / `INVALID_CREDIT_TOKEN` / `INSUFFICIENT_CREDIT` | Missing/unknown/rotated token, or balance too low — top up. |
+
+**Rotating the token.** Tokens do not expire. If one may have leaked, `POST /api/v1/chunks/token/rotate` with the current token in `X-Bandwidth-Credit-Token` returns a new one and revokes the old one immediately. If someone else rotated it first (your token now gets `INVALID_CREDIT_TOKEN`), top up with `POST /api/v1/chunks/credit?mb=N&rotate_token=true`: the payment proves you control the wallet, and you get a fresh token that nobody else has. A plain top-up returns the account's *current* token.
 | 402 | `FREE_TIER_DISABLED` | Free mode requested but disabled. |
 | 429 | `FREE_QUOTA_EXCEEDED` | Daily free quota exhausted — top up for more. |
 | 502 | — | Bee rejected the chunk (often an invalid stamp) or is unavailable; any debit is refunded. |
