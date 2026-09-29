@@ -32,6 +32,9 @@ def ownership_file(tmp_path, monkeypatch):
 
 def test_registry_is_loaded_when_the_app_starts(ownership_file, monkeypatch):
     monkeypatch.setattr(settings, "X402_ENABLED", True)
+    # x402 settings are validated at startup (#370).
+    monkeypatch.setattr(settings, "X402_NETWORK", "base-sepolia")
+    monkeypatch.setattr(settings, "X402_PAY_TO_ADDRESS", "0xc87688A40CE2ff1765BA54497c7471c892755488")
     with open(ownership_file, "w") as f:
         json.dump({BATCH: {"owner": OWNER, "mode": "paid", "acquired_at": "x", "source": "direct_purchase"}}, f)
 

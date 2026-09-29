@@ -16,14 +16,13 @@ from typing import Optional
 from fastapi import HTTPException, Request
 
 from x402.types import PaymentPayload
-from x402.facilitator import FacilitatorClient, FacilitatorConfig
+from x402.facilitator import FacilitatorClient
 
 from app.core.config import settings
 from app.core.client_ip import client_key
 from app.services.metrics import x402_payments_total
 from app.x402.pricing import get_price_quote
 from app.x402.ratelimit import check_rate_limit, get_rate_limit_headers, get_free_tier_stats
-from app.x402.base_balance import check_base_eth_balance
 from app.x402.middleware import (
     is_protected_endpoint,
     get_client_ip,
@@ -36,17 +35,11 @@ from app.x402.middleware import (
 
 logger = logging.getLogger(__name__)
 
-# Lazy-initialized facilitator client
-_facilitator_client: Optional[FacilitatorClient] = None
-
-
 def _get_facilitator_client() -> FacilitatorClient:
-    """Get or create the facilitator client singleton."""
-    global _facilitator_client
-    if _facilitator_client is None:
-        config: FacilitatorConfig = {"url": settings.X402_FACILITATOR_URL}
-        _facilitator_client = FacilitatorClient(config=config)
-    return _facilitator_client
+    """The shared facilitator client (verify here, settle in settlement.py and
+    the middleware). Built once, with authentication when configured (#369)."""
+    from app.x402.facilitator import get_facilitator_client
+    return get_facilitator_client()
 
 
 def _request_method(request) -> str:
@@ -302,22 +295,11 @@ async def require_x402_payment(request: Request) -> None:
     if not is_protected_endpoint(request.method, request.url.path):
         return
 
-    # Check gateway ETH balance
-    base_balance = await check_base_eth_balance()
-    if base_balance.get("is_critical"):
-        logger.error(
-            f"x402: Gateway ETH critically low ({base_balance.get('balance_eth', 0):.6f} ETH). "
-            f"Cannot process payments."
-        )
-        raise HTTPException(
-            status_code=503,
-            detail={
-                "error": "Gateway temporarily unavailable",
-                "detail": "Gateway wallet has insufficient ETH for gas. Please try again later.",
-                "x402_status": "critical",
-                "balance_eth": base_balance.get("balance_eth", 0),
-            }
-        )
+    # No pay-to balance check here (#371). With x402 the facilitator submits
+    # the transfer and pays its gas; the pay-to address never sends anything.
+    # The check made every protected request, free tier included, depend on a
+    # Base RPC lookup, and would have taken the service down with a correctly
+    # cold (0 ETH) mainnet pay-to address. The balance is still on /health.
 
     client_ip = get_client_ip(request)
     logger.info(f"x402: Processing protected request from {client_ip}: {request.method} {request.url.path}")
@@ -464,6 +446,22 @@ async def require_x402_payment(request: Request) -> None:
                 "accepts": [payment_requirements.model_dump(by_alias=True)],
             },
         )
+    # An Idempotency-Key is scoped to the `from` of the authorization the
+    # facilitator verified. If the facilitator reports a different payer, that
+    # identity is not one to hand someone's stored result to.
+    verified_payer = getattr(verify_response, "payer", None)
+    if (request.headers.get("Idempotency-Key") is not None and verified_payer
+            and str(verified_payer).lower() != auth_key[0]):
+        logger.warning(f"x402: facilitator payer {verified_payer} differs from authorization signer")
+        raise HTTPException(
+            status_code=402,
+            detail={
+                "x402Version": X402_VERSION,
+                "error": "Payment verification failed: payer does not match the authorization.",
+                "accepts": [payment_requirements.model_dump(by_alias=True)],
+            },
+        )
+
     if not replay_guard.reserve(auth_key):
         logger.warning(f"x402: Payment authorization reused by {client_ip}")
         raise HTTPException(
@@ -475,6 +473,20 @@ async def require_x402_payment(request: Request) -> None:
             },
         )
 
+    # A retry of a request already paid for (#359). Checked only now that the
+    # facilitator has verified this payment's signature for its payer and the
+    # guard has reserved it (so it is not one already in use), and before it
+    # is settled: a repeat is answered from the stored result and its new
+    # payment is never charged. Every way out of here without proceeding
+    # releases the reservation: nothing was collected.
+    from app.x402.idempotency import begin_idempotent_request
+    request.state.x402_requirements = payment_requirements
+    try:
+        idempotency_id = await begin_idempotent_request(request, payer=auth_key[0], auth_key=auth_key)
+    except BaseException:
+        replay_guard.release(auth_key)
+        raise
+
     logger.info(f"x402: Payment verified for payer {verify_response.payer}")
     x402_payments_total.labels(mode="paid").inc()
 
@@ -484,3 +496,4 @@ async def require_x402_payment(request: Request) -> None:
     request.state.x402_payment = payment_payload
     request.state.x402_requirements = payment_requirements
     request.state.x402_auth_key = auth_key
+    request.state.x402_idempotency_id = idempotency_id
