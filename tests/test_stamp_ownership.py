@@ -23,10 +23,10 @@ class TestOwnershipRegistration:
 
     def test_register_paid_stamp(self, manager):
         """Wallet address stored as owner for paid stamps."""
-        manager.register_stamp("batch_001", owner="0xABCDEF1234567890", mode="paid", source="pool_acquire")
+        manager.register_stamp("batch_001", owner="0xABCDEF1234567890ABCDEF1234567890ABCDEF12", mode="paid", source="pool_acquire")
         info = manager.get_stamp_info("batch_001")
         assert info is not None
-        assert info["owner"] == "0xABCDEF1234567890"
+        assert info["owner"] == "0xabcdef1234567890abcdef1234567890abcdef12"  # stored canonical (#384)
         assert info["mode"] == "paid"
         assert info["source"] == "pool_acquire"
 
@@ -49,14 +49,14 @@ class TestPaidStampAccess:
     @pytest.fixture
     def manager(self, state_file):
         mgr = StampOwnershipManager(state_file=state_file)
-        mgr.register_stamp("paid_stamp", owner="0xOwnerWallet123", mode="paid", source="pool_acquire")
+        mgr.register_stamp("paid_stamp", owner="0x1111111111111111111111111111111111111111", mode="paid", source="pool_acquire")
         return mgr
 
     def test_paid_stamp_access_by_owner(self, manager):
         """Owner wallet can use their paid stamp."""
         with patch('app.services.stamp_ownership.settings') as mock_settings:
             mock_settings.X402_ENABLED = True
-            allowed, reason = manager.check_access("paid_stamp", "0xOwnerWallet123", "paid")
+            allowed, reason = manager.check_access("paid_stamp", "0x1111111111111111111111111111111111111111", "paid")
             assert allowed is True
             assert "owner match" in reason
 
@@ -64,7 +64,7 @@ class TestPaidStampAccess:
         """Different wallet gets denied from using a paid stamp."""
         with patch('app.services.stamp_ownership.settings') as mock_settings:
             mock_settings.X402_ENABLED = True
-            allowed, reason = manager.check_access("paid_stamp", "0xOtherWallet999", "paid")
+            allowed, reason = manager.check_access("paid_stamp", "0x9999999999999999999999999999999999999999", "paid")
             assert allowed is False
             assert "not accessible" in reason
 
@@ -100,7 +100,7 @@ class TestSharedStampAccess:
         """Any wallet can use a shared stamp."""
         with patch('app.services.stamp_ownership.settings') as mock_settings:
             mock_settings.X402_ENABLED = True
-            allowed, reason = manager.check_access("shared_stamp", "0xAnyWallet", "paid")
+            allowed, reason = manager.check_access("shared_stamp", "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "paid")
             assert allowed is True
             assert "shared" in reason
 
@@ -146,7 +146,7 @@ class TestBackwardCompatibility:
         with patch('app.services.stamp_ownership.settings') as mock_settings:
             mock_settings.X402_ENABLED = True
             mock_settings.STAMP_OWNERSHIP_ALLOW_UNTRACKED = False
-            allowed, reason = manager.check_access("unknown_stamp", "0xAnyWallet", "paid")
+            allowed, reason = manager.check_access("unknown_stamp", "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "paid")
             assert allowed is False, "an unowned batch was writable by an arbitrary wallet"
             assert "not registered" in reason
 
@@ -160,7 +160,7 @@ class TestBackwardCompatibility:
         with patch('app.services.stamp_ownership.settings') as mock_settings:
             mock_settings.X402_ENABLED = True
             mock_settings.STAMP_OWNERSHIP_ALLOW_UNTRACKED = True
-            allowed, reason = manager.check_access("unknown_stamp", "0xAnyWallet", "paid")
+            allowed, reason = manager.check_access("unknown_stamp", "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "paid")
             assert allowed is True
             assert "permissive" in reason
 
@@ -176,7 +176,7 @@ class TestBackwardCompatibility:
         with patch('app.services.stamp_ownership.settings') as mock_settings:
             mock_settings.X402_ENABLED = True
             mock_settings.STAMP_OWNERSHIP_ALLOW_UNTRACKED = False
-            for wallet, mode in (("0xSomeone", "paid"), (None, "free-tier"), (None, None)):
+            for wallet, mode in (("0xcccccccccccccccccccccccccccccccccccccccc", "paid"), (None, "free-tier"), (None, None)):
                 allowed, reason = manager.check_access("pool_stamp", wallet, mode)
                 assert allowed is False, f"pool inventory was writable by {wallet or 'anonymous'} ({mode})"
                 assert "acquire it first" in reason
@@ -192,16 +192,16 @@ class TestBackwardCompatibility:
         with patch('app.services.stamp_ownership.settings') as mock_settings:
             mock_settings.X402_ENABLED = True
             mock_settings.STAMP_OWNERSHIP_ALLOW_UNTRACKED = True
-            allowed, _ = manager.check_access("pool_stamp", "0xSomeone", "paid")
+            allowed, _ = manager.check_access("pool_stamp", "0xcccccccccccccccccccccccccccccccccccccccc", "paid")
             assert allowed is False, "permissive mode unlocked gateway-owned inventory"
 
     def test_x402_disabled_skips_enforcement(self, manager):
         """No ownership checks when x402 is off."""
-        manager.register_stamp("paid_stamp", owner="0xOwner", mode="paid", source="test")
+        manager.register_stamp("paid_stamp", owner="0xBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB", mode="paid", source="test")
         with patch('app.services.stamp_ownership.settings') as mock_settings:
             mock_settings.X402_ENABLED = False
             # Even a different wallet should be allowed when x402 is disabled
-            allowed, reason = manager.check_access("paid_stamp", "0xDifferent", "paid")
+            allowed, reason = manager.check_access("paid_stamp", "0xdddddddddddddddddddddddddddddddddddddddd", "paid")
             assert allowed is True
             assert "x402 disabled" in reason
 
@@ -216,7 +216,7 @@ class TestOwnershipPersistence:
     def test_ownership_save_load(self, state_file):
         """Persist and reload ownership data."""
         mgr1 = StampOwnershipManager(state_file=state_file)
-        mgr1.register_stamp("batch_a", owner="0xOwnerA", mode="paid", source="pool")
+        mgr1.register_stamp("batch_a", owner="0xAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", mode="paid", source="pool")
         mgr1.register_stamp("batch_b", owner="shared", mode="free", source="pool")
 
         # New manager loads from same file
@@ -225,7 +225,7 @@ class TestOwnershipPersistence:
 
         info_a = mgr2.get_stamp_info("batch_a")
         assert info_a is not None
-        assert info_a["owner"] == "0xOwnerA"
+        assert info_a["owner"] == "0x" + "a" * 40  # stored canonical (#384)
 
         info_b = mgr2.get_stamp_info("batch_b")
         assert info_b is not None
@@ -276,8 +276,8 @@ class TestOwnershipPersistence:
     def test_cleanup_expired_stamps(self, state_file):
         """Expired stamps removed from ownership."""
         mgr = StampOwnershipManager(state_file=state_file)
-        mgr.register_stamp("valid", owner="0xOwner", mode="paid", source="pool")
-        mgr.register_stamp("expired", owner="0xOwner2", mode="paid", source="pool")
+        mgr.register_stamp("valid", owner="0xBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB", mode="paid", source="pool")
+        mgr.register_stamp("expired", owner="0x2222222222222222222222222222222222222222", mode="paid", source="pool")
 
         # Cleanup: only "valid" is still on the Bee node
         mgr.cleanup_expired(valid_batch_ids={"valid"})
@@ -294,7 +294,7 @@ class TestOwnershipPersistence:
     def test_remove_stamp(self, state_file):
         """Remove a single stamp from registry."""
         mgr = StampOwnershipManager(state_file=state_file)
-        mgr.register_stamp("to_remove", owner="0xOwner", mode="paid", source="pool")
+        mgr.register_stamp("to_remove", owner="0xBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB", mode="paid", source="pool")
         assert mgr.get_stamp_info("to_remove") is not None
 
         mgr.remove_stamp("to_remove")
@@ -346,7 +346,7 @@ class TestOwnershipIntegration:
             mock_settings.X402_ENABLED = True
             mock_settings.MAX_UPLOAD_SIZE_MB = 10
             with patch('app.api.endpoints.data.stamp_ownership_manager') as mock_ownership:
-                mock_ownership.check_access.return_value = (False, "stamp owned by 0xOther...")
+                mock_ownership.check_access.return_value = (False, "stamp owned by 0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee...")
                 response = client.post(
                     f"/api/v1/data/?stamp_id={stamp_id}",
                     files={"file": ("test.json", b'{"data": "test"}', "application/json")}
@@ -490,7 +490,7 @@ class TestPoolInventoryIsReportedDistinctly:
 
         for owner, mode, expected in (
             (POOL_OWNER, "pool", "pool"),
-            ("0xWallet", "paid", "owned"),
+            ("0xffffffffffffffffffffffffffffffffffffffff", "paid", "owned"),
             ("shared", "free", "shared"),
         ):
             info = {"owner": owner, "mode": mode}

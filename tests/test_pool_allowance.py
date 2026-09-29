@@ -98,6 +98,45 @@ class TestPersistence:
         ok, info = second.check(APP)
         assert not ok, f"a restart reset the allowance: {info}"
 
+    BAD_FILES = ["", "{not json", '"a string"', '{"day": "TODAY", "used": {"k": "x"}}',
+                 '{"day": "TODAY", "used": {"k": 1.9}}', '{"day": "TODAY", "used": {"k": -1}}']
+
+    @pytest.mark.parametrize("content", BAD_FILES)
+    def test_an_unreadable_file_refuses_limited_allowances_and_is_kept(self, tmp_path, monkeypatch, content):
+        """An empty counter would hand out a fresh allowance and the next save
+        would overwrite today's record (#378)."""
+        from app.services import pool_allowance
+        monkeypatch.setattr(settings, "POOL_DEFAULT_DAILY_ALLOWANCE", 5)
+        body = content.replace("TODAY", pool_allowance._today())
+        path = tmp_path / "allow.json"
+        path.write_text(body)
+        t = PoolAllowanceTracker(state_file=str(path))
+        allowed, info = t.check(None, "small")
+        assert not allowed and info["state_unreadable"]
+        t.consume(None, "small")
+        assert path.read_text() == body
+        backups = list(tmp_path.glob("allow.json.corrupt-*"))
+        assert len(backups) == 1 and backups[0].read_text() == body
+
+    def test_an_unlimited_allowance_is_unaffected(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(settings, "POOL_DEFAULT_DAILY_ALLOWANCE", -1)
+        path = tmp_path / "allow.json"
+        path.write_text("{not json")
+        assert PoolAllowanceTracker(state_file=str(path)).check(None, "small")[0]
+
+    def test_a_missing_file_starts_fresh(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(settings, "POOL_DEFAULT_DAILY_ALLOWANCE", 5)
+        assert PoolAllowanceTracker(state_file=str(tmp_path / "none.json")).check(None, "small")[0]
+
+    def test_the_refusal_ends_with_the_day(self, tmp_path, monkeypatch):
+        from app.services import pool_allowance
+        monkeypatch.setattr(settings, "POOL_DEFAULT_DAILY_ALLOWANCE", 5)
+        path = tmp_path / "allow.json"
+        path.write_text("{not json")
+        t = PoolAllowanceTracker(state_file=str(path))
+        monkeypatch.setattr(pool_allowance, "_today", lambda: "2099-01-01")
+        assert t.check(None, "small")[0]
+
     def test_state_from_a_previous_day_is_ignored(self, tmp_path, monkeypatch):
         monkeypatch.setattr(settings, "POOL_DAILY_ALLOWANCES", f"{APP}=2")
         path = str(tmp_path / "allowance.json")
@@ -126,6 +165,9 @@ class TestEndpointBehaviour:
         import app.api.endpoints.pool as pool_ep
         monkeypatch.setattr(pool_ep, "pool_allowance_tracker",
                             pool_allowance.pool_allowance_tracker)
+        # Stock the pool: an empty pool is answered with 409 before any allowance.
+        monkeypatch.setattr(pool_ep.stamp_pool_manager, "get_available_stamp",
+                            lambda d: type("S", (), {"depth": 17})())
 
         resp = TestClient(app).post("/api/v1/pool/acquire", json={"size": "small"},
                                     headers={"Origin": APP})
@@ -302,7 +344,10 @@ class TestPaidAcquireBypassesTheAllowance:
         monkeypatch.setattr(settings, "POOL_DAILY_ALLOWANCES", f"{APP}=0")
         monkeypatch.setattr(settings, "POOL_DEFAULT_DAILY_ALLOWANCE", 0)
         tracker = PoolAllowanceTracker(state_file=str(tmp_path / "a.json"))
-        self._client(monkeypatch, tmp_path, tracker)
+        pool_ep = self._client(monkeypatch, tmp_path, tracker)
+        # Stock the pool: an empty pool is answered with 409 before any allowance.
+        monkeypatch.setattr(pool_ep.stamp_pool_manager, "get_available_stamp",
+                            lambda d: type("S", (), {"depth": 17})())
 
         resp = TestClient(app).post("/api/v1/pool/acquire", json={"size": "small"},
                                     headers={"Origin": APP})
@@ -402,3 +447,32 @@ class TestTestnetPaymentsDoNotBuyABypass:
                                     headers={"Origin": APP, "X-PAYMENT": "anything"})
         assert resp.status_code == 429, "a testnet payment must not buy a bypass"
         assert resp.json()["detail"]["code"] == "DAILY_STAMP_ALLOWANCE_EXHAUSTED"
+
+
+def test_an_unreadable_allowance_record_is_reported_as_such(monkeypatch, tmp_path):
+    """Not "used up": the caller should learn the pause is on the operator's side."""
+    monkeypatch.setattr(settings, "STAMP_POOL_ENABLED", True)
+    monkeypatch.setattr(settings, "POOL_DEFAULT_DAILY_ALLOWANCE", 5)
+    path = tmp_path / "allow.json"
+    path.write_text("{not json")
+    import app.api.endpoints.pool as pool_ep
+    monkeypatch.setattr(pool_ep, "pool_allowance_tracker", PoolAllowanceTracker(state_file=str(path)))
+    # A batch in stock: an empty pool is answered before any allowance (#414).
+    from types import SimpleNamespace
+    monkeypatch.setattr(pool_ep.stamp_pool_manager, "get_available_stamp",
+                        lambda d: SimpleNamespace(batch_id="b" * 64, depth=17))
+    r = TestClient(app).post("/api/v1/pool/acquire", json={"size": "small"})
+    assert r.status_code == 503
+    assert r.json()["detail"]["code"] == "POOL_ALLOWANCE_UNAVAILABLE"
+
+
+def test_an_unreadable_record_also_refuses_the_per_client_limit(monkeypatch, tmp_path):
+    """With only the per-client limit set (#414), unknown counts still refuse (#378)."""
+    monkeypatch.setattr(settings, "POOL_DEFAULT_DAILY_ALLOWANCE", -1)
+    monkeypatch.setattr(settings, "POOL_ALLOWANCE_PER_IP", 3)
+    path = tmp_path / "allow.json"
+    path.write_text("{not json")
+    t = PoolAllowanceTracker(state_file=str(path))
+    assert t.check(None, "small")[0]                    # the origin bucket is unlimited
+    ok, info = t.check_address(None, "small", "1.2.3.4")
+    assert not ok and info["state_unreadable"]

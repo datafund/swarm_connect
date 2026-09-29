@@ -15,6 +15,7 @@ Two limits, answering different questions: a per-request ceiling so no single
 call takes a large share of the wallet, and a per-caller daily budget so the
 first cannot simply be applied repeatedly.
 """
+import json
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -99,18 +100,60 @@ class TestBudgetArithmetic:
         path.write_text(json.dumps({"day": "1999-01-01", "spent": {"1.2.3.4": 999.0}}))
         assert SpendBudgetTracker(state_file=str(path)).check("1.2.3.4", 0.9)[0]
 
-    def test_an_unreadable_state_file_does_not_break_startup(self, tmp_path, monkeypatch):
-        """Never fail to start over a counter."""
+    BAD_FILES = ["", "{not json", "[]", '{"day": "TODAY", "spent": []}',
+                 '{"day": "TODAY", "spent": {"1.2.3.4": "x"}}', '{"day": "TODAY", "spent": {"1.2.3.4": -5}}',
+                 '{"day": "TODAY", "spent": {"1.2.3.4": NaN}}', '{"day": "TODAY", "spent": {"1.2.3.4": true}}']
+
+    @pytest.mark.parametrize("content", BAD_FILES)
+    def test_an_unreadable_file_refuses_limited_budgets_and_is_kept(self, tmp_path, monkeypatch, content):
+        """Empty counters would reset every caller's budget and the next save
+        would overwrite today's record (#378). The process stays up; limited
+        checks are refused and nothing is written."""
+        from app.services import spend_budget
+        monkeypatch.setattr(settings, "STAMP_DAILY_BZZ_PER_CALLER", 1.0)
+        body = content.replace("TODAY", spend_budget._today())
+        path = tmp_path / "spend.json"
+        path.write_text(body)
+        t = SpendBudgetTracker(state_file=str(path))
+        allowed, info = t.check("1.2.3.4", 0.1)
+        assert not allowed and info["state_unreadable"]
+        t.consume("1.2.3.4", 0.1)
+        assert path.read_text() == body, "the unreadable file was overwritten"
+        backups = list(tmp_path.glob("spend.json.corrupt-*"))
+        assert len(backups) == 1 and backups[0].read_text() == body
+
+    def test_an_unlimited_budget_is_unaffected(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(settings, "STAMP_DAILY_BZZ_PER_CALLER", -1)
+        path = tmp_path / "spend.json"
+        path.write_text("{not json")
+        assert SpendBudgetTracker(state_file=str(path)).check("1.2.3.4", 5.0)[0]
+
+    def test_the_refusal_ends_with_the_day(self, tmp_path, monkeypatch):
+        from app.services import spend_budget
         monkeypatch.setattr(settings, "STAMP_DAILY_BZZ_PER_CALLER", 1.0)
         path = tmp_path / "spend.json"
         path.write_text("{not json")
+        t = SpendBudgetTracker(state_file=str(path))
+        monkeypatch.setattr(spend_budget, "_today", lambda: "2099-01-01")
+        assert t.check("1.2.3.4", 0.1)[0]
+
+    def test_bad_values_in_a_previous_days_file_are_ignored(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(settings, "STAMP_DAILY_BZZ_PER_CALLER", 1.0)
+        path = tmp_path / "spend.json"
+        path.write_text('{"day": "1999-01-01", "spent": {"1.2.3.4": "x"}}')
         assert SpendBudgetTracker(state_file=str(path)).check("1.2.3.4", 0.5)[0]
 
+    def test_a_leftover_tmp_file_does_not_matter(self, tmp_path, monkeypatch):
+        from app.services import spend_budget
+        monkeypatch.setattr(settings, "STAMP_DAILY_BZZ_PER_CALLER", 1.0)
+        path = tmp_path / "spend.json"
+        path.write_text(json.dumps({"day": spend_budget._today(), "spent": {"1.2.3.4": 0.95}}))
+        (tmp_path / "spend.json.tmp").write_text("{trunc")
+        assert not SpendBudgetTracker(state_file=str(path)).check("1.2.3.4", 0.1)[0]
 
-class TestPerRequestCeiling:
-    """X402_MAX_STAMP_BZZ was in configuration from the start and referenced
-    nowhere — a cap that reads as protection during review and enforces
-    nothing."""
+    def test_a_missing_state_file_starts_fresh(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(settings, "STAMP_DAILY_BZZ_PER_CALLER", 1.0)
+        assert SpendBudgetTracker(state_file=str(tmp_path / "none.json")).check("1.2.3.4", 0.5)[0]
 
     def _purchase(self, depth=20, duration=8760):
         with patch("app.services.swarm_api.get_chainstate",
@@ -852,3 +895,44 @@ class TestForOwnerRelease:
     def test_an_uncertain_error_keeps_the_hold(self, tracker, monkeypatch):
         assert self._call(monkeypatch, TimeoutError("receipt")).status_code == 500
         assert tracker.snapshot()["gateway_spent"] > 0
+
+
+class TestUnreadableRecordWithReservations:
+    """#415's fail-closed load meets #408's reservations: an unreadable record
+    refuses every limited charge, paid ones included (the gateway ceiling
+    bounds them too), with its own code rather than "limit reached"."""
+
+    def _unreadable(self, tmp_path, monkeypatch):
+        from app.services import spend_budget
+        import app.api.endpoints.stamps as stamps_ep
+        path = tmp_path / "broken.json"
+        path.write_text("{not json")
+        t = SpendBudgetTracker(state_file=str(path))
+        monkeypatch.setattr(spend_budget, "spend_budget_tracker", t)
+        monkeypatch.setattr(stamps_ep, "spend_budget_tracker", t)
+        return t, path
+
+    def test_reserve_refuses_every_limited_charge(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(settings, "GATEWAY_DAILY_BZZ_CEILING", 10.0)
+        t, path = self._unreadable(tmp_path, monkeypatch)
+        hold, refused, info = t.reserve_spend(0.1, None)          # paid: ceiling only
+        assert hold is None and info["state_unreadable"]
+        hold, info = t.reserve_gateway(0.1)                        # pool purchases
+        assert hold is None and info["state_unreadable"]
+        assert path.read_text() == "{not json"
+
+    def test_unlimited_charges_still_pass(self, tmp_path, monkeypatch):
+        t, _ = self._unreadable(tmp_path, monkeypatch)             # every limit -1 (conftest)
+        hold, _, _ = t.reserve_spend(0.1, "1.2.3.4")
+        assert hold is not None
+
+    def test_purchase_answers_503_spend_budget_unavailable(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(settings, "STAMP_DAILY_BZZ_PER_CALLER", 1.0)
+        self._unreadable(tmp_path, monkeypatch)
+        with patch("app.services.swarm_api.get_chainstate", new=AsyncMock(return_value=CHAINSTATE)), \
+             patch("app.services.swarm_api.check_sufficient_funds", new=AsyncMock(return_value=FUNDS_OK)), \
+             patch("app.services.swarm_api.purchase_postage_stamp", new=AsyncMock(return_value="b" * 64)) as buy:
+            r = TestClient(app).post("/api/v1/stamps/", json={"depth": 17, "duration_hours": 24})
+        assert r.status_code == 503
+        assert r.json()["detail"]["code"] == "SPEND_BUDGET_UNAVAILABLE"
+        buy.assert_not_called()

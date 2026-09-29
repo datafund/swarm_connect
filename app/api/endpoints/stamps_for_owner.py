@@ -140,6 +140,13 @@ async def create_batch_for_owner(body: StampForOwnerRequest, request: Request) -
     hold, _refused, ceiling = spend_budget_tracker.reserve_spend(cost_bzz, caller)
     if hold is None:
         metrics.for_owner_batches_total.labels(status="ceiling").inc()
+        if ceiling.get("state_unreadable"):
+            # Today's spend record could not be read (#378): nothing is spent
+            # until it is restored or the day rolls over.
+            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail={
+                "code": "SPEND_BUDGET_UNAVAILABLE",
+                "message": ("Batch purchases are paused until the operator restores the "
+                            f"gateway's spend records, or until {ceiling['resets_at']}.")})
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail={
             "code": "GATEWAY_DAILY_SPEND_CEILING",
             "message": f"A daily spending limit is reached. It resets at {ceiling['resets_at']}.",
