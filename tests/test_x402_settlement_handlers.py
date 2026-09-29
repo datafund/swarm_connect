@@ -37,8 +37,7 @@ def x402_on(monkeypatch):
     monkeypatch.setattr(settings, "X402_PAY_TO_ADDRESS", "0xpayee")
     monkeypatch.setattr(settings, "X402_NETWORK", "base-sepolia")
     reset_rate_limiter()
-    with patch("app.x402.dependency.check_base_eth_balance", new=AsyncMock(return_value=OK_BALANCE)), \
-         patch("app.x402.dependency._calculate_price_for_request",
+    with patch("app.x402.dependency._calculate_price_for_request",
                new=AsyncMock(return_value={"price_usd": 0.02, "description": "t"})):
         yield
     reset_rate_limiter()

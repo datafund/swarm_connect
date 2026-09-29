@@ -21,11 +21,12 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import JSONResponse
 
 from x402.types import PaymentRequirements, PaymentPayload, SettleResponse
-from x402.facilitator import FacilitatorClient, FacilitatorConfig
+from x402.facilitator import FacilitatorClient
 from x402.encoding import safe_base64_decode, safe_base64_encode
 
 from app.core.config import settings
 from app.x402.ratelimit import get_rate_limit_headers
+from app.services.metrics import x402_settlements_total
 
 logger = logging.getLogger(__name__)
 
@@ -150,12 +151,11 @@ def create_payment_requirements(
     # Convert USD to USDC smallest units (string format for x402)
     amount_usdc = int(price_usd * 1_000_000)
 
-    # Get USDC address for the configured network
-    asset = USDC_ADDRESSES.get(network, USDC_ADDRESSES["base-sepolia"])
-
-    # Get USDC token metadata for EIP-712 domain separator
-    # This is required for clients to construct proper EIP-3009 signatures
-    token_metadata = USDC_TOKEN_METADATA.get(network, USDC_TOKEN_METADATA["base-sepolia"])
+    # USDC address and EIP-712 domain for the configured network. No fallback:
+    # an unknown network used to get the Base Sepolia asset silently (#370);
+    # validate_x402_config() now refuses to start with one.
+    asset = USDC_ADDRESSES[network]
+    token_metadata = USDC_TOKEN_METADATA[network]
 
     resource = public_url(request)
 
@@ -204,6 +204,75 @@ def create_402_response(
         content=response_body,
         headers={"Content-Type": "application/json"}
     )
+
+
+# Fields that identify what a paid request delivered. Never the credit token:
+# it is a bearer secret.
+_RESOURCE_FIELDS = ("batchID", "batch_id", "reference", "credited_bytes")
+
+
+def _log_delivery(request: Request, settlement, body: bytes, client_ip: str, payer: Optional[str]) -> None:
+    """One audit line linking a settlement to what it paid for (#375).
+
+    With payment_settled (the transaction) and this (the delivered resource),
+    a "paid but got nothing" question can be answered from the audit log.
+    """
+    from app.x402.audit import AuditEventType, log_audit_event
+    resource = {}
+    # Paid routes answer with small JSON bodies; skip anything else rather than
+    # parse a large payload just for the audit line.
+    if len(body) <= 64 * 1024 and body[:1] in (b"{", b" "):
+        try:
+            parsed = json.loads(body)
+            if isinstance(parsed, dict):
+                resource = {k: parsed[k] for k in _RESOURCE_FIELDS if k in parsed}
+        except Exception:
+            pass
+    requirements = getattr(request.state, "x402_requirements", None)
+    log_audit_event(
+        event_type=AuditEventType.PAYMENT_DELIVERED,
+        data={
+            "transaction_hash": getattr(settlement, "transaction", None),
+            "method": request.method,
+            "path": request.url.path,
+            "amount": getattr(requirements, "max_amount_required", None),
+            "network": settings.X402_NETWORK,
+            "resource": resource,
+        },
+        client_ip=client_ip,
+        wallet_address=payer,
+    )
+
+
+async def _spec_shaped_402(response: Response) -> Response:
+    """Put an x402 Payment Required body at the top level, as x402 v1 specifies.
+
+    The dependency raises HTTPException(402, detail=body), which FastAPI
+    serialises as {"detail": body}. Standard x402 clients read x402Version,
+    accepts and error from the top level and cannot pay a nested body (#372).
+    The same body is kept under "detail" as well, so clients written against
+    the old shape keep working; that copy is deprecated. The error envelope's
+    top-level `code` and `message` (#381) stay as well.
+    """
+    raw = b""
+    async for chunk in response.body_iterator:
+        raw += chunk
+    try:
+        parsed = json.loads(raw)
+        detail = parsed.get("detail")
+    except Exception:
+        parsed, detail = {}, None
+    if isinstance(detail, dict) and "x402Version" in detail and "accepts" in detail:
+        envelope = {k: parsed[k] for k in ("code", "message") if k in parsed}
+        out = JSONResponse(status_code=402, content={**detail, **envelope, "detail": detail})
+    else:
+        out = Response(content=raw, status_code=402, media_type=response.media_type)
+    # Keep every original header (repeated ones included) except those that
+    # describe the old body.
+    out.raw_headers = [
+        (k, v) for k, v in response.raw_headers if k.lower() not in (b"content-length", b"content-type")
+    ] + [(k, v) for k, v in out.raw_headers if k.lower() in (b"content-length", b"content-type")]
+    return out
 
 
 def decode_payment_header(header_value: str) -> Optional[PaymentPayload]:
@@ -256,6 +325,9 @@ class X402Middleware(BaseHTTPMiddleware):
     """
     x402 post-response middleware for FastAPI.
 
+    Also returns x402 Payment Required bodies at the top level, as x402 v1
+    specifies (see _spec_shaped_402).
+
     Handles post-response processing only:
     - Settles payments via facilitator after successful responses
     - Adds X-PAYMENT-RESPONSE header with settlement proof
@@ -277,10 +349,10 @@ class X402Middleware(BaseHTTPMiddleware):
 
     @property
     def facilitator_client(self) -> FacilitatorClient:
-        """Lazy initialization of facilitator client."""
+        """The shared, authenticated facilitator client (app/x402/facilitator.py)."""
         if self._facilitator_client is None:
-            config: FacilitatorConfig = {"url": settings.X402_FACILITATOR_URL}
-            self._facilitator_client = FacilitatorClient(config=config)
+            from app.x402.facilitator import get_facilitator_client
+            return get_facilitator_client()
         return self._facilitator_client
 
     async def dispatch(
@@ -302,15 +374,27 @@ class X402Middleware(BaseHTTPMiddleware):
             return await call_next(request)
 
         # Let the request through — the dependency handles pre-request checks
+        from app.x402.idempotency import IdempotentReplay, finish_idempotent_request
         try:
             response = await call_next(request)
-        except Exception:
-            if getattr(request.state, "x402_mode", None) != "paid":
+        except IdempotentReplay as replay:
+            # A repeat of a completed paid request (idempotency.py): the stored
+            # response, and nothing settled.
+            return replay.response
+        except BaseException as exc:
+            # Also on cancellation (client gone), so the key is not left
+            # blocked as in progress. A key whose payment already settled stays
+            # taken (idempotency.py), so a retry is not charged again.
+            finish_idempotent_request(request, None)
+            if not isinstance(exc, Exception) or getattr(request.state, "x402_mode", None) != "paid":
                 raise
             return self._paid_request_crashed(request)
 
         # Check what the dependency decided
         x402_mode = getattr(request.state, 'x402_mode', None)
+
+        if x402_mode is None and response.status_code == 402:
+            return await _spec_shaped_402(response)
 
         if x402_mode == "free-tier":
             # Add rate limit headers for free-tier responses
@@ -333,7 +417,14 @@ class X402Middleware(BaseHTTPMiddleware):
             return new_response
 
         if x402_mode == "paid":
-            return await self._finish_paid(request, response)
+            try:
+                out = await self._finish_paid(request, response)
+            except BaseException:
+                finish_idempotent_request(request, None)
+                raise
+            # Stores a 2xx result for the request's Idempotency-Key, if any.
+            finish_idempotent_request(request, out)
+            return out
 
         return response
 
@@ -358,11 +449,16 @@ class X402Middleware(BaseHTTPMiddleware):
             # Nothing delivered and nothing collected: let the same signed
             # authorization be retried.
             replay_guard.release(getattr(request.state, "x402_auth_key", None))
+            if response.status_code == 402:
+                return await _spec_shaped_402(response)
             return response
 
         if settlement is None:
             payment_payload = getattr(request.state, "x402_payment", None)
             payment_requirements = getattr(request.state, "x402_requirements", None)
+            unknown_outcome = False
+            from app.x402.idempotency import record_settling, settlement_refused
+            record_settling(request)
             try:
                 settlement = await self.facilitator_client.settle(
                     payment=payment_payload,
@@ -372,10 +468,20 @@ class X402Middleware(BaseHTTPMiddleware):
             except Exception as e:
                 logger.error(f"x402: Payment settlement failed: {type(e).__name__}: {e}", exc_info=True)
                 failure = f"{type(e).__name__}"
+                unknown_outcome = True
             if failure is not None:
                 logger.error(f"x402: settlement failed after delivery on {request.url.path}: {failure}")
-                log_payment_settled(client_ip=client_ip, payer=payer, transaction_hash=None,
-                                    network=settings.X402_NETWORK, success=False, error_reason=failure)
+                if unknown_outcome:
+                    # The facilitator may or may not have moved the money: not
+                    # a refusal. Same record as settlement.py uses for it.
+                    log_payment_failed(client_ip=client_ip, reason=failure, stage="settle",
+                                       wallet_address=payer)
+                    x402_settlements_total.labels(result="error").inc()
+                else:
+                    settlement_refused(request)
+                    log_payment_settled(client_ip=client_ip, payer=payer, transaction_hash=None,
+                                        network=settings.X402_NETWORK, success=False, error_reason=failure)
+                    x402_settlements_total.labels(result="refused").inc()
                 return JSONResponse(
                     status_code=402,
                     content={
@@ -388,6 +494,9 @@ class X402Middleware(BaseHTTPMiddleware):
             log_payment_settled(client_ip=client_ip, payer=payer,
                                 transaction_hash=getattr(settlement, "transaction", None),
                                 network=settings.X402_NETWORK, success=True)
+            from app.x402.idempotency import record_settlement
+            record_settlement(request, settlement)
+            x402_settlements_total.labels(result="settled").inc()
 
         tx_hash = getattr(settlement, "transaction", None) or "unknown"
         if not ok:
@@ -398,10 +507,15 @@ class X402Middleware(BaseHTTPMiddleware):
             log_payment_failed(client_ip=client_ip,
                                reason=f"HTTP {response.status_code} after settlement; tx={tx_hash}",
                                stage="delivery_after_settlement", wallet_address=payer)
+            x402_settlements_total.labels(result="settled_not_delivered").inc()
 
         body = b""
         async for chunk in response.body_iterator:
             body += chunk
+        # 202: accepted, not yet delivered (a stamp purchase Bee has not
+        # confirmed, #400). The handler records the delivery when it happens.
+        if ok and response.status_code != 202:
+            _log_delivery(request, settlement, body, client_ip, payer)
         new_response = Response(
             content=body,
             status_code=response.status_code,
@@ -432,6 +546,7 @@ class X402Middleware(BaseHTTPMiddleware):
             return JSONResponse(status_code=500, content={"detail": "Internal server error. You were not charged."})
 
         tx_hash = getattr(settlement, "transaction", None) or "unknown"
+        x402_settlements_total.labels(result="settled_not_delivered").inc()
         logger.error(f"x402: payment {tx_hash} settled but {request.url.path} raised; refund needed", exc_info=True)
         log_payment_failed(client_ip=get_client_ip(request),
                            reason=f"exception after settlement; tx={tx_hash}",

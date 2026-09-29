@@ -14,7 +14,6 @@ from app.x402.ratelimit import reset_rate_limiter
 
 # Large enough that depth and duration move the price above the minimum.
 CHAINSTATE = {"currentPrice": "240000", "chainTip": 1, "block": 1}
-OK_BALANCE = {"ok": True, "is_critical": False, "balance_eth": 0.01}
 
 
 async def _ok():
@@ -28,8 +27,7 @@ def x402_on(monkeypatch):
                  ("X402_PAY_TO_ADDRESS", "0xpayee"), ("X402_NETWORK", "base-sepolia")):
         monkeypatch.setattr(settings, k, v)
     reset_rate_limiter()
-    with patch("app.services.swarm_api.get_chainstate", new=AsyncMock(return_value=CHAINSTATE)) as bee, \
-         patch("app.x402.dependency.check_base_eth_balance", new=AsyncMock(return_value=OK_BALANCE)):
+    with patch("app.services.swarm_api.get_chainstate", new=AsyncMock(return_value=CHAINSTATE)) as bee:
         yield bee
     reset_rate_limiter()
 

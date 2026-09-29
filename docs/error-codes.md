@@ -24,8 +24,10 @@ example `HTTP_404` or `HTTP_502`, and `message` is the error text.
 Two responses keep their own shape:
 
 - **402 Payment Required** from the x402 payment check. Its body is the x402
-  payment request (`x402Version`, `error`, `accepts`, `freeTier`), currently
-  under `detail`; `code` is `HTTP_402`. See
+  payment request (`x402Version`, `error`, `accepts`, `freeTier`) at the top
+  level, as x402 v1 specifies, next to `code` (`HTTP_402`) and `message`. The
+  same request is also under `detail` for older clients; that copy is
+  deprecated. See
   [x402-client-integration.md](x402-client-integration.md) for how to pay it.
   To learn a price *without* triggering a 402, call `GET /api/v1/pricing`.
 - **Payment settlement failure** (500) after a paid request. Its body is
@@ -35,9 +37,9 @@ Two responses keep their own shape:
   **Do not retry automatically or re-pay** because the body says to: that can
   pay, and run the operation, twice. First check whether your payment
   authorization's nonce was used (or your USDC balance), and if it was, contact
-  the operator with the payer address and the time of the request. Once
-  `Idempotency-Key` is supported (#422), send one with every paid request, so
-  that a retry returns the first result instead of charging again.
+  the operator with the payer address and the time of the request. Send an
+  `Idempotency-Key` with every paid request, so that a retry returns the first
+  result instead of charging again (see below).
 
 A test (`tests/test_error_codes_doc.py`) fails if a code is raised in `app/`
 without being listed here, or listed here but no longer raised.
@@ -57,7 +59,7 @@ without being listed here, or listed here but no longer raised.
 
 | Code | Status | Meaning | What to do |
 |---|---|---|---|
-| `HTTP_402` | 402 | Payment required (x402), or the payment sent was rejected (invalid header, verification failed; see `message`). `detail.accepts` lists what to pay; `detail.freeTier` is present when the free tier is available. | Sign a payment for `accepts[0]` and retry with `X-PAYMENT`, or retry with `X-Payment-Mode: free`. |
+| `HTTP_402` | 402 | Payment required (x402), or the payment sent was rejected (invalid header, verification failed; see `message`). `accepts` lists what to pay; `freeTier` is present when the free tier is available (both also under `detail`, deprecated). | Sign a payment for `accepts[0]` and retry with `X-PAYMENT`, or retry with `X-Payment-Mode: free`. |
 | `PRICING_UNAVAILABLE` | 503 | `GET /api/v1/pricing` could not read the current chain price. | Retry shortly. |
 | `PAYMENT_REQUIRED` | 402 | Bandwidth credit top-up was attempted on the free tier. | Pay with `X-PAYMENT`. The free tier cannot fund credit. |
 | `BILLING_DISABLED` | 400 | Bandwidth credit top-up needs x402, which is off on this gateway. | Use the free tier for chunk uploads, or another gateway. |
@@ -73,11 +75,29 @@ without being listed here, or listed here but no longer raised.
 | `PAYMENT_SETTLEMENT_FAILED` | 402 | The facilitator refused the payment, so **nothing was delivered**. `detail.reason` gives the refusal, `detail.x402_status` is `settlement_failed`. | Fix what `reason` names (usually funds or an expired authorization) and retry. |
 | `DELIVERY_FAILED_AFTER_PAYMENT` | 500 | The payment **was collected** and the request then failed. The only code here that means money moved without a result. `detail.transaction` and the `X-Payment-Transaction` header carry the transfer; `x402_status` is `settled_not_delivered`. | Do not retry blindly. Contact the operator with the transaction for a refund. |
 
+## Idempotency-Key
+
+Paid requests may carry an `Idempotency-Key`; see
+[x402-client-integration.md](x402-client-integration.md#retries-and-idempotency-key).
+None of these responses charges the new payment.
+
+| Code | Status | Meaning | What to do |
+|---|---|---|---|
+| `IDEMPOTENCY_KEY_INVALID` | 400 | The key is empty, longer than 255 characters, or not printable ASCII. | Send a valid key (a UUID). |
+| `IDEMPOTENCY_KEY_IN_PROGRESS` | 409 | A request with this key is still being processed. `Retry-After: 5`. | Retry with the same key. |
+| `IDEMPOTENCY_KEY_REUSED` | 422 | The key was already used for a different request (method, path, body or query). | Use a new key. |
+| `IDEMPOTENCY_KEY_SETTLED_PENDING` | 409 | The first request with this key was paid, but its result is not available (it failed or was interrupted afterwards). `detail.transaction` names the payment. | Do not pay again. Contact the operator with the transaction for the result or a refund. |
+| `IDEMPOTENCY_KEY_SETTLEMENT_UNKNOWN` | 409 | The first request's payment was sent for settlement and no answer came back. `detail.nonce` is that authorization's nonce. | Check on-chain whether the nonce was used before paying again with a new key; if it was, contact the operator. |
+| `IDEMPOTENCY_KEY_DELIVERED_NOT_STORED` | 409 | The first request succeeded and was paid once, but its response was too large to keep. | Look the result up through the resource itself. |
+| `IDEMPOTENCY_UNAVAILABLE` | 503 | The gateway cannot read its idempotency store. | Retry later with the same key. |
+
 ## Stamps
 
 | Code | Status | Meaning | What to do |
 |---|---|---|---|
 | `STAMP_COST_EXCEEDS_LIMIT` | 400 | The requested batch would cost more than the gateway allows per purchase. | Ask for a smaller size or a shorter duration. |
+| `PURCHASE_PENDING` | 202 | Paid stamp purchase: the payment was collected but the Bee node did not confirm the purchase in time. Not an error. The body has the payment `transaction` and the batch `label`; the batch is registered to the paying wallet as soon as the node reports it. | Do not pay again. Look for the label in `GET /api/v1/stamps/?wallet=<payer>`, or retry with the same `Idempotency-Key` for the `201` once it is found. |
+| `PURCHASE_CAPACITY` | 503 | Too many paid stamp purchases are waiting on the Bee node. Checked before settlement: **nothing was charged**. `Retry-After: 30`. | Retry shortly. |
 | `DAILY_SPEND_BUDGET_EXHAUSTED` | 429 | This caller's daily purchase budget is spent. | Wait until the budget resets (see `message`). |
 | `GATEWAY_DAILY_SPEND_CEILING` | 503 | The gateway itself has spent its daily BZZ allowance, so it is refusing to spend more for anyone. Two variants, distinguished by `message`: the overall ceiling is reached, or only the portion open to unpaid requests is — in the second case paid requests still work. `detail.resets_at` is when it lifts. Applies to stamp purchase, extension and buy-batch-for-owner. | Wait for `resets_at`. If the message says only free spending is exhausted, pay with `X-PAYMENT` and retry. This is the operator's limit, not yours — if it recurs, tell them. |
 | `DAILY_STAMP_ALLOWANCE_EXHAUSTED` | 429 | `POST /pool/acquire`: the free daily allowance for this size is used up. `detail` has `allowance`, `used`, `resets_at` and an `alternative`. | Wait for `resets_at`, or follow `detail.alternative` (pay, or buy a stamp directly). |
