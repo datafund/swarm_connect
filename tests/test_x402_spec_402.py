@@ -86,7 +86,7 @@ def _full_app(verify_ok=True, settle_ok=True, free_tier=True):
 
     fac = MagicMock()
     fac.verify = AsyncMock(return_value=VerifyResponse(isValid=verify_ok, invalidReason=None if verify_ok else "bad",
-                                                       payer="0xp"))
+                                                       payer="0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"))
     fac.settle = AsyncMock(return_value=SettleResponse(success=settle_ok, errorReason=None if settle_ok else "no funds"))
     app = FastAPI()
     paid = APIRouter(dependencies=[Depends(require_x402_payment)])

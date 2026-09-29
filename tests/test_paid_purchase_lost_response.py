@@ -296,10 +296,10 @@ def test_find_purchased_batch_survives_a_failed_poll():
 def test_register_stamp_refuses_or_logs_a_change_of_owner(tmp_path, caplog):
     from app.services.stamp_ownership import StampOwnershipManager
     m = StampOwnershipManager(state_file=str(tmp_path / "o.json"))
-    assert m.register_stamp(BATCH, "0xaa", "paid", "direct_purchase")
-    assert not m.register_stamp(BATCH, "0xbb", "paid", "direct_purchase", only_if_unowned=True)
-    assert m.get_stamp_info(BATCH)["owner"] == "0xaa"
-    m.register_stamp(BATCH, "0xbb", "paid", "direct_purchase")
+    assert m.register_stamp(BATCH, "0x" + "aa" * 20, "paid", "direct_purchase")
+    assert not m.register_stamp(BATCH, "0x" + "bb" * 20, "paid", "direct_purchase", only_if_unowned=True)
+    assert m.get_stamp_info(BATCH)["owner"] == "0x" + "aa" * 20
+    m.register_stamp(BATCH, "0x" + "bb" * 20, "paid", "direct_purchase")
     assert "Re-registering" in caplog.text
 
 

@@ -36,7 +36,7 @@ async def no_settle_point():
 def _run(settle, path="/api/v1/stamps/"):
     reset_rate_limiter()
     fac = MagicMock()
-    fac.verify = AsyncMock(return_value=VerifyResponse(isValid=True, payer="0xpayer"))
+    fac.verify = AsyncMock(return_value=VerifyResponse(isValid=True, payer="0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"))
     fac.settle = AsyncMock(side_effect=settle) if isinstance(settle, Exception) else AsyncMock(return_value=settle)
     app = FastAPI()
     router = APIRouter(dependencies=[Depends(require_x402_payment)])
