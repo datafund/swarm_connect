@@ -24,7 +24,7 @@ from enum import Enum
 from typing import Dict, List, Optional, Set
 from threading import Lock
 
-from app.core.atomic_io import atomic_write_json
+from app.core.atomic_io import atomic_write_json, unreadable_state
 from app.core.config import settings
 from app.services import swarm_api
 from app.services.swarm_api import coerce_int
@@ -177,39 +177,56 @@ class StampPoolManager:
             logger.error(f"Failed to save pool state to {state_file}: {e}")
 
     def _load_state(self) -> Set[str]:
-        """Load pool batch IDs from state file.
+        """Load the pool's batch IDs from its state file.
 
-        Returns:
-            Set of batch IDs that were previously in the pool.
-            Returns empty set if file is missing or corrupt.
+        A MISSING file is the only case where starting empty is correct: it is a
+        genuine first run. Every other failure raises StateLoadError, after
+        copying the file aside once (#440).
+
+        Treating a corrupt file as a first run loses the pool's batches twice
+        over: the gateway buys a fresh reserve it already owns, and the next
+        _save_state overwrites the only record of the originals with the new
+        list. They then live out their TTL owned by the gateway, unacquirable and
+        unwritable, having been paid for.
+
+        Raising instead makes the sync fail, which sets _last_sync_ok = False and
+        stops replenishment (see check_and_replenish) rather than reading an empty
+        pool as a real deficit. The permission case already did this after #416;
+        this brings corrupt JSON, a wrong top-level type and anything unexpected
+        into line with it.
         """
         state_file = self._get_state_file_path()
         try:
             with open(state_file, 'r') as f:
                 batch_ids = json.load(f)
-            if isinstance(batch_ids, list):
-                logger.info(f"Loaded pool state: {len(batch_ids)} stamps from {state_file}")
-                return set(batch_ids)
-            else:
-                logger.warning(f"Invalid pool state format in {state_file}, treating as first run")
-                return set()
         except FileNotFoundError:
             logger.info(f"No pool state file at {state_file}, treating as first run")
             return set()
-        except (json.JSONDecodeError, ValueError) as e:
-            logger.warning(f"Corrupt pool state file {state_file}: {e}, treating as first run")
-            return set()
-        except OSError as e:
-            # The file exists but cannot be read — e.g. still owned by root from
-            # before the container ran unprivileged. That is not a first run:
-            # treating it as one would buy a fresh reserve and the next save would
-            # overwrite the only list of the pool's batches. Raise so the sync
-            # counts as failed (no purchases, no save) and retries next cycle.
-            logger.error(f"Cannot read pool state file {state_file}: {e}")
-            raise
         except Exception as e:
-            logger.warning(f"Error loading pool state from {state_file}: {e}, treating as first run")
-            return set()
+            # Unparseable JSON, a permission or I/O error, anything else. Not a
+            # first run, so do not answer as though it were.
+            logger.error(f"Cannot read pool state file {state_file}: {e}; "
+                         "pool spending is paused until it is repaired")
+            raise unreadable_state(state_file, e) from e
+
+        if not isinstance(batch_ids, list):
+            logger.error(f"Pool state in {state_file} is a {type(batch_ids).__name__}, "
+                         "expected a list; pool spending is paused until it is repaired")
+            raise unreadable_state(
+                state_file, f"expected a JSON list of batch IDs, got {type(batch_ids).__name__}")
+
+        # Element types are checked here rather than left to set(): a nested
+        # object raises an opaque "unhashable type" from a later line, which
+        # reads as a bug in the pool rather than a corrupt file.
+        bad = [b for b in batch_ids if not isinstance(b, str)]
+        if bad:
+            logger.error(f"Pool state in {state_file} has {len(bad)} non-string entries; "
+                         "pool spending is paused until it is repaired")
+            raise unreadable_state(
+                state_file, f"expected strings, got {type(bad[0]).__name__} among {len(batch_ids)} entries")
+
+        logger.info(f"Loaded pool state: {len(batch_ids)} stamps from {state_file}")
+        return set(batch_ids)
 
     def get_status(self) -> PoolStatus:
         """Get current pool status."""
