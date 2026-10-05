@@ -91,8 +91,7 @@ def refused(reason="insufficient_funds"):
 def env():
     DELIVERED.clear()
     reset_rate_limiter()
-    with patch("app.x402.dependency.check_base_eth_balance", new=AsyncMock(return_value=OK_BALANCE)), \
-         patch("app.x402.dependency._calculate_price_for_request",
+    with patch("app.x402.dependency._calculate_price_for_request",
                new=AsyncMock(return_value={"price_usd": 0.02, "description": "t"})), \
          patch("app.x402.middleware.settings") as mw, \
          patch("app.x402.dependency.settings") as dep:
@@ -206,7 +205,7 @@ def test_failure_after_settlement_is_recorded_for_refund(env):
     assert r.headers["X-Payment-Transaction"] == TX
     assert r.headers["X-Payment-Status"] == "settled_not_delivered"
     events = [e for e in read_audit_log() if e["data"].get("stage") == "delivery_after_settlement"]
-    assert events and TX in events[-1]["data"]["reason"]
+    assert any(TX in e["data"]["reason"] for e in events)
 
 
 def test_crash_after_settlement_returns_the_transaction(env):

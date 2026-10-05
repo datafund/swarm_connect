@@ -61,8 +61,6 @@ def test_the_echoed_free_tier_value_is_accepted_as_an_opt_in(monkeypatch, mode):
     req.state.x402_mode = None
     with patch.object(dependency, "_calculate_price_for_request",
                       new=AsyncMock(return_value={"price_usd": 0.05, "description": "x"})), \
-         patch.object(dependency, "check_base_eth_balance",
-                      new=AsyncMock(return_value={"is_critical": False})), \
          patch.object(dependency, "check_rate_limit", return_value=(True, None, {"requests_made": 1, "limit": 3})):
         asyncio.run(dependency.require_x402_payment(req))
     assert req.state.x402_mode == "free-tier"
@@ -79,8 +77,6 @@ def test_the_free_tier_429_says_when_to_retry(monkeypatch):
     stats = {"requests_made": 3, "limit": 3, "remaining": 0, "window_seconds": 60}
     with patch.object(dependency, "_calculate_price_for_request",
                       new=AsyncMock(return_value={"price_usd": 0.05, "description": "x"})), \
-         patch.object(dependency, "check_base_eth_balance",
-                      new=AsyncMock(return_value={"is_critical": False})), \
          patch.object(dependency, "check_rate_limit", return_value=(False, "limit", stats)):
         with pytest.raises(HTTPException) as e:
             asyncio.run(dependency.require_x402_payment(req))

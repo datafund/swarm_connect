@@ -17,7 +17,7 @@ from app.core.config import settings
 from app.x402.dependency import require_x402_payment
 from app.services.stamp_ownership import stamp_ownership_manager
 from app.x402.ratelimit import reset_rate_limiter
-from tests.test_x402_integration import OK_BALANCE, create_valid_payment_header
+from tests.test_x402_integration import create_valid_payment_header
 
 # The production app attaches the x402 dependency only when X402_ENABLED is set
 # at import time, which it is not in the test process. Mount the real stamps
@@ -41,8 +41,7 @@ def gated(monkeypatch):
     saved = dict(stamp_ownership_manager._registry)
     stamp_ownership_manager._registry = {}
     extend = AsyncMock(return_value=BATCH)
-    with patch("app.x402.dependency.check_base_eth_balance", new=AsyncMock(return_value=OK_BALANCE)), \
-         patch("app.services.swarm_api.get_all_stamps_processed",
+    with patch("app.services.swarm_api.get_all_stamps_processed",
                new=AsyncMock(return_value=[{"batchID": BATCH, "depth": 20}])), \
          patch("app.services.swarm_api.get_chainstate", new=AsyncMock(return_value=CHAINSTATE)), \
          patch("app.x402.pricing.get_chainstate", new=AsyncMock(return_value=CHAINSTATE)), \

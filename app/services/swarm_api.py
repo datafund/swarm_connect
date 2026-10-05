@@ -137,7 +137,8 @@ async def get_local_stamps() -> List[Dict[str, Any]]:
         return []
 
 
-async def purchase_postage_stamp(amount: int, depth: int, label: Optional[str] = None) -> str:
+async def purchase_postage_stamp(amount: int, depth: int, label: Optional[str] = None,
+                                 timeout: Optional[float] = None) -> str:
     """
     Purchases a new postage stamp from the configured Swarm Bee node.
 
@@ -145,6 +146,7 @@ async def purchase_postage_stamp(amount: int, depth: int, label: Optional[str] =
         amount: The amount of the postage stamp in wei
         depth: The depth of the postage stamp
         label: Optional user-defined label for the stamp
+        timeout: Seconds to wait for Bee (default SWARM_STAMP_PURCHASE_TIMEOUT_SECONDS)
 
     Returns:
         The batchID of the purchased stamp
@@ -159,19 +161,16 @@ async def purchase_postage_stamp(amount: int, depth: int, label: Optional[str] =
         raise ValueError(f"Stamp amount must be positive, got {amount}")
 
     api_url = urljoin(str(settings.SWARM_BEE_API_URL), f"stamps/{amount}/{depth}")
-    headers = {"Content-Type": "application/json"}
 
-    # Prepare request body if label is provided
-    request_body = {}
-    if label:
-        request_body["label"] = label
+    # Bee reads the label from the query string. It used to be sent in a JSON
+    # body, which Bee ignores, so every label was silently dropped (#400 needs
+    # it to find a purchase whose response was lost).
+    params = {"label": label} if label else None
 
     try:
         client = get_client()
-        if request_body:
-            response = await client.post(api_url, json=request_body, headers=headers, timeout=120)
-        else:
-            response = await client.post(api_url, headers=headers, timeout=120)
+        response = await client.post(api_url, params=params,
+                                     timeout=timeout or settings.SWARM_STAMP_PURCHASE_TIMEOUT_SECONDS)
 
         response.raise_for_status()
         response_json = response.json()
@@ -190,6 +189,49 @@ async def purchase_postage_stamp(amount: int, depth: int, label: Optional[str] =
     except (ValueError, KeyError) as e:
         logger.error(f"Error parsing stamp purchase response: {e}")
         raise ValueError(f"Could not parse stamp purchase response: {e}") from e
+
+
+async def find_purchased_batch(label: str, depth: int, amount: int, is_known, min_block: Optional[int],
+                               wait_seconds: float, interval: float = 3.0) -> Optional[str]:
+    """Find a batch whose purchase response was lost (#400).
+
+    When Bee's POST /stamps gives no answer, the purchase may still go through.
+    Look for it in the node's own batches by what it was bought with. `label`
+    must be unique to this purchase (the gateway adds a random suffix), and a
+    match must also have the depth and amount, not be registered to anyone
+    (is_known), and, when min_block is known, be created at or after it (the
+    node's block when the purchase started), so an older batch can never match.
+
+    Bee labels a batch it learns about only from the chain "recovered". Those
+    are NOT matched: nothing ties one to this purchase rather than to another
+    purchase in flight at the same time, so a lost purchase that surfaces that
+    way goes to the refund path instead.
+
+    Polls for up to wait_seconds, because a new batch appears only once Bee has
+    seen it on-chain. A failed poll counts as "not found yet". Returns None
+    unless exactly one batch matches.
+    """
+    def matches(s: Dict[str, Any]) -> bool:
+        return (bool(s.get("batchID")) and s.get("label") == label
+                and coerce_int(s.get("depth"), -1) == depth and str(s.get("amount")) == str(amount)
+                and (min_block is None or coerce_int(s.get("blockNumber"), -1) >= min_block)
+                and not is_known(s["batchID"]))
+
+    deadline = time.monotonic() + wait_seconds
+    while True:
+        try:
+            found = [s["batchID"] for s in await get_local_stamps() if matches(s)]
+        except Exception as e:
+            logger.warning(f"Lost purchase lookup: listing failed ({e}); retrying")
+            found = []
+        if len(found) == 1:
+            return found[0]
+        if len(found) > 1:
+            logger.warning(f"Lost purchase lookup: {len(found)} batches match label {label!r}; not guessing")
+            return None
+        if time.monotonic() >= deadline:
+            return None
+        await asyncio.sleep(interval)
 
 
 async def extend_postage_stamp(stamp_id: str, amount: int) -> str:

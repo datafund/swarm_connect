@@ -75,7 +75,7 @@ def test_the_handler_buys_exactly_the_priced_batch(monkeypatch):
     from fastapi import Depends, FastAPI
     from app.api.endpoints import stamps
     from app.x402.dependency import require_x402_payment
-    from tests.test_x402_integration import OK_BALANCE, create_valid_payment_header
+    from tests.test_x402_integration import create_valid_payment_header
     from x402.types import VerifyResponse
 
     monkeypatch.setattr(settings, "X402_ENABLED", True)
@@ -85,15 +85,14 @@ def test_the_handler_buys_exactly_the_priced_batch(monkeypatch):
     app.include_router(stamps.router, prefix="/api/v1/stamps", dependencies=[Depends(require_x402_payment)])
     bought = {}
 
-    async def buy(amount, depth, label=None):
+    async def buy(amount, depth, label=None, timeout=None):
         bought.update(amount=amount, depth=depth)
         return "b" * 64
 
     fac = SimpleNamespace(verify=AsyncMock(return_value=VerifyResponse(isValid=True, payer="0xp")),
                           settle=AsyncMock())
     moved = {"currentPrice": "48000", "minimumValidityBlocks": 17280}   # price doubled after the quote
-    with patch("app.x402.dependency.check_base_eth_balance", new=AsyncMock(return_value=OK_BALANCE)), \
-         patch("app.x402.dependency._get_facilitator_client", return_value=fac), \
+    with patch("app.x402.dependency._get_facilitator_client", return_value=fac), \
          patch("app.x402.pricing.get_chainstate", new=AsyncMock(return_value=CHAINSTATE)), \
          patch("app.services.swarm_api.get_chainstate", new=AsyncMock(return_value=moved)), \
          patch("app.services.swarm_api.check_sufficient_funds",
