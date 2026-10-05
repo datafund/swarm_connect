@@ -19,9 +19,9 @@ jobs:
   # Only dev and main deploy. workflow_dispatch accepts any ref, and the steps
   # below used to treat every ref other than dev as production: a manual run
   # from a feature branch swapped /opt/swarm_connect to that branch, stopped
-  # and chowned the production gateway, and recreated it — a restart that
-  # re-buys the pool reserve (#487). Refuse here, on a hosted runner, before
-  # anything reaches a deploy host.
+  # and chowned the production gateway, and recreated it: an unplanned
+  # production restart, with the host left on a feature-branch checkout (#487).
+  # Refuse here, on a hosted runner, before anything reaches a deploy host.
   ref-guard:
     name: ref-guard
     runs-on: ubuntu-latest
@@ -311,9 +311,12 @@ jobs:
 
           # Recreate ONLY the service this branch owns. `docker compose up -d
           # --force-recreate` with no argument recreates every service, so a push
-          # to dev restarted production and vice versa. That is not free: the
-          # stamp pool buys a reserve on startup, and one such restart cost about
-          # 0.7 BZZ for nothing.
+          # to dev restarted production and vice versa. On 2026-08-25 one such
+          # restart cost about 0.7 BZZ (c71f6ef): the pool bought a fresh reserve
+          # on startup. It no longer does. It reloads its batches from
+          # pool_state.json and buys only for a real shortfall (#349, #416, #440);
+          # two staging restarts on 2026-10-05 bought nothing. A restart still
+          # means a short outage: the container is stopped for the chown below.
           #
           # --no-deps keeps it from dragging the other environment's containers
           # in through depends_on.
