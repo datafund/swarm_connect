@@ -11,7 +11,12 @@ WORKDIR /app
 # ones included, with hashes; --require-hashes makes pip refuse anything else.
 COPY requirements.lock .
 RUN apt-get update && apt-get install -y curl && rm -rf /var/lib/apt/lists/*
-RUN pip install --no-cache-dir --require-hashes -r requirements.lock
+# --no-deps: the lockfile is complete, so pip must not resolve anything itself.
+# Without it, pip 23 treats a dependency's extra (x402 -> fastapi[standard]) as a
+# new unpinned requirement and refuses the build in --require-hashes mode.
+# pip check then fails the build if the lock ever misses a dependency.
+RUN pip install --no-cache-dir --no-deps --require-hashes -r requirements.lock \
+    && pip check
 
 # Copy the rest of the application code
 COPY . .
