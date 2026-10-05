@@ -117,7 +117,8 @@ def test_pool_acquire_reports_the_stamps_expiry(monkeypatch):
     stamp = SimpleNamespace(batch_id=BATCH, depth=17)
     mgr = pool_ep.stamp_pool_manager
     with patch.object(mgr, "get_available_stamp", return_value=stamp), \
-         patch.object(mgr, "release_stamp", return_value=stamp), \
+         patch.object(mgr, "reserve_stamp", return_value=stamp), \
+         patch.object(mgr, "release_reserved_stamp", return_value=stamp), \
          patch.object(mgr, "trigger_replenishment_if_needed", return_value=False), \
          patch.object(pool_ep.stamp_ownership_manager, "register_stamp"), \
          patch("app.api.endpoints.pool.get_batch_expiry", new=AsyncMock(return_value="2026-10-02T00:00:00Z")):

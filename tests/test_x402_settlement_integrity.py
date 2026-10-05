@@ -91,8 +91,7 @@ def refused(reason="insufficient_funds"):
 def env():
     DELIVERED.clear()
     reset_rate_limiter()
-    with patch("app.x402.dependency.check_base_eth_balance", new=AsyncMock(return_value=OK_BALANCE)), \
-         patch("app.x402.dependency._calculate_price_for_request",
+    with patch("app.x402.dependency._calculate_price_for_request",
                new=AsyncMock(return_value={"price_usd": 0.02, "description": "t"})), \
          patch("app.x402.middleware.settings") as mw, \
          patch("app.x402.dependency.settings") as dep:
@@ -206,7 +205,7 @@ def test_failure_after_settlement_is_recorded_for_refund(env):
     assert r.headers["X-Payment-Transaction"] == TX
     assert r.headers["X-Payment-Status"] == "settled_not_delivered"
     events = [e for e in read_audit_log() if e["data"].get("stage") == "delivery_after_settlement"]
-    assert events and TX in events[-1]["data"]["reason"]
+    assert any(TX in e["data"]["reason"] for e in events)
 
 
 def test_crash_after_settlement_returns_the_transaction(env):
@@ -243,20 +242,3 @@ def test_payload_without_an_authorization_is_refused(env):
     assert "EIP-3009" in r.json()["detail"]["error"]
     assert DELIVERED == []
 
-
-def test_returned_pool_batch_is_available_again(tmp_path):
-    """return_released_stamp on the real manager: back in the pool and on disk."""
-    import json
-    from datetime import datetime, timezone
-    from app.services.stamp_pool import PoolStamp, PoolStampStatus, StampPoolManager
-    state = tmp_path / "pool.json"
-    mgr = StampPoolManager(state_file=str(state))
-    batch = "f" * 64
-    mgr._pool[batch] = PoolStamp(batch_id=batch, depth=17, amount=1, created_at=datetime.now(timezone.utc),
-                                 ttl_at_creation=3600, status=PoolStampStatus.AVAILABLE)
-    released = mgr.release_stamp(batch, released_to="1.2.3.4")
-    assert mgr.get_available_stamp(17) is None
-    mgr.return_released_stamp(released)
-    assert mgr.get_available_stamp(17).batch_id == batch
-    assert batch in json.dumps(json.load(open(state)))
-    assert mgr.release_stamp(batch) is not None

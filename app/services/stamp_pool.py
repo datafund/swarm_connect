@@ -24,7 +24,7 @@ from enum import Enum
 from typing import Dict, List, Optional, Set
 from threading import Lock
 
-from app.core.atomic_io import atomic_write_json
+from app.core.atomic_io import atomic_write_json, unreadable_state
 from app.core.config import settings
 from app.services import swarm_api
 from app.services.swarm_api import coerce_int
@@ -58,8 +58,12 @@ def _bee_error_message(exc) -> Optional[str]:
 class PoolStampStatus(str, Enum):
     """Status of a stamp in the pool."""
     AVAILABLE = "available"  # Ready to be released
-    RESERVED = "reserved"    # Temporarily held (e.g., during release)
+    RESERVED = "reserved"    # Held while an acquiring payment settles
     RELEASED = "released"    # Released to client, no longer managed
+
+
+# Statuses that are still the pool's: they count toward the reserve target.
+_HELD = (PoolStampStatus.AVAILABLE, PoolStampStatus.RESERVED)
 
 
 @dataclass
@@ -173,39 +177,56 @@ class StampPoolManager:
             logger.error(f"Failed to save pool state to {state_file}: {e}")
 
     def _load_state(self) -> Set[str]:
-        """Load pool batch IDs from state file.
+        """Load the pool's batch IDs from its state file.
 
-        Returns:
-            Set of batch IDs that were previously in the pool.
-            Returns empty set if file is missing or corrupt.
+        A MISSING file is the only case where starting empty is correct: it is a
+        genuine first run. Every other failure raises StateLoadError, after
+        copying the file aside once (#440).
+
+        Treating a corrupt file as a first run loses the pool's batches twice
+        over: the gateway buys a fresh reserve it already owns, and the next
+        _save_state overwrites the only record of the originals with the new
+        list. They then live out their TTL owned by the gateway, unacquirable and
+        unwritable, having been paid for.
+
+        Raising instead makes the sync fail, which sets _last_sync_ok = False and
+        stops replenishment (see check_and_replenish) rather than reading an empty
+        pool as a real deficit. The permission case already did this after #416;
+        this brings corrupt JSON, a wrong top-level type and anything unexpected
+        into line with it.
         """
         state_file = self._get_state_file_path()
         try:
             with open(state_file, 'r') as f:
                 batch_ids = json.load(f)
-            if isinstance(batch_ids, list):
-                logger.info(f"Loaded pool state: {len(batch_ids)} stamps from {state_file}")
-                return set(batch_ids)
-            else:
-                logger.warning(f"Invalid pool state format in {state_file}, treating as first run")
-                return set()
         except FileNotFoundError:
             logger.info(f"No pool state file at {state_file}, treating as first run")
             return set()
-        except (json.JSONDecodeError, ValueError) as e:
-            logger.warning(f"Corrupt pool state file {state_file}: {e}, treating as first run")
-            return set()
-        except OSError as e:
-            # The file exists but cannot be read — e.g. still owned by root from
-            # before the container ran unprivileged. That is not a first run:
-            # treating it as one would buy a fresh reserve and the next save would
-            # overwrite the only list of the pool's batches. Raise so the sync
-            # counts as failed (no purchases, no save) and retries next cycle.
-            logger.error(f"Cannot read pool state file {state_file}: {e}")
-            raise
         except Exception as e:
-            logger.warning(f"Error loading pool state from {state_file}: {e}, treating as first run")
-            return set()
+            # Unparseable JSON, a permission or I/O error, anything else. Not a
+            # first run, so do not answer as though it were.
+            logger.error(f"Cannot read pool state file {state_file}: {e}; "
+                         "pool spending is paused until it is repaired")
+            raise unreadable_state(state_file, e) from e
+
+        if not isinstance(batch_ids, list):
+            logger.error(f"Pool state in {state_file} is a {type(batch_ids).__name__}, "
+                         "expected a list; pool spending is paused until it is repaired")
+            raise unreadable_state(
+                state_file, f"expected a JSON list of batch IDs, got {type(batch_ids).__name__}")
+
+        # Element types are checked here rather than left to set(): a nested
+        # object raises an opaque "unhashable type" from a later line, which
+        # reads as a bug in the pool rather than a corrupt file.
+        bad = [b for b in batch_ids if not isinstance(b, str)]
+        if bad:
+            logger.error(f"Pool state in {state_file} has {len(bad)} non-string entries; "
+                         "pool spending is paused until it is repaired")
+            raise unreadable_state(
+                state_file, f"expected strings, got {type(bad[0]).__name__} among {len(batch_ids)} entries")
+
+        logger.info(f"Loaded pool state: {len(batch_ids)} stamps from {state_file}")
+        return set(batch_ids)
 
     def get_status(self) -> PoolStatus:
         """Get current pool status."""
@@ -320,20 +341,58 @@ class StampPoolManager:
             self._save_state()
             return stamp
 
-    def return_released_stamp(self, stamp: PoolStamp) -> None:
-        """Put back a batch that release_stamp() handed out but was not delivered.
+    def reserve_stamp(
+        self,
+        batch_id: str,
+        reserved_for: Optional[str] = None
+    ) -> Optional[PoolStamp]:
+        """Hold an available batch for a caller whose payment is still settling.
 
-        Used when a paid acquire claims a batch and settlement then fails: the
-        batch goes back to the pool exactly as it was, so it is neither lost to
-        the pool nor handed to a caller who did not pay.
+        The batch stays in the pool and in the state file while settlement runs,
+        which can take seconds. Taking it out instead (release first, put back on
+        failure) left a window in which a replenish check saw one batch fewer and
+        bought an extra, and in which a crash dropped the batch from pool state
+        so it sat on the node unused until it expired (#403).
+
+        A reserved batch counts toward the reserve target but is never selected
+        or sold. Finish with release_reserved_stamp() once payment has settled,
+        or unreserve_stamp() if it has not. Statuses are not persisted, so a
+        batch reserved when the process dies is simply available after restart.
+
+        Returns:
+            The reserved stamp, or None if not found/not available (another
+            request got it first)
         """
         with self._lock:
-            stamp.status = PoolStampStatus.AVAILABLE
-            stamp.released_at = None
-            stamp.released_to = None
-            self._pool[stamp.batch_id] = stamp
+            stamp = self._pool.get(batch_id)
+            if not stamp or stamp.status != PoolStampStatus.AVAILABLE:
+                return None
+            stamp.status = PoolStampStatus.RESERVED
+            stamp.released_to = reserved_for
+            return stamp
+
+    def release_reserved_stamp(self, batch_id: str) -> Optional[PoolStamp]:
+        """Hand a reserved batch to its caller: payment settled, the pool lets go."""
+        with self._lock:
+            stamp = self._pool.get(batch_id)
+            if not stamp or stamp.status != PoolStampStatus.RESERVED:
+                return None
+            stamp.status = PoolStampStatus.RELEASED
+            stamp.released_at = datetime.now(timezone.utc)
+            del self._pool[batch_id]
             self._save_state()
-        logger.info(f"Returned undelivered stamp {stamp.batch_id[:16]}... to the pool")
+        logger.info(f"Released stamp {batch_id[:16]}... (depth={stamp.depth}) to {stamp.released_to or 'unknown'}")
+        return stamp
+
+    def unreserve_stamp(self, batch_id: str) -> None:
+        """Make a reserved batch available again: its payment did not settle."""
+        with self._lock:
+            stamp = self._pool.get(batch_id)
+            if not stamp or stamp.status != PoolStampStatus.RESERVED:
+                return
+            stamp.status = PoolStampStatus.AVAILABLE
+            stamp.released_to = None
+        logger.info(f"Reservation on {batch_id[:16]}... cancelled, back in the pool")
 
     def trigger_replenishment_if_needed(self, depth: int) -> bool:
         """
@@ -361,9 +420,11 @@ class StampPoolManager:
 
         # Count current available stamps for this depth
         with self._lock:
+            # Reserved batches count: they are still the pool's until their
+            # payment settles, and go back to available if it fails.
             current_count = len([
                 s for s in self._pool.values()
-                if s.depth == depth and s.status == PoolStampStatus.AVAILABLE
+                if s.depth == depth and s.status in _HELD
             ])
             pending_count = self._pending_replenishments.get(depth, 0)
 
@@ -537,6 +598,12 @@ class StampPoolManager:
             unreadable_ids = set()
 
             with self._lock:
+                # Decide against the state as it is now, not as it was before
+                # the await above. A batch handed to a caller while Bee was
+                # answering has left the pool and the state file, but is still
+                # in the earlier read and still usable on the node; importing it
+                # would put a sold batch back up for sale.
+                known_ids &= self._load_state()
                 for batch_id in known_ids:
                     # Skip if already in pool
                     if batch_id in self._pool:
@@ -607,8 +674,10 @@ class StampPoolManager:
             # reach 50% utilisation unasked (#312).
             #
             # Idempotent, and does not disturb a batch already owned by someone:
-            # only AVAILABLE batches are in the pool, and one acquired by a caller
-            # was removed from it at release.
+            # a batch acquired by a caller was removed from the pool at release,
+            # and _register_pool_ownership skips any batch recorded to another
+            # owner. A RESERVED batch is still the pool's; the acquiring handler
+            # registers its caller only once it has been released.
             self._register_pool_ownership(valid_ids)
 
             self._last_sync_ok = True
@@ -698,9 +767,12 @@ class StampPoolManager:
 
             # Check levels for each depth
             for depth, target_count in reserve_config.items():
+                # Reserved batches count toward the target (see reserve_stamp):
+                # counting only available ones bought an extra batch whenever a
+                # check ran while a paid acquire was settling.
                 current_count = len([
                     s for s in self._pool.values()
-                    if s.depth == depth and s.status == PoolStampStatus.AVAILABLE
+                    if s.depth == depth and s.status in _HELD
                 ])
 
                 # Purchase new stamps if below target
@@ -1109,6 +1181,10 @@ class StampPoolManager:
             with self._lock:
                 to_remove = []
                 for batch_id, pool_stamp in self._pool.items():
+                    # A reserved batch belongs to an acquire whose payment is
+                    # settling; that request decides what happens to it.
+                    if pool_stamp.status == PoolStampStatus.RESERVED:
+                        continue
                     stamp_data = stamp_map.get(batch_id)
                     if stamp_data:
                         # Update TTL

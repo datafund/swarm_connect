@@ -916,6 +916,8 @@ When the limit is exceeded, the gateway returns **429**:
 {"error": "Rate limit exceeded", "detail": "Too many requests. Try again in 42 seconds.", "retry_after": 42}
 ```
 
+**x402 startup checks** (#370): with `X402_ENABLED=true` the gateway refuses to start on an unknown `X402_NETWORK` (only `base` and `base-sepolia`), a missing, zero or mis-checksummed `X402_PAY_TO_ADDRESS`, a mainnet paired with the public x402.org facilitator (test networks only), or inconsistent facilitator credentials (`X402_FACILITATOR_CDP_API_KEY_ID`/`_SECRET` or `X402_FACILITATOR_BEARER_TOKEN`). The pay-to wallet's Base ETH balance is shown on `/health` for information only; the facilitator pays settlement gas.
+
 **Exempt paths** (never rate-limited): `/`, `/health`, `/docs`, `/redoc`, `/api/v1/openapi.json`, `/metrics`. With x402 billing on, pre-stamped chunk uploads (`POST /api/v1/chunks/`) are also exempt, because each chunk is already paid for per byte (prepaid credit or the free daily quota).
 
 **With x402 enabled** the global limit still applies to every other route. Free-tier writes additionally meet the x402 free-tier limit (`X402_FREE_TIER_RATE_LIMIT`, default 3/min), and count against both. Callers sharing one IP (NAT, CI runners, a shared backend) share one budget.

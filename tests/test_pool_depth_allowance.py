@@ -31,7 +31,7 @@ def pool(tmp_path, monkeypatch):
         bigger = sorted(d for d in inventory["available"] if d >= min_depth)
         return SimpleNamespace(batch_id=f"{len(handed):064x}", depth=bigger[0]) if bigger else None
 
-    def release(batch_id, released_to=None):
+    def release(batch_id):
         d = next(d for d in inventory["available"])
         handed.append(d)
         return SimpleNamespace(batch_id=batch_id, depth=d)
@@ -39,7 +39,8 @@ def pool(tmp_path, monkeypatch):
     mgr = pool_ep.stamp_pool_manager
     with patch.object(mgr, "get_available_stamp", side_effect=exact), \
          patch.object(mgr, "get_available_stamp_any_size", side_effect=any_size), \
-         patch.object(mgr, "release_stamp", side_effect=release), \
+         patch.object(mgr, "reserve_stamp", return_value=True), \
+         patch.object(mgr, "release_reserved_stamp", side_effect=release), \
          patch.object(mgr, "trigger_replenishment_if_needed", return_value=False), \
          patch.object(pool_ep.stamp_ownership_manager, "register_stamp"):
         yield SimpleNamespace(tracker=tracker, handed=handed, inventory=inventory)
