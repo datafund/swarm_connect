@@ -4,7 +4,6 @@ name: deploy
 on:
   push:
     branches:
-      - master
       - main
       - dev
   workflow_dispatch:
@@ -17,14 +16,32 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # Only dev and main deploy. workflow_dispatch accepts any ref, and the steps
+  # below used to treat every ref other than dev as production: a manual run
+  # from a feature branch swapped /opt/swarm_connect to that branch, stopped
+  # and chowned the production gateway, and recreated it — a restart that
+  # re-buys the pool reserve (#487). Refuse here, on a hosted runner, before
+  # anything reaches a deploy host.
+  ref-guard:
+    name: ref-guard
+    runs-on: ubuntu-latest
+    steps:
+      - name: refuse refs other than dev and main
+        run: |
+          case "$GITHUB_REF" in
+            refs/heads/dev|refs/heads/main) echo "Deploying $GITHUB_REF" ;;
+            *) echo "::error::deploy runs only from dev or main, not $GITHUB_REF"; exit 1 ;;
+          esac
+
   test:
     name: test
     uses: ./.github/workflows/tests.yml
 
   build:
     name: build
-    # Never deploy a commit whose tests fail (#360).
-    needs: test
+    # Never deploy a commit whose tests fail (#360), or from a ref that is
+    # neither dev nor main (#487).
+    needs: [ref-guard, test]
     # Deploy targets are data, not code: set the repository variable DEPLOY_RUNNERS
     # to a JSON array of runner labels to add or retire a host without a code
     # change. Unset -> the single existing host, i.e. current behaviour.
@@ -290,13 +307,13 @@ jobs:
           #
           # --no-deps keeps it from dragging the other environment's containers
           # in through depends_on.
-          if [ "$GITHUB_REF_NAME" = "dev" ]; then
-            BRANCH_SERVICE=provenance_gateway_dev
-            DATA_DIR=/opt/swarm_connect_dev_data
-          else
-            BRANCH_SERVICE=provenance_gateway
-            DATA_DIR=/opt/swarm_connect_data
-          fi
+          # Explicit for both branches: ref-guard already refuses anything else,
+          # and this must not fall back to production if that ever changes (#487).
+          case "$GITHUB_REF_NAME" in
+            dev)  BRANCH_SERVICE=provenance_gateway_dev; DATA_DIR=/opt/swarm_connect_dev_data ;;
+            main) BRANCH_SERVICE=provenance_gateway;     DATA_DIR=/opt/swarm_connect_data ;;
+            *)    echo "::error::no service for branch $GITHUB_REF_NAME"; exit 1 ;;
+          esac
           echo "Recreating $BRANCH_SERVICE (branch $GITHUB_REF_NAME)"
           # The new container runs as UID 10001 (see Dockerfile), not root, so
           # hand it the state dir, including files written by earlier root
@@ -354,11 +371,11 @@ jobs:
           # not pass. 90s, not 60: the healthcheck interval is 30s, so a first
           # probe that lands before the app is up is only retried at ~60s.
           cd /opt/swarm_connect
-          if [ "$GITHUB_REF_NAME" = "dev" ]; then
-            BRANCH_SERVICE=provenance_gateway_dev
-          else
-            BRANCH_SERVICE=provenance_gateway
-          fi
+          case "$GITHUB_REF_NAME" in
+            dev)  BRANCH_SERVICE=provenance_gateway_dev ;;
+            main) BRANCH_SERVICE=provenance_gateway ;;
+            *)    echo "::error::no service for branch $GITHUB_REF_NAME"; exit 1 ;;
+          esac
           # `|| true`: if compose itself fails, fall through to the "missing"
           # path below (annotation + logs) instead of ending the step under -e.
           CID=$(docker compose ps -aq "$BRANCH_SERVICE" || true)
@@ -393,15 +410,11 @@ jobs:
           echo "=== Waiting 10s for container startup ==="
           sleep 10
           echo ""
-          if [ "$GITHUB_REF_NAME" = "dev" ]; then
-            CONTAINER="swarm_connect-provenance_gateway_dev-1"
-            PORT=8900
-            ENV_FILE="/opt/swarm_connect_dev.env"
-          else
-            CONTAINER="swarm_connect-provenance_gateway-1"
-            PORT=8899
-            ENV_FILE="/opt/swarm_connect.env"
-          fi
+          case "$GITHUB_REF_NAME" in
+            dev)  CONTAINER="swarm_connect-provenance_gateway_dev-1"; PORT=8900; ENV_FILE="/opt/swarm_connect_dev.env" ;;
+            main) CONTAINER="swarm_connect-provenance_gateway-1";     PORT=8899; ENV_FILE="/opt/swarm_connect.env" ;;
+            *)    echo "no service for branch $GITHUB_REF_NAME"; exit 0 ;;
+          esac
           echo "=== Container logs (last 30 lines) ==="
           docker logs "$CONTAINER" --tail 30 2>&1 || echo "Container not found"
           echo ""
