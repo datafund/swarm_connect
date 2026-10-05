@@ -74,7 +74,7 @@ def _app(facilitator):
 
 def _facilitator(*settles):
     f = MagicMock()
-    f.verify = AsyncMock(return_value=VerifyResponse(isValid=True, payer="0xpayer"))
+    f.verify = AsyncMock(return_value=VerifyResponse(isValid=True, payer="0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"))
     f.settle = AsyncMock(side_effect=list(settles))
     return f
 

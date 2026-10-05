@@ -23,7 +23,7 @@ BATCH = "d" * 64
 
 def _fac(settle):
     f = MagicMock()
-    f.verify = AsyncMock(return_value=VerifyResponse(isValid=True, payer="0xpayer"))
+    f.verify = AsyncMock(return_value=VerifyResponse(isValid=True, payer="0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"))
     f.settle = AsyncMock(return_value=settle)
     return f
 
@@ -71,7 +71,7 @@ def test_stamp_purchase_buys_nothing_when_settlement_fails(x402_on):
 def test_upload_uploads_nothing_when_settlement_fails(x402_on, monkeypatch):
     from app.api.endpoints import data
     from app.services.stamp_ownership import stamp_ownership_manager
-    monkeypatch.setitem(stamp_ownership_manager._registry, BATCH, {"owner": "0xpayer", "mode": "paid"})
+    monkeypatch.setitem(stamp_ownership_manager._registry, BATCH, {"owner": "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1", "mode": "paid"})
     fac = _fac(REFUSED)
     upload = AsyncMock(return_value="e" * 64)
     validate = AsyncMock(return_value={})

@@ -22,8 +22,9 @@ deployment that has not thought about who may spend its money cannot be talked
 into spending it.
 """
 import logging
+import threading
 import time
-from typing import List, Optional
+from typing import Dict, List, NamedTuple, Optional
 
 from eth_account import Account
 from eth_account.messages import encode_defunct
@@ -36,6 +37,7 @@ logger = logging.getLogger(__name__)
 # Message prefixes. One per privilege — see the module docstring.
 DEBUG_PREFIX = "swarm-connect-debug:"
 POOL_CHECK_PREFIX = "swarm-connect-pool-check:"
+OWNER_UPLOAD_PREFIX = "swarm-connect-owner-upload:"
 
 
 def authorize_signed_request(
@@ -80,3 +82,103 @@ def authorize_signed_request(
 
     logger.info("Authorized %s for %s", signer, operation)
     return signer
+
+
+# ---------------------------------------------------------------------------
+# Owner proof for uploads to an owned batch (#384)
+#
+# An owned batch used to be writable only on a paid request, because the x402
+# payer was the only identity the gateway knew. The owner therefore paid again
+# on every upload just to say who they were. A signature proves the same thing
+# for free, so the free-tier upload path accepts one instead.
+#
+# The message names the batch, so a proof for one batch is not a proof for
+# another, and uses its own prefix, so no debug or pool-maintenance signature
+# can be presented as one. Each proof is accepted ONCE: operator signatures only
+# expire, but an owner proof travels with every upload, and a copy of one
+# should not let anybody else write to the owner's batch until it goes stale.
+# Keyed on the message and the signer rather than the signature bytes, which
+# can be re-encoded into a second valid signature for the same message.
+#
+# A proof is marked used only once it has been granted access, so proofs from
+# non-owners do not fill the used set, and an owner's proof is not spent by a
+# request that was refused anyway.
+#
+# The used set lives in memory. That is sufficient because the gateway runs as a
+# single process. A restart empties it, so proofs signed before the process
+# started are refused outright; otherwise one seen just before a restart could
+# be accepted again while still fresh. Running several workers would need a
+# shared store.
+#
+# A proof is a bearer credential: it is not bound to the upload's content, so
+# whoever presents it first gets that one upload. It must not be logged or shared.
+# ---------------------------------------------------------------------------
+
+
+class OwnerProofError(Exception):
+    """An owner proof was presented and is not acceptable."""
+
+
+class OwnerProof(NamedTuple):
+    """A verified owner proof, not yet marked used (see consume_owner_proof)."""
+    signer: str
+    key: str        # message|signer: what "used" is recorded against
+    expires: float  # unix seconds after which the proof is stale anyway
+
+
+_used_owner_proofs: Dict[str, float] = {}  # message|signer -> expiry (unix seconds)
+_used_owner_proofs_lock = threading.Lock()
+_process_started_at = int(time.time())
+
+
+def owner_proof_message(batch_id: str, timestamp: int) -> str:
+    """The exact text an owner signs (EIP-191 personal_sign) to upload to batch_id."""
+    return f"{OWNER_UPLOAD_PREFIX}{batch_id.lower()}:{timestamp}"
+
+
+def verify_owner_proof(batch_id: str, timestamp: Optional[str], signature: Optional[str]) -> OwnerProof:
+    """Verify a fresh, unused owner proof for batch_id, without marking it used.
+
+    Only proves who is asking; whether that address owns the batch is for the
+    ownership registry to decide. Call consume_owner_proof once access is
+    granted. Raises OwnerProofError.
+    """
+    if not timestamp or not signature:
+        raise OwnerProofError("both X-Owner-Timestamp and X-Owner-Signature are required")
+    try:
+        ts = int(timestamp)
+    except (TypeError, ValueError):
+        raise OwnerProofError("timestamp is not a unix time in seconds")
+    # Same freshness window, and the same refusal of future timestamps, as the
+    # operator signatures above.
+    if abs(int(time.time()) - ts) > settings.DEBUG_SIG_MAX_AGE_SECONDS:
+        raise OwnerProofError("timestamp is stale or in the future")
+    if ts < _process_started_at:
+        raise OwnerProofError("proof was signed before the gateway restarted; sign a new one")
+
+    message = owner_proof_message(batch_id, ts)
+    try:
+        signer = Account.recover_message(encode_defunct(text=message), signature=signature)
+    except Exception:
+        raise OwnerProofError("signature is not valid")
+
+    proof = OwnerProof(signer, f"{message}|{signer.lower()}", ts + settings.DEBUG_SIG_MAX_AGE_SECONDS + 1)
+    with _used_owner_proofs_lock:
+        if proof.key in _used_owner_proofs:
+            raise OwnerProofError("owner proof has already been used; sign a new one")
+    return proof
+
+
+def consume_owner_proof(proof: OwnerProof) -> None:
+    """Mark a verified proof used. Raises OwnerProofError if it already was.
+
+    Check and mark happen under one lock, so two requests racing with the same
+    proof cannot both get through.
+    """
+    now = time.time()
+    with _used_owner_proofs_lock:
+        for k in [k for k, exp in _used_owner_proofs.items() if exp < now]:
+            del _used_owner_proofs[k]
+        if proof.key in _used_owner_proofs:
+            raise OwnerProofError("owner proof has already been used; sign a new one")
+        _used_owner_proofs[proof.key] = proof.expires

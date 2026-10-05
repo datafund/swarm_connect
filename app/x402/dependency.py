@@ -21,6 +21,7 @@ from x402.facilitator import FacilitatorClient
 from app.core.config import settings
 from app.core.client_ip import client_key
 from app.services.metrics import x402_payments_total
+from app.services.stamp_ownership import normalize_address
 from app.x402.pricing import get_price_quote
 from app.x402.ratelimit import check_rate_limit, get_rate_limit_headers, get_free_tier_stats
 from app.x402.middleware import (
@@ -429,6 +430,19 @@ async def require_x402_payment(request: Request) -> None:
         }
         raise HTTPException(status_code=402, detail=response_body)
 
+    # The payer becomes the owner of whatever this request buys, and the
+    # ownership registry refuses an owner that is not an address (#384). Checked
+    # here, before anything is spent: refused later, the batch would already be
+    # bought or taken from the pool, and the caller would get a 500 unsettled.
+    payer = getattr(verify_response, 'payer', None)
+    if normalize_address(payer) is None:
+        logger.warning(f"x402: facilitator reported a payer that is not an address: {payer!r}")
+        response_body = {
+            "x402Version": X402_VERSION,
+            "error": "Payment verification failed: payer is not a valid address",
+            "accepts": [payment_requirements.model_dump(by_alias=True)]
+        }
+        raise HTTPException(status_code=402, detail=response_body)
     # One authorization, one delivery (#356). Reserved only after the facilitator
     # has verified it, so unverified junk cannot fill the guard. A concurrent
     # request carrying the same authorization is refused here, before it can do
@@ -492,7 +506,7 @@ async def require_x402_payment(request: Request) -> None:
 
     # Store payment info on request.state for middleware settlement
     request.state.x402_mode = "paid"
-    request.state.x402_payer = getattr(verify_response, 'payer', None)
+    request.state.x402_payer = payer
     request.state.x402_payment = payment_payload
     request.state.x402_requirements = payment_requirements
     request.state.x402_auth_key = auth_key

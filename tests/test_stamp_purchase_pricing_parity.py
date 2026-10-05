@@ -89,7 +89,7 @@ def test_the_handler_buys_exactly_the_priced_batch(monkeypatch):
         bought.update(amount=amount, depth=depth)
         return "b" * 64
 
-    fac = SimpleNamespace(verify=AsyncMock(return_value=VerifyResponse(isValid=True, payer="0xp")),
+    fac = SimpleNamespace(verify=AsyncMock(return_value=VerifyResponse(isValid=True, payer="0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1")),
                           settle=AsyncMock())
     moved = {"currentPrice": "48000", "minimumValidityBlocks": 17280}   # price doubled after the quote
     with patch("app.x402.dependency._get_facilitator_client", return_value=fac), \

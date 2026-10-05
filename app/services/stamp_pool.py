@@ -997,8 +997,12 @@ class StampPoolManager:
         from app.services.metrics import stamp_spend_refusals_total
         hold, info = spend_budget_tracker.reserve_gateway(cost_bzz)
         if hold is None:
-            msg = (f"Refusing to {what}: the gateway's daily spending ceiling "
-                   f"({info['daily_budget_bzz']} BZZ) is reached; it resets at {info['resets_at']}.")
+            if info.get("state_unreadable"):
+                msg = (f"Refusing to {what}: the gateway's spend record is unreadable (#378); "
+                       f"spending is paused until it is restored or until {info['resets_at']}.")
+            else:
+                msg = (f"Refusing to {what}: the gateway's daily spending ceiling "
+                       f"({info['daily_budget_bzz']} BZZ) is reached; it resets at {info['resets_at']}.")
             logger.error(msg)
             self._errors.append(msg)
             self._refusals.append(msg)

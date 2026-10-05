@@ -370,6 +370,21 @@ async def acquire_stamp(
             address_ok, address_info = pool_allowance_tracker.check_address(
                 origin, charged_size, client_address)
 
+        if budget.get("state_unreadable") or (address_info or {}).get("state_unreadable"):
+            # Today's allowance record could not be read (#378): refuse free
+            # acquires rather than guess, and say so instead of "used up".
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail={
+                    "code": "POOL_ALLOWANCE_UNAVAILABLE",
+                    "message": (
+                        "Free pooled stamps are paused until the operator restores the "
+                        f"gateway's allowance records, or until {budget['resets_at']}. "
+                        "Buying a stamp directly with POST /api/v1/stamps/ still works."
+                    ),
+                },
+            )
+
         if (not allowed_by_budget or not address_ok) and fallback_used:
             # The size asked for is out of stock and the allowance for the
             # larger size that would stand in is spent. Blaming the larger
