@@ -245,6 +245,16 @@ jobs:
 
       - name: deploy
         run: |
+          # Which service this branch owns. Chosen first, before the checkout
+          # below is replaced: ref-guard already refuses any other ref, and an
+          # unknown branch must not reach the swap or fall back to production
+          # if that ever changes (#487).
+          case "$GITHUB_REF_NAME" in
+            dev)  BRANCH_SERVICE=provenance_gateway_dev; DATA_DIR=/opt/swarm_connect_dev_data ;;
+            main) BRANCH_SERVICE=provenance_gateway;     DATA_DIR=/opt/swarm_connect_data ;;
+            *)    echo "::error::no service for branch $GITHUB_REF_NAME"; exit 1 ;;
+          esac
+
           # Clone into a temporary directory and swap it in only on success.
           #
           # This used to be `rm -rf swarm_connect && git clone`, which destroys
@@ -307,13 +317,7 @@ jobs:
           #
           # --no-deps keeps it from dragging the other environment's containers
           # in through depends_on.
-          # Explicit for both branches: ref-guard already refuses anything else,
-          # and this must not fall back to production if that ever changes (#487).
-          case "$GITHUB_REF_NAME" in
-            dev)  BRANCH_SERVICE=provenance_gateway_dev; DATA_DIR=/opt/swarm_connect_dev_data ;;
-            main) BRANCH_SERVICE=provenance_gateway;     DATA_DIR=/opt/swarm_connect_data ;;
-            *)    echo "::error::no service for branch $GITHUB_REF_NAME"; exit 1 ;;
-          esac
+          # BRANCH_SERVICE and DATA_DIR are chosen at the top of this step.
           echo "Recreating $BRANCH_SERVICE (branch $GITHUB_REF_NAME)"
           # The new container runs as UID 10001 (see Dockerfile), not root, so
           # hand it the state dir, including files written by earlier root
