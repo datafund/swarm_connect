@@ -20,9 +20,26 @@ services:
     image: grafana/alloy:latest
     volumes:
       - ./monitoring/alloy/config.alloy:/etc/alloy/config.alloy:ro
+      # Read-only access to the Docker API, so Alloy can list containers and
+      # tail their logs.
+      #
+      # Worth stating plainly: the Docker socket is a root-equivalent interface
+      # to this host, and :ro restricts writes to the SOCKET FILE, not to the
+      # API reachable through it. Anything able to execute inside this container
+      # can therefore start a privileged container. That is accepted here
+      # because Alloy is part of the same trusted stack and runs a config from
+      # this repository, and because the alternative — a logging driver writing
+      # files for Alloy to tail — trades this for a different set of moving
+      # parts. It is not a decision to copy without re-making it.
+      - /var/run/docker.sock:/var/run/docker.sock:ro
     environment:
       - GRAFANA_CLOUD_PROM_USERNAME=${GRAFANA_CLOUD_PROM_USERNAME}
       - GRAFANA_CLOUD_API_TOKEN=${GRAFANA_CLOUD_API_TOKEN}
+      # Loki push endpoint and tenant id. Region-specific, and the tenant id is
+      # NOT the Prometheus one — they are different numbers on the same stack.
+      # Unset -> the log pipeline reports unhealthy and metrics keep flowing.
+      - GRAFANA_CLOUD_LOKI_URL=${GRAFANA_CLOUD_LOKI_URL:-}
+      - GRAFANA_CLOUD_LOKI_USERNAME=${GRAFANA_CLOUD_LOKI_USERNAME:-}
       # Tags this host's metrics so several hosts running the stack stay
       # distinguishable in Grafana. Empty by default -> no label added, so an
       # existing host's series are unchanged until it is explicitly set.

@@ -6,7 +6,9 @@ from typing import Optional
 import httpx
 from fastapi import APIRouter, Header, HTTPException, Query, Request, status
 
-from app.api.models.chunk import ChunkUploadResponse, CreditTopUpResponse
+from app.core.client_ip import get_client_key
+from app.x402.settlement import settle_payment
+from app.api.models.chunk import ChunkUploadResponse, CreditTopUpResponse, TokenRotationResponse
 from app.core.config import settings
 from app.services.bandwidth_credit import (
     BYTES_PER_MB, bandwidth_credit_manager, parse_topup_mb,
@@ -87,6 +89,14 @@ async def top_up_credit(
         ),
         example="100",
     ),
+    rotate_token: bool = Query(
+        False,
+        description=(
+            "Replace the account's bearer token and revoke the old one. Use this "
+            "if the token may have leaked: the payment proves control of the "
+            "wallet, so it works even if someone else has already rotated it."
+        ),
+    ),
 ) -> CreditTopUpResponse:
     """
     Add prepaid bandwidth credit with a single x402 payment.
@@ -161,9 +171,17 @@ async def top_up_credit(
             },
         )
 
+    await settle_payment(request)
     credited_bytes = mb * BYTES_PER_MB
     new_balance = bandwidth_credit_manager.credit(payer, credited_bytes)
-    token = bandwidth_credit_manager.issue_token(payer)
+    try:
+        token = bandwidth_credit_manager.issue_token(payer, rotate=rotate_token)
+    except Exception as e:
+        # The credit above is already booked; only the rotation failed.
+        logger.error(f"Credit token rotation on top-up for {payer[:10]}… could not be saved: {e}")
+        token = bandwidth_credit_manager.issue_token(payer)
+    if rotate_token:
+        logger.info(f"Credit token rotated by paid top-up for {payer[:10]}…")
 
     bandwidth_topups_total.labels(status="success").inc()
     bandwidth_topup_bytes_total.inc(credited_bytes)
@@ -180,6 +198,44 @@ async def top_up_credit(
         credited_bytes=credited_bytes,
         balance_bytes=new_balance,
     )
+
+
+@router.post(
+    "/token/rotate",
+    response_model=TokenRotationResponse,
+    summary="Replace the bandwidth credit bearer token",
+)
+async def rotate_credit_token(
+    request: Request,
+    x_bandwidth_credit_token: Optional[str] = Header(None, alias=CREDIT_TOKEN_HEADER),
+) -> TokenRotationResponse:
+    """
+    Issue a new bearer token for a credit account and revoke the presented one.
+
+    Tokens used to be permanent, so one that leaked (a log, a shared script)
+    spent the account's balance for good (#380). Present the current token in
+    `X-Bandwidth-Credit-Token`; the response carries its replacement and the old
+    one stops working immediately. If someone else rotated it first, a paid
+    top-up with `rotate_token=true` takes the account back.
+    """
+    address = bandwidth_credit_manager.resolve_token(x_bandwidth_credit_token or "")
+    if not address:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail={"code": "INVALID_CREDIT_TOKEN",
+                    "message": "Unknown or revoked bandwidth credit token."},
+        )
+    try:
+        token = bandwidth_credit_manager.issue_token(address, rotate=True)
+    except Exception as e:
+        logger.error(f"Credit token rotation for {address[:10]}… could not be saved: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={"code": "TOKEN_ROTATION_FAILED",
+                    "message": "The token could not be rotated; the current token is unchanged. Try again later."},
+        )
+    logger.info(f"Credit token rotated for {address[:10]}… from {get_client_ip(request)}")
+    return TokenRotationResponse(address=address, token=token)
 
 
 @router.post(
@@ -265,9 +321,9 @@ async def upload_chunk(
     credit_balance: Optional[int] = None
 
     if settings.X402_ENABLED:
-        payment_mode = request.headers.get("X-Payment-Mode", "").lower()
+        from app.x402.middleware import is_free_tier_opt_in
 
-        if payment_mode == "free":
+        if is_free_tier_opt_in(request):
             if not settings.CHUNK_UPLOAD_FREE_TIER_ENABLED:
                 raise HTTPException(
                     status_code=402,
@@ -277,7 +333,7 @@ async def upload_chunk(
                         "payment_info": _topup_info(),
                     },
                 )
-            free_ip = get_client_ip(request)
+            free_ip = get_client_key(request)
             daily_limit = settings.CHUNK_UPLOAD_FREE_TIER_MB_PER_DAY * BYTES_PER_MB
             allowed, remaining = free_tier_tracker.try_consume(free_ip, chunk_len, daily_limit)
             if not allowed:
@@ -310,7 +366,11 @@ async def upload_chunk(
                     status_code=402,
                     detail={
                         "code": "INVALID_CREDIT_TOKEN",
-                        "message": "The bandwidth credit token is unknown. Top up to obtain a valid token.",
+                        "message": (
+                            "The bandwidth credit token is unknown or has been rotated. "
+                            "If you did not rotate it, top up with rotate_token=true to take "
+                            "the account back with a new token."
+                        ),
                         "payment_info": _topup_info(),
                     },
                 )

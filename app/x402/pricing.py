@@ -14,16 +14,44 @@ Configuration is loaded from app/core/config.py:
 - X402_MIN_PRICE_USD: Minimum price floor
 """
 import logging
+from contextlib import contextmanager
+from contextvars import ContextVar
 from typing import Dict, Any, Optional
 
 from app.core.config import settings
+from app.services import swarm_api
 from app.services.swarm_api import (
-    get_chainstate,
     calculate_stamp_amount,
     calculate_stamp_total_cost,
 )
 
 logger = logging.getLogger(__name__)
+
+# A chainstate fixed for the duration of one caller's work, so several quotes
+# computed together read Bee once instead of once each. Used by GET /pricing
+# (#381), which prices several operations per request and is not rate-limited
+# when x402 is on. A ContextVar keeps it private to that request's task.
+_pinned_chainstate: ContextVar[Optional[Dict[str, Any]]] = ContextVar(
+    "pinned_chainstate", default=None
+)
+
+
+@contextmanager
+def pinned_chainstate(chainstate: Dict[str, Any]):
+    """Make get_chainstate() in this module return `chainstate` inside the block."""
+    token = _pinned_chainstate.set(chainstate)
+    try:
+        yield
+    finally:
+        _pinned_chainstate.reset(token)
+
+
+async def get_chainstate() -> Dict[str, Any]:
+    """The Bee chainstate: the pinned one if set, else fetched from Bee."""
+    pinned = _pinned_chainstate.get()
+    if pinned is not None:
+        return pinned
+    return await swarm_api.get_chainstate()
 
 # Conversion constants
 # Single source in app/services/swarm_api; re-exported here because callers
@@ -170,80 +198,48 @@ async def calculate_stamp_price_usd(
     return result
 
 
-async def calculate_upload_price_usd(
-    size_bytes: int,
-    duration_hours: int = 24,
-    include_breakdown: bool = True
-) -> Dict[str, Any]:
-    """
-    Calculate the USD price for a data upload.
-
-    This calculates the price for uploading data of a given size.
-    The price is based on the stamp cost required to store the data.
-
-    For uploads, we use a default depth based on the data size.
-    Depth determines capacity: 2^depth chunks of 4096 bytes each.
-    - depth 17 = 512 MB capacity
-    - depth 20 = 4 GB capacity
-    - depth 24 = 64 GB capacity
-
-    Args:
-        size_bytes: Size of data to upload in bytes
-        duration_hours: How long to store the data (default 24 hours)
-        include_breakdown: Whether to include detailed breakdown
-
-    Returns:
-        Dict containing price calculation details
-    """
-    # Calculate appropriate depth based on size
-    # Each chunk is 4096 bytes, depth gives 2^depth chunks
-    chunk_size = 4096
-    chunks_needed = (size_bytes + chunk_size - 1) // chunk_size  # Ceiling division
-
-    # Find minimum depth to fit the data
-    # depth 17 = 2^17 = 131,072 chunks = 512 MB
-    # We add some buffer for overhead
-    min_depth = 17
-    max_depth = 32
-
-    depth = min_depth
-    while depth < max_depth:
-        capacity_chunks = 2 ** depth
-        if capacity_chunks >= chunks_needed * 1.1:  # 10% buffer
-            break
-        depth += 1
-
-    # Calculate stamp price for this depth and duration
-    stamp_price = await calculate_stamp_price_usd(
-        duration_hours=duration_hours,
-        depth=depth,
-        include_breakdown=include_breakdown
-    )
-
-    result = {
-        "price_usd": stamp_price["price_usd"],
-        "price_bzz": stamp_price["price_bzz"],
-        "exchange_rate": stamp_price["exchange_rate"],
-        "markup_percent": stamp_price["markup_percent"],
-        "minimum_applied": stamp_price["minimum_applied"],
+def _price_from_cost_bzz(cost_bzz: float) -> Dict[str, Any]:
+    """Apply exchange rate, markup and minimum to a BZZ cost."""
+    exchange_rate = settings.X402_BZZ_USD_RATE
+    markup_percent = settings.X402_MARKUP_PERCENT
+    min_price = settings.X402_MIN_PRICE_USD
+    with_markup = apply_markup(bzz_to_usd(cost_bzz, exchange_rate), markup_percent)
+    return {
+        "price_usd": round(apply_minimum_price(with_markup, min_price), 6),
+        "price_bzz": round(cost_bzz, 8),
+        "exchange_rate": exchange_rate,
+        "markup_percent": markup_percent,
+        "minimum_applied": with_markup < min_price,
     }
 
-    if include_breakdown:
-        result["breakdown"] = {
-            "size_bytes": size_bytes,
-            "chunks_needed": chunks_needed,
-            "depth_used": depth,
-            "capacity_chunks": 2 ** depth,
-            "duration_hours": duration_hours,
-            "stamp_breakdown": stamp_price.get("breakdown", {}),
-        }
 
-    logger.info(
-        f"Calculated upload price: {size_bytes} bytes for {duration_hours}h -> "
-        f"depth={depth}, ${stamp_price['price_usd']:.4f} USD"
-    )
+async def calculate_batch_price_usd(
+    depth: int,
+    duration_hours: Optional[int] = None,
+    amount: Optional[int] = None,
+) -> Dict[str, Any]:
+    """Price a batch purchase or top-up exactly as the stamp handlers perform it.
 
-    return result
+    Used for POST /stamps/ (#361) and PATCH /stamps/{id}/extend (#350).
+    `amount` (PLUR per chunk, legacy) wins when given; otherwise the amount is
+    derived from `duration_hours` (default 25, as in both handlers) with the
+    same calculate_stamp_amount call and minimum-validity floor they use.
+    """
+    if amount is None:
+        chainstate = await get_chainstate()
+        current_price = int(chainstate.get("currentPrice", 0))
+        if current_price <= 0:
+            raise ValueError("Invalid current price from chainstate")
+        amount = calculate_stamp_amount(
+            duration_hours or 25, current_price,
+            minimum_validity_blocks=chainstate.get("minimumValidityBlocks"),
+        )
+    cost_bzz = plur_to_bzz(calculate_stamp_total_cost(int(amount), depth))
+    return {**_price_from_cost_bzz(cost_bzz), "amount": int(amount), "depth": depth}
+
+
+# The extension quote is the same calculation over the batch's own depth.
+calculate_extension_price_usd = calculate_batch_price_usd
 
 
 def calculate_bandwidth_price_usd(
@@ -316,7 +312,7 @@ async def get_price_quote(
     This is the main entry point for generating x402 PaymentRequired responses.
 
     Args:
-        operation: Type of operation ("stamp_purchase", "upload")
+        operation: Type of operation ("stamp_purchase", "upload", "bandwidth")
         **kwargs: Operation-specific parameters
 
     Returns:
@@ -335,11 +331,23 @@ async def get_price_quote(
         duration_hours = kwargs.get("duration_hours", 24)
         depth = kwargs.get("depth", 17)
         price_info = await calculate_stamp_price_usd(duration_hours, depth)
-    elif operation == "upload":
-        size_bytes = kwargs.get("size_bytes", 0)
-        duration_hours = kwargs.get("duration_hours", 24)
-        price_info = await calculate_upload_price_usd(size_bytes, duration_hours)
-    elif operation == "bandwidth":
+    elif operation in ("stamp_extension", "stamp_batch"):
+        price_info = await calculate_batch_price_usd(
+            depth=kwargs.get("depth", 17),
+            duration_hours=kwargs.get("duration_hours"),
+            amount=kwargs.get("amount"),
+        )
+    elif operation in ("upload", "bandwidth"):
+        # An upload is written with the caller's own stamp, so storage is
+        # already paid for; the gateway's cost is the bandwidth. It used to be
+        # priced as a new stamp sized to the upload, charging for storage twice
+        # (#365).
+        #
+        # dev routed "upload" to calculate_upload_price_usd, which priced it as a
+        # new stamp. That function had no callers left once this branch stopped
+        # using it, so it is gone rather than kept unreachable. GET /api/v1/pricing
+        # quotes through this dispatcher, so it reports the bandwidth price with
+        # no change of its own.
         size_bytes = kwargs.get("size_bytes", 0)
         price_info = calculate_bandwidth_price_usd(size_bytes)
     else:

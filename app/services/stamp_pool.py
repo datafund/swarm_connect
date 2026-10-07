@@ -16,6 +16,7 @@ See GitHub Issue #63 for full specification.
 """
 import asyncio
 import json
+import os
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -23,7 +24,7 @@ from enum import Enum
 from typing import Dict, List, Optional, Set
 from threading import Lock
 
-from app.core.atomic_io import atomic_write_json
+from app.core.atomic_io import atomic_write_json, unreadable_state
 from app.core.config import settings
 from app.services import swarm_api
 from app.services.swarm_api import coerce_int
@@ -57,8 +58,12 @@ def _bee_error_message(exc) -> Optional[str]:
 class PoolStampStatus(str, Enum):
     """Status of a stamp in the pool."""
     AVAILABLE = "available"  # Ready to be released
-    RESERVED = "reserved"    # Temporarily held (e.g., during release)
+    RESERVED = "reserved"    # Held while an acquiring payment settles
     RELEASED = "released"    # Released to client, no longer managed
+
+
+# Statuses that are still the pool's: they count toward the reserve target.
+_HELD = (PoolStampStatus.AVAILABLE, PoolStampStatus.RESERVED)
 
 
 @dataclass
@@ -108,11 +113,16 @@ class StampPoolManager:
         # Timestamps of recent purchases, for the hourly ceiling. See
         # _spend_budget_remaining().
         self._spend_times: List[datetime] = []
+        # Refusals by the spending ceilings since the last maintenance run. Kept
+        # apart from _errors, which each run replaces with its own results, so
+        # a refusal from a purchase or top-up is not lost from /pool/status.
+        self._refusals: List[str] = []
         self._task: Optional[asyncio.Task] = None
         self._last_check: Optional[datetime] = None
         self._errors: List[str] = []
         self._pending_replenishments: Dict[int, int] = {}  # depth -> count of pending purchases
         self._state_file = state_file  # Allow override for testing
+        self._spend_times = self._load_spend_times()
         # False until a sync has actually read the node. Starts False so the very
         # first check cannot purchase against an unverified (empty) pool.
         self._last_sync_ok: bool = False
@@ -167,31 +177,56 @@ class StampPoolManager:
             logger.error(f"Failed to save pool state to {state_file}: {e}")
 
     def _load_state(self) -> Set[str]:
-        """Load pool batch IDs from state file.
+        """Load the pool's batch IDs from its state file.
 
-        Returns:
-            Set of batch IDs that were previously in the pool.
-            Returns empty set if file is missing or corrupt.
+        A MISSING file is the only case where starting empty is correct: it is a
+        genuine first run. Every other failure raises StateLoadError, after
+        copying the file aside once (#440).
+
+        Treating a corrupt file as a first run loses the pool's batches twice
+        over: the gateway buys a fresh reserve it already owns, and the next
+        _save_state overwrites the only record of the originals with the new
+        list. They then live out their TTL owned by the gateway, unacquirable and
+        unwritable, having been paid for.
+
+        Raising instead makes the sync fail, which sets _last_sync_ok = False and
+        stops replenishment (see check_and_replenish) rather than reading an empty
+        pool as a real deficit. The permission case already did this after #416;
+        this brings corrupt JSON, a wrong top-level type and anything unexpected
+        into line with it.
         """
         state_file = self._get_state_file_path()
         try:
             with open(state_file, 'r') as f:
                 batch_ids = json.load(f)
-            if isinstance(batch_ids, list):
-                logger.info(f"Loaded pool state: {len(batch_ids)} stamps from {state_file}")
-                return set(batch_ids)
-            else:
-                logger.warning(f"Invalid pool state format in {state_file}, treating as first run")
-                return set()
         except FileNotFoundError:
             logger.info(f"No pool state file at {state_file}, treating as first run")
             return set()
-        except (json.JSONDecodeError, ValueError) as e:
-            logger.warning(f"Corrupt pool state file {state_file}: {e}, treating as first run")
-            return set()
         except Exception as e:
-            logger.warning(f"Error loading pool state from {state_file}: {e}, treating as first run")
-            return set()
+            # Unparseable JSON, a permission or I/O error, anything else. Not a
+            # first run, so do not answer as though it were.
+            logger.error(f"Cannot read pool state file {state_file}: {e}; "
+                         "pool spending is paused until it is repaired")
+            raise unreadable_state(state_file, e) from e
+
+        if not isinstance(batch_ids, list):
+            logger.error(f"Pool state in {state_file} is a {type(batch_ids).__name__}, "
+                         "expected a list; pool spending is paused until it is repaired")
+            raise unreadable_state(
+                state_file, f"expected a JSON list of batch IDs, got {type(batch_ids).__name__}")
+
+        # Element types are checked here rather than left to set(): a nested
+        # object raises an opaque "unhashable type" from a later line, which
+        # reads as a bug in the pool rather than a corrupt file.
+        bad = [b for b in batch_ids if not isinstance(b, str)]
+        if bad:
+            logger.error(f"Pool state in {state_file} has {len(bad)} non-string entries; "
+                         "pool spending is paused until it is repaired")
+            raise unreadable_state(
+                state_file, f"expected strings, got {type(bad[0]).__name__} among {len(batch_ids)} entries")
+
+        logger.info(f"Loaded pool state: {len(batch_ids)} stamps from {state_file}")
+        return set(batch_ids)
 
     def get_status(self) -> PoolStatus:
         """Get current pool status."""
@@ -306,6 +341,59 @@ class StampPoolManager:
             self._save_state()
             return stamp
 
+    def reserve_stamp(
+        self,
+        batch_id: str,
+        reserved_for: Optional[str] = None
+    ) -> Optional[PoolStamp]:
+        """Hold an available batch for a caller whose payment is still settling.
+
+        The batch stays in the pool and in the state file while settlement runs,
+        which can take seconds. Taking it out instead (release first, put back on
+        failure) left a window in which a replenish check saw one batch fewer and
+        bought an extra, and in which a crash dropped the batch from pool state
+        so it sat on the node unused until it expired (#403).
+
+        A reserved batch counts toward the reserve target but is never selected
+        or sold. Finish with release_reserved_stamp() once payment has settled,
+        or unreserve_stamp() if it has not. Statuses are not persisted, so a
+        batch reserved when the process dies is simply available after restart.
+
+        Returns:
+            The reserved stamp, or None if not found/not available (another
+            request got it first)
+        """
+        with self._lock:
+            stamp = self._pool.get(batch_id)
+            if not stamp or stamp.status != PoolStampStatus.AVAILABLE:
+                return None
+            stamp.status = PoolStampStatus.RESERVED
+            stamp.released_to = reserved_for
+            return stamp
+
+    def release_reserved_stamp(self, batch_id: str) -> Optional[PoolStamp]:
+        """Hand a reserved batch to its caller: payment settled, the pool lets go."""
+        with self._lock:
+            stamp = self._pool.get(batch_id)
+            if not stamp or stamp.status != PoolStampStatus.RESERVED:
+                return None
+            stamp.status = PoolStampStatus.RELEASED
+            stamp.released_at = datetime.now(timezone.utc)
+            del self._pool[batch_id]
+            self._save_state()
+        logger.info(f"Released stamp {batch_id[:16]}... (depth={stamp.depth}) to {stamp.released_to or 'unknown'}")
+        return stamp
+
+    def unreserve_stamp(self, batch_id: str) -> None:
+        """Make a reserved batch available again: its payment did not settle."""
+        with self._lock:
+            stamp = self._pool.get(batch_id)
+            if not stamp or stamp.status != PoolStampStatus.RESERVED:
+                return
+            stamp.status = PoolStampStatus.AVAILABLE
+            stamp.released_to = None
+        logger.info(f"Reservation on {batch_id[:16]}... cancelled, back in the pool")
+
     def trigger_replenishment_if_needed(self, depth: int) -> bool:
         """
         Check if replenishment is needed for the given depth and trigger async purchase.
@@ -332,9 +420,11 @@ class StampPoolManager:
 
         # Count current available stamps for this depth
         with self._lock:
+            # Reserved batches count: they are still the pool's until their
+            # payment settles, and go back to available if it fails.
             current_count = len([
                 s for s in self._pool.values()
-                if s.depth == depth and s.status == PoolStampStatus.AVAILABLE
+                if s.depth == depth and s.status in _HELD
             ])
             pending_count = self._pending_replenishments.get(depth, 0)
 
@@ -452,6 +542,20 @@ class StampPoolManager:
         try:
             from app.services.stamp_ownership import POOL_OWNER, stamp_ownership_manager
             for batch_id in batch_ids:
+                # Now that the registry survives restarts (#349), a batch the
+                # pool state still lists may already belong to a caller: the
+                # pool-state save after an acquire can fail while the ownership
+                # save succeeds. Handing such a batch back to the pool would
+                # take it from someone who paid for it. Only claim batches that
+                # are unregistered or already the pool's.
+                existing = stamp_ownership_manager.get_stamp_info(batch_id)
+                if existing is not None:
+                    if existing.get("owner") != POOL_OWNER:
+                        logger.warning(
+                            f"Pool state lists {batch_id[:16]}..., but it is registered to "
+                            f"{str(existing.get('owner'))[:16]}; leaving it with its owner."
+                        )
+                    continue
                 stamp_ownership_manager.register_stamp(
                     batch_id=batch_id,
                     owner=POOL_OWNER,
@@ -494,6 +598,12 @@ class StampPoolManager:
             unreadable_ids = set()
 
             with self._lock:
+                # Decide against the state as it is now, not as it was before
+                # the await above. A batch handed to a caller while Bee was
+                # answering has left the pool and the state file, but is still
+                # in the earlier read and still usable on the node; importing it
+                # would put a sold batch back up for sale.
+                known_ids &= self._load_state()
                 for batch_id in known_ids:
                     # Skip if already in pool
                     if batch_id in self._pool:
@@ -564,8 +674,10 @@ class StampPoolManager:
             # reach 50% utilisation unasked (#312).
             #
             # Idempotent, and does not disturb a batch already owned by someone:
-            # only AVAILABLE batches are in the pool, and one acquired by a caller
-            # was removed from it at release.
+            # a batch acquired by a caller was removed from the pool at release,
+            # and _register_pool_ownership skips any batch recorded to another
+            # owner. A RESERVED batch is still the pool's; the acquiring handler
+            # registers its caller only once it has been released.
             self._register_pool_ownership(valid_ids)
 
             self._last_sync_ok = True
@@ -655,9 +767,12 @@ class StampPoolManager:
 
             # Check levels for each depth
             for depth, target_count in reserve_config.items():
+                # Reserved batches count toward the target (see reserve_stamp):
+                # counting only available ones bought an extra batch whenever a
+                # check ran while a paid acquire was settling.
                 current_count = len([
                     s for s in self._pool.values()
-                    if s.depth == depth and s.status == PoolStampStatus.AVAILABLE
+                    if s.depth == depth and s.status in _HELD
                 ])
 
                 # Purchase new stamps if below target
@@ -747,9 +862,11 @@ class StampPoolManager:
                 }
                 if current_ttl is not None and current_ttl < min_ttl_seconds:
                     try:
-                        await self._topup_stamp(stamp.batch_id)
-                        results["stamps_topped_up"] += 1
-                        debug["result"] = "topped_up"
+                        if await self._topup_stamp(stamp.batch_id):
+                            results["stamps_topped_up"] += 1
+                            debug["result"] = "topped_up"
+                        else:
+                            debug["result"] = "refused by a spending ceiling"
                     except Exception as e:
                         error_msg = f"Failed to top up stamp {stamp.batch_id[:16]}...: {e}"
                         logger.error(error_msg)
@@ -761,6 +878,8 @@ class StampPoolManager:
                     debug["result"] = "skipped: above_threshold"
                 results["topup_debug"].append(debug)
 
+            results["errors"].extend(self._refusals)
+            self._refusals.clear()
             self._errors = results["errors"]
 
         except Exception as e:
@@ -803,9 +922,105 @@ class StampPoolManager:
             self._spend_times = [t for t in self._spend_times if t > cutoff]
             return max(0, settings.STAMP_POOL_MAX_PURCHASES_PER_HOUR - len(self._spend_times))
 
-    def _record_spend(self) -> None:
+    def _reserve_spend_slot(self) -> Optional[datetime]:
+        """Take one slot of the hourly ceiling now, before the Bee call (#363).
+
+        Checking the remaining count and recording the spend only after Bee
+        returned let a scheduled check and an immediate replenishment both pass
+        the check. Returns the slot to release, or None if the ceiling is full.
+        """
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=1)
         with self._lock:
-            self._spend_times.append(datetime.now(timezone.utc))
+            self._spend_times = [t for t in self._spend_times if t > cutoff]
+            if len(self._spend_times) >= settings.STAMP_POOL_MAX_PURCHASES_PER_HOUR:
+                return None
+            slot = datetime.now(timezone.utc)
+            self._spend_times.append(slot)
+            self._persist_spend_times_locked()
+            return slot
+
+    def _release_spend_slot(self, slot: Optional[datetime]) -> None:
+        if slot is None:
+            return
+        with self._lock:
+            try:
+                self._spend_times.remove(slot)
+            except ValueError:
+                pass
+            else:
+                self._persist_spend_times_locked()
+
+    def _persist_spend_times_locked(self) -> None:
+        """Write the spend record; call with self._lock held, after ANY change
+        to self._spend_times (a merge that adds reserve/release paths must call
+        it too, or the ceiling stops surviving restarts)."""
+        try:
+            atomic_write_json(self._spend_times_path(), [t.isoformat() for t in self._spend_times])
+        except Exception as e:
+            logger.error(f"Could not persist the pool's hourly spend record: {e}")
+
+    # The hourly ceiling is persisted (#380). Kept in memory only, every deploy
+    # or crash-restart granted a fresh hour of spending, and a restart loop is
+    # one of the ways the ceiling exists to bound.
+    #
+    # #363 replaced record-after-the-call with reserve-before-it, so there are now
+    # two places that mutate _spend_times rather than one: the reservation above
+    # and the release below. Both persist. The docstring above asked for exactly
+    # this, and it is the whole merge: taking either side alone leaves the ceiling
+    # either unpersisted or unreserved.
+
+    def _spend_times_path(self) -> str:
+        base, _ = os.path.splitext(self._get_state_file_path())
+        return f"{base}_spend_times.json"
+
+    def _load_spend_times(self) -> List[datetime]:
+        path = self._spend_times_path()
+        try:
+            with open(path) as f:
+                raw = json.load(f)
+            cutoff = datetime.now(timezone.utc) - timedelta(hours=1)
+            return [t for t in (datetime.fromisoformat(x) for x in raw) if t > cutoff]
+        except FileNotFoundError:
+            return []
+        except Exception as e:
+            # Unknown spending in the last hour: assume the ceiling was reached
+            # rather than grant a fresh one. It clears on its own within the hour.
+            logger.error(f"Unreadable pool spend record {path} ({e}); pausing pool spending for an hour")
+            return [datetime.now(timezone.utc)] * settings.STAMP_POOL_MAX_PURCHASES_PER_HOUR
+
+    def _reserve_gateway_spend(self, cost_bzz: float, what: str, operation: str):
+        """Charge the gateway-wide daily ceiling for a pool spend (#363).
+
+        Returns the hold, or None (and records why) if the ceiling is reached.
+        """
+        from app.services.spend_budget import spend_budget_tracker
+        from app.services.metrics import stamp_spend_refusals_total
+        hold, info = spend_budget_tracker.reserve_gateway(cost_bzz)
+        if hold is None:
+            if info.get("state_unreadable"):
+                msg = (f"Refusing to {what}: the gateway's spend record is unreadable (#378); "
+                       f"spending is paused until it is restored or until {info['resets_at']}.")
+            else:
+                msg = (f"Refusing to {what}: the gateway's daily spending ceiling "
+                       f"({info['daily_budget_bzz']} BZZ) is reached; it resets at {info['resets_at']}.")
+            logger.error(msg)
+            self._errors.append(msg)
+            self._refusals.append(msg)
+            stamp_spend_refusals_total.labels(operation=operation, limit="gateway_daily").inc()
+        return hold
+
+    def _release_if_unspent(self, slot, hold, exc: BaseException) -> None:
+        """Give back the hourly slot and the ceiling hold only if nothing was spent."""
+        from app.services.spend_budget import spend_budget_tracker, spend_certainly_did_not_happen
+        if spend_certainly_did_not_happen(exc):
+            self._release_spend_slot(slot)
+            spend_budget_tracker.release_hold(hold)
+        else:
+            from app.services.metrics import gateway_spend_uncertain_bzz_total
+            cost = sum(c for _, c in getattr(hold, "charges", []))
+            gateway_spend_uncertain_bzz_total.labels(operation="pool").inc(cost)
+            logger.warning(f"Pool spend failed with {type(exc).__name__}; the outcome is uncertain, "
+                           "so it stays counted against the hourly and daily ceilings")
 
     async def _purchase_stamp(self, depth: int, max_retries: int = 3) -> Optional[str]:
         """Purchase a new stamp for the pool. Retries on 429 rate limiting.
@@ -815,8 +1030,8 @@ class StampPoolManager:
         check, the immediate replenishment after an acquire, and anything added
         later that forgets to ask.
         """
-        remaining = self._spend_budget_remaining()
-        if remaining <= 0:
+        slot = self._reserve_spend_slot()
+        if slot is None:
             msg = (
                 f"Refusing to buy a depth-{depth} batch: the pool has already "
                 f"bought {settings.STAMP_POOL_MAX_PURCHASES_PER_HOUR} in the last "
@@ -828,6 +1043,8 @@ class StampPoolManager:
             self._errors.append(msg)
             return None
 
+        batch_id = None
+        hold = None
         try:
             # Get current price (Bee API returns currentPrice as a string)
             chainstate = await swarm_api.get_chainstate()
@@ -843,20 +1060,23 @@ class StampPoolManager:
 
             logger.info(f"Purchasing stamp for pool: depth={depth}, amount={amount}, duration={duration_hours}h")
 
-            # Purchase the stamp with retry on 429
-            batch_id = None
+            cost_bzz = swarm_api.plur_to_bzz(swarm_api.calculate_stamp_total_cost(amount, depth))
+            hold = self._reserve_gateway_spend(cost_bzz, f"buy a depth-{depth} pool batch", "pool purchase")
+            if hold is None:
+                self._release_spend_slot(slot)
+                return None
+
+            # Purchase the stamp with retry on 429. The hourly slot and the
+            # ceiling hold were taken before the call; they are kept once Bee
+            # accepts it, before waiting for it to become usable, because the
+            # money is spent at that point.
             for attempt in range(max_retries):
                 try:
                     batch_id = await swarm_api.purchase_postage_stamp(amount, depth, label)
-                    # Counted the moment Bee accepts it, before waiting for it to
-                    # become usable. The money is spent at that point, so a batch
-                    # that never becomes usable must still count against the
-                    # ceiling — otherwise a run of unusable purchases would spend
-                    # without limit while appearing to buy nothing.
-                    self._record_spend()
                     break
                 except Exception as e:
-                    if "429" in str(e) and attempt < max_retries - 1:
+                    status_code = getattr(getattr(e, "response", None), "status_code", None)
+                    if status_code == 429 and attempt < max_retries - 1:
                         wait_time = 15 * (attempt + 1)
                         logger.warning(f"Bee node rate limited (429), retrying in {wait_time}s (attempt {attempt + 1}/{max_retries})")
                         await asyncio.sleep(wait_time)
@@ -864,6 +1084,10 @@ class StampPoolManager:
                         raise
 
             if not batch_id:
+                # Only reachable with max_retries <= 0: nothing was attempted.
+                from app.services.spend_budget import spend_budget_tracker
+                self._release_spend_slot(slot)
+                spend_budget_tracker.release_hold(hold)
                 return None
 
             # Wait for stamp to become usable (up to 90 seconds)
@@ -894,16 +1118,25 @@ class StampPoolManager:
                 )
                 return batch_id
 
-        except Exception as e:
+        except BaseException as e:
             # Surface Bee's own message. httpx's str(e) is only the status line
             # ("Client error '400 Bad Request' for url ..."), so the actual cause
             # — "out of funds", "insufficient amount for 24h minimum validity" —
             # was discarded and had to be obtained by calling Bee by hand.
-            detail = _bee_error_message(e)
-            logger.error(
-                f"Failed to purchase stamp for pool (depth={depth}): {e}"
-                + (f" — Bee said: {detail}" if detail else "")
-            )
+            if not batch_id:
+                # Nothing confirmed bought. Give the slot and the hold back only
+                # if the purchase certainly did not happen; a price lookup that
+                # failed before the call always counts as that.
+                if hold is None:
+                    self._release_spend_slot(slot)
+                else:
+                    self._release_if_unspent(slot, hold, e)
+            if isinstance(e, Exception):
+                detail = _bee_error_message(e)
+                logger.error(
+                    f"Failed to purchase stamp for pool (depth={depth}): {e}"
+                    + (f" — Bee said: {detail}" if detail else "")
+                )
             raise
 
     async def _wait_for_stamp_usable(self, batch_id: str, timeout: int = 90) -> bool:
@@ -948,6 +1181,10 @@ class StampPoolManager:
             with self._lock:
                 to_remove = []
                 for batch_id, pool_stamp in self._pool.items():
+                    # A reserved batch belongs to an acquire whose payment is
+                    # settling; that request decides what happens to it.
+                    if pool_stamp.status == PoolStampStatus.RESERVED:
+                        continue
                     stamp_data = stamp_map.get(batch_id)
                     if stamp_data:
                         # Update TTL
@@ -973,7 +1210,7 @@ class StampPoolManager:
         except Exception as e:
             logger.warning(f"Error updating stamp TTLs: {e}")
 
-    async def _topup_stamp(self, batch_id: str):
+    async def _topup_stamp(self, batch_id: str) -> bool:
         """Top up a stamp with additional TTL.
 
         Subject to the same hourly ceiling as buying a batch (#334). Extending
@@ -985,8 +1222,8 @@ class StampPoolManager:
         recorded only once Bee has accepted the extension, because that is when
         the money is spent.
         """
-        remaining = self._spend_budget_remaining()
-        if remaining <= 0:
+        slot = self._reserve_spend_slot()
+        if slot is None:
             msg = (
                 f"Refusing to top up batch {batch_id[:16]}...: the pool has "
                 f"already made {settings.STAMP_POOL_MAX_PURCHASES_PER_HOUR} "
@@ -997,7 +1234,8 @@ class StampPoolManager:
             )
             logger.error(msg)
             self._errors.append(msg)
-            return
+            self._refusals.append(msg)
+            return False
 
         try:
             # Get current price (Bee API returns currentPrice as a string)
@@ -1010,10 +1248,31 @@ class StampPoolManager:
 
             logger.info(f"Topping up stamp {batch_id[:16]}... with {topup_hours}h ({amount} PLUR)")
 
-            await swarm_api.extend_postage_stamp(batch_id, amount)
-            self._record_spend()
+            if batch_id not in self._pool:
+                # Only pool inventory is topped up here; without its depth the
+                # cost cannot be charged correctly against the ceiling.
+                logger.error(f"Not topping up {batch_id[:16]}...: not in the pool")
+                self._release_spend_slot(slot)
+                return False
+            depth = self._pool[batch_id].depth
+            cost_bzz = swarm_api.plur_to_bzz(swarm_api.calculate_stamp_total_cost(amount, depth))
+            hold = self._reserve_gateway_spend(cost_bzz, f"top up batch {batch_id[:16]}...", "pool top-up")
+            if hold is None:
+                self._release_spend_slot(slot)
+                return False
+            try:
+                await swarm_api.extend_postage_stamp(batch_id, amount)
+            except BaseException as e:
+                self._release_if_unspent(slot, hold, e)
+                slot = None  # handled
+                raise
+            return True
 
-        except Exception as e:
+        except BaseException as e:
+            if slot is not None:
+                # Failed before the top-up call (e.g. the price lookup, or a
+                # cancellation there): nothing was spent.
+                self._release_spend_slot(slot)
             logger.error(f"Failed to top up stamp {batch_id[:16]}...: {e}")
             raise
 

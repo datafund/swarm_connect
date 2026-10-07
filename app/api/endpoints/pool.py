@@ -8,18 +8,22 @@ Provides endpoints for:
 - Manual pool maintenance
 """
 from fastapi import APIRouter, BackgroundTasks, Header, HTTPException, Request, status
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from typing import Dict, List, Optional, Literal
 from datetime import datetime, timezone
 import logging
 
+from app.x402.settlement import settle_payment
 from app.core.config import settings
 from app.services.stamp_pool import stamp_pool_manager, PoolStampStatus
+from app.services.swarm_api import get_batch_expiry
 from app.services.stamp_ownership import stamp_ownership_manager
 from app.services.metrics import pool_acquires_total
 from app.services.pool_allowance import pool_allowance_tracker
+from app.core.client_ip import get_client_key
 from app.services.signed_auth import POOL_CHECK_PREFIX, authorize_signed_request
 from app.api.models.stamp import SIZE_PRESETS
+
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -68,12 +72,36 @@ class AcquireStampRequest(BaseModel):
     """Request to acquire a stamp from the pool."""
     size: Optional[Literal["small", "medium", "large"]] = Field(
         None,
-        description="Preferred stamp size. If not available, may return larger size."
+        description=("Preferred stamp size. If it is not available, a free acquire may be served a "
+                     "larger size (charged to that size's allowance); a paid acquire gets exactly the "
+                     "size paid for, or 409.")
     )
     depth: Optional[int] = Field(
         None,
-        description="Specific depth requested (overrides size). 17=small, 20=medium, 22=large."
+        description="Specific depth requested (overrides size): 17 (small), 20 (medium) or 22 (large)."
     )
+
+    @field_validator("depth")
+    @classmethod
+    def _pool_depth(cls, v):
+        # The pool only holds the preset sizes. Any other depth used to be
+        # accepted, got its own daily-allowance bucket, and was then served
+        # whatever larger batch was available (#351).
+        if v is not None and v not in SIZE_PRESETS.values():
+            raise ValueError("depth must be one of 17 (small), 20 (medium) or 22 (large)")
+        return v
+
+    def requested_depth(self) -> int:
+        """The depth this request asks for: explicit depth, else size, else small.
+
+        Shared by the handler and the x402 pricer so the price and the batch
+        are derived from the same parse (#362).
+        """
+        if self.depth is not None:
+            return self.depth
+        if self.size is not None:
+            return SIZE_PRESETS[self.size]
+        return SIZE_PRESETS["small"]
 
     class Config:
         json_schema_extra = {
@@ -91,6 +119,12 @@ class AcquireStampResponse(BaseModel):
     size_name: Optional[str] = Field(None, description="Human-friendly size name")
     message: str = Field(..., description="Status message")
     fallback_used: bool = Field(False, description="True if a larger stamp was provided")
+    expires_at: Optional[str] = Field(
+        None,
+        description=("When the stamp runs out (UTC, from its current TTL on the node; an estimate at today's "
+                     "price, null if unknown). Data uploaded with it can disappear after this unless "
+                     "the stamp is extended; extend with a margin."),
+    )
 
     class Config:
         json_schema_extra = {
@@ -151,6 +185,64 @@ async def get_pool_status():
     )
 
 
+async def _refuse_allowance(http_request: Request, message: str, detail: dict) -> None:
+    """Refuse an acquire whose free allowance is spent, saying what still works.
+
+    The offer to pay is conditional. Where a settled payment does not buy a
+    bypass — a testnet, without the explicit override — telling the caller to
+    pay would send them to a path that takes their payment and still refuses
+    them, which is worse than not offering it at all.
+    """
+    detail = dict(detail)
+    if settings.paid_bypass_is_honoured():
+        message += (
+            "To continue now, pay with x402: send an X-PAYMENT header with "
+            "this same request and you get a pooled stamp immediately, "
+            "without drawing on the allowance."
+        )
+        detail["alternative"] = {
+            "endpoint": "POST /api/v1/pool/acquire",
+            "payment": "x402",
+            "header": "X-PAYMENT",
+            "note": "Paid acquires bypass the allowance and are immediate.",
+        }
+    else:
+        message += (
+            "To continue now, buy a stamp directly with POST /api/v1/stamps/ — "
+            "that is not drawn from the pool, so this limit does not apply. "
+            "It takes about a minute to become usable rather than seconds."
+        )
+        detail["alternative"] = {
+            "endpoint": "POST /api/v1/stamps/",
+            "note": "Direct purchase is not drawn from the pool, so the allowance does not apply.",
+        }
+    detail["message"] = message
+
+    if settings.X402_ENABLED and settings.paid_bypass_is_honoured():
+        # Paying bypasses the allowance here, so answer the way x402 clients
+        # understand: 402 with the price, not a 429 they can only report as a
+        # rate limit (#374). If the price cannot be worked out right now, the
+        # 429 below still tells the caller what happened and what to do.
+        try:
+            from app.x402.dependency import _calculate_price_for_request
+            from app.x402.middleware import X402_VERSION, create_payment_requirements
+            quote = await _calculate_price_for_request(http_request)
+            requirements = create_payment_requirements(
+                http_request, quote["price_usd"], quote.get("description", "Pooled stamp"))
+            payment_required = {
+                "x402Version": X402_VERSION,
+                "error": message,
+                "accepts": [requirements.model_dump(by_alias=True)],
+                **detail,
+            }
+        except Exception as e:
+            logger.warning("Could not price the allowance refusal, answering 429: %s", e)
+        else:
+            raise HTTPException(status_code=status.HTTP_402_PAYMENT_REQUIRED, detail=payment_required)
+
+    raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail=detail)
+
+
 @router.post(
     "/acquire",
     response_model=AcquireStampResponse,
@@ -168,17 +260,19 @@ async def acquire_stamp(
     """
     Acquire a stamp from the pool for immediate use (~5 seconds vs >1 minute).
 
-    **x402 Payment** (when gateway has x402 enabled):
-    This endpoint requires payment OR free tier access. Check `GET /health` for availability.
-    - **Free tier**: Add header `X-Payment-Mode: free` (rate limited)
-    - **Paid**: Include x402 payment header (higher rate limit)
-    - Without either header, returns **HTTP 402** with payment instructions and free tier info
+    **Free, within a daily allowance.** No payment header is needed: each
+    calling origin (or the shared bucket for unlisted origins and non-browser
+    callers) has a daily allowance per size. `X-Payment-Mode` is ignored here.
+    When the allowance is spent the response is **429** with
+    `DAILY_STAMP_ALLOWANCE_EXHAUSTED` and what to do instead.
 
-    **Quick start** (free tier):
+    **Paid (optional, x402).** An `X-PAYMENT` header is settled and, on a
+    mainnet network, bypasses the allowance. See `docs/stamp-pool-guide.md`.
+
+    **Quick start**:
     ```bash
     curl -X POST http://gateway/api/v1/pool/acquire \\
          -H "Content-Type: application/json" \\
-         -H "X-Payment-Mode: free" \\
          -d '{"size": "small"}'
     ```
 
@@ -202,12 +296,7 @@ async def acquire_stamp(
     # Resolve the size first: the budget is per size, because a depth-20 batch
     # costs eight times a depth-17 one and a shared count would let a caller
     # spend eight times its allowance by asking for a larger one.
-    if request.depth is not None:
-        requested_depth = request.depth
-    elif request.size is not None:
-        requested_depth = SIZE_PRESETS.get(request.size, 17)
-    else:
-        requested_depth = 17  # Default to small
+    requested_depth = request.requested_depth()
     requested_size = depth_to_size_name(requested_depth)
 
     # A settled payment bypasses the allowance. The allowance bounds what the
@@ -234,88 +323,164 @@ async def acquire_stamp(
             settings.X402_NETWORK,
         )
 
-    allowed_by_budget, budget = pool_allowance_tracker.check(origin, requested_size)
-    if paid:
-        logger.info("Pool acquire paid via x402, bypassing the daily allowance")
-    elif not allowed_by_budget:
-        logger.info(
-            "Pool allowance exhausted for origin %s (%s/%s today)",
-            budget["origin"], budget["used"], budget["allowance"],
-        )
-        # Written to be shown to a person, not just logged: the caller is a
-        # browser app whose user has never heard of a postage batch, so it says
-        # what they can do rather than only what failed.
-        #
-        # The offer to pay is conditional. Where a settled payment does not buy
-        # a bypass — a testnet, without the explicit override — telling the
-        # caller to pay would send them to a path that takes their payment and
-        # still refuses them, which is worse than not offering it at all.
-        message = (
-            f"The daily free allowance of {budget['allowance']} {requested_size} stamps for this "
-            f"application has been used up. It resets at {budget['resets_at']}. "
-        )
-        detail = {
-            "code": "DAILY_STAMP_ALLOWANCE_EXHAUSTED",
-            "size": requested_size,
-            "allowance": budget["allowance"],
-            "used": budget["used"],
-            "resets_at": budget["resets_at"],
-        }
-        if settings.paid_bypass_is_honoured():
-            message += (
-                "To continue now, pay with x402: send an X-PAYMENT header with "
-                "this same request and you get a pooled stamp immediately, "
-                "without drawing on the allowance."
-            )
-            detail["alternative"] = {
-                "endpoint": "POST /api/v1/pool/acquire",
-                "payment": "x402",
-                "header": "X-PAYMENT",
-                "note": "Paid acquires bypass the allowance and are immediate.",
-            }
-        else:
-            message += (
-                "To continue now, buy a stamp directly with POST /api/v1/stamps/ — "
-                "that is not drawn from the pool, so this limit does not apply. "
-                "It takes about a minute to become usable rather than seconds."
-            )
-            detail["alternative"] = {
-                "endpoint": "POST /api/v1/stamps/",
-                "note": "Direct purchase is not drawn from the pool, so the allowance does not apply.",
-            }
-        detail["message"] = message
-
-        raise HTTPException(
-            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-            detail=detail,
-        )
-
-    # Try to get exact match first
+    # Pick the batch first, so the allowance is charged for the size actually
+    # handed out rather than the size asked for (#351).
     stamp = stamp_pool_manager.get_available_stamp(requested_depth)
     fallback_used = False
 
-    # If no exact match, try any larger stamp
-    if not stamp:
+    # If no exact match, a larger batch may stand in, but not for a paying
+    # caller: the payment was priced for the requested size, and a larger batch
+    # costs the operator up to 32x more (#362). Deliberately keyed on `settled`
+    # (any settled payment, testnet included) rather than `paid` (payments that
+    # also bypass the allowance): a payment is priced for one size either way.
+    if not stamp and not settled:
         stamp = stamp_pool_manager.get_available_stamp_any_size(requested_depth)
         if stamp:
             fallback_used = True
 
+    charged_size = depth_to_size_name(stamp.depth) if stamp else requested_size
+
+    # An empty pool is answered before any allowance: offering to take payment
+    # (402) or to wait for tomorrow (429) for a size that is not in stock would
+    # only send the caller down a path that fails again.
     if not stamp:
         size_name = depth_to_size_name(requested_depth)
         pool_acquires_total.labels(size=size_name, status="error").inc()
+        message = f"No stamp available for depth {requested_depth} (size: {size_name}). Pool is exhausted."
+        if settled:
+            message = (f"No {size_name} stamp is available right now. Paid acquires are served only at "
+                       f"the size that was paid for, so no larger stamp was substituted and nothing was charged.")
         raise HTTPException(
             status_code=409,
             detail={
-                "message": f"No stamp available for depth {requested_depth} (size: {size_name}). Pool is exhausted.",
+                "message": message,
                 "suggestion": "Purchase a stamp directly via POST /api/v1/stamps/"
             }
         )
 
+    # Grouped like every other per-caller limit (#367): an IPv6 client is one
+    # /64, so it cannot take a fresh allowance per address.
+    client_address = get_client_key(http_request)
+    if paid:
+        logger.info("Pool acquire paid via x402, bypassing the daily allowance")
+    else:
+        allowed_by_budget, budget = pool_allowance_tracker.check(origin, charged_size)
+        address_ok, address_info = (True, None)
+        if allowed_by_budget:
+            address_ok, address_info = pool_allowance_tracker.check_address(
+                origin, charged_size, client_address)
+
+        if budget.get("state_unreadable") or (address_info or {}).get("state_unreadable"):
+            # Today's allowance record could not be read (#378): refuse free
+            # acquires rather than guess, and say so instead of "used up".
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail={
+                    "code": "POOL_ALLOWANCE_UNAVAILABLE",
+                    "message": (
+                        "Free pooled stamps are paused until the operator restores the "
+                        f"gateway's allowance records, or until {budget['resets_at']}. "
+                        "Buying a stamp directly with POST /api/v1/stamps/ still works."
+                    ),
+                },
+            )
+
+        if (not allowed_by_budget or not address_ok) and fallback_used:
+            # The size asked for is out of stock and the allowance for the
+            # larger size that would stand in is spent. Blaming the larger
+            # size's allowance would be confusing (the caller never asked for
+            # it); the accurate answer is that the requested size is
+            # momentarily unavailable.
+            whose = "this application" if not allowed_by_budget else "this client"
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={
+                    "code": "REQUESTED_SIZE_UNAVAILABLE",
+                    "size": requested_size,
+                    "message": (
+                        f"No {requested_size} stamp is available right now; the pool is being "
+                        f"refilled. A larger stamp was available, but today's {charged_size} "
+                        f"allowance for {whose} is used up. Try again in a few minutes, "
+                        f"or buy a stamp directly with POST /api/v1/stamps/."
+                    ),
+                },
+            )
+
+        if not allowed_by_budget:
+            logger.info(
+                "Pool allowance exhausted for origin %s (%s/%s today)",
+                budget["origin"], budget["used"], budget["allowance"],
+            )
+            # Written to be shown to a person, not just logged: the caller is a
+            # browser app whose user has never heard of a postage batch, so it
+            # says what they can do rather than only what failed.
+            await _refuse_allowance(
+                http_request,
+                message=(
+                    f"The daily free allowance of {budget['allowance']} {charged_size} stamps for this "
+                    f"application has been used up. It resets at {budget['resets_at']}. "
+                ),
+                detail={
+                    "code": "DAILY_STAMP_ALLOWANCE_EXHAUSTED",
+                    "size": charged_size,
+                    "allowance": budget["allowance"],
+                    "used": budget["used"],
+                    "resets_at": budget["resets_at"],
+                },
+            )
+
+        if not address_ok:
+            await _refuse_allowance(
+                http_request,
+                message=(
+                    f"This client has used its {address_info['address_allowance']} free "
+                    f"{charged_size} stamps for today. It resets at {address_info['resets_at']}. "
+                ),
+                detail={
+                    "code": "DAILY_STAMP_ALLOWANCE_PER_CLIENT_EXHAUSTED",
+                    "size": charged_size,
+                    "allowance": address_info["address_allowance"],
+                    "resets_at": address_info["resets_at"],
+                },
+            )
+
     # Get client identifier for logging
     client_ip = http_request.client.host if http_request.client else "unknown"
 
-    # Release the stamp
-    released = stamp_pool_manager.release_stamp(stamp.batch_id, released_to=client_ip)
+    # Reserve the batch first, then collect payment. reserve_stamp is the
+    # atomic claim; settling can take seconds, and a batch merely chosen but not
+    # claimed could be taken by a concurrent acquire in that time, leaving a
+    # paid caller charged with nothing to receive. The reserved batch stays in
+    # the pool (and counts toward its target) until settlement has succeeded; if
+    # settlement fails it is simply available again.
+    released = None
+    if stamp_pool_manager.reserve_stamp(stamp.batch_id, reserved_for=client_ip):
+        try:
+            await settle_payment(http_request)
+        except BaseException as e:
+            # Named here so the operator can match a transfer that does appear
+            # on-chain after an uncertain settlement (502) to the batch this
+            # request would have received.
+            logger.warning(
+                "Pool acquire: settlement did not complete for batch %s (%s); "
+                "batch made available again",
+                stamp.batch_id, type(e).__name__,
+            )
+            stamp_pool_manager.unreserve_stamp(stamp.batch_id)
+            raise
+        released = stamp_pool_manager.release_reserved_stamp(stamp.batch_id)
+        if not released:
+            # Cannot happen while nothing but this request moves a reserved
+            # batch. If it ever does, the caller has paid and gets a 409, which
+            # must not read as an ordinary lost race.
+            settlement = getattr(http_request.state, "x402_settlement", None)
+            logger.error(
+                "Pool acquire: PAID NON-DELIVERY: batch %s was no longer reserved "
+                "after settlement (payer=%s, tx=%s)",
+                stamp.batch_id,
+                getattr(http_request.state, "x402_payer", None),
+                getattr(settlement, "transaction", None),
+            )
 
     if not released:
         size_name = depth_to_size_name(requested_depth)
@@ -350,7 +515,7 @@ async def acquire_stamp(
     # allowance has genuinely been spent. A paid acquire consumes nothing — the
     # caller bought this batch rather than drawing on the free budget.
     if not paid:
-        pool_allowance_tracker.consume(origin, requested_size)
+        pool_allowance_tracker.consume(origin, charged_size, client_address)
 
     # Trigger immediate replenishment if pool is below target
     # This runs in the background and doesn't affect the response
@@ -371,7 +536,8 @@ async def acquire_stamp(
         depth=released.depth,
         size_name=size_name,
         message=message,
-        fallback_used=fallback_used
+        fallback_used=fallback_used,
+        expires_at=await get_batch_expiry(released.batch_id),
     )
 
 

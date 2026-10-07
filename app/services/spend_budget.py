@@ -37,19 +37,64 @@ casual and accidental spending — which is what actually happened, twice — an
 raises the cost of deliberate spending without pretending to prevent it. A
 caller who wants a real allowance pays, and paying bypasses this entirely.
 """
-import json
+import math
 import logging
-import os
 from datetime import datetime, timezone
 from threading import Lock
 from typing import Dict, Optional, Tuple
 
 from app.core.config import settings
+from app.core.atomic_io import StateLoadError, atomic_write_json, load_json_state, unreadable_state
 
 logger = logging.getLogger(__name__)
 
+# Keys for the gateway-wide totals, kept alongside per-caller keys. Not valid
+# IPs, so they cannot collide with a caller.
+GLOBAL_KEY = "(gateway total)"
+GIVEAWAY_KEY = "(gateway giveaway)"
+TOTAL_KEYS = (GLOBAL_KEY, GIVEAWAY_KEY)
+
+
+class Hold:
+    """Amounts reserved together for one spend, on one UTC day (#363).
+
+    Released only if the spend certainly did not happen, and only on the day it
+    was taken: after midnight the day's counters have been reset, and taking a
+    stale hold off them would erase real spend of the new day.
+    """
+
+    def __init__(self, day: str, charges):
+        self.day = day
+        self.charges = list(charges)  # [(key, cost_bzz)]
+        self.released = False
+
+
+def spend_certainly_did_not_happen(exc: BaseException) -> bool:
+    """Whether a failed spend definitely spent nothing, so its hold can go back.
+
+    Only when the refusal came before the money moved: a check of our own
+    (HTTPException), a connection that was never made, or Bee answering with a
+    4xx refusal. A timeout after the request was sent, a cancellation, a 5xx or
+    anything unrecognised may have spent money, so the hold is kept and the
+    limits fail closed.
+    """
+    import httpx
+    from fastapi import HTTPException
+    if isinstance(exc, HTTPException):
+        return True
+    if isinstance(exc, (httpx.ConnectError, httpx.ConnectTimeout)):
+        return True
+    if isinstance(exc, httpx.HTTPStatusError):
+        return 400 <= exc.response.status_code < 500
+    return False
+
 # Sentinel for "no limit", matching pool_allowance so the two read alike.
 UNLIMITED = -1.0
+
+
+def _is_amount(v) -> bool:
+    return (isinstance(v, (int, float)) and not isinstance(v, bool)
+            and math.isfinite(v) and v >= 0)
 
 
 def _today() -> str:
@@ -64,6 +109,8 @@ class SpendBudgetTracker:
         self._state_file = state_file
         self._day = _today()
         self._spent: Dict[str, float] = {}
+        # Set when today's file could not be read; see _load.
+        self._unreadable: Optional[str] = None
         self._load()
 
     # --- persistence -------------------------------------------------------
@@ -76,29 +123,40 @@ class SpendBudgetTracker:
         return self._state_file or settings.STAMP_SPEND_BUDGET_STATE_FILE
 
     def _load(self) -> None:
+        # Only a missing file means a fresh day. An unreadable one is not
+        # treated as empty (#378): that would reset every caller's BZZ budget
+        # and the next save would overwrite today's record. Instead a copy is
+        # kept, nothing is written, and every limited check is refused until
+        # the next UTC day or until an operator restores or removes the file
+        # and restarts. Stopping the process instead would take paid traffic
+        # down with it over one day of counters.
+        path = self._path()
         try:
-            path = self._path()
-            if not os.path.exists(path):
+            data = load_json_state(path)
+            if data is None:
                 return
-            with open(path) as f:
-                data = json.load(f)
-            if data.get("day") == self._day:
-                self._spent = {k: float(v) for k, v in (data.get("spent") or {}).items()}
-                logger.info("Loaded spend budget state for %s: %s", self._day, self._spent)
-        except Exception as e:
-            # Never fail startup over a counter.
-            logger.warning("Could not load spend budget state: %s", e)
+            if "day" not in data:
+                logger.warning("Spend budget state %s has no day; ignoring it", path)
+                return
+            if data["day"] != self._day:
+                return
+            spent = data.get("spent", {})
+            if not isinstance(spent, dict) or not all(_is_amount(v) for v in spent.values()):
+                raise unreadable_state(path, "spent must map callers to non-negative numbers")
+        except StateLoadError as e:
+            self._unreadable = str(e)
+            logger.error("Spend budget refused until the next UTC day: %s", e)
+            return
+        self._spent = {k: float(v) for k, v in spent.items()}
+        # Totals only: keys are client addresses, which do not belong in logs.
+        logger.info("Loaded spend budget state for %s: %d callers, %.4f BZZ",
+                    self._day, len(self._spent), sum(self._spent.values()))
 
     def _save(self) -> None:
+        if self._unreadable:
+            return  # leave the unreadable file for the operator
         try:
-            path = self._path()
-            directory = os.path.dirname(path)
-            if directory:
-                os.makedirs(directory, exist_ok=True)
-            tmp = f"{path}.tmp"
-            with open(tmp, "w") as f:
-                json.dump({"day": self._day, "spent": self._spent}, f)
-            os.replace(tmp, path)
+            atomic_write_json(self._path(), {"day": self._day, "spent": self._spent})
         except Exception as e:
             logger.warning("Could not persist spend budget state: %s", e)
 
@@ -110,6 +168,7 @@ class SpendBudgetTracker:
             logger.info("Spend budget day rolled %s -> %s, resetting", self._day, today)
             self._day = today
             self._spent = {}
+            self._unreadable = None
             self._save()
 
     def budget(self) -> float:
@@ -142,7 +201,108 @@ class SpendBudgetTracker:
         }
         if limit == UNLIMITED:
             return True, info
+        if self._unreadable:
+            info["state_unreadable"] = True
+            return False, info
         return (spent + cost_bzz) <= limit, info
+
+    def reserve_all(self, charges) -> Tuple[Optional[Hold], Optional[str], dict]:
+        """Reserve several (key, cost, limit) charges atomically: all or none.
+
+        One lock and one write for the whole set, so a request that will be
+        refused on one limit never holds another in the meantime. Returns
+        (hold, None, {}) on success, or (None, refusing_key, info) on refusal.
+        """
+        with self._lock:
+            self._roll_day()
+            for key, cost, limit in charges:
+                spent = self._spent.get(key, 0.0)
+                if limit != UNLIMITED and self._unreadable:
+                    # Today's spending is unknown (#378): refuse every limited
+                    # charge rather than count from zero.
+                    return None, key, {
+                        "caller": key,
+                        "daily_budget_bzz": limit,
+                        "request_cost_bzz": round(cost, 6),
+                        "resets_at": f"{self._day}T24:00:00Z",
+                        "state_unreadable": True,
+                    }
+                if limit != UNLIMITED and spent + cost > limit:
+                    remaining = max(0.0, limit - spent)
+                    return None, key, {
+                        "caller": key,
+                        "daily_budget_bzz": limit,
+                        "spent_bzz": round(spent, 6),
+                        "remaining_bzz": round(remaining, 6),
+                        "request_cost_bzz": round(cost, 6),
+                        "resets_at": f"{self._day}T24:00:00Z",
+                    }
+            for key, cost, _ in charges:
+                self._spent[key] = self._spent.get(key, 0.0) + cost
+            self._save()
+            return Hold(self._day, [(k, c) for k, c, _ in charges]), None, {}
+
+    def release_hold(self, hold: Optional[Hold]) -> None:
+        """Give back a hold whose spend certainly did not happen (see Hold)."""
+        if hold is None or hold.released:
+            return
+        with self._lock:
+            self._roll_day()
+            hold.released = True
+            if hold.day != self._day:
+                return
+            for key, cost in hold.charges:
+                if key in self._spent:
+                    left = self._spent[key] - cost
+                    if left <= 1e-12:
+                        del self._spent[key]
+                    else:
+                        self._spent[key] = left
+            self._save()
+
+    def reserve_spend(self, cost_bzz: float, caller: Optional[str]) -> Tuple[Optional[Hold], Optional[str], dict]:
+        """Reserve a gateway spend against every limit that applies to it.
+
+        Always the gateway-wide ceiling. When `caller` is given (the spend is a
+        giveaway: unpaid, or paid on a test network) also the free-spending
+        ceiling and that caller's daily budget. All or nothing, one write.
+        """
+        charges = [(GLOBAL_KEY, cost_bzz, settings.GATEWAY_DAILY_BZZ_CEILING)]
+        if caller is not None:
+            charges += [(GIVEAWAY_KEY, cost_bzz, settings.GATEWAY_DAILY_BZZ_FREE_CEILING),
+                        (caller, cost_bzz, self.budget())]
+        return self.reserve_all(charges)
+
+    def reserve_gateway(self, cost_bzz: float) -> Tuple[Optional[Hold], dict]:
+        """Reserve against GATEWAY_DAILY_BZZ_CEILING only (pool, for-owner)."""
+        hold, _, info = self.reserve_all([(GLOBAL_KEY, cost_bzz, settings.GATEWAY_DAILY_BZZ_CEILING)])
+        return hold, info
+
+    def reserve(self, caller: str, cost_bzz: float, limit: Optional[float] = None) -> Tuple[bool, dict]:
+        """Check and charge in one step (#363).
+
+        check() followed later by consume() let concurrent requests all pass
+        the check before any of them was charged. This charges immediately,
+        under the lock; call release() if the spend then does not happen.
+        """
+        limit = self.budget() if limit is None else limit
+        with self._lock:
+            self._roll_day()
+            spent = self._spent.get(caller, 0.0)
+            remaining = UNLIMITED if limit == UNLIMITED else max(0.0, limit - spent)
+            info = {
+                "caller": caller,
+                "daily_budget_bzz": limit,
+                "spent_bzz": round(spent, 6),
+                "remaining_bzz": remaining if limit == UNLIMITED else round(remaining, 6),
+                "request_cost_bzz": round(cost_bzz, 6),
+                "resets_at": f"{self._day}T24:00:00Z",
+            }
+            if limit != UNLIMITED and spent + cost_bzz > limit:
+                return False, info
+            self._spent[caller] = spent + cost_bzz
+            self._save()
+            return True, info
 
     def consume(self, caller: str, cost_bzz: float) -> None:
         with self._lock:
@@ -153,7 +313,12 @@ class SpendBudgetTracker:
     def snapshot(self) -> dict:
         with self._lock:
             self._roll_day()
-            return {"day": self._day, "spent": dict(self._spent)}
+            return {
+                "day": self._day,
+                "spent": {k: v for k, v in self._spent.items() if k not in TOTAL_KEYS},
+                "gateway_spent": self._spent.get(GLOBAL_KEY, 0.0),
+                "giveaway_spent": self._spent.get(GIVEAWAY_KEY, 0.0),
+            }
 
 
 spend_budget_tracker = SpendBudgetTracker()

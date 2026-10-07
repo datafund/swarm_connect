@@ -17,11 +17,18 @@ a createBatch we cannot fund.
 import logging
 
 from fastapi import APIRouter, HTTPException, Request, status
+from fastapi.responses import JSONResponse
 
+from app.x402.settlement import settle_payment
 from app.api.models.stamp import StampForOwnerRequest, StampForOwnerResponse
 from app.core.config import settings
 from app.services import metrics, swarm_api
-from app.services.gnosis_chain import GnosisChainError, gnosis_chain_client
+from app.services.gnosis_chain import (
+    GnosisChainError,
+    SignerBusy,
+    TransactionPending,
+    gnosis_chain_client,
+)
 from app.services.stamp_ownership import stamp_ownership_manager
 from app.services.stamp_tracker import record_purchase
 from app.x402.audit import log_stamp_purchased
@@ -38,6 +45,11 @@ from app.services.swarm_api import PLUR_PER_BZZ  # noqa: F401
     response_model=StampForOwnerResponse,
     status_code=status.HTTP_201_CREATED,
     summary="Create a postage batch owned by an external address",
+    responses={202: {
+        "model": StampForOwnerResponse,
+        "description": "createBatch was broadcast but not confirmed in time (`confirmed: false`). "
+                       "It is pending and may still mine; check `txHash` on Gnosis before retrying.",
+    }},
 )
 async def create_batch_for_owner(body: StampForOwnerRequest, request: Request) -> StampForOwnerResponse:
     """Create a postage batch on Gnosis owned by `body.owner` (Flow B).
@@ -116,26 +128,87 @@ async def create_batch_for_owner(body: StampForOwnerRequest, request: Request) -
             "message": "Gateway signer wallet has insufficient funds to create this batch.",
             "warnings": pf["warnings"]})
 
+    # --- gateway-wide daily ceiling (#363), charged before the on-chain spend ---
+    from app.services.spend_budget import spend_budget_tracker
+    from app.core.config import settings as config
+    caller = None
+    if not (x402_mode == "paid" and config.paid_bypass_is_honoured()):
+        # Unpaid (free tier, when enabled) or testnet-paid: a giveaway, bounded
+        # like direct purchases by the free ceiling and the caller's budget.
+        from app.core.client_ip import get_client_ip
+        caller = get_client_ip(request)
+    hold, _refused, ceiling = spend_budget_tracker.reserve_spend(cost_bzz, caller)
+    if hold is None:
+        metrics.for_owner_batches_total.labels(status="ceiling").inc()
+        if ceiling.get("state_unreadable"):
+            # Today's spend record could not be read (#378): nothing is spent
+            # until it is restored or the day rolls over.
+            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail={
+                "code": "SPEND_BUDGET_UNAVAILABLE",
+                "message": ("Batch purchases are paused until the operator restores the "
+                            f"gateway's spend records, or until {ceiling['resets_at']}.")})
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail={
+            "code": "GATEWAY_DAILY_SPEND_CEILING",
+            "message": f"A daily spending limit is reached. It resets at {ceiling['resets_at']}.",
+            "resets_at": ceiling["resets_at"]})
+
     # --- on-chain createBatch(owner=...) ---
+    pending = False
     try:
+        await settle_payment(request)
         result = await gnosis_chain_client.create_batch(owner, amount, depth, immutable=body.immutable)
+    except TransactionPending as e:
+        # Broadcast, but no receipt in time (#368). This used to surface as an
+        # error, which told the caller they were not charged, while the
+        # transaction could still mine and spend our BZZ. The outcome is
+        # unknown, so it is reported as unknown: 202 with the tx hash. Being a
+        # 2xx, the payment is settled, the same fail-closed rule as the spend
+        # limits: money is only given back when the spend certainly did not
+        # happen, and here it most likely did.
+        pending = True
+        result = {"batch_id": e.batch_id, "tx_hash": e.tx_hash, "owner": e.owner}
+        metrics.for_owner_batches_total.labels(status="pending").inc()
+        logger.warning(f"for-owner: createBatch {e.tx_hash} not confirmed in time; reported as pending")
+    except SignerBusy as e:
+        # Nothing was sent, so nothing is charged: a 5xx is not settled.
+        metrics.for_owner_batches_total.labels(status="busy").inc()
+        logger.warning(f"for-owner: refused, {e}")
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail={
+            "code": "SIGNER_BUSY",
+            "message": f"The gateway signer is busy ({e}). Nothing was sent and you were not charged; retry later."})
     except GnosisChainError as e:
+        # Raised for a connection that was never made or a transaction that
+        # reverted: no BZZ moved. A receipt timeout is not a GnosisChainError
+        # (web3 raises TimeExhausted) and keeps the hold: it may still mine.
+        spend_budget_tracker.release_hold(hold)
         metrics.for_owner_batches_total.labels(status="error").inc()
         logger.error(f"for-owner: createBatch failed: {e}")
-        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY,
-                            detail=f"createBatch failed: {e}")
+        # The exception text is RPC and contract internals (#104, #380); it is
+        # logged above for the operator and not returned to the caller.
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail={
+            "code": "CREATE_BATCH_FAILED",
+            "message": "The batch could not be created on chain. Try again later."})
+    except BaseException:
+        # Outcome uncertain (e.g. receipt timeout: the transaction may still
+        # mine): the hold stays, and is counted as such.
+        metrics.gateway_spend_uncertain_bzz_total.labels(operation="for-owner").inc(cost_bzz)
+        raise
 
     batch_id = result["batch_id"]
     bid = batch_id[2:] if batch_id.startswith("0x") else batch_id  # Bee uses 64-hex, no 0x
 
-    # propagation tracking + informational ownership record (on-chain is source of truth)
+    # propagation tracking + informational ownership record (on-chain is source of truth).
+    # Also for a pending batch: its ID is already fixed, and if it mines the
+    # record must exist. If it never mines, the record stays: nothing removes
+    # it today, and it grants access to no batch that exists.
     record_purchase(bid)
     stamp_ownership_manager.register_stamp(batch_id=bid, owner=owner, mode="paid", source="created_for_owner")
     prop = swarm_api.calculate_propagation_signals(bid, usable=None)
 
     # metrics + audit (payer is the x402 caller; owner is the batch owner)
-    metrics.for_owner_batches_total.labels(status="success").inc()
-    metrics.for_owner_bzz_spent_total.inc(total_cost_plur)
+    if not pending:
+        metrics.for_owner_batches_total.labels(status="success").inc()
+        metrics.for_owner_bzz_spent_total.inc(total_cost_plur)
     try:
         log_stamp_purchased(
             client_ip=get_client_ip(request), stamp_id=bid, amount=amount, depth=depth,
@@ -145,7 +218,7 @@ async def create_batch_for_owner(body: StampForOwnerRequest, request: Request) -
     except Exception as e:  # auditing must never fail the request
         logger.debug(f"for-owner: audit log failed: {e}")
 
-    return StampForOwnerResponse(
+    response = StampForOwnerResponse(
         batchID=bid,
         owner=result["owner"],
         depth=depth,
@@ -155,3 +228,12 @@ async def create_batch_for_owner(body: StampForOwnerRequest, request: Request) -
         estimatedReadyAt=prop["estimatedReadyAt"],
         propagationStatus=prop["propagationStatus"],
     )
+    if pending:
+        response.confirmed = False
+        response.message = (
+            "createBatch was broadcast but not confirmed in time. "
+            "It is pending and may still mine. Check txHash on Gnosis before retrying, "
+            "or you may pay for a second batch."
+        )
+        return JSONResponse(status_code=status.HTTP_202_ACCEPTED, content=response.model_dump())
+    return response

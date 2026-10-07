@@ -1,12 +1,14 @@
 # app/api/endpoints/data.py
+import asyncio
 import base64
 import json
 import logging
 import time
-from fastapi import APIRouter, HTTPException, Path, Query, Request, File, UploadFile
+from fastapi import APIRouter, Header, HTTPException, Path, Query, Request, File, UploadFile
 from fastapi.responses import Response
 import httpx
 
+from app.x402.settlement import settle_payment
 from app.api.models.data import (
     DataUploadRequest,
     DataUploadResponse,
@@ -19,6 +21,8 @@ from typing import Optional
 from app.services.swarm_api import (
     upload_data_to_swarm,
     download_data_from_swarm,
+    DownloadTooLargeError,
+    get_batch_expiry,
     upload_collection_to_swarm,
     validate_tar,
     count_tar_files,
@@ -29,6 +33,7 @@ from app.services.swarm_api import (
 )
 from app.core.config import settings
 from app.services.stamp_ownership import stamp_ownership_manager
+from app.services.signed_auth import OwnerProofError, consume_owner_proof, verify_owner_proof
 from app.services.provenance import (
     get_provenance_service,
     DocumentValidationError,
@@ -45,6 +50,7 @@ logger = logging.getLogger(__name__)
 # uploaded file. 8 KB is far more than a boundary plus part headers need, and
 # far less than any size that would matter for the limit itself.
 MULTIPART_ENVELOPE_ALLOWANCE = 8 * 1024
+
 router = APIRouter()
 
 
@@ -64,6 +70,39 @@ def _build_server_timing_header(timing_dict: dict) -> str:
     return ", ".join(parts)
 
 
+SNIFF_FULL_PARSE_BYTES = 1024 * 1024
+
+
+def _is_utf8_prefix(data: bytes, size: int = 64 * 1024) -> bool:
+    """Whether the first `size` bytes decode as UTF-8 (a cut multi-byte char at the end is fine)."""
+    import codecs
+    try:
+        codecs.getincrementaldecoder("utf-8")().decode(data[:size], final=len(data) <= size)
+        return True
+    except UnicodeDecodeError:
+        return False
+
+
+def _too_large(reference: str, e: Exception) -> HTTPException:
+    downloads_total.labels(status="too_large").inc()
+    logger.warning(f"Download of {reference} refused: {e}")
+    return HTTPException(
+        status_code=413,
+        detail={
+            "code": "DOWNLOAD_TOO_LARGE",
+            "message": (f"This content is larger than the gateway's download limit of "
+                        f"{settings.MAX_DOWNLOAD_SIZE_MB} MB. Fetch it from a Swarm node directly."),
+            "max_size_mb": settings.MAX_DOWNLOAD_SIZE_MB,
+        },
+    )
+
+
+def _download_timeout(reference: str) -> HTTPException:
+    downloads_total.labels(status="error").inc()
+    logger.warning(f"Download of {reference} exceeded {settings.DOWNLOAD_TIMEOUT_SECONDS}s")
+    return HTTPException(status_code=504, detail="Fetching the content from the Swarm network took too long.")
+
+
 def _detect_content_type_and_filename(data_bytes: bytes, reference: str) -> tuple[str, str]:
     """
     Detect content type and generate user-friendly filename for downloads.
@@ -75,14 +114,19 @@ def _detect_content_type_and_filename(data_bytes: bytes, reference: str) -> tupl
     Returns:
         Tuple of (content_type, filename)
     """
-    # Try to detect if it's JSON
-    try:
-        json.loads(data_bytes.decode('utf-8'))
-        # It's valid JSON - use JSON content type and provenance filename
-        short_ref = reference[:8]  # First 8 chars of reference for filename
-        return "application/json", f"provenance-{short_ref}.json"
-    except (json.JSONDecodeError, UnicodeDecodeError):
-        pass
+    # Try to detect if it's JSON. A full parse only for small bodies: parsing a
+    # large JSON document of many small values costs many times its size in
+    # memory and blocks the event loop; beyond that, the leading bracket decides.
+    if len(data_bytes) <= SNIFF_FULL_PARSE_BYTES:
+        try:
+            json.loads(data_bytes.decode('utf-8'))
+            # It's valid JSON - use JSON content type and provenance filename
+            short_ref = reference[:8]  # First 8 chars of reference for filename
+            return "application/json", f"provenance-{short_ref}.json"
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            pass
+    elif data_bytes[:1024].lstrip()[:1] in (b"{", b"[") and _is_utf8_prefix(data_bytes):
+        return "application/json", f"provenance-{reference[:8]}.json"
 
     # Check for common binary file signatures
     if data_bytes.startswith(b'\x89PNG'):
@@ -95,15 +139,61 @@ def _detect_content_type_and_filename(data_bytes: bytes, reference: str) -> tupl
         return "image/gif", f"image-{reference[:8]}.gif"
 
     # Check if it's likely text
-    try:
-        data_bytes.decode('utf-8')
-        # It's valid UTF-8 text
+    if _is_utf8_prefix(data_bytes):
         return "text/plain", f"text-{reference[:8]}.txt"
-    except UnicodeDecodeError:
-        pass
 
     # Default to binary with .bin extension
     return "application/octet-stream", f"data-{reference[:8]}.bin"
+
+
+def _check_stamp_access(
+    request: Request,
+    stamp_id: str,
+    owner_timestamp: Optional[str],
+    owner_signature: Optional[str],
+) -> None:
+    """Raise unless the caller may upload to stamp_id.
+
+    The caller is identified by the x402 payer on a paid request, or by a
+    signed owner proof (#384). The proof is only examined when the payer alone
+    is not enough, so a proof is not consumed by a request that did not need it.
+    """
+    x402_payer = getattr(request.state, 'x402_payer', None)
+    x402_mode = getattr(request.state, 'x402_mode', None)
+    allowed, reason = stamp_ownership_manager.check_access(stamp_id, x402_payer, x402_mode)
+    if not allowed and (owner_timestamp or owner_signature):
+        try:
+            proof = verify_owner_proof(stamp_id, owner_timestamp, owner_signature)
+            allowed, reason = stamp_ownership_manager.check_access(stamp_id, proof.signer, x402_mode)
+            # Marked used only when it grants access: a refused proof spends
+            # nothing, and non-owners' proofs do not fill the used set.
+            if allowed:
+                consume_owner_proof(proof)
+        except OwnerProofError as e:
+            raise HTTPException(
+                status_code=401,
+                detail={
+                    "code": "OWNER_PROOF_INVALID",
+                    "message": f"Owner proof rejected: {e}",
+                    "stamp_id": stamp_id
+                }
+            )
+    if not allowed:
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "code": "STAMP_OWNERSHIP_DENIED",
+                "message": f"Access denied: {reason}",
+                "stamp_id": stamp_id
+            }
+        )
+
+
+_OWNER_TS_DESC = "Owner proof: unix seconds, signed in X-Owner-Signature. See 'Owned stamps' above."
+_OWNER_SIG_DESC = (
+    "Owner proof: EIP-191 personal_sign of "
+    "'swarm-connect-owner-upload:<stamp_id lowercase>:<X-Owner-Timestamp>'."
+)
 
 
 @router.post("/", response_model=DataUploadResponse)
@@ -116,7 +206,9 @@ async def upload_data(
     include_timing: bool = False,
     redundancy: Optional[int] = Query(default=None, ge=0, le=4),
     sign: Optional[str] = None,
-    file: UploadFile = File(...)
+    file: UploadFile = File(...),
+    x_owner_timestamp: Optional[str] = Header(None, alias="X-Owner-Timestamp", description=_OWNER_TS_DESC),
+    x_owner_signature: Optional[str] = Header(None, alias="X-Owner-Signature", description=_OWNER_SIG_DESC),
 ):
     """
     Upload data to the Swarm network via the configured Bee node.
@@ -126,6 +218,19 @@ async def upload_data(
     - **Free tier**: Add header `X-Payment-Mode: free` (rate limited)
     - **Paid**: Include x402 payment header (higher rate limit)
     - Without either header, returns **HTTP 402** with payment instructions and free tier info
+
+    **Owned stamps** (x402 enabled): a stamp bought with a payment belongs to the
+    paying wallet, and only that wallet may upload to it. Prove it is you either
+    by paying for the upload from that wallet, or for free (`X-Payment-Mode: free`,
+    free-tier rate limit applies) with an owner proof:
+    - `X-Owner-Timestamp`: current unix time in seconds (valid for 5 minutes)
+    - `X-Owner-Signature`: EIP-191 `personal_sign` by the owner wallet of
+      `swarm-connect-owner-upload:<stamp_id in lowercase>:<timestamp>`
+    - Each proof is accepted once; sign a new one per upload. It is a bearer
+      credential for one upload (not bound to the file): do not log or share it.
+      A rejected proof
+      returns **401** `OWNER_PROOF_INVALID`; a valid proof from another wallet
+      returns **403** `STAMP_OWNERSHIP_DENIED`.
     - Downloads (`GET /api/v1/data/{reference}`) are always free — no headers needed
 
     **Requirements**:
@@ -227,20 +332,41 @@ async def upload_data(
     bee_upload_ms = None
 
     try:
+        # Reject an over-sized body before anything else.
+        #
+        # This ran after the stamp ownership check, so an over-sized upload with
+        # an unrecognised stamp answered 403 STAMP_OWNERSHIP_DENIED and the
+        # documented 413 was unreachable — the caller was told the wrong thing
+        # about their request. Size does not depend on who is asking, and the
+        # check is a header comparison against a registry lookup, so it belongs
+        # first on both counts.
+        #
+        # Content-Length covers the whole multipart envelope — boundary, part
+        # headers, trailer — not just the file, so it is compared against the
+        # limit plus an allowance for that wrapper. Without it a file of exactly
+        # MAX_UPLOAD_SIZE_MB was always rejected, putting the real ceiling a few
+        # hundred bytes below the documented one and making it shrink as the
+        # filename grew.
+        #
+        # This cannot reject early despite reading like it should: FastAPI parses
+        # the multipart form during dependency resolution, so the body is already
+        # in memory by the time this line runs. It is a coarse guard, not a fast
+        # path. The exact limit is enforced on the file's own length further down.
+        max_size = settings.MAX_UPLOAD_SIZE_MB * 1024 * 1024
+        content_length = request.headers.get("content-length")
+        if content_length and int(content_length) > max_size + MULTIPART_ENVELOPE_ALLOWANCE:
+            raise HTTPException(
+                status_code=413,
+                detail={
+                    "code": "FILE_TOO_LARGE",
+                    "message": f"Upload exceeds maximum size of {settings.MAX_UPLOAD_SIZE_MB} MB.",
+                    "max_size_mb": settings.MAX_UPLOAD_SIZE_MB
+                }
+            )
+
         # Check stamp ownership
         if settings.X402_ENABLED:
-            x402_payer = getattr(request.state, 'x402_payer', None)
-            x402_mode = getattr(request.state, 'x402_mode', None)
-            allowed, reason = stamp_ownership_manager.check_access(stamp_id, x402_payer, x402_mode)
-            if not allowed:
-                raise HTTPException(
-                    status_code=403,
-                    detail={
-                        "code": "STAMP_OWNERSHIP_DENIED",
-                        "message": f"Access denied: {reason}",
-                        "stamp_id": stamp_id
-                    }
-                )
+            _check_stamp_access(request, stamp_id, x_owner_timestamp, x_owner_signature)
 
         # Validate redundancy level if provided
         if redundancy is not None and redundancy not in REDUNDANCY_LEVELS:
@@ -250,11 +376,13 @@ async def upload_data(
                 detail=f"Invalid redundancy level {redundancy}. Must be 0-4 ({valid_levels})"
             )
 
-        # Optional pre-upload stamp validation
-        if validate_stamp:
+        # Optional pre-upload stamp validation. Always done for a paid upload:
+        # the payment is settled just before the upload, so a stamp Bee would
+        # refuse (missing, expired, full) must be caught while it is still free.
+        if validate_stamp or getattr(request.state, "x402_mode", None) == "paid":
             stamp_start = time.perf_counter()
             try:
-                await validate_stamp_for_upload(stamp_id)
+                await validate_stamp_for_upload(stamp_id, local_only=not validate_stamp)
             except StampValidationError as e:
                 # Build structured error response
                 detail = {
@@ -279,33 +407,6 @@ async def upload_data(
                     raise HTTPException(status_code=400, detail=detail)
             stamp_validate_ms = (time.perf_counter() - stamp_start) * 1000
 
-        # Check upload size limit.
-        #
-        # Content-Length covers the whole multipart envelope — boundary, part
-        # headers, trailer — not just the file. Comparing it against the file
-        # limit put the real ceiling a few hundred bytes below the documented
-        # one, so a file of exactly MAX_UPLOAD_SIZE_MB was always rejected with
-        # 413 while the check below, which measures the file itself, would have
-        # accepted it. The two checks were applying one limit to two different
-        # quantities.
-        #
-        # The allowance is generous relative to a real envelope (a boundary and
-        # one set of part headers is a few hundred bytes) because this check is
-        # only a coarse guard: it cannot reject early, since FastAPI parses the
-        # multipart form during dependency resolution and the body is already
-        # in memory by the time this line runs. The exact limit is enforced on
-        # the file's own length below.
-        max_size = settings.MAX_UPLOAD_SIZE_MB * 1024 * 1024
-        content_length = request.headers.get("content-length")
-        if content_length and int(content_length) > max_size + MULTIPART_ENVELOPE_ALLOWANCE:
-            raise HTTPException(
-                status_code=413,
-                detail={
-                    "code": "FILE_TOO_LARGE",
-                    "message": f"Upload exceeds maximum size of {settings.MAX_UPLOAD_SIZE_MB} MB.",
-                    "max_size_mb": settings.MAX_UPLOAD_SIZE_MB
-                }
-            )
 
         # Read file content as bytes
         file_start = time.perf_counter()
@@ -373,6 +474,7 @@ async def upload_data(
 
         # Upload to Swarm
         bee_start = time.perf_counter()
+        await settle_payment(request)
         reference = await upload_data_to_swarm(
             data=data_bytes,
             stamp_id=stamp_id,
@@ -400,7 +502,8 @@ async def upload_data(
         response = DataUploadResponse(
             reference=reference,
             message=f"File '{file.filename}' uploaded successfully",
-            timing=timing
+            timing=timing,
+            expires_at=await get_batch_expiry(stamp_id),
         )
 
         # Always add Server-Timing header (useful for browser devtools)
@@ -488,6 +591,10 @@ async def download_data(
         downloads_total.labels(status="error").inc()
         logger.warning(f"Data not found for reference {reference}: {e}")
         raise HTTPException(status_code=404, detail=f"Data not found for reference {reference}")
+    except DownloadTooLargeError as e:
+        raise _too_large(reference, e)
+    except asyncio.TimeoutError:
+        raise _download_timeout(reference)
     except httpx.HTTPError as e:
         downloads_total.labels(status="error").inc()
         logger.error(f"Swarm API error during download: {e}")
@@ -548,6 +655,10 @@ async def download_data_json(
         downloads_total.labels(status="error").inc()
         logger.warning(f"Data not found for reference {reference}: {e}")
         raise HTTPException(status_code=404, detail=f"Data not found for reference {reference}")
+    except DownloadTooLargeError as e:
+        raise _too_large(reference, e)
+    except asyncio.TimeoutError:
+        raise _download_timeout(reference)
     except httpx.HTTPError as e:
         downloads_total.labels(status="error").inc()
         logger.error(f"Swarm API error during download: {e}")
@@ -566,7 +677,9 @@ async def upload_manifest(
     deferred: bool = False,
     include_timing: bool = False,
     redundancy: Optional[int] = Query(default=None, ge=0, le=4),
-    file: UploadFile = File(...)
+    file: UploadFile = File(...),
+    x_owner_timestamp: Optional[str] = Header(None, alias="X-Owner-Timestamp", description=_OWNER_TS_DESC),
+    x_owner_signature: Optional[str] = Header(None, alias="X-Owner-Signature", description=_OWNER_SIG_DESC),
 ):
     """
     Upload a TAR archive as a collection/manifest to the Swarm network.
@@ -580,6 +693,19 @@ async def upload_manifest(
     - **Free tier**: Add header `X-Payment-Mode: free` (rate limited)
     - **Paid**: Include x402 payment header (higher rate limit)
     - Without either header, returns **HTTP 402** with payment instructions and free tier info
+
+    **Owned stamps** (x402 enabled): a stamp bought with a payment belongs to the
+    paying wallet, and only that wallet may upload to it. Prove it is you either
+    by paying for the upload from that wallet, or for free (`X-Payment-Mode: free`,
+    free-tier rate limit applies) with an owner proof:
+    - `X-Owner-Timestamp`: current unix time in seconds (valid for 5 minutes)
+    - `X-Owner-Signature`: EIP-191 `personal_sign` by the owner wallet of
+      `swarm-connect-owner-upload:<stamp_id in lowercase>:<timestamp>`
+    - Each proof is accepted once; sign a new one per upload. It is a bearer
+      credential for one upload (not bound to the file): do not log or share it.
+      A rejected proof
+      returns **401** `OWNER_PROOF_INVALID`; a valid proof from another wallet
+      returns **403** `STAMP_OWNERSHIP_DENIED`.
 
     **Performance benefit**: Uploading 50 files as a TAR manifest takes ~500ms vs
     ~14 seconds for sequential individual uploads (15x improvement).
@@ -672,20 +798,41 @@ async def upload_manifest(
     bee_upload_ms = None
 
     try:
+        # Reject an over-sized body before anything else.
+        #
+        # This ran after the stamp ownership check, so an over-sized upload with
+        # an unrecognised stamp answered 403 STAMP_OWNERSHIP_DENIED and the
+        # documented 413 was unreachable — the caller was told the wrong thing
+        # about their request. Size does not depend on who is asking, and the
+        # check is a header comparison against a registry lookup, so it belongs
+        # first on both counts.
+        #
+        # Content-Length covers the whole multipart envelope — boundary, part
+        # headers, trailer — not just the file, so it is compared against the
+        # limit plus an allowance for that wrapper. Without it a file of exactly
+        # MAX_UPLOAD_SIZE_MB was always rejected, putting the real ceiling a few
+        # hundred bytes below the documented one and making it shrink as the
+        # filename grew.
+        #
+        # This cannot reject early despite reading like it should: FastAPI parses
+        # the multipart form during dependency resolution, so the body is already
+        # in memory by the time this line runs. It is a coarse guard, not a fast
+        # path. The exact limit is enforced on the file's own length further down.
+        max_size = settings.MAX_UPLOAD_SIZE_MB * 1024 * 1024
+        content_length = request.headers.get("content-length")
+        if content_length and int(content_length) > max_size + MULTIPART_ENVELOPE_ALLOWANCE:
+            raise HTTPException(
+                status_code=413,
+                detail={
+                    "code": "FILE_TOO_LARGE",
+                    "message": f"Upload exceeds maximum size of {settings.MAX_UPLOAD_SIZE_MB} MB.",
+                    "max_size_mb": settings.MAX_UPLOAD_SIZE_MB
+                }
+            )
+
         # Check stamp ownership
         if settings.X402_ENABLED:
-            x402_payer = getattr(request.state, 'x402_payer', None)
-            x402_mode = getattr(request.state, 'x402_mode', None)
-            allowed, reason = stamp_ownership_manager.check_access(stamp_id, x402_payer, x402_mode)
-            if not allowed:
-                raise HTTPException(
-                    status_code=403,
-                    detail={
-                        "code": "STAMP_OWNERSHIP_DENIED",
-                        "message": f"Access denied: {reason}",
-                        "stamp_id": stamp_id
-                    }
-                )
+            _check_stamp_access(request, stamp_id, x_owner_timestamp, x_owner_signature)
 
         # Validate redundancy level if provided
         if redundancy is not None and redundancy not in REDUNDANCY_LEVELS:
@@ -695,11 +842,13 @@ async def upload_manifest(
                 detail=f"Invalid redundancy level {redundancy}. Must be 0-4 ({valid_levels})"
             )
 
-        # Optional pre-upload stamp validation
-        if validate_stamp:
+        # Optional pre-upload stamp validation. Always done for a paid upload:
+        # the payment is settled just before the upload, so a stamp Bee would
+        # refuse (missing, expired, full) must be caught while it is still free.
+        if validate_stamp or getattr(request.state, "x402_mode", None) == "paid":
             stamp_start = time.perf_counter()
             try:
-                await validate_stamp_for_upload(stamp_id)
+                await validate_stamp_for_upload(stamp_id, local_only=not validate_stamp)
             except StampValidationError as e:
                 # Build structured error response
                 detail = {
@@ -724,33 +873,6 @@ async def upload_manifest(
                     raise HTTPException(status_code=400, detail=detail)
             stamp_validate_ms = (time.perf_counter() - stamp_start) * 1000
 
-        # Check upload size limit.
-        #
-        # Content-Length covers the whole multipart envelope — boundary, part
-        # headers, trailer — not just the file. Comparing it against the file
-        # limit put the real ceiling a few hundred bytes below the documented
-        # one, so a file of exactly MAX_UPLOAD_SIZE_MB was always rejected with
-        # 413 while the check below, which measures the file itself, would have
-        # accepted it. The two checks were applying one limit to two different
-        # quantities.
-        #
-        # The allowance is generous relative to a real envelope (a boundary and
-        # one set of part headers is a few hundred bytes) because this check is
-        # only a coarse guard: it cannot reject early, since FastAPI parses the
-        # multipart form during dependency resolution and the body is already
-        # in memory by the time this line runs. The exact limit is enforced on
-        # the file's own length below.
-        max_size = settings.MAX_UPLOAD_SIZE_MB * 1024 * 1024
-        content_length = request.headers.get("content-length")
-        if content_length and int(content_length) > max_size + MULTIPART_ENVELOPE_ALLOWANCE:
-            raise HTTPException(
-                status_code=413,
-                detail={
-                    "code": "FILE_TOO_LARGE",
-                    "message": f"Upload exceeds maximum size of {settings.MAX_UPLOAD_SIZE_MB} MB.",
-                    "max_size_mb": settings.MAX_UPLOAD_SIZE_MB
-                }
-            )
 
         # Read TAR file content
         file_start = time.perf_counter()
@@ -782,6 +904,7 @@ async def upload_manifest(
 
         # Upload to Swarm as collection
         bee_start = time.perf_counter()
+        await settle_payment(request)
         reference = await upload_collection_to_swarm(
             tar_bytes, stamp_id, deferred=deferred, redundancy_level=redundancy
         )
@@ -815,7 +938,8 @@ async def upload_manifest(
             reference=reference,
             file_count=file_count,
             message=f"Collection uploaded successfully with {file_count} files",
-            timing=timing
+            timing=timing,
+            expires_at=await get_batch_expiry(stamp_id),
         )
 
         # Always add Server-Timing header (useful for browser devtools)

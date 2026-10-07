@@ -4,14 +4,44 @@ name: deploy
 on:
   push:
     branches:
-      - master
       - main
       - dev
   workflow_dispatch:
 
+# One deploy per branch at a time, in push order. Without this, a quick second
+# push could finish first and then be overwritten by the older run (the test
+# gate adds about a minute, widening that window).
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
+  # Only dev and main deploy. workflow_dispatch accepts any ref, and the steps
+  # below used to treat every ref other than dev as production: a manual run
+  # from a feature branch swapped /opt/swarm_connect to that branch, stopped
+  # and chowned the production gateway, and recreated it: an unplanned
+  # production restart, with the host left on a feature-branch checkout (#487).
+  # Refuse here, on a hosted runner, before anything reaches a deploy host.
+  ref-guard:
+    name: ref-guard
+    runs-on: ubuntu-latest
+    steps:
+      - name: refuse refs other than dev and main
+        run: |
+          case "$GITHUB_REF" in
+            refs/heads/dev|refs/heads/main) echo "Deploying $GITHUB_REF" ;;
+            *) echo "::error::deploy runs only from dev or main, not $GITHUB_REF"; exit 1 ;;
+          esac
+
+  test:
+    name: test
+    uses: ./.github/workflows/tests.yml
+
   build:
     name: build
+    # Never deploy a commit whose tests fail (#360), or from a ref that is
+    # neither dev nor main (#487).
+    needs: [ref-guard, test]
     # Deploy targets are data, not code: set the repository variable DEPLOY_RUNNERS
     # to a JSON array of runner labels to add or retire a host without a code
     # change. Unset -> the single existing host, i.e. current behaviour.
@@ -47,19 +77,33 @@ jobs:
         if: github.ref == 'refs/heads/dev'
         run: |
           mkdir -p /opt/swarm_connect_dev_data
+          # This file holds signing keys: make it owner-only BEFORE writing.
+          # umask alone would not narrow a file that already exists as 0644.
+          touch /opt/swarm_connect_dev.env && chmod 600 /opt/swarm_connect_dev.env
           cat > /opt/swarm_connect_dev.env << 'EOF'
           X402_ENABLED=${{ vars.X402_ENABLED || 'false' }}
           X402_PAY_TO_ADDRESS=${{ vars.X402_PAY_TO_ADDRESS || '' }}
           X402_NETWORK=${{ vars.X402_NETWORK || 'base-sepolia' }}
           X402_FACILITATOR_URL=${{ vars.X402_FACILITATOR_URL || 'https://x402.org/facilitator' }}
+          X402_BZZ_USD_RATE=${{ vars.X402_BZZ_USD_RATE || '0.50' }}
+          X402_MARKUP_PERCENT=${{ vars.X402_MARKUP_PERCENT || '50' }}
+          X402_MIN_PRICE_USD=${{ vars.X402_MIN_PRICE_USD || '0.01' }}
+          X402_BZZ_PRICE_FEED_URL=${{ vars.X402_BZZ_PRICE_FEED_URL || '' }}
+          X402_BZZ_PRICE_FEED_INTERVAL_SECONDS=${{ vars.X402_BZZ_PRICE_FEED_INTERVAL_SECONDS || '900' }}
+          X402_FACILITATOR_CDP_API_KEY_ID=${{ secrets.X402_FACILITATOR_CDP_API_KEY_ID || '' }}
+          X402_FACILITATOR_CDP_API_KEY_SECRET=${{ secrets.X402_FACILITATOR_CDP_API_KEY_SECRET || '' }}
+          X402_FACILITATOR_BEARER_TOKEN=${{ secrets.X402_FACILITATOR_BEARER_TOKEN || '' }}
           X402_FREE_TIER_ENABLED=${{ vars.X402_FREE_TIER_ENABLED || 'true' }}
           STAMP_POOL_ENABLED=${{ vars.STAMP_POOL_ENABLED || 'false' }}
           STAMP_POOL_RESERVE_SMALL=${{ vars.STAMP_POOL_RESERVE_SMALL || '1' }}
           STAMP_POOL_RESERVE_MEDIUM=${{ vars.STAMP_POOL_RESERVE_MEDIUM || '1' }}
           STAMP_POOL_RESERVE_LARGE=${{ vars.STAMP_POOL_RESERVE_LARGE || '0' }}
           STAMP_POOL_MAX_PURCHASES_PER_HOUR=${{ vars.STAMP_POOL_MAX_PURCHASES_PER_HOUR || '10' }}
+          GATEWAY_DAILY_BZZ_CEILING=${{ vars.GATEWAY_DAILY_BZZ_CEILING || '20' }}
+          GATEWAY_DAILY_BZZ_FREE_CEILING=${{ vars.GATEWAY_DAILY_BZZ_FREE_CEILING || '10' }}
           POOL_DAILY_ALLOWANCES=${{ vars.POOL_DAILY_ALLOWANCES }}
           POOL_DEFAULT_DAILY_ALLOWANCE=${{ vars.POOL_DEFAULT_DAILY_ALLOWANCE || '-1' }}
+          POOL_ALLOWANCE_PER_IP=${{ vars.POOL_ALLOWANCE_PER_IP || '-1' }}
           X402_POOL_MARKUP_PERCENT=${{ vars.X402_POOL_MARKUP_PERCENT || '100' }}
           X402_ALLOW_TESTNET_PAID_BYPASS=${{ vars.X402_ALLOW_TESTNET_PAID_BYPASS || 'false' }}
           X402_MAX_STAMP_BZZ=${{ vars.X402_MAX_STAMP_BZZ || '5.0' }}
@@ -76,6 +120,7 @@ jobs:
           CORS_ALLOWED_ORIGINS=${{ vars.CORS_ALLOWED_ORIGINS || '*' }}
           CORS_ALLOW_CREDENTIALS=${{ vars.CORS_ALLOW_CREDENTIALS || 'false' }}
           MAX_UPLOAD_SIZE_MB=${{ vars.MAX_UPLOAD_SIZE_MB || '10' }}
+          MAX_DOWNLOAD_SIZE_MB=${{ vars.MAX_DOWNLOAD_SIZE_MB || '25' }}
           CHUNK_UPLOAD_ENABLED=${{ vars.CHUNK_UPLOAD_ENABLED || 'false' }}
           CHUNK_UPLOAD_MAX_BYTES_PER_REQUEST=${{ vars.CHUNK_UPLOAD_MAX_BYTES_PER_REQUEST || '4104' }}
           CHUNK_UPLOAD_FREE_TIER_ENABLED=${{ vars.CHUNK_UPLOAD_FREE_TIER_ENABLED || 'true' }}
@@ -116,19 +161,35 @@ jobs:
         if: github.ref == 'refs/heads/main'
         run: |
           mkdir -p /opt/swarm_connect_data
+          # This file holds signing keys: make it owner-only BEFORE writing.
+          # umask alone would not narrow a file that already exists as 0644.
+          touch /opt/swarm_connect.env && chmod 600 /opt/swarm_connect.env
           cat > /opt/swarm_connect.env << 'EOF'
           X402_ENABLED=${{ vars.X402_ENABLED || 'false' }}
           X402_PAY_TO_ADDRESS=${{ vars.X402_PAY_TO_ADDRESS || '' }}
-          X402_NETWORK=${{ vars.X402_NETWORK || 'base' }}
-          X402_FACILITATOR_URL=${{ vars.X402_FACILITATOR_URL || 'https://x402.org/facilitator' }}
+          # No defaults for production (#370): a missing variable must stop the
+          # gateway at startup (validate_x402_config), not silently pick a network.
+          X402_NETWORK=${{ vars.X402_NETWORK }}
+          X402_FACILITATOR_URL=${{ vars.X402_FACILITATOR_URL }}
+          X402_FACILITATOR_CDP_API_KEY_ID=${{ secrets.X402_FACILITATOR_CDP_API_KEY_ID || '' }}
+          X402_FACILITATOR_CDP_API_KEY_SECRET=${{ secrets.X402_FACILITATOR_CDP_API_KEY_SECRET || '' }}
+          X402_FACILITATOR_BEARER_TOKEN=${{ secrets.X402_FACILITATOR_BEARER_TOKEN || '' }}
+          X402_BZZ_USD_RATE=${{ vars.X402_BZZ_USD_RATE || '0.50' }}
+          X402_MARKUP_PERCENT=${{ vars.X402_MARKUP_PERCENT || '50' }}
+          X402_MIN_PRICE_USD=${{ vars.X402_MIN_PRICE_USD || '0.01' }}
+          X402_BZZ_PRICE_FEED_URL=${{ vars.X402_BZZ_PRICE_FEED_URL || '' }}
+          X402_BZZ_PRICE_FEED_INTERVAL_SECONDS=${{ vars.X402_BZZ_PRICE_FEED_INTERVAL_SECONDS || '900' }}
           X402_FREE_TIER_ENABLED=${{ vars.X402_FREE_TIER_ENABLED || 'true' }}
           STAMP_POOL_ENABLED=${{ vars.STAMP_POOL_ENABLED || 'false' }}
           STAMP_POOL_RESERVE_SMALL=${{ vars.STAMP_POOL_RESERVE_SMALL || '1' }}
           STAMP_POOL_RESERVE_MEDIUM=${{ vars.STAMP_POOL_RESERVE_MEDIUM || '1' }}
           STAMP_POOL_RESERVE_LARGE=${{ vars.STAMP_POOL_RESERVE_LARGE || '0' }}
           STAMP_POOL_MAX_PURCHASES_PER_HOUR=${{ vars.STAMP_POOL_MAX_PURCHASES_PER_HOUR || '10' }}
+          GATEWAY_DAILY_BZZ_CEILING=${{ vars.GATEWAY_DAILY_BZZ_CEILING || '20' }}
+          GATEWAY_DAILY_BZZ_FREE_CEILING=${{ vars.GATEWAY_DAILY_BZZ_FREE_CEILING || '10' }}
           POOL_DAILY_ALLOWANCES=${{ vars.POOL_DAILY_ALLOWANCES }}
           POOL_DEFAULT_DAILY_ALLOWANCE=${{ vars.POOL_DEFAULT_DAILY_ALLOWANCE || '-1' }}
+          POOL_ALLOWANCE_PER_IP=${{ vars.POOL_ALLOWANCE_PER_IP || '-1' }}
           X402_POOL_MARKUP_PERCENT=${{ vars.X402_POOL_MARKUP_PERCENT || '100' }}
           X402_ALLOW_TESTNET_PAID_BYPASS=${{ vars.X402_ALLOW_TESTNET_PAID_BYPASS || 'false' }}
           X402_MAX_STAMP_BZZ=${{ vars.X402_MAX_STAMP_BZZ || '5.0' }}
@@ -145,6 +206,7 @@ jobs:
           CORS_ALLOWED_ORIGINS=${{ vars.CORS_ALLOWED_ORIGINS || '*' }}
           CORS_ALLOW_CREDENTIALS=${{ vars.CORS_ALLOW_CREDENTIALS || 'false' }}
           MAX_UPLOAD_SIZE_MB=${{ vars.MAX_UPLOAD_SIZE_MB || '10' }}
+          MAX_DOWNLOAD_SIZE_MB=${{ vars.MAX_DOWNLOAD_SIZE_MB || '25' }}
           CHUNK_UPLOAD_ENABLED=${{ vars.CHUNK_UPLOAD_ENABLED || 'false' }}
           CHUNK_UPLOAD_MAX_BYTES_PER_REQUEST=${{ vars.CHUNK_UPLOAD_MAX_BYTES_PER_REQUEST || '4104' }}
           CHUNK_UPLOAD_FREE_TIER_ENABLED=${{ vars.CHUNK_UPLOAD_FREE_TIER_ENABLED || 'true' }}
@@ -183,6 +245,16 @@ jobs:
 
       - name: deploy
         run: |
+          # Which service this branch owns. Chosen first, before the checkout
+          # below is replaced: ref-guard already refuses any other ref, and an
+          # unknown branch must not reach the swap or fall back to production
+          # if that ever changes (#487).
+          case "$GITHUB_REF_NAME" in
+            dev)  BRANCH_SERVICE=provenance_gateway_dev; DATA_DIR=/opt/swarm_connect_dev_data ;;
+            main) BRANCH_SERVICE=provenance_gateway;     DATA_DIR=/opt/swarm_connect_data ;;
+            *)    echo "::error::no service for branch $GITHUB_REF_NAME"; exit 1 ;;
+          esac
+
           # Clone into a temporary directory and swap it in only on success.
           #
           # This used to be `rm -rf swarm_connect && git clone`, which destroys
@@ -208,9 +280,13 @@ jobs:
           mv swarm_connect.new swarm_connect
           rm -rf swarm_connect.old
           cd swarm_connect
+          # Monitoring credentials: owner-only, like the gateway env files.
+          touch .env && chmod 600 .env
           cat > .env << EOF
           GRAFANA_CLOUD_PROM_USERNAME=${{ secrets.GRAFANA_CLOUD_PROM_USERNAME }}
           GRAFANA_CLOUD_API_TOKEN=${{ secrets.GRAFANA_CLOUD_API_TOKEN }}
+          GRAFANA_CLOUD_LOKI_URL=${{ secrets.GRAFANA_CLOUD_LOKI_URL }}
+          GRAFANA_CLOUD_LOKI_USERNAME=${{ secrets.GRAFANA_CLOUD_LOKI_USERNAME }}
           EOF
           # Host-specific compose settings (Bee endpoints, COMPOSE_PROFILES, p2p
           # ports, ...). Lives outside the clone so it survives the rm -rf above.
@@ -235,18 +311,33 @@ jobs:
 
           # Recreate ONLY the service this branch owns. `docker compose up -d
           # --force-recreate` with no argument recreates every service, so a push
-          # to dev restarted production and vice versa. That is not free: the
-          # stamp pool buys a reserve on startup, and one such restart cost about
-          # 0.7 BZZ for nothing.
+          # to dev restarted production and vice versa. On 2026-08-25 one such
+          # restart cost about 0.7 BZZ (c71f6ef): the pool bought a fresh reserve
+          # on startup. It no longer does. It reloads its batches from
+          # pool_state.json and buys only for a real shortfall (#349, #416, #440);
+          # two staging restarts on 2026-10-05 bought nothing. A restart still
+          # means a short outage: the container is stopped for the chown below.
           #
           # --no-deps keeps it from dragging the other environment's containers
           # in through depends_on.
-          if [ "$GITHUB_REF_NAME" = "dev" ]; then
-            BRANCH_SERVICE=provenance_gateway_dev
-          else
-            BRANCH_SERVICE=provenance_gateway
-          fi
+          # BRANCH_SERVICE and DATA_DIR are chosen at the top of this step.
           echo "Recreating $BRANCH_SERVICE (branch $GITHUB_REF_NAME)"
+          # The new container runs as UID 10001 (see Dockerfile), not root, so
+          # hand it the state dir, including files written by earlier root
+          # containers. Stop the old container FIRST: while it runs it can still
+          # write state files as root with mode 0600, which the new one could not
+          # read. The chown runs through the image so it works whatever user the
+          # runner is; the extra downtime is the chown itself.
+          docker compose stop "$BRANCH_SERVICE"
+          if ! docker run --rm --user 0 --entrypoint chown \
+            -v "$DATA_DIR:/app/data" "swarm_connect:$GITHUB_REF_NAME" -R 10001:10001 /app/data; then
+            # Do not leave a payment-taking gateway down: bring the old
+            # container back (it runs as root, so a partial chown is harmless
+            # to it) and fail the job.
+            echo "::error::chown of $DATA_DIR failed; restarting the previous container"
+            docker compose start "$BRANCH_SERVICE"
+            exit 1
+          fi
           docker compose up -d --force-recreate --no-deps "$BRANCH_SERVICE"
 
           # Host-level services (the bundled Bee nodes and the metrics agent) live
@@ -278,7 +369,47 @@ jobs:
           # config at startup.
           docker compose -f docker-compose.host.yml up -d --force-recreate --no-deps alloy
 
+      - name: wait for healthy
+        run: |
+          # `up -d` returns as soon as the container is created, so a gateway
+          # that refuses to start (e.g. an unsafe x402 config since #407) used
+          # to sit in a restart loop behind a green deploy. Wait for Docker's
+          # own healthcheck (docker-compose.yml) and fail the job if it does
+          # not pass. 90s, not 60: the healthcheck interval is 30s, so a first
+          # probe that lands before the app is up is only retried at ~60s.
+          cd /opt/swarm_connect
+          case "$GITHUB_REF_NAME" in
+            dev)  BRANCH_SERVICE=provenance_gateway_dev ;;
+            main) BRANCH_SERVICE=provenance_gateway ;;
+            *)    echo "::error::no service for branch $GITHUB_REF_NAME"; exit 1 ;;
+          esac
+          # `|| true`: if compose itself fails, fall through to the "missing"
+          # path below (annotation + logs) instead of ending the step under -e.
+          CID=$(docker compose ps -aq "$BRANCH_SERVICE" || true)
+          STATE=missing
+          for i in $(seq 1 30); do
+            # No container at all: `docker inspect ""` prints a blank line rather
+            # than failing cleanly, so check for it explicitly.
+            [ -n "$CID" ] || break
+            STATE=$(docker inspect -f '{{.State.Status}}/{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}/{{.RestartCount}}' "$CID" 2>/dev/null) || STATE=missing
+            case "$STATE" in
+              running/healthy/*) echo "$BRANCH_SERVICE is healthy"; exit 0 ;;
+              # No healthcheck defined: fall back to probing the process itself.
+              running/none/0) docker exec "$CID" curl -sf http://localhost:8000/ >/dev/null && { echo "$BRANCH_SERVICE is up"; exit 0; } ;;
+            esac
+            # A restart or a stopped container will not recover by waiting.
+            case "$STATE" in
+              missing|*/unhealthy/*|exited/*|dead/*|*/*/[1-9]*) break ;;
+            esac
+            sleep 3
+          done
+          echo "::error::$BRANCH_SERVICE did not become healthy (status/health/restarts: $STATE)"
+          docker compose logs --tail 200 "$BRANCH_SERVICE" || true
+          exit 1
+
       - name: post-deploy diagnostics
+        # Most useful exactly when the deploy failed.
+        if: always()
         run: |
           echo "=== Container status ==="
           docker ps -a --filter "name=swarm_connect" --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
@@ -286,15 +417,11 @@ jobs:
           echo "=== Waiting 10s for container startup ==="
           sleep 10
           echo ""
-          if [ "$GITHUB_REF_NAME" = "dev" ]; then
-            CONTAINER="swarm_connect-provenance_gateway_dev-1"
-            PORT=8900
-            ENV_FILE="/opt/swarm_connect_dev.env"
-          else
-            CONTAINER="swarm_connect-provenance_gateway-1"
-            PORT=8899
-            ENV_FILE="/opt/swarm_connect.env"
-          fi
+          case "$GITHUB_REF_NAME" in
+            dev)  CONTAINER="swarm_connect-provenance_gateway_dev-1"; PORT=8900; ENV_FILE="/opt/swarm_connect_dev.env" ;;
+            main) CONTAINER="swarm_connect-provenance_gateway-1";     PORT=8899; ENV_FILE="/opt/swarm_connect.env" ;;
+            *)    echo "no service for branch $GITHUB_REF_NAME"; exit 0 ;;
+          esac
           echo "=== Container logs (last 30 lines) ==="
           docker logs "$CONTAINER" --tail 30 2>&1 || echo "Container not found"
           echo ""
@@ -302,4 +429,4 @@ jobs:
           curl -s "http://localhost:${PORT}/health" 2>&1 || echo "Cannot reach container"
           echo ""
           echo "=== Env file (redacted) ==="
-          cat "$ENV_FILE" 2>/dev/null | grep -v PRIVATE_KEY | head -20 || echo "Env file not found"
+          cat "$ENV_FILE" 2>/dev/null | grep -vE 'PRIVATE_KEY|SECRET|TOKEN' | head -20 || echo "Env file not found"

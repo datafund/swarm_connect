@@ -22,6 +22,13 @@ from app.core.config import settings
 logger = logging.getLogger(__name__)
 
 
+def _error(code: str, message: str) -> dict:
+    """Error body in the gateway's envelope (#381): `detail` as before, plus
+    `code` and `message` at the top level. Built here because a middleware
+    response never reaches the app's HTTPException handler."""
+    return {"detail": message, "code": code, "message": message}
+
+
 def _check_nesting_depth(data: bytes, max_depth: int) -> bool:
     """
     Fast O(n) check for JSON nesting depth.
@@ -75,8 +82,20 @@ class BodyLimitMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
         content_type = (request.headers.get("content-type") or "").lower()
 
-        # Only check JSON content types
-        if "application/json" not in content_type:
+        # JSON bodies, including +json types and requests with no Content-Type
+        # at all: FastAPI parses a body without one as JSON, so skipping those
+        # left the size and depth limits open (#354). Multipart uploads and
+        # octet-stream chunks carry their own limits and are not inspected.
+        is_json = "json" in content_type
+        if content_type and not is_json:
+            return await call_next(request)
+        if not content_type and (
+            request.method in ("GET", "HEAD", "OPTIONS", "DELETE")
+            # Raw chunk uploads are binary and often sent without a
+            # Content-Type; a depth scan would misread random bytes as nested
+            # JSON. The route reads the body itself with its own size limit.
+            or request.url.path.rstrip("/") == f"{settings.API_V1_STR}/chunks"
+        ):
             return await call_next(request)
 
         max_bytes = settings.MAX_JSON_BODY_BYTES
@@ -93,10 +112,8 @@ class BodyLimitMiddleware(BaseHTTPMiddleware):
                     )
                     return JSONResponse(
                         status_code=413,
-                        content={
-                            "detail": f"Request body too large. "
-                            f"Maximum size for JSON is {max_bytes} bytes."
-                        },
+                        content=_error("BODY_TOO_LARGE", f"Request body too large. "
+                                       f"Maximum size for JSON is {max_bytes} bytes."),
                     )
             except ValueError:
                 pass
@@ -110,20 +127,16 @@ class BodyLimitMiddleware(BaseHTTPMiddleware):
             )
             return JSONResponse(
                 status_code=413,
-                content={
-                    "detail": f"Request body too large. "
-                    f"Maximum size for JSON is {max_bytes} bytes."
-                },
+                content=_error("BODY_TOO_LARGE", f"Request body too large. "
+                               f"Maximum size for JSON is {max_bytes} bytes."),
             )
 
         if body and not _check_nesting_depth(body, max_depth):
             logger.warning(f"JSON body rejected: nesting depth exceeds {max_depth} levels")
             return JSONResponse(
                 status_code=400,
-                content={
-                    "detail": f"JSON nesting too deep. "
-                    f"Maximum depth is {max_depth} levels."
-                },
+                content=_error("JSON_TOO_DEEP", f"JSON nesting too deep. "
+                               f"Maximum depth is {max_depth} levels."),
             )
 
         return await call_next(request)

@@ -5,7 +5,13 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from app.core.config import settings
 from app.core.version import VERSION
-from app.api.endpoints import stamps, data, wallet, pool, notary, chunks, debug, stamps_for_owner
+from app.api.endpoints import stamps, data, wallet, pool, notary, chunks, debug, stamps_for_owner, pricing
+from fastapi.encoders import jsonable_encoder
+from fastapi.exceptions import RequestValidationError
+from fastapi.utils import is_body_allowed_for_status_code
+from starlette.exceptions import HTTPException as StarletteHTTPException
+from starlette.responses import Response
+from http import HTTPStatus
 import logging
 import time
 
@@ -21,9 +27,27 @@ _STARTED_MONOTONIC = time.monotonic()
 async def lifespan(app: FastAPI):
     """Application lifespan handler for startup/shutdown tasks."""
     # === Startup ===
+    # Refuse to start with an x402 configuration that cannot take payment
+    # safely: an unknown network, a missing pay-to address, or a mainnet
+    # paired with the public test-network facilitator (#370).
+    from app.x402.facilitator import validate_x402_config
+    validate_x402_config()
+
     # Initialize shared HTTP client (must be first — other services depend on it)
     from app.services.http_client import init_client, close_client
     await init_client()
+
+    # Load the stamp ownership registry before anything can register a batch.
+    #
+    # It was saved on every change but never loaded, so each restart (every
+    # deploy) started with an empty registry: owners were denied their own
+    # batches, and the pool's startup sync then rewrote the file with only its
+    # own inventory, erasing the owners' records (#349). Loaded before the pool
+    # starts for exactly that reason. An unreadable file stops startup rather
+    # than being replaced (#378).
+    from app.services.stamp_ownership import stamp_ownership_manager
+    stamp_ownership_manager.load_on_startup()
+    logger.info("Stamp ownership registry loaded")
 
     # Load bandwidth credit ledger so prepaid balances survive restarts
     if settings.CHUNK_UPLOAD_ENABLED:
@@ -68,6 +92,12 @@ async def lifespan(app: FastAPI):
         logger.info("Stopping stamp pool background task")
         await stamp_pool_manager.stop_background_task()
 
+    # Paid stamp purchases still waiting on Bee (#400): give them a grace
+    # period, then stop them with a refund record, before the client they use
+    # is closed.
+    from app.api.endpoints.stamps import drain_pending_purchases
+    await drain_pending_purchases(settings.SHUTDOWN_PENDING_PURCHASE_GRACE_SECONDS)
+
     # Close shared HTTP client (must be last)
     await close_client()
 
@@ -79,22 +109,115 @@ app = FastAPI(
     lifespan=lifespan
 )
 
+
+# --- One error envelope (#381) ---
+#
+# Errors used to come in several shapes: {"detail": "text"}, {"detail": {code,
+# message, ...}}, and others. The SDK and CLI read `code` from the top level,
+# which none of them had. Every HTTPException now also carries `code` and
+# `message` at the top level, next to `detail`.
+#
+# `detail` is left exactly as it was, so this adds fields and breaks nothing a
+# client already reads. The x402 Payment Required body is also returned at the
+# top level, as x402 v1 specifies (#372, app/x402/middleware.py), with its
+# copy under `detail` kept. Codes are listed in docs/error-codes.md.
+def error_envelope(status_code: int, detail) -> dict:
+    """Build {detail, code, message} for an error response.
+
+    `code` is the one the endpoint raised, or HTTP_<status> when it raised none.
+    `message` is the endpoint's own message, else its `error` text, else the
+    detail string itself, else the standard status phrase.
+    """
+    code = message = None
+    if isinstance(detail, dict):
+        code = detail.get("code")
+        message = detail.get("message") or detail.get("error")
+        if message is None and isinstance(detail.get("detail"), str):
+            message = detail["detail"]
+    elif isinstance(detail, str):
+        message = detail
+    if not isinstance(code, str) or not code:
+        code = f"HTTP_{status_code}"
+    if not message:
+        try:
+            message = HTTPStatus(status_code).phrase
+        except ValueError:
+            message = "Error"
+    return {"detail": detail, "code": code, "message": str(message)}
+
+
+@app.exception_handler(StarletteHTTPException)
+async def http_exception_handler(request, exc: StarletteHTTPException):
+    # Same as FastAPI's default handler, plus the top-level code and message.
+    headers = getattr(exc, "headers", None)
+    if not is_body_allowed_for_status_code(exc.status_code):
+        return Response(status_code=exc.status_code, headers=headers)
+    return JSONResponse(
+        status_code=exc.status_code,
+        content=error_envelope(exc.status_code, exc.detail),
+        headers=headers,
+    )
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request, exc: RequestValidationError):
+    # Same `detail` list FastAPI returns by default, plus code and message.
+    return JSONResponse(
+        status_code=422,
+        content={
+            "detail": jsonable_encoder(exc.errors()),
+            "code": "VALIDATION_ERROR",
+            "message": "The request is invalid; see detail for the fields.",
+        },
+    )
+
+
 # Add JSON body size and depth limiting (protects against nested-JSON DoS)
 from app.middleware.body_limit import BodyLimitMiddleware
 app.add_middleware(BodyLimitMiddleware)
 logger.info(f"JSON body limits enabled: max {settings.MAX_JSON_BODY_BYTES} bytes, max depth {settings.MAX_JSON_DEPTH}")
 
-# Add global rate limiting if enabled and x402 is disabled (x402 has its own limiter)
-if settings.RATE_LIMIT_ENABLED and not settings.X402_ENABLED:
+# Global per-IP rate limiting, whether or not x402 is enabled (#352).
+#
+# It used to be installed only when x402 was off, on the grounds that x402 has
+# its own limiter. That limiter only covers free-tier requests to the protected
+# POST routes, so with x402 on (as in production) every other route, including
+# downloads and paid requests, had no limit at all. The x402 free-tier limit
+# still applies on top, as the stricter inner limit for free writes.
+if settings.RATE_LIMIT_ENABLED:
     from app.middleware.rate_limit import RateLimitMiddleware
     app.add_middleware(RateLimitMiddleware)
     logger.info(f"Global rate limiting enabled: {settings.RATE_LIMIT_PER_MINUTE}/min + {settings.RATE_LIMIT_BURST} burst")
+
+# Blocklist (#379). Added after the rate limiter, so it runs before it (outer).
+if settings.X402_BLACKLIST_IPS.strip():
+    from app.middleware.access_list import AccessListMiddleware
+    app.add_middleware(AccessListMiddleware, blocked=settings.X402_BLACKLIST_IPS)
+    logger.info("IP blocklist enabled")
+# Documented but deliberately not implemented: an allowlist that skips payment
+# would give paid operations away to anyone who can appear from a listed
+# address. Say so rather than silently ignore it.
+if settings.X402_WHITELIST_IPS.strip():
+    logger.warning("X402_WHITELIST_IPS is set but has no effect: listed IPs do not bypass payment. "
+                   "Remove it to silence this warning.")
 
 # Add x402 payment middleware if enabled (must be added before CORS)
 if settings.X402_ENABLED:
     from app.x402.middleware import X402Middleware
     app.add_middleware(X402Middleware)
     logger.info("x402 middleware enabled")
+
+# Record which client types we serve and whether we serve them (#347).
+#
+# Added AFTER the rate limiter and x402 so that it WRAPS them. Starlette runs the
+# most recently added middleware outermost, so this sees the final response —
+# including the 429 from the rate limiter and the 402 from x402, which are the
+# two outcomes the counter exists to surface. Added before it, it would only ever
+# see responses those two allowed through.
+if settings.METRICS_ENABLED:
+    from app.middleware.client_metrics import ClientMetricsMiddleware
+    app.add_middleware(ClientMetricsMiddleware)
+    logger.info("Client-type metrics enabled")
 
 # Add CORS middleware for browser-based SDK usage
 # IMPORTANT: Add CORS last so it wraps all other middleware.
@@ -106,6 +229,14 @@ app.add_middleware(
     allow_credentials=settings.CORS_ALLOW_CREDENTIALS,
     allow_methods=["*"],
     allow_headers=["*"],
+    # Browsers hide every response header not listed here from page scripts,
+    # so a browser client could not read its settlement receipt, how long to
+    # back off, or its remaining free-tier quota (#385).
+    expose_headers=[
+        "X-PAYMENT-RESPONSE", "X-Payment-Mode", "X-Payment-Transaction",
+        "Retry-After", "X-RateLimit-Limit", "X-RateLimit-Remaining", "X-RateLimit-Reset",
+        "X-Swarm-Reference", "Content-Disposition",
+    ],
 )
 logger.info(f"CORS enabled for origins: {cors_origins}")
 
@@ -159,6 +290,8 @@ app.include_router(debug.router, prefix=f"{settings.API_V1_STR}/debug", tags=["d
 # prefix; the handler is also 404'd + guarded (toggle off by default, allow-list + caps)
 # so the on-chain spend path is never open.
 app.include_router(stamps_for_owner.router, prefix=f"{settings.API_V1_STR}/stamps", tags=["stamps"], dependencies=x402_deps)
+# Price quotes (#381). No x402 dependency: learning a price must never cost one.
+app.include_router(pricing.router, prefix=f"{settings.API_V1_STR}", tags=["pricing"])
 
 @app.get("/", summary="Health Check", tags=["default"])
 @app.get("/health", summary="Health Check", tags=["default"], include_in_schema=False)
@@ -200,6 +333,9 @@ async def read_root():
     response_data = {
         "status": "ok",
         "message": f"Welcome to {settings.PROJECT_NAME}",
+        # What a paid request buys, what happens on failure, and that data
+        # lives only as long as its stamp (#383).
+        "terms_url": settings.TERMS_URL or None,
         # Build and process age. Both were previously only readable from /metrics,
         # which is not public any more (#188) — and they are the two fields an
         # external checker needs to tell whether the gateway was redeployed or
@@ -245,13 +381,9 @@ async def read_root():
         warnings = []
         errors = []
 
-        # Collect warnings and errors
-        if base_eth.get("warning"):
-            if base_eth.get("is_critical"):
-                errors.append(base_eth["warning"])
-            else:
-                warnings.append(base_eth["warning"])
-
+        # The pay-to balance is informational only (#371): the facilitator pays
+        # settlement gas and the pay-to address never sends a transaction, so a
+        # low or zero balance (correct for a cold mainnet wallet) is not a fault.
         warnings.extend(gnosis.get("warnings", []))
         errors.extend(gnosis.get("errors", []))
 
@@ -260,9 +392,9 @@ async def read_root():
         # operators can see what's wrong. Docker healthcheck and reverse
         # proxy rely on 200; returning 503 causes a cascading failure
         # where the container is marked unhealthy and users see nothing.
-        if base_eth.get("is_critical") or len(errors) > 0:
+        if len(errors) > 0:
             response_data["status"] = "critical"
-        elif not base_eth["ok"] or not gnosis["can_accept"]:
+        elif not gnosis["can_accept"]:
             response_data["status"] = "degraded"
 
         # Add x402 details

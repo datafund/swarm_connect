@@ -14,3 +14,6 @@ logs/
 
 # Test artifact: MagicMock path leaks from stamp-pool tests
 MagicMock/
+
+# Local per-developer editor settings (may contain credentials)
+.claude/settings.local.json

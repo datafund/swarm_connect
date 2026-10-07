@@ -1,5 +1,13 @@
 // Grafana Alloy configuration for Provenance Gateway monitoring
-// Scrapes /metrics from gateway containers and pushes to Grafana Cloud
+//
+// Scrapes /metrics from the gateway containers and the bundled Bee nodes and
+// pushes to Grafana Cloud Prometheus, and tails the gateway containers' logs
+// and pushes them to Grafana Cloud Loki.
+//
+// The two pipelines are independent components. If the Loki credentials are
+// absent the log pipeline reports unhealthy and drops logs; metrics are
+// unaffected. That is the intended failure mode — a host that has not been
+// given Loki credentials still collects metrics.
 
 // ── Scrape development gateway (dev branch) ─────────────────────────────────
 
@@ -141,6 +149,112 @@ prometheus.relabel "bee_development" {
     replacement  = sys.env("HOST_LABEL")
   }
   forward_to = [prometheus.remote_write.grafana_cloud.receiver]
+}
+
+// ── Ship gateway container logs to Loki ─────────────────────────────────────
+//
+// Metrics say how many errors there were; they never say what the error was.
+// Reading an actual message meant SSH to the host and `docker logs` per
+// container, which is how every investigation in this repository has started —
+// including the one that found #299, where the answer was a single line in the
+// reverse proxy's log.
+//
+// VOLUME, measured on the host before enabling this: production emits ~3,450
+// lines/hour (~211 MB/month), staging ~60 lines/hour (~3 MB/month). Both well
+// inside Grafana Cloud's included allowance, so everything is shipped rather
+// than pre-filtered. Filtering at the source is the thing you regret during an
+// incident, because the line you need is always the one that looked like noise.
+//
+// LABELS are deliberately few: container, environment, host and level. Loki
+// indexes by label, and a high-cardinality label (a request id, an IP, a stamp
+// id) multiplies the index and the bill. Everything else is searched with a
+// filter expression at query time, which is what Loki is built for.
+
+discovery.docker "containers" {
+  host = "unix:///var/run/docker.sock"
+  refresh_interval = "30s"
+}
+
+discovery.relabel "gateway_containers" {
+  targets = discovery.docker.containers.targets
+
+  // Only the two gateways. Bee logs are high-volume and chain-focused; Alloy's
+  // own logs would be self-referential. Matched on the compose SERVICE label
+  // rather than the container name, which carries the project prefix and would
+  // break if the project were ever renamed.
+  rule {
+    action        = "keep"
+    source_labels = ["__meta_docker_container_label_com_docker_compose_service"]
+    regex         = "provenance_gateway(_dev)?"
+  }
+
+  rule {
+    action        = "replace"
+    source_labels = ["__meta_docker_container_label_com_docker_compose_service"]
+    target_label  = "container"
+  }
+
+  // Relabel regexes are fully anchored, so "provenance_gateway" does not match
+  // "provenance_gateway_dev" and the two rules cannot both fire.
+  rule {
+    action        = "replace"
+    source_labels = ["__meta_docker_container_label_com_docker_compose_service"]
+    regex         = "provenance_gateway"
+    target_label  = "environment"
+    replacement   = "main"
+  }
+  rule {
+    action        = "replace"
+    source_labels = ["__meta_docker_container_label_com_docker_compose_service"]
+    regex         = "provenance_gateway_dev"
+    target_label  = "environment"
+    replacement   = "development"
+  }
+
+  // Same host label as the metrics pipeline, so a log line and a metric spike
+  // can be attributed to the same machine when more than one runs this stack.
+  rule {
+    action       = "replace"
+    target_label = "host"
+    replacement  = sys.env("HOST_LABEL")
+  }
+}
+
+loki.source.docker "gateway" {
+  host       = "unix:///var/run/docker.sock"
+  targets    = discovery.relabel.gateway_containers.output
+  labels     = {"job" = "swarm_connect/gateway"}
+  forward_to = [loki.process.gateway.receiver]
+}
+
+loki.process "gateway" {
+  // Promote the Python log level to a label so `{level="ERROR"}` works without
+  // a substring match over the whole stream. Five possible values, so the
+  // cardinality cost is negligible.
+  //
+  // Both line shapes the gateway produces start with the level:
+  //   INFO:app.services.swarm_api:Successfully retrieved wallet info: ...
+  //   INFO:     10.0.0.1:52344 - "GET /health HTTP/1.1" 200 OK
+  // A line that matches neither — a traceback continuation, say — simply gets
+  // no level label rather than being dropped.
+  stage.regex {
+    expression = "^(?P<level>DEBUG|INFO|WARNING|ERROR|CRITICAL)"
+  }
+  stage.labels {
+    values = {level = ""}
+  }
+  forward_to = [loki.write.grafana_cloud.receiver]
+}
+
+loki.write "grafana_cloud" {
+  endpoint {
+    url = sys.env("GRAFANA_CLOUD_LOKI_URL")
+
+    basic_auth {
+      username = sys.env("GRAFANA_CLOUD_LOKI_USERNAME")
+      password = sys.env("GRAFANA_CLOUD_API_TOKEN")
+    }
+  }
 }
 
 // ── Push to Grafana Cloud ───────────────────────────────────────────────────

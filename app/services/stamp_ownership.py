@@ -4,16 +4,17 @@ Stamp Ownership Manager for tracking and enforcing stamp access.
 
 When x402 is enabled, stamps acquired via paid requests are exclusive
 to the payer's wallet address. Free tier stamps are shared/communal.
-Pre-existing stamps (not in the registry) remain accessible for
-backward compatibility.
+Batches not in the registry are denied unless STAMP_OWNERSHIP_ALLOW_UNTRACKED
+is set (#312); the registry is loaded at startup (#349).
 """
 import json
 import logging
+import re
 from datetime import datetime, timezone
 from threading import Lock
 from typing import Dict, Optional, Set, Tuple
 
-from app.core.atomic_io import atomic_write_json
+from app.core.atomic_io import atomic_write_json, load_json_state, unreadable_state
 from app.core.config import settings
 
 logger = logging.getLogger(__name__)
@@ -23,6 +24,26 @@ logger = logging.getLogger(__name__)
 # out. Not a wallet address, and deliberately not a valid one, so it can never
 # collide with a real owner.
 POOL_OWNER = "pool"
+
+# Owner values that are not wallet addresses.
+_SPECIAL_OWNERS = ("shared", POOL_OWNER)
+
+_ADDRESS_RE = re.compile(r"^(0x)?[0-9a-fA-F]{40}$")
+
+
+def normalize_address(address: Optional[str]) -> Optional[str]:
+    """Return the address lowercased and 0x-prefixed, or None if it is not one.
+
+    Owners were stored and compared as exact strings (#384). The facilitator
+    reports the payer in its own casing, for-owner stored `owner` as the caller
+    typed it, and a signed owner proof recovers the checksummed form, so the
+    same wallet could fail to match itself and be locked out of its own batch.
+    One canonical form on the way in and on every comparison removes that.
+    """
+    if not isinstance(address, str) or not _ADDRESS_RE.match(address):
+        return None
+    address = address.lower()
+    return address if address.startswith("0x") else "0x" + address
 
 
 class StampOwnershipManager:
@@ -51,34 +72,47 @@ class StampOwnershipManager:
             logger.error(f"Failed to save ownership state to {state_file}: {e}")
 
     def _load_state(self):
-        """Load ownership registry from state file."""
+        """Load ownership registry from state file.
+
+        A missing file starts an empty registry. An unreadable one raises
+        StateLoadError (see load_json_state): an empty registry denies every
+        owner, and the next registration would overwrite their records.
+        """
         state_file = self._get_state_file_path()
-        try:
-            with open(state_file, 'r') as f:
-                data = json.load(f)
-            if isinstance(data, dict):
-                self._registry = data
-                logger.info(f"Loaded ownership state: {len(self._registry)} stamps from {state_file}")
-            else:
-                logger.warning(f"Invalid ownership state format in {state_file}, starting fresh")
-                self._registry = {}
-        except FileNotFoundError:
+        data = load_json_state(state_file)
+        if data is None:
             logger.info(f"No ownership state file at {state_file}, starting fresh")
             self._registry = {}
-        except (json.JSONDecodeError, ValueError) as e:
-            logger.warning(f"Corrupt ownership state file {state_file}: {e}, starting fresh")
-            self._registry = {}
-        except Exception as e:
-            logger.warning(f"Error loading ownership state from {state_file}: {e}, starting fresh")
-            self._registry = {}
+            return
+        normalized = 0
+        for batch_id, entry in data.items():
+            if not isinstance(entry, dict) or not isinstance(entry.get("owner"), str):
+                raise unreadable_state(state_file, f"entry {batch_id[:16]} has no owner")
+            # Records written before owners were normalised (#384) may hold a
+            # mixed-case address. Canonicalise them here, or those owners stay
+            # locked out of batches registered before the fix.
+            owner = entry["owner"]
+            if owner in _SPECIAL_OWNERS:
+                continue
+            canonical = normalize_address(owner)
+            if canonical is None:
+                raise unreadable_state(state_file, f"entry {batch_id[:16]} has an invalid owner")
+            if canonical != owner:
+                entry["owner"] = canonical
+                normalized += 1
+        if normalized:
+            logger.info(f"Normalised {normalized} owner address(es) in {state_file}")
+        self._registry = data
+        logger.info(f"Loaded ownership state: {len(self._registry)} stamps from {state_file}")
 
     def register_stamp(
         self,
         batch_id: str,
         owner: str,
         mode: str,
-        source: str
-    ):
+        source: str,
+        only_if_unowned: bool = False,
+    ) -> bool:
         """
         Register stamp ownership.
 
@@ -87,8 +121,30 @@ class StampOwnershipManager:
             owner: Wallet address (e.g. "0xABC...") or "shared" for communal stamps
             mode: "paid" or "free"
             source: How the stamp was acquired (e.g. "pool_acquire", "direct_purchase")
+            only_if_unowned: Refuse (return False) if the batch is registered already.
+
+        Returns:
+            False if refused, else True.
+
+        Raises:
+            ValueError: owner is neither a special owner nor a valid address.
         """
+        if owner not in _SPECIAL_OWNERS:
+            canonical = normalize_address(owner)
+            if canonical is None:
+                raise ValueError(f"invalid owner address: {owner!r}")
+            owner = canonical
         with self._lock:
+            existing = self._registry.get(batch_id)
+            if existing is not None:
+                if only_if_unowned:
+                    logger.error(f"Refusing to register {batch_id[:16]} to {owner}: already registered "
+                                 f"to {existing.get('owner')}")
+                    return False
+                if existing.get("owner") not in (POOL_OWNER, owner):
+                    # A batch changing hands between callers is never expected.
+                    logger.error(f"Re-registering {batch_id[:16]} from {existing.get('owner')} to {owner} "
+                                 f"(source={source})")
             self._registry[batch_id] = {
                 "owner": owner,
                 "mode": mode,
@@ -97,6 +153,7 @@ class StampOwnershipManager:
             }
             logger.info(f"Registered stamp {batch_id[:16]}... owner={owner[:16] if owner != 'shared' else 'shared'}, mode={mode}, source={source}")
             self._save_state()
+            return True
 
     def check_access(
         self,
@@ -155,8 +212,9 @@ class StampOwnershipManager:
         if entry["owner"] == "shared":
             return True, "shared stamp, open access"
 
-        # Owner matches wallet -> allowed
-        if wallet_address and entry["owner"] == wallet_address:
+        # Owner matches wallet -> allowed. Both sides are canonical addresses, so
+        # casing cannot make a wallet fail to match itself (#384).
+        if wallet_address and entry["owner"] == normalize_address(wallet_address):
             return True, "owner match"
 
         # Otherwise -> denied

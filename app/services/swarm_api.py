@@ -137,7 +137,8 @@ async def get_local_stamps() -> List[Dict[str, Any]]:
         return []
 
 
-async def purchase_postage_stamp(amount: int, depth: int, label: Optional[str] = None) -> str:
+async def purchase_postage_stamp(amount: int, depth: int, label: Optional[str] = None,
+                                 timeout: Optional[float] = None) -> str:
     """
     Purchases a new postage stamp from the configured Swarm Bee node.
 
@@ -145,6 +146,7 @@ async def purchase_postage_stamp(amount: int, depth: int, label: Optional[str] =
         amount: The amount of the postage stamp in wei
         depth: The depth of the postage stamp
         label: Optional user-defined label for the stamp
+        timeout: Seconds to wait for Bee (default SWARM_STAMP_PURCHASE_TIMEOUT_SECONDS)
 
     Returns:
         The batchID of the purchased stamp
@@ -159,19 +161,16 @@ async def purchase_postage_stamp(amount: int, depth: int, label: Optional[str] =
         raise ValueError(f"Stamp amount must be positive, got {amount}")
 
     api_url = urljoin(str(settings.SWARM_BEE_API_URL), f"stamps/{amount}/{depth}")
-    headers = {"Content-Type": "application/json"}
 
-    # Prepare request body if label is provided
-    request_body = {}
-    if label:
-        request_body["label"] = label
+    # Bee reads the label from the query string. It used to be sent in a JSON
+    # body, which Bee ignores, so every label was silently dropped (#400 needs
+    # it to find a purchase whose response was lost).
+    params = {"label": label} if label else None
 
     try:
         client = get_client()
-        if request_body:
-            response = await client.post(api_url, json=request_body, headers=headers, timeout=120)
-        else:
-            response = await client.post(api_url, headers=headers, timeout=120)
+        response = await client.post(api_url, params=params,
+                                     timeout=timeout or settings.SWARM_STAMP_PURCHASE_TIMEOUT_SECONDS)
 
         response.raise_for_status()
         response_json = response.json()
@@ -190,6 +189,49 @@ async def purchase_postage_stamp(amount: int, depth: int, label: Optional[str] =
     except (ValueError, KeyError) as e:
         logger.error(f"Error parsing stamp purchase response: {e}")
         raise ValueError(f"Could not parse stamp purchase response: {e}") from e
+
+
+async def find_purchased_batch(label: str, depth: int, amount: int, is_known, min_block: Optional[int],
+                               wait_seconds: float, interval: float = 3.0) -> Optional[str]:
+    """Find a batch whose purchase response was lost (#400).
+
+    When Bee's POST /stamps gives no answer, the purchase may still go through.
+    Look for it in the node's own batches by what it was bought with. `label`
+    must be unique to this purchase (the gateway adds a random suffix), and a
+    match must also have the depth and amount, not be registered to anyone
+    (is_known), and, when min_block is known, be created at or after it (the
+    node's block when the purchase started), so an older batch can never match.
+
+    Bee labels a batch it learns about only from the chain "recovered". Those
+    are NOT matched: nothing ties one to this purchase rather than to another
+    purchase in flight at the same time, so a lost purchase that surfaces that
+    way goes to the refund path instead.
+
+    Polls for up to wait_seconds, because a new batch appears only once Bee has
+    seen it on-chain. A failed poll counts as "not found yet". Returns None
+    unless exactly one batch matches.
+    """
+    def matches(s: Dict[str, Any]) -> bool:
+        return (bool(s.get("batchID")) and s.get("label") == label
+                and coerce_int(s.get("depth"), -1) == depth and str(s.get("amount")) == str(amount)
+                and (min_block is None or coerce_int(s.get("blockNumber"), -1) >= min_block)
+                and not is_known(s["batchID"]))
+
+    deadline = time.monotonic() + wait_seconds
+    while True:
+        try:
+            found = [s["batchID"] for s in await get_local_stamps() if matches(s)]
+        except Exception as e:
+            logger.warning(f"Lost purchase lookup: listing failed ({e}); retrying")
+            found = []
+        if len(found) == 1:
+            return found[0]
+        if len(found) > 1:
+            logger.warning(f"Lost purchase lookup: {len(found)} batches match label {label!r}; not guessing")
+            return None
+        if time.monotonic() >= deadline:
+            return None
+        await asyncio.sleep(interval)
 
 
 async def extend_postage_stamp(stamp_id: str, amount: int) -> str:
@@ -791,9 +833,20 @@ async def upload_chunk_to_swarm(
         raise ValueError(f"Could not parse chunk upload response: {e}") from e
 
 
+class DownloadTooLargeError(Exception):
+    """The referenced content exceeds MAX_DOWNLOAD_SIZE_MB."""
+
+    def __init__(self, limit_bytes: int):
+        super().__init__(f"Content exceeds the {limit_bytes} byte download limit")
+        self.limit_bytes = limit_bytes
+
+
 async def download_data_from_swarm(reference: str) -> bytes:
     """
     Downloads data from the Swarm network using a reference hash.
+
+    Streams the body and stops once it exceeds MAX_DOWNLOAD_SIZE_MB, so an
+    arbitrarily large reference cannot be pulled into memory (#353).
 
     Args:
         reference: The Swarm reference hash of the data to download
@@ -804,20 +857,37 @@ async def download_data_from_swarm(reference: str) -> bytes:
     Raises:
         httpx.HTTPError: If the HTTP request to the Swarm API fails
         FileNotFoundError: If the data is not found (404)
+        DownloadTooLargeError: If the content exceeds the download limit
     """
     api_url = urljoin(str(settings.SWARM_BEE_API_URL), f"bzz/{reference.lower()}")
+    limit = settings.MAX_DOWNLOAD_SIZE_MB * 1024 * 1024
+
+    async def fetch() -> bytes:
+        client = get_client()
+        # identity: the limit must apply to the bytes held in memory, and a
+        # compressed response would be inflated chunk by chunk before counting.
+        async with client.stream("GET", api_url, timeout=60,
+                                 headers={"Accept-Encoding": "identity"}) as response:
+            if response.status_code == 404:
+                raise FileNotFoundError(f"Data not found on Swarm at reference {reference}")
+            response.raise_for_status()
+
+            declared = response.headers.get("content-length")
+            if declared and declared.isdigit() and int(declared) > limit:
+                raise DownloadTooLargeError(limit)
+
+            body = bytearray()
+            async for chunk in response.aiter_bytes():
+                if len(body) + len(chunk) > limit:
+                    raise DownloadTooLargeError(limit)
+                body += chunk
+            return bytes(body)
 
     try:
-        client = get_client()
-        response = await client.get(api_url, timeout=60)
-
-        if response.status_code == 404:
-            raise FileNotFoundError(f"Data not found on Swarm at reference {reference}")
-
-        response.raise_for_status()
-
-        logger.info(f"Successfully downloaded {len(response.content)} bytes from Swarm reference: {reference}")
-        return response.content
+        # One deadline for the whole transfer: httpx timeouts apply per read.
+        content = await asyncio.wait_for(fetch(), timeout=settings.DOWNLOAD_TIMEOUT_SECONDS)
+        logger.info(f"Successfully downloaded {len(content)} bytes from Swarm reference: {reference}")
+        return content
 
     except httpx.HTTPError as e:
         _record_bee_error("download")
@@ -1211,6 +1281,52 @@ def calculate_stamp_amount(duration_hours: int, current_price,
     return amount
 
 
+SECONDS_PER_BLOCK = 3600 / BLOCKS_PER_HOUR
+
+
+def _utc_iso(seconds_from_now: int) -> str:
+    """UTC timestamp in the form 2026-09-25T10:00:00Z."""
+    t = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(seconds=seconds_from_now)
+    return t.replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def expiry_from_amount(amount: int, current_price) -> Optional[str]:
+    """When a batch funded with `amount` PLUR per chunk runs out at today's price.
+
+    An estimate: it assumes Gnosis's 5 s blocks and today's price, which moves;
+    top-ups extend it. None if it cannot be computed.
+    """
+    try:
+        price = int(current_price)
+        if price <= 0:
+            return None
+        return _utc_iso(int(int(amount) / price * SECONDS_PER_BLOCK))
+    except Exception:
+        return None
+
+
+async def get_batch_expiry(batch_id: str, timeout: float = 1.0) -> Optional[str]:
+    """When a batch held by this node runs out, from its current TTL (#383).
+
+    Best effort, bounded to `timeout` seconds in total so it never holds up the
+    response it decorates; None if unknown. The TTL is Bee's own estimate at
+    the current price, so it can move.
+    """
+    async def lookup() -> Optional[str]:
+        client = get_client()
+        url = urljoin(str(settings.SWARM_BEE_API_URL), f"stamps/{batch_id.lower()}")
+        response = await client.get(url, timeout=timeout)
+        if response.status_code != 200:
+            return None
+        ttl = coerce_int(response.json().get("batchTTL"), 0)
+        return _utc_iso(ttl) if ttl > 0 else None
+
+    try:
+        return await asyncio.wait_for(lookup(), timeout=timeout)
+    except Exception:
+        return None
+
+
 def calculate_stamp_total_cost(amount: int, depth: int) -> int:
     """
     Calculates the total BZZ cost for a stamp based on amount and depth.
@@ -1414,7 +1530,33 @@ TTL_THRESHOLD_EXPIRED = 0          # 0 seconds - stamp is expired
 TTL_THRESHOLD_LOW = 3600           # 1 hour - warn about low TTL
 
 
-async def validate_stamp_for_upload(stamp_id: str) -> Dict[str, Any]:
+async def _get_local_stamp_processed(stamp_id: str) -> Optional[Dict[str, Any]]:
+    """One batch as the connected node sees it, in the processed-stamp shape.
+
+    A single GET /stamps/{id} rather than the whole network's /batches list.
+    Returns None when the node does not hold the batch.
+    """
+    client = get_client()
+    url = urljoin(str(settings.SWARM_BEE_API_URL), f"stamps/{stamp_id.lower()}")
+    response = await client.get(url, timeout=10)
+    if response.status_code in (400, 404):
+        return None
+    response.raise_for_status()
+    stamp = response.json()
+    percent = calculate_utilization_percent(
+        coerce_int(stamp.get("utilization"), 0), stamp.get("depth"), stamp.get("bucketDepth"))
+    status, warning = calculate_utilization_status(percent)
+    return {
+        **stamp,
+        "local": True,
+        "batchTTL": coerce_int(stamp.get("batchTTL"), 0),
+        "utilizationPercent": percent,
+        "utilizationStatus": status,
+        "utilizationWarning": warning,
+    }
+
+
+async def validate_stamp_for_upload(stamp_id: str, local_only: bool = False) -> Dict[str, Any]:
     """
     Validates that a stamp is suitable for uploading data.
 
@@ -1435,15 +1577,22 @@ async def validate_stamp_for_upload(stamp_id: str) -> Dict[str, Any]:
         StampValidationError: If stamp fails any blocking validation check
         httpx.HTTPError: If unable to reach Swarm API
     """
-    # Get all processed stamps (includes utilization calculation)
-    all_stamps = await get_all_stamps_processed()
+    if local_only:
+        # Just the one batch on the connected node. Used before settling a paid
+        # upload, where the full network list would add a large, uncached fetch
+        # to every paid request. A batch the node does not hold is reported as
+        # not found, which is what the upload itself would run into.
+        found_stamp = await _get_local_stamp_processed(stamp_id)
+    else:
+        # Get all processed stamps (includes utilization calculation)
+        all_stamps = await get_all_stamps_processed()
 
-    # Find the requested stamp (case-insensitive)
-    found_stamp = None
-    for stamp in all_stamps:
-        if stamp.get("batchID") == stamp_id or stamp.get("batchID", "").lower() == stamp_id.lower():
-            found_stamp = stamp
-            break
+        # Find the requested stamp (case-insensitive)
+        found_stamp = None
+        for stamp in all_stamps:
+            if stamp.get("batchID") == stamp_id or stamp.get("batchID", "").lower() == stamp_id.lower():
+                found_stamp = stamp
+                break
 
     # Check 1: Stamp exists
     if not found_stamp:

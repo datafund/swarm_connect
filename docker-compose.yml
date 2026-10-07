@@ -6,9 +6,9 @@ services:
     ports:
       # Docker publishes ports via its own iptables chains, which bypass ufw — a
       # published port is reachable from the internet even when the host firewall
-      # denies it. Set GATEWAY_BIND=127.0.0.1 on hosts that terminate TLS with a
-      # local reverse proxy, so the gateway is not also served in plaintext.
-      - "${GATEWAY_BIND:-0.0.0.0}:8899:8000"
+      # denies it. Bound to 127.0.0.1 by default so only the local reverse proxy
+      # reaches it (#367); set GATEWAY_BIND=0.0.0.0 only on a host without one.
+      - "${GATEWAY_BIND:-127.0.0.1}:8899:8000"
     env_file:
       - /opt/swarm_connect.env
     environment:
@@ -21,6 +21,11 @@ services:
     volumes:
       - /opt/swarm_connect_data:/app/data
     restart: unless-stopped
+    # uvicorn stops in-flight requests after 10 s, then the gateway gives paid
+    # stamp purchases still waiting on Bee up to 25 s
+    # (SHUTDOWN_PENDING_PURCHASE_GRACE_SECONDS) before recording them for the
+    # operator. Docker's default 10 s would kill it first.
+    stop_grace_period: 40s
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/"]
       interval: 30s
@@ -31,7 +36,7 @@ services:
     build: .
     image: swarm_connect:dev
     ports:
-      - "${GATEWAY_BIND:-0.0.0.0}:8900:8000"
+      - "${GATEWAY_BIND:-127.0.0.1}:8900:8000"
     env_file:
       - /opt/swarm_connect_dev.env
     environment:
@@ -41,6 +46,11 @@ services:
     volumes:
       - /opt/swarm_connect_dev_data:/app/data
     restart: unless-stopped
+    # uvicorn stops in-flight requests after 10 s, then the gateway gives paid
+    # stamp purchases still waiting on Bee up to 25 s
+    # (SHUTDOWN_PENDING_PURCHASE_GRACE_SECONDS) before recording them for the
+    # operator. Docker's default 10 s would kill it first.
+    stop_grace_period: 40s
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/"]
       interval: 30s

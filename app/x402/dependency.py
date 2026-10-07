@@ -16,36 +16,39 @@ from typing import Optional
 from fastapi import HTTPException, Request
 
 from x402.types import PaymentPayload
-from x402.facilitator import FacilitatorClient, FacilitatorConfig
+from x402.facilitator import FacilitatorClient
 
 from app.core.config import settings
+from app.core.client_ip import client_key
 from app.services.metrics import x402_payments_total
+from app.services.stamp_ownership import normalize_address
 from app.x402.pricing import get_price_quote
 from app.x402.ratelimit import check_rate_limit, get_rate_limit_headers, get_free_tier_stats
-from app.x402.base_balance import check_base_eth_balance
 from app.x402.middleware import (
     is_protected_endpoint,
     get_client_ip,
     create_payment_requirements,
     decode_payment_header,
     X_PAYMENT_HEADER,
-    X_PAYMENT_MODE_HEADER,
+    is_free_tier_opt_in,
     X402_VERSION,
 )
 
 logger = logging.getLogger(__name__)
 
-# Lazy-initialized facilitator client
-_facilitator_client: Optional[FacilitatorClient] = None
-
-
 def _get_facilitator_client() -> FacilitatorClient:
-    """Get or create the facilitator client singleton."""
-    global _facilitator_client
-    if _facilitator_client is None:
-        config: FacilitatorConfig = {"url": settings.X402_FACILITATOR_URL}
-        _facilitator_client = FacilitatorClient(config=config)
-    return _facilitator_client
+    """The shared facilitator client (verify here, settle in settlement.py and
+    the middleware). Built once, with authentication when configured (#369)."""
+    from app.x402.facilitator import get_facilitator_client
+    return get_facilitator_client()
+
+
+def _request_method(request) -> str:
+    """HTTP method, tolerating minimal request stand-ins without a method."""
+    scope = getattr(request, "scope", None)
+    if isinstance(scope, dict):
+        return scope.get("method", "") or ""
+    return getattr(request, "method", "") or ""
 
 
 async def _calculate_price_for_request(request: Request) -> dict:
@@ -75,6 +78,38 @@ async def _calculate_price_for_request(request: Request) -> dict:
         return {
             "price_usd": quote["price_usd"],
             "description": f"Bandwidth credit top-up ({mb} MB)",
+        }
+
+    if _request_method(request) == "PATCH" and path.rstrip("/").endswith("/extend"):
+        # Stamp top-up (#350). Priced from the SAME model the endpoint parses and
+        # the depth of the batch it will top up, so the quote and the spend
+        # cannot describe different things (the #260/#261 lesson). A batch that
+        # does not exist is refused by the endpoint with 404, so it is never
+        # charged; price it at the smallest depth.
+        from app.api.models.stamp import StampExtensionRequest
+        from app.services import swarm_api
+        try:
+            b = await request.json()
+        except Exception:
+            b = {}
+        try:
+            parsed = StampExtensionRequest.model_validate(b)
+        except Exception:
+            parsed = StampExtensionRequest()
+        batch_id = path.rstrip("/").split("/")[-2]
+        depth = 17
+        for stamp in await swarm_api.get_all_stamps_processed():
+            if stamp.get("batchID") == batch_id:
+                depth = int(stamp.get("depth", 17))
+                break
+        quote = await get_price_quote(
+            operation="stamp_extension", depth=depth,
+            duration_hours=parsed.duration_hours, amount=parsed.amount,
+        )
+        what = f"{parsed.amount} PLUR/chunk" if parsed.amount is not None else f"{parsed.duration_hours or 25}h"
+        return {
+            "price_usd": quote["price_usd"],
+            "description": f"Extend stamp (depth {depth}, {what})",
         }
 
     if "/stamps/for-owner" in path:
@@ -119,15 +154,18 @@ async def _calculate_price_for_request(request: Request) -> dict:
         # regardless of size. A depth-20 batch costs eight times a depth-17 one,
         # so the quote bore no relation to what was handed over. It was harmless
         # only because paying for a pooled batch was not possible at all.
-        from app.api.models.stamp import SIZE_PRESETS
+        # Parsed with the endpoint's own model so the quote and the batch come
+        # from the same reading of the body (#362). A body the model rejects is
+        # refused by the endpoint with 422 and never charged.
+        from app.api.endpoints.pool import AcquireStampRequest
         try:
             b = await request.json()
         except Exception:
             b = {}
-        depth = b.get("depth")
-        if not isinstance(depth, int):
-            size = b.get("size")
-            depth = SIZE_PRESETS.get(size, 17) if isinstance(size, str) else 17
+        try:
+            depth = AcquireStampRequest.model_validate(b).requested_depth()
+        except Exception:
+            depth = 17
         # Price from what the POOL PAID, not from what the caller receives.
         #
         # _purchase_stamp buys at STAMP_POOL_DEFAULT_DURATION_HOURS + 1 — the
@@ -154,29 +192,53 @@ async def _calculate_price_for_request(request: Request) -> dict:
             ),
         }
 
-    if "/stamps/" in path:
+    if path.rstrip("/") == "/api/v1/stamps":
+        # Direct purchase (#361). This used to quote a fixed 24h depth-17 batch
+        # whatever the body asked for, while the handler bought the requested
+        # depth and duration (or legacy amount) up to X402_MAX_STAMP_BZZ: on a
+        # network where a paid purchase skips the daily budget, a minimum
+        # payment bought a batch many times its price. Priced now from the same
+        # model the handler parses, with the same amount calculation. A body the
+        # model rejects is refused with 422 and never charged.
+        from app.api.models.stamp import StampPurchaseRequest
+        try:
+            b = await request.json()
+        except Exception:
+            b = {}
+        try:
+            parsed = StampPurchaseRequest.model_validate(b)
+        except Exception:
+            parsed = StampPurchaseRequest()
+        depth = parsed.get_effective_depth()
         quote = await get_price_quote(
-            operation="stamp_purchase",
-            duration_hours=24,
-            depth=17
+            operation="stamp_batch", depth=depth,
+            duration_hours=parsed.duration_hours, amount=parsed.amount,
         )
+        what = f"{parsed.amount} PLUR/chunk" if parsed.amount is not None else f"{parsed.duration_hours or 25}h"
+        # The handler buys exactly this amount and depth, rather than
+        # recalculating from a second chainstate read that may have moved.
+        details = quote.get("details") or {}
+        if "amount" in details and "depth" in details:
+            request.state.x402_priced_batch = {"amount": details["amount"], "depth": details["depth"]}
         return {
             "price_usd": quote["price_usd"],
-            "description": "Postage stamp purchase (24h, depth 17)"
+            "description": f"Postage stamp purchase (depth {depth}, {what})",
         }
 
     elif "/data/" in path:
-        content_length = request.headers.get("Content-Length", "0")
-        size_bytes = int(content_length) if content_length.isdigit() else 1024
+        # Without a Content-Length (a chunked body) the size is unknown until
+        # it has been read, so price the largest upload accepted rather than a
+        # token amount the body could then exceed by any factor.
+        content_length = request.headers.get("Content-Length", "")
+        if content_length.isdigit():
+            size_bytes = int(content_length)
+        else:
+            size_bytes = settings.MAX_UPLOAD_SIZE_MB * 1024 * 1024
 
-        quote = await get_price_quote(
-            operation="upload",
-            size_bytes=size_bytes,
-            duration_hours=24
-        )
+        quote = await get_price_quote(operation="upload", size_bytes=size_bytes)
         return {
             "price_usd": quote["price_usd"],
-            "description": f"Data upload ({size_bytes} bytes, 24h)"
+            "description": f"Upload bandwidth ({size_bytes} bytes, stored with the stamp you supplied)"
         }
 
     return {
@@ -234,22 +296,11 @@ async def require_x402_payment(request: Request) -> None:
     if not is_protected_endpoint(request.method, request.url.path):
         return
 
-    # Check gateway ETH balance
-    base_balance = await check_base_eth_balance()
-    if base_balance.get("is_critical"):
-        logger.error(
-            f"x402: Gateway ETH critically low ({base_balance.get('balance_eth', 0):.6f} ETH). "
-            f"Cannot process payments."
-        )
-        raise HTTPException(
-            status_code=503,
-            detail={
-                "error": "Gateway temporarily unavailable",
-                "detail": "Gateway wallet has insufficient ETH for gas. Please try again later.",
-                "x402_status": "critical",
-                "balance_eth": base_balance.get("balance_eth", 0),
-            }
-        )
+    # No pay-to balance check here (#371). With x402 the facilitator submits
+    # the transfer and pays its gas; the pay-to address never sends anything.
+    # The check made every protected request, free tier included, depend on a
+    # Base RPC lookup, and would have taken the service down with a correctly
+    # cold (0 ETH) mainnet pay-to address. The balance is still on /health.
 
     client_ip = get_client_ip(request)
     logger.info(f"x402: Processing protected request from {client_ip}: {request.method} {request.url.path}")
@@ -278,11 +329,11 @@ async def require_x402_payment(request: Request) -> None:
 
     # Get X-PAYMENT header and payment mode
     payment_header = request.headers.get(X_PAYMENT_HEADER)
-    payment_mode = request.headers.get(X_PAYMENT_MODE_HEADER, "").lower()
+    payment_mode = "free" if is_free_tier_opt_in(request) else ""
 
     # If no payment header AND no free tier opt-in, return 402
     if not payment_header and payment_mode != "free":
-        free_tier_info = get_free_tier_stats(client_ip) if settings.X402_FREE_TIER_ENABLED else None
+        free_tier_info = get_free_tier_stats(client_key(client_ip)) if settings.X402_FREE_TIER_ENABLED else None
 
         logger.info(f"x402: No payment header, returning 402 for ${price_usd}")
         x402_payments_total.labels(mode="rejected").inc()
@@ -309,7 +360,7 @@ async def require_x402_payment(request: Request) -> None:
             raise HTTPException(status_code=402, detail=response_body)
 
         # Check free tier rate limit
-        is_allowed, reason, stats = check_rate_limit(client_ip, is_free_tier=True)
+        is_allowed, reason, stats = check_rate_limit(client_key(client_ip), is_free_tier=True)
 
         if is_allowed:
             logger.info(f"x402: Free tier access granted for {client_ip} ({stats['requests_made']}/{stats['limit']} requests)")
@@ -333,7 +384,10 @@ async def require_x402_payment(request: Request) -> None:
                         "pay_to": settings.X402_PAY_TO_ADDRESS,
                     }
                 },
-                headers=get_rate_limit_headers(stats)
+                # Retry-After too, as the global limiter's 429 sends: the
+                # window length is the longest the caller has to wait.
+                headers={**get_rate_limit_headers(stats),
+                         "Retry-After": str(stats.get("window_seconds", 60))},
             )
 
     # At this point, we have an X-PAYMENT header - verify payment
@@ -376,11 +430,84 @@ async def require_x402_payment(request: Request) -> None:
         }
         raise HTTPException(status_code=402, detail=response_body)
 
+    # The payer becomes the owner of whatever this request buys, and the
+    # ownership registry refuses an owner that is not an address (#384). Checked
+    # here, before anything is spent: refused later, the batch would already be
+    # bought or taken from the pool, and the caller would get a 500 unsettled.
+    payer = getattr(verify_response, 'payer', None)
+    if normalize_address(payer) is None:
+        logger.warning(f"x402: facilitator reported a payer that is not an address: {payer!r}")
+        response_body = {
+            "x402Version": X402_VERSION,
+            "error": "Payment verification failed: payer is not a valid address",
+            "accepts": [payment_requirements.model_dump(by_alias=True)]
+        }
+        raise HTTPException(status_code=402, detail=response_body)
+    # One authorization, one delivery (#356). Reserved only after the facilitator
+    # has verified it, so unverified junk cannot fill the guard. A concurrent
+    # request carrying the same authorization is refused here, before it can do
+    # any work; the middleware releases the reservation if nothing was settled.
+    from app.x402.settlement import authorization_key, replay_guard
+    auth_key = authorization_key(payment_payload)
+    if auth_key is None:
+        # Every payment this gateway accepts (scheme "exact" on an EVM network)
+        # is an EIP-3009 authorization. Anything else cannot be deduplicated.
+        raise HTTPException(
+            status_code=402,
+            detail={
+                "x402Version": X402_VERSION,
+                "error": "Unsupported payment payload: expected an EIP-3009 authorization.",
+                "accepts": [payment_requirements.model_dump(by_alias=True)],
+            },
+        )
+    # An Idempotency-Key is scoped to the `from` of the authorization the
+    # facilitator verified. If the facilitator reports a different payer, that
+    # identity is not one to hand someone's stored result to.
+    verified_payer = getattr(verify_response, "payer", None)
+    if (request.headers.get("Idempotency-Key") is not None and verified_payer
+            and str(verified_payer).lower() != auth_key[0]):
+        logger.warning(f"x402: facilitator payer {verified_payer} differs from authorization signer")
+        raise HTTPException(
+            status_code=402,
+            detail={
+                "x402Version": X402_VERSION,
+                "error": "Payment verification failed: payer does not match the authorization.",
+                "accepts": [payment_requirements.model_dump(by_alias=True)],
+            },
+        )
+
+    if not replay_guard.reserve(auth_key):
+        logger.warning(f"x402: Payment authorization reused by {client_ip}")
+        raise HTTPException(
+            status_code=402,
+            detail={
+                "x402Version": X402_VERSION,
+                "error": "This payment authorization has already been used. Sign a new payment.",
+                "accepts": [payment_requirements.model_dump(by_alias=True)],
+            },
+        )
+
+    # A retry of a request already paid for (#359). Checked only now that the
+    # facilitator has verified this payment's signature for its payer and the
+    # guard has reserved it (so it is not one already in use), and before it
+    # is settled: a repeat is answered from the stored result and its new
+    # payment is never charged. Every way out of here without proceeding
+    # releases the reservation: nothing was collected.
+    from app.x402.idempotency import begin_idempotent_request
+    request.state.x402_requirements = payment_requirements
+    try:
+        idempotency_id = await begin_idempotent_request(request, payer=auth_key[0], auth_key=auth_key)
+    except BaseException:
+        replay_guard.release(auth_key)
+        raise
+
     logger.info(f"x402: Payment verified for payer {verify_response.payer}")
     x402_payments_total.labels(mode="paid").inc()
 
     # Store payment info on request.state for middleware settlement
     request.state.x402_mode = "paid"
-    request.state.x402_payer = getattr(verify_response, 'payer', None)
+    request.state.x402_payer = payer
     request.state.x402_payment = payment_payload
     request.state.x402_requirements = payment_requirements
+    request.state.x402_auth_key = auth_key
+    request.state.x402_idempotency_id = idempotency_id

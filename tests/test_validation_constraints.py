@@ -19,6 +19,16 @@ client = TestClient(app)
 VALID_STAMP_ID = "a" * 64
 
 
+
+@pytest.fixture(autouse=True)
+def _chainstate(monkeypatch):
+    """Extend reads the current price for its minimum-amount check (#350)."""
+    from unittest.mock import AsyncMock
+    monkeypatch.setattr(
+        "app.services.swarm_api.get_chainstate",
+        AsyncMock(return_value={"currentPrice": "24000", "minimumValidityBlocks": 17280}),
+    )
+
 class TestAmountValidation:
     """Tests for amount field validation in stamp operations."""
 
@@ -161,7 +171,7 @@ class TestLabelValidation:
     @patch('app.services.swarm_api.purchase_postage_stamp', return_value="mock_batch")
     @patch('app.services.swarm_api.check_sufficient_funds', return_value=MOCK_FUNDS_OK)
     def test_label_string_validation(self, mock_funds, mock_purchase):
-        """Test that label accepts valid string values."""
+        """Human-readable labels are accepted; Bee takes any text (sent URL-encoded)."""
         valid_labels = [
             "simple-label",
             "label_with_underscores",
@@ -178,6 +188,15 @@ class TestLabelValidation:
             response = client.post("/api/v1/stamps/", json=purchase_data)
             assert response.status_code == 201, f"Valid label '{label}' should be accepted"
 
+        # Refused before any payment (#400): control characters, Bee's label for
+        # recovered batches, and the gateway's own prefixes.
+        invalid_labels = ["line\nbreak", "tab\there", "c1\x85control", "bidi\u202eflip", "zero\u200bwidth",
+                          "recovered", "paid-1", "pool-17", "synced-17"]
+        for label in invalid_labels:
+            purchase_data = {"amount": 8000000000, "depth": 17, "label": label}
+            response = client.post("/api/v1/stamps/", json=purchase_data)
+            assert response.status_code == 422, f"Label {label!r} should be refused"
+
     @patch('app.services.swarm_api.purchase_postage_stamp', return_value="mock_batch")
     @patch('app.services.swarm_api.check_sufficient_funds', return_value=MOCK_FUNDS_OK)
     def test_label_length_limits(self, mock_funds, mock_purchase):
@@ -188,12 +207,11 @@ class TestLabelValidation:
         response = client.post("/api/v1/stamps/", json=purchase_data)
         assert response.status_code == 201, "Medium length label should be accepted"
 
-        # Test very long label (should be handled gracefully)
-        very_long_label = "a" * 10000
-        purchase_data = {"amount": 8000000000, "depth": 17, "label": very_long_label}
-        response = client.post("/api/v1/stamps/", json=purchase_data)
-        # Should either accept or reject gracefully
-        assert response.status_code in [201, 422], "Very long label should be handled gracefully"
+        # Over 100 characters is refused, before any payment.
+        for too_long in ("a" * 101, "a" * 10000):
+            purchase_data = {"amount": 8000000000, "depth": 17, "label": too_long}
+            response = client.post("/api/v1/stamps/", json=purchase_data)
+            assert response.status_code == 422, "Labels over 100 characters are refused"
 
     def test_label_type_validation(self):
         """Test that non-string label values are rejected."""
@@ -397,9 +415,9 @@ class TestBusinessRuleValidation:
     def test_stamp_extension_business_rules(self, mock_stamps, mock_funds, mock_extend):
         """Test business rules for stamp extension."""
         # Extension amount should follow same rules as purchase amount
-        extend_data = {"amount": 1}  # Minimum extension
+        extend_data = {"amount": 1}  # Below 24 hours' worth (#350)
         response = client.patch(f"/api/v1/stamps/{VALID_STAMP_ID}/extend", json=extend_data)
-        assert response.status_code in [200, 404], "Minimum extension should be valid"
+        assert response.status_code in [400, 404], "Dust extensions are refused"
 
         # Very large extension
         extend_data = {"amount": 999999999999}
@@ -513,6 +531,6 @@ class TestDurationAmountExclusivity:
              patch('app.services.swarm_api.extend_postage_stamp', return_value=VALID_STAMP_ID):
             response = client.patch(
                 f"/api/v1/stamps/{VALID_STAMP_ID}/extend",
-                json={"amount": 10000000}
+                json={"amount": 500000000}
             )
             assert response.status_code == 200

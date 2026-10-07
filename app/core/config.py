@@ -2,7 +2,7 @@
 import os
 from typing import Optional, List
 from pydantic_settings import BaseSettings, SettingsConfigDict
-from pydantic import AnyHttpUrl, field_validator
+from pydantic import Field, AnyHttpUrl, field_validator
 from functools import lru_cache
 from dotenv import load_dotenv
 
@@ -31,6 +31,9 @@ def is_testnet_network(network: str) -> bool:
 
 class Settings(BaseSettings):
     PROJECT_NAME: str = "Provenance Gateway"
+    # Where the approved service terms are published; shown on / as terms_url
+    # (#383). Empty (null) until the terms are approved: TERMS.md is a draft.
+    TERMS_URL: str = ""
     API_V1_STR: str = "/api/v1"
     SWARM_BEE_API_URL: AnyHttpUrl  # validates that it's a URL
 
@@ -38,12 +41,24 @@ class Settings(BaseSettings):
     X402_ENABLED: bool = False  # Master switch - gateway works as today when false
     X402_FACILITATOR_URL: str = "https://x402.org/facilitator"  # Testnet facilitator
     X402_PAY_TO_ADDRESS: Optional[str] = None  # Wallet address for USDC receipts (Base)
+    # Optional facilitator authentication (#369), one of the two. CDP needs the
+    # cdp-sdk package; store the CDP secret on a single line in env files.
+    X402_FACILITATOR_CDP_API_KEY_ID: Optional[str] = None
+    X402_FACILITATOR_CDP_API_KEY_SECRET: Optional[str] = None
+    X402_FACILITATOR_BEARER_TOKEN: Optional[str] = None
     X402_NETWORK: str = "base-sepolia"  # Network identifier (v1 style)
 
     # === x402 Pricing Settings ===
     X402_BZZ_USD_RATE: float = 0.50  # Manual BZZ/USD rate (1 BZZ = $0.50)
     X402_MARKUP_PERCENT: float = 50.0  # Markup percentage
     X402_MIN_PRICE_USD: float = 0.01  # Minimum charge per request
+    # Optional market price feed for BZZ/USD, used only to watch for drift
+    # (#364): prices stay on the configured X402_BZZ_USD_RATE, reviewed by a
+    # person, and an alert fires when it is more than 2x away from the market.
+    # Any JSON endpoint whose first numeric "usd" field is the price works, e.g.
+    # https://api.coingecko.com/api/v3/simple/price?ids=swarm-bzz&vs_currencies=usd
+    X402_BZZ_PRICE_FEED_URL: str = ""
+    X402_BZZ_PRICE_FEED_INTERVAL_SECONDS: int = 900
 
     # === x402 Threshold Settings (Gnosis wallet - warnings) ===
     X402_XBZZ_WARN_THRESHOLD: float = 10.0  # Warn if xBZZ < threshold
@@ -77,6 +92,41 @@ class Settings(BaseSettings):
     # any observed legitimate caller and far less than the wallet.
     STAMP_DAILY_BZZ_PER_CALLER: float = 0.5
     STAMP_SPEND_BUDGET_STATE_FILE: str = "data/stamp_spend_budget.json"
+    # Ceiling on everything the gateway spends in one UTC day, across every
+    # path: direct purchases and extensions (paid or not), pool purchases and
+    # top-ups, and batches bought for an external owner (#363). Every other
+    # limit is per caller, per origin or per hour; this one bounds the total,
+    # including through any bypass not yet found. -1 disables it.
+    GATEWAY_DAILY_BZZ_CEILING: float = 20.0
+    # Part of that ceiling open to unpaid spending (free-tier purchases and
+    # extensions, and testnet-paid ones). Keeps headroom for the pool's own
+    # purchases and top-ups, so free callers cannot starve it. -1 disables.
+    GATEWAY_DAILY_BZZ_FREE_CEILING: float = 10.0
+
+    # Paid purchase that Bee does not answer in time (#400). Bee's POST /stamps
+    # waits for the on-chain transaction and names the batch only once it has
+    # the receipt, on the request's own context: closing the connection early
+    # leaves an unlabelled ("recovered") batch. So a paid purchase keeps Bee's
+    # request open for up to STAMP_PURCHASE_BEE_TIMEOUT_SECONDS, answers 202
+    # after SWARM_STAMP_PURCHASE_TIMEOUT_SECONDS (the free tier's Bee timeout
+    # too), and registers the batch when Bee answers. Only if that request
+    # itself fails without an answer does the gateway look for the batch by its
+    # label: STAMP_PURCHASE_LOOKUP_SECONDS in the request, then up to
+    # STAMP_PURCHASE_BACKGROUND_LOOKUP_SECONDS in the background.
+    SWARM_STAMP_PURCHASE_TIMEOUT_SECONDS: float = 120.0
+    STAMP_PURCHASE_BEE_TIMEOUT_SECONDS: float = 900.0
+    # Paid purchases waiting on Bee at once. Each holds a connection of the
+    # shared Bee client (100) for up to STAMP_PURCHASE_BEE_TIMEOUT_SECONDS; the
+    # cap keeps a hung Bee from starving uploads and health checks. Checked
+    # before the payment is settled: a caller refused here is not charged.
+    STAMP_MAX_CONCURRENT_PAID_PURCHASES: int = 10
+    # On shutdown, how long to let paid purchases still waiting on Bee finish
+    # before cutting them off. Keep the container's stop grace period (docker
+    # stop_grace_period, systemd TimeoutStopSec) above uvicorn's graceful
+    # shutdown timeout plus this.
+    SHUTDOWN_PENDING_PURCHASE_GRACE_SECONDS: float = 25.0
+    STAMP_PURCHASE_LOOKUP_SECONDS: float = 30.0
+    STAMP_PURCHASE_BACKGROUND_LOOKUP_SECONDS: float = 900.0
     X402_RATE_LIMIT_PER_IP: int = 10  # Requests per minute per IP (for paying users)
 
     # === x402 Free Tier Settings ===
@@ -89,7 +139,15 @@ class Settings(BaseSettings):
     X402_WHITELIST_IPS: str = ""  # Comma-separated free-access IPs
 
     # === x402 Audit Settings ===
-    X402_AUDIT_LOG_PATH: str = "logs/x402_audit.jsonl"
+    # Under data/, which is the persistent volume in docker-compose: logs/ was
+    # inside the container and lost on every deploy (#375).
+    X402_AUDIT_LOG_PATH: str = "data/x402_audit.jsonl"
+
+    # Stored results of paid requests sent with an Idempotency-Key, kept 24 h
+    # so a retry after a client timeout is not charged again (#359).
+    X402_IDEMPOTENCY_STATE_FILE: str = "data/x402_idempotency.json"
+    # Bound on stored entries; the oldest completed ones are evicted first.
+    X402_IDEMPOTENCY_MAX_ENTRIES: int = 10000
 
     # === Base Chain Settings (for monitoring USDC receipts) ===
     BASE_RPC_URL: str = "https://sepolia.base.org"
@@ -147,6 +205,11 @@ class Settings(BaseSettings):
     # default so that deploying changes nothing until allowances are deliberately
     # configured. A limit that arrives unannounced breaks callers.
     POOL_DEFAULT_DAILY_ALLOWANCE: int = -1
+    # Most batches of one size a single client (IPv4 address, or IPv6 /64)
+    # may take per day within any origin's allowance (#366). The Origin header is
+    # set by the caller, so without this one client can spend a partner app's
+    # whole allowance, or the shared one. -1 = no per-address limit.
+    POOL_ALLOWANCE_PER_IP: int = -1
     POOL_ALLOWANCE_STATE_FILE: str = "data/pool_allowance.json"
     # Premium charged for taking a pre-bought batch from the pool instead of
     # buying one, as a percentage on top of what the batch itself costs.
@@ -253,6 +316,14 @@ class Settings(BaseSettings):
 
     # === Upload Limits ===
     MAX_UPLOAD_SIZE_MB: int = 10  # Maximum file upload size in megabytes
+    # Largest body GET /data/{ref} will fetch from Bee and return (#353). The
+    # download is buffered to detect the content type, and it can be any Swarm
+    # reference, not only ones uploaded here, so without a cap a few requests
+    # for large content could exhaust memory and the chequebook.
+    MAX_DOWNLOAD_SIZE_MB: int = Field(25, ge=1)
+    # Total time allowed for fetching one download from Bee. httpx timeouts
+    # apply per read, so a slow trickle could otherwise hold the request open.
+    DOWNLOAD_TIMEOUT_SECONDS: int = Field(120, ge=1)
 
     # === Chunk Upload (stamped-chunk forwarding, Flow A) ===
     # When enabled, the gateway forwards a single client-supplied PRE-STAMPED chunk
@@ -324,6 +395,14 @@ class Settings(BaseSettings):
         if self.CORS_ALLOWED_ORIGINS == "*":
             return ["*"]
         return [origin.strip() for origin in self.CORS_ALLOWED_ORIGINS.split(",") if origin.strip()]
+
+    @field_validator("X402_NETWORK", "X402_FACILITATOR_URL", "X402_PAY_TO_ADDRESS", mode="before")
+    @classmethod
+    def strip_x402_strings(cls, v):
+        """Normalise once, so the startup check and the payment code see the
+        same value: a trailing space passed validation and then broke every
+        payment with a KeyError (#370)."""
+        return v.strip() if isinstance(v, str) else v
 
     @field_validator("X402_BLACKLIST_IPS", "X402_WHITELIST_IPS", mode="before")
     @classmethod
@@ -411,6 +490,10 @@ class Settings(BaseSettings):
         env_file=".env",
         case_sensitive=True,
         extra="ignore",  # Ignore extra fields from .env
+        # A validation error otherwise echoes its input, and for a missing
+        # required field that input is every setting, signing keys included.
+        # Startup errors end up in container logs and the deploy job's log tail.
+        hide_input_in_errors=True,
     )
 
 
