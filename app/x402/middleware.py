@@ -52,17 +52,21 @@ USDC_ADDRESSES = {
     "base-sepolia": "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
 }
 
-# USDC token metadata for EIP-3009 signing
-# The "name" and "version" fields are required for EIP-712 domain separator
-# IMPORTANT: The name MUST match the on-chain DOMAIN_SEPARATOR exactly
-# Circle's USDC uses "USDC" (not "USD Coin") in the EIP-712 domain
+# USDC token metadata for EIP-3009 signing, advertised in the 402's `extra`.
+# Clients and facilitators build the EIP-712 domain (name, version, chainId,
+# verifyingContract) from it, so "name" and "version" MUST be exactly what the
+# token contract reports, or every signature fails verification.
+# The name is NOT the same on every network: Base mainnet USDC reports
+# name() = "USD Coin", Base Sepolia USDC reports name() = "USDC" (#467, #60).
+# tests/test_x402_middleware.py pins each network's resulting DOMAIN_SEPARATOR
+# to the value read from the chain.
 USDC_TOKEN_METADATA = {
     "base": {
-        "name": "USDC",  # Matches on-chain EIP-712 domain
+        "name": "USD Coin",  # name() of 0x8335...2913 on chain 8453
         "version": "2",
     },
     "base-sepolia": {
-        "name": "USDC",  # Matches on-chain EIP-712 domain
+        "name": "USDC",  # name() of 0x036C...CF7e on chain 84532
         "version": "2",
     },
 }

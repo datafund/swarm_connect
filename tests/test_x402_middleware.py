@@ -474,18 +474,83 @@ class TestTokenMetadata:
             assert isinstance(metadata["version"], str)
 
     def test_usdc_domain_name_matches_onchain(self):
-        assert USDC_TOKEN_METADATA["base"]["name"] == "USDC"
+        # The name differs per network (#467): "USD Coin" on Base mainnet,
+        # "USDC" on Base Sepolia. An earlier version of this file asserted
+        # "USDC" for both and forbade "USD Coin", which pinned the mainnet bug.
+        assert USDC_TOKEN_METADATA["base"]["name"] == "USD Coin"
         assert USDC_TOKEN_METADATA["base-sepolia"]["name"] == "USDC"
 
-    def test_token_name_not_human_readable_variation(self):
-        forbidden_names = ["USD Coin", "Usd Coin", "usd coin"]
-        for network, metadata in USDC_TOKEN_METADATA.items():
-            assert metadata["name"] not in forbidden_names
 
-    def test_mainnet_and_testnet_metadata_consistent(self):
-        if "base" in USDC_TOKEN_METADATA and "base-sepolia" in USDC_TOKEN_METADATA:
-            assert USDC_TOKEN_METADATA["base"]["name"] == USDC_TOKEN_METADATA["base-sepolia"]["name"]
-            assert USDC_TOKEN_METADATA["base"]["version"] == USDC_TOKEN_METADATA["base-sepolia"]["version"]
+# EIP-712 domain separators of the USDC contracts, read from the chain with a
+# read-only eth_call to DOMAIN_SEPARATOR() (selector 0x3644e515) on 2026-10-21:
+#   base         https://mainnet.base.org  chainId 8453  block 52899667
+#                0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913
+#                name() = "USD Coin", version() = "2"
+#   base-sepolia https://sepolia.base.org  chainId 84532 block 48410197
+#                0x036CbD53842c5426634e7929541eC2318f3dCF7e
+#                name() = "USDC", version() = "2"
+# Re-check with:
+#   curl -s -X POST -H 'Content-Type: application/json' <rpc> --data \
+#     '{"jsonrpc":"2.0","id":1,"method":"eth_call","params":[{"to":"<usdc>","data":"0x3644e515"},"latest"]}'
+ONCHAIN_USDC_DOMAIN_SEPARATORS = {
+    "base": (8453, "0x02fa7265e7c5d81118673727957699e4d68f74cd74b7db77da710fe8a2c7834f"),
+    "base-sepolia": (84532, "0x71f17a3b2ff373b803d70a5a07c046c1a2bc8e89c09ef722fcb047abe94c9818"),
+}
+
+
+def _eip712_domain_separator(name: str, version: str, chain_id: int, verifying_contract: str) -> str:
+    from eth_abi import encode
+    from eth_utils import keccak, to_checksum_address
+
+    type_hash = keccak(
+        text="EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"
+    )
+    encoded = encode(
+        ["bytes32", "bytes32", "bytes32", "uint256", "address"],
+        [type_hash, keccak(text=name), keccak(text=version), chain_id,
+         to_checksum_address(verifying_contract)],
+    )
+    return "0x" + keccak(encoded).hex().removeprefix("0x")
+
+
+class TestUSDCDomainSeparator:
+    """The advertised `extra` must reproduce the token's on-chain domain (#467).
+
+    Clients sign EIP-3009 authorizations against the domain built from the
+    402's `extra` plus the network's chain id and the `asset` address. If that
+    domain differs from the contract's DOMAIN_SEPARATOR, every payment fails
+    verification. Hermetic: compares against the recorded on-chain values.
+    """
+
+    def test_every_network_has_a_recorded_separator(self):
+        assert set(ONCHAIN_USDC_DOMAIN_SEPARATORS) == set(USDC_TOKEN_METADATA) == set(USDC_ADDRESSES)
+
+    @pytest.mark.parametrize("network", sorted(ONCHAIN_USDC_DOMAIN_SEPARATORS))
+    def test_domain_separator_matches_chain(self, network):
+        chain_id, expected = ONCHAIN_USDC_DOMAIN_SEPARATORS[network]
+        metadata = USDC_TOKEN_METADATA[network]
+        computed = _eip712_domain_separator(
+            metadata["name"], metadata["version"], chain_id, USDC_ADDRESSES[network]
+        )
+        assert computed == expected, (
+            f"{network}: EIP-712 domain from name={metadata['name']!r} "
+            f"version={metadata['version']!r} does not match the token's DOMAIN_SEPARATOR"
+        )
+
+    def test_402_extra_reproduces_mainnet_separator(self):
+        """End to end through create_payment_requirements on X402_NETWORK=base."""
+        request = MagicMock()
+        request.url = "https://gateway.example/api/v1/stamps/"
+        request.headers = {}
+        with patch("app.x402.middleware.settings") as s:
+            s.X402_NETWORK = "base"
+            s.X402_PAY_TO_ADDRESS = "0x" + "11" * 20
+            s.TRUSTED_PROXY_HOPS = 0
+            req = create_payment_requirements(request, 0.01)
+        chain_id, expected = ONCHAIN_USDC_DOMAIN_SEPARATORS["base"]
+        assert _eip712_domain_separator(
+            req.extra["name"], req.extra["version"], chain_id, req.asset
+        ) == expected
 
 
 class TestProtectedEndpoints:
