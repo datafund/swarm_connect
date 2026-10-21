@@ -119,12 +119,54 @@ The minimum price (`X402_MIN_PRICE_USD`) ensures you always cover costs.
 already paid for. The price is:
 
 ```
-Upload Price = max(Content-Length / 10^9 × X402_BANDWIDTH_USD_PER_GB × (1 + MARKUP_PERCENT/100), X402_MIN_PRICE_USD)
+Priced Bytes = ceil(Content-Length × (data + parity) / data)
+Upload Price = max(Priced Bytes / 10^9 × X402_BANDWIDTH_USD_PER_GB × (1 + MARKUP_PERCENT/100), X402_MIN_PRICE_USD)
 ```
 
-A request without `Content-Length` is priced at `MAX_UPLOAD_SIZE_MB`. With the
+`(data + parity) / data` is the erasure-coding overhead of the upload's
+redundancy level (#429). Bee splits the chunks into groups and adds parity
+chunks to each group, and it pushes those chunks to the network too. The
+level is the request's `redundancy` query parameter. Without one, the level
+is the default, 2, because the gateway always asks Bee for a level. A value
+the endpoint refuses is priced at the default, and the request is then
+refused without a charge.
+
+| Level | Name | Data chunks per full group | Parity chunks | Factor |
+|-------|------|---------------------------|---------------|--------|
+| 0 | none | - | 0 | 1.000 |
+| 1 | medium | 119 | 9 | 1.076 |
+| 2 | strong (default) | 107 | 21 | 1.196 |
+| 3 | insane | 97 | 31 | 1.320 |
+| 4 | paranoid | 39 | 89 | 3.282 |
+
+The counts are from Bee v2.8.1, `pkg/file/redundancy/level.go` (`mediumEt`,
+`strongEt`, `insaneEt`, `paranoidEt`), and are set in
+`REDUNDANCY_ERASURE_GROUP` in `app/services/swarm_api.py`. If you upgrade Bee,
+check that these tables have not changed.
+
+Limitations of the factor:
+
+- **Small files are underpriced.** The factor is the overhead of a full
+  group, which is the smallest overhead Bee adds. A file of a few chunks, and
+  the last partial group of a larger file, get more parity per data chunk. For
+  example, one data chunk at level 2 gets 4 parity chunks. Bee also stores the
+  root chunk as 2, 4, 8 or 16 extra copies (levels 1-4). The gateway does not
+  price these extra bytes. Uploads that small cost the `X402_MIN_PRICE_USD`
+  floor unless you raise `X402_BANDWIDTH_USD_PER_GB` by several orders of
+  magnitude.
+- **The gateway cannot count chunks exactly.** It sees only `Content-Length`,
+  which includes the multipart framing. A `/data/manifest` TAR holds several
+  files and manifest nodes, each with its own chunk tree.
+- **Encrypted uploads are out of scope.** Bee uses different tables for
+  encrypted chunks (`encMediumEt` and the others). The gateway does not offer
+  encrypted uploads, so it does not use them.
+
+`GET /api/v1/pricing` takes the same `redundancy` parameter and quotes the
+same amount the 402 asks for.
+
+A request without `Content-Length` is priced at `MAX_UPLOAD_SIZE_MB`, multiplied by the same factor. With the
 defaults ($0.10/GB, 50% markup, 10 MB cap) every upload costs the $0.01
-minimum. There is no setting for the upload price alone:
+minimum, at every redundancy level. There is no setting for the upload price alone:
 `X402_BANDWIDTH_USD_PER_GB` also prices chunk-credit top-ups, and
 `X402_MIN_PRICE_USD` also floors stamp purchases. Before #365 an upload cost
 the price of a new 24-hour stamp sized to it.

@@ -187,6 +187,7 @@ Owner addresses are canonical (lowercase, `0x`-prefixed, validated) on `register
 #### Data Operations
 - `POST /api/v1/data/?stamp_id={id}&content_type={type}&redundancy={level}`: Upload raw data to Swarm (redundancy 0-4, default 2)
 - `POST /api/v1/data/manifest?stamp_id={id}&redundancy={level}`: Upload TAR archive as collection/manifest (15x faster for batch uploads)
+- **Paid upload pricing (#365, #429)**: bandwidth, not storage. `_calculate_price_for_request` prices `Content-Length` (or `MAX_UPLOAD_SIZE_MB` without one) multiplied by the erasure-coding overhead of the effective redundancy level: the `redundancy` query parameter, parsed as the endpoint parses it, else `DEFAULT_REDUNDANCY_LEVEL` (2), which the gateway always sends to Bee. The factor is `(data + parity) / data` for a full group, from `REDUNDANCY_ERASURE_GROUP` in `swarm_api.py` (Bee v2.8.1 `pkg/file/redundancy/level.go`): 1.076, 1.196, 1.320, 3.282 for levels 1-4. It underprices small files (more parity per chunk, plus root replicas); see `docs/x402-operator-guide.md`. `GET /api/v1/pricing` takes the same `redundancy` parameter and forwards it, so the quote equals the 402.
 - `GET /api/v1/data/{reference}`: Download raw data from Swarm (returns bytes directly)
 - `GET /api/v1/data/{reference}/json`: Download data with JSON metadata (base64-encoded)
 

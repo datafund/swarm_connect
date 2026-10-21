@@ -112,6 +112,11 @@ Content-Type: application/json
 The price is at least the gateway's minimum (`X402_MIN_PRICE_USD`, $0.01 by
 default), so sign exactly `maxAmountRequired`, never less.
 
+An upload's price covers the request body plus the parity chunks Bee adds at
+the upload's `redundancy` level (default 2). A higher level costs more once the
+price is above the minimum. To learn the price before you upload, call
+`GET /api/v1/pricing?upload_bytes=<body size>&redundancy=<level>`.
+
 **Before signing, check `network` and `asset`** against the chain you mean to
 pay on, and `payTo` if you know the gateway's address. A client signs whatever
 the 402 names: pointed at a mainnet gateway, a key you think of as testnet-only
