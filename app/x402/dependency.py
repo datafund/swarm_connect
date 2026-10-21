@@ -51,6 +51,28 @@ def _request_method(request) -> str:
     return getattr(request, "method", "") or ""
 
 
+def _upload_redundancy_level(request) -> int:
+    """The redundancy level an upload will be stored with.
+
+    Parsed as the upload endpoints parse their `redundancy` query parameter
+    (an int, 0-4), so anything they accept as level N is priced as level N. A
+    value they refuse is priced at the default: the request is refused with
+    422 or 400 and never charged. No parameter means the default level, which
+    the gateway always sends to Bee.
+    """
+    from pydantic import TypeAdapter, ValidationError
+    from app.services.swarm_api import DEFAULT_REDUNDANCY_LEVEL, REDUNDANCY_LEVELS
+
+    raw = request.query_params.get("redundancy")
+    if raw is None:
+        return DEFAULT_REDUNDANCY_LEVEL
+    try:
+        level = TypeAdapter(int).validate_python(raw)
+    except ValidationError:
+        return DEFAULT_REDUNDANCY_LEVEL
+    return level if level in REDUNDANCY_LEVELS else DEFAULT_REDUNDANCY_LEVEL
+
+
 async def _calculate_price_for_request(request: Request) -> dict:
     """
     Calculate price based on the request type.
@@ -235,10 +257,20 @@ async def _calculate_price_for_request(request: Request) -> dict:
         else:
             size_bytes = settings.MAX_UPLOAD_SIZE_MB * 1024 * 1024
 
-        quote = await get_price_quote(operation="upload", size_bytes=size_bytes)
+        # Bee pushes parity chunks on top of the data at the redundancy level
+        # the gateway asks for, so those bytes are bandwidth too (#429). The
+        # level is the one the upload will use, including the default.
+        from app.services.swarm_api import REDUNDANCY_LEVELS, bytes_with_redundancy
+        level = _upload_redundancy_level(request)
+        priced_bytes = bytes_with_redundancy(size_bytes, level)
+
+        quote = await get_price_quote(operation="upload", size_bytes=priced_bytes)
         return {
             "price_usd": quote["price_usd"],
-            "description": f"Upload bandwidth ({size_bytes} bytes, stored with the stamp you supplied)"
+            "description": (
+                f"Upload bandwidth ({priced_bytes} bytes: {size_bytes} bytes with "
+                f"redundancy {level} ({REDUNDANCY_LEVELS[level]}), stored with the stamp you supplied)"
+            ),
         }
 
     return {

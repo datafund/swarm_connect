@@ -160,3 +160,27 @@ def test_a_pricing_bug_is_not_reported_as_a_chain_outage(x402_on):
     with patch("app.x402.dependency._calculate_price_for_request", new=AsyncMock(side_effect=OverflowError)):
         r = TestClient(app, raise_server_exceptions=False).get("/api/v1/pricing")
     assert r.status_code == 500
+
+
+@pytest.mark.parametrize("redundancy", [None, 0, 2, 4])
+def test_upload_quote_with_redundancy_equals_the_402(client, monkeypatch, redundancy):
+    """#429: the quote prices the same redundancy level the upload would use."""
+    monkeypatch.setattr(settings, "X402_BANDWIDTH_USD_PER_GB", 10000.0)  # above the floor
+    q = "" if redundancy is None else f"&redundancy={redundancy}"
+    quote = client.get(f"/api/v1/pricing?upload_bytes=5000{q}").json()["quotes"]["data_upload"]
+    path = "/api/v1/data/" + ("" if redundancy is None else f"?redundancy={redundancy}")
+    assert quote["max_amount_required"] == _402_amount(client, path, content=b"x" * 5000)
+
+
+def test_upload_quote_rises_with_redundancy(client, monkeypatch):
+    monkeypatch.setattr(settings, "X402_BANDWIDTH_USD_PER_GB", 10000.0)
+    price = {lvl: client.get(f"/api/v1/pricing?upload_bytes=5000&redundancy={lvl}").json()
+             ["quotes"]["data_upload"]["price_usd"] for lvl in range(5)}
+    assert price[0] < price[1] < price[2] < price[3] < price[4]
+    default = client.get("/api/v1/pricing?upload_bytes=5000").json()["quotes"]["data_upload"]["price_usd"]
+    assert default == price[2]
+
+
+def test_redundancy_out_of_range_is_422(client):
+    assert client.get("/api/v1/pricing?redundancy=5").status_code == 422
+    assert client.get("/api/v1/pricing?redundancy=-1").status_code == 422

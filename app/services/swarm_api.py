@@ -695,6 +695,42 @@ REDUNDANCY_LEVELS = {
     4: "paranoid",  # 50% chunk loss tolerance
 }
 
+# Erasure-coding group per redundancy level (#429): (data chunks, parity chunks)
+# in a full group. Bee splits a file's chunks into groups of
+# Level.GetMaxShards() data chunks (128 branches minus the parities) and adds
+# getParities(GetMaxShards()) parity chunks to each group, at every level of the
+# chunk tree. Values from ethersphere/bee v2.8.1, pkg/file/redundancy/level.go
+# (mediumEt, strongEt, insaneEt, paranoidEt; unchanged since v2.7.0). Level 0
+# adds no parity. Unencrypted uploads only: the gateway does not expose
+# encryption, and encrypted chunks use other tables (encMediumEt and so on).
+#
+# A full group is the smallest overhead Bee adds. A small file, or the last
+# partial group of a larger one, gets proportionally more parity (one data
+# chunk at STRONG gets 4), and the root chunk is also stored as 2/4/8/16
+# dispersed replicas. Those extra bytes are not priced.
+REDUNDANCY_ERASURE_GROUP = {
+    1: (119, 9),    # MEDIUM
+    2: (107, 21),   # STRONG
+    3: (97, 31),    # INSANE
+    4: (39, 89),    # PARANOID
+}
+
+
+def redundancy_overhead_factor(level: int) -> float:
+    """Bytes Bee pushes per data byte at this redundancy level (1.0 for none)."""
+    if level not in REDUNDANCY_ERASURE_GROUP:
+        return 1.0
+    data, parities = REDUNDANCY_ERASURE_GROUP[level]
+    return (data + parities) / data
+
+
+def bytes_with_redundancy(size_bytes: int, level: int) -> int:
+    """`size_bytes` of data plus its full-group parity at `level`, rounded up."""
+    if level not in REDUNDANCY_ERASURE_GROUP:
+        return size_bytes
+    data, parities = REDUNDANCY_ERASURE_GROUP[level]
+    return -(-size_bytes * (data + parities) // data)
+
 
 def validate_redundancy_level(level: int) -> None:
     """
