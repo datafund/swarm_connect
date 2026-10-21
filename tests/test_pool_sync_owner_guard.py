@@ -102,14 +102,18 @@ async def test_unregistered_batch_is_imported_and_claimed_by_the_pool(tmp_path, 
 
 
 @pytest.mark.asyncio
-async def test_foreign_owned_batch_already_in_pool_is_taken_off_sale(tmp_path, monkeypatch):
+@pytest.mark.parametrize("owner,mode", [(WALLET, "paid"), ("shared", "free")])
+async def test_foreign_owned_batch_already_in_pool_is_taken_off_sale(tmp_path, monkeypatch, caplog, owner, mode):
     """Not reachable through the acquire handler today; defence in depth."""
     mgr = _manager(tmp_path, BATCH)
-    monkeypatch.setitem(stamp_ownership_manager._registry, BATCH, {"owner": WALLET, "mode": "paid"})
-    assert await _sync(mgr, BATCH) == 0
+    monkeypatch.setitem(stamp_ownership_manager._registry, BATCH, {"owner": owner, "mode": mode})
+    with caplog.at_level(logging.ERROR, logger="app.services.stamp_pool"):
+        assert await _sync(mgr, BATCH) == 0
     assert BATCH not in mgr._pool
     assert _state(mgr) == []
-    assert stamp_ownership_manager.get_stamp_info(BATCH)["owner"] == WALLET
+    assert stamp_ownership_manager.get_stamp_info(BATCH)["owner"] == owner
+    assert any("dropping it from pool state" in r.getMessage() for r in caplog.records)
+    assert not any("left for that acquire" in r.getMessage() for r in caplog.records)
 
 
 @pytest.mark.asyncio
@@ -145,12 +149,17 @@ async def test_unreadable_ownership_record_fails_safe(tmp_path, monkeypatch, cap
 
 
 @pytest.mark.asyncio
-async def test_reserved_batch_is_left_for_its_acquire(tmp_path, monkeypatch):
+async def test_reserved_batch_is_left_for_its_acquire(tmp_path, monkeypatch, caplog):
     """A batch mid-acquire must stay reserved so release_reserved_stamp finds
     it after settlement; evicting it would leave a paid caller with nothing."""
     mgr = _manager(tmp_path, BATCH)
     mgr.reserve_stamp(BATCH)
     monkeypatch.setitem(stamp_ownership_manager._registry, BATCH, {"owner": WALLET, "mode": "paid"})
-    assert await _sync(mgr, BATCH) == 0
+    with caplog.at_level(logging.ERROR, logger="app.services.stamp_pool"):
+        assert await _sync(mgr, BATCH) == 0
+    assert any("RESERVED for an acquire in progress; left for that acquire" in r.getMessage()
+               for r in caplog.records)
+    assert not any("dropping it from pool state" in r.getMessage() for r in caplog.records)
+    assert _state(mgr) == [BATCH]
     assert mgr._pool[BATCH].status == PoolStampStatus.RESERVED
     assert mgr.release_reserved_stamp(BATCH) is not None

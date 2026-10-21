@@ -627,17 +627,22 @@ class StampPoolManager:
                             unreadable_ids.add(batch_id)
                         continue
                     if record is not None and record.get("owner") != POOL_OWNER:
-                        logger.error(
-                            f"Pool state lists {batch_id[:16]}..., but it is registered to "
-                            f"{str(record.get('owner'))[:16]}; not importing it, dropping it "
-                            "from pool state (an earlier pool-state save probably failed)"
-                        )
+                        owner_prefix = str(record.get("owner"))[:16]
                         held = self._pool.get(batch_id)
                         if held is not None and held.status == PoolStampStatus.RESERVED:
                             # Mid-acquire: release_reserved_stamp must still
                             # find it, or a paid caller gets nothing.
+                            logger.error(
+                                f"Pool batch {batch_id[:16]}... is registered to {owner_prefix} "
+                                "but RESERVED for an acquire in progress; left for that acquire"
+                            )
                             valid_ids.add(batch_id)
                         else:
+                            logger.error(
+                                f"Pool state lists {batch_id[:16]}..., but it is registered to "
+                                f"{owner_prefix}; not importing it, dropping it from pool state "
+                                "(an earlier pool-state save probably failed)"
+                            )
                             self._pool.pop(batch_id, None)
                         continue
 
