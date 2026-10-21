@@ -272,6 +272,11 @@ class _InternalsUnavailable(Exception):
     """FastAPI's internals do not have the shape this check expects."""
 
 
+# Errors that mean FastAPI's internals changed shape, as opposed to a problem
+# with one request.
+_INTERNALS_ERRORS = (_InternalsUnavailable, AttributeError, TypeError, ImportError, KeyError)
+
+
 def _route_for_validation(request: Request):
     """The matched route as FastAPI's request handler sees it.
 
@@ -340,6 +345,29 @@ async def _route_validation_errors(request: Request) -> list:
 
     route = _route_for_validation(request)
     body = await _received_body(request, route)
+    try:
+        return await _validate_params(request, route, body, request_params_to_args, request_body_to_args)
+    finally:
+        await _rewind_uploads(body)
+
+
+async def _rewind_uploads(body) -> None:
+    """Put every uploaded file back at its start.
+
+    For a field typed `bytes = File()` or `list[bytes]`, request_body_to_args
+    reads the UploadFile. FastAPI's own validation pass then reads the same
+    cached FormData, and would get an empty file without this rewind. Runs
+    whether validation passed or failed.
+    """
+    from starlette.datastructures import FormData, UploadFile
+    if not isinstance(body, FormData):
+        return
+    for _, value in body.multi_items():
+        if isinstance(value, UploadFile):
+            await value.seek(0)
+
+
+async def _validate_params(request: Request, route, body, request_params_to_args, request_body_to_args) -> list:
     embed = route._embed_body_fields
     errors: list = []
 
@@ -371,7 +399,9 @@ async def _validate_before_payment(request: Request) -> None:
     from fastapi.exceptions import RequestValidationError
     try:
         errors = await _route_validation_errors(request)
-    except Exception as e:
+    except _INTERNALS_ERRORS as e:
+        # FastAPI's internals do not have the shape this check expects. Warn
+        # once per process; FastAPI still validates after the payment step.
         if not _PREVALIDATION_WARNED:
             _PREVALIDATION_WARNED = True
             logger.warning(
@@ -379,6 +409,12 @@ async def _validate_before_payment(request: Request) -> None:
                 "malformed requests are checked after the payment step until this is fixed",
                 type(e).__name__, e,
             )
+        return
+    except Exception as e:
+        # Anything else (for example the client disconnecting while the body is
+        # read) concerns this request only: skip the early check for it, without
+        # the warning, so a later real change in FastAPI is still reported.
+        logger.debug("x402: early validation skipped for this request (%s: %s)", type(e).__name__, e)
         return
     if errors:
         raise RequestValidationError(errors)

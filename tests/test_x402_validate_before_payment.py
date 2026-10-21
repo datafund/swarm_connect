@@ -184,3 +184,76 @@ def test_the_early_check_does_not_fall_back_on_this_fastapi(x402_on, monkeypatch
     with caplog.at_level(logging.WARNING, logger=dependency.logger.name):
         TestClient(_app()).post("/api/v1/stamps/", json={"depth": 17})
     assert dependency._PREVALIDATION_WARNED is False
+
+
+def test_a_bytes_file_field_still_receives_the_whole_upload(x402_on):
+    """For `bytes = File()`, validation reads the UploadFile. The early check
+    must leave it at the start, or the handler gets an empty file."""
+    from fastapi import APIRouter, File
+    received = {}
+
+    async def probe(file: bytes = File(...), files: list[bytes] = File(...)):
+        received["file"] = file
+        received["files"] = files
+        return {}
+
+    router = APIRouter(dependencies=[Depends(require_x402_payment)])
+    router.add_api_route("/api/v1/data/", probe, methods=["POST"])
+    app = FastAPI()
+    app.include_router(router)
+    app.add_middleware(X402Middleware, facilitator_client=MagicMock())
+    content = bytes(range(256)) * 4
+    with patch.object(dependency, "check_rate_limit", return_value=(True, None, {"requests_made": 1, "limit": 3})):
+        r = TestClient(app).post(
+            "/api/v1/data/", headers={"X-Payment-Mode": "free"},
+            files=[("file", ("a.bin", content)), ("files", ("b.bin", content)), ("files", ("c.bin", b"xyz"))],
+        )
+    assert r.status_code == 200, r.text
+    assert received["file"] == content
+    assert received["files"] == [content, b"xyz"]
+
+
+def test_uploads_are_rewound_when_validation_fails():
+    import asyncio
+    from io import BytesIO
+    from starlette.datastructures import FormData, UploadFile
+    upload = UploadFile(BytesIO(b"abc"), filename="a")
+
+    async def run():
+        await upload.read()
+        await dependency._rewind_uploads(FormData([("file", upload)]))
+        return await upload.read()
+
+    assert asyncio.run(run()) == b"abc"
+
+
+class TestTransientFailure:
+    @pytest.fixture(autouse=True)
+    def _reset_warning(self, monkeypatch):
+        monkeypatch.setattr(dependency, "_PREVALIDATION_WARNED", False)
+
+    def test_a_request_level_error_skips_the_check_once_without_latching(self, x402_on, caplog):
+        from starlette.requests import ClientDisconnect
+        client = TestClient(_app())
+        with caplog.at_level(logging.DEBUG, logger=dependency.logger.name):
+            with patch.object(dependency, "_route_validation_errors", side_effect=ClientDisconnect()):
+                r1 = client.post("/api/v1/stamps/", json={"depth": 99})
+            r2 = client.post("/api/v1/stamps/", json={"depth": 99})
+        assert r1.status_code == 402, "that one request falls back to the old order"
+        assert r2.status_code == 422, "the next request is checked again"
+        assert dependency._PREVALIDATION_WARNED is False
+        assert not [rec for rec in caplog.records if rec.levelno >= logging.WARNING
+                    and "validate" in rec.getMessage().lower()]
+        assert any(rec.levelno == logging.DEBUG and "skipped" in rec.getMessage() for rec in caplog.records)
+
+    def test_a_later_real_break_is_still_reported(self, x402_on, caplog):
+        from starlette.requests import ClientDisconnect
+        client = TestClient(_app())
+        with caplog.at_level(logging.WARNING, logger=dependency.logger.name):
+            with patch.object(dependency, "_route_validation_errors", side_effect=ClientDisconnect()):
+                client.post("/api/v1/stamps/", json={"depth": 99})
+            with patch.object(dependency, "_route_validation_errors", side_effect=AttributeError("gone")):
+                client.post("/api/v1/stamps/", json={"depth": 99})
+        assert dependency._PREVALIDATION_WARNED is True
+        assert len([rec for rec in caplog.records if rec.levelno == logging.WARNING
+                    and "validate" in rec.getMessage().lower()]) == 1
