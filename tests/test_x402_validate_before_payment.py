@@ -257,3 +257,60 @@ class TestTransientFailure:
         assert dependency._PREVALIDATION_WARNED is True
         assert len([rec for rec in caplog.records if rec.levelno == logging.WARNING
                     and "validate" in rec.getMessage().lower()]) == 1
+
+
+BAD_MB = ["abc", "100.0", "0"]
+
+
+@pytest.mark.parametrize("mb", BAD_MB)
+def test_unpaid_bad_topup_amount_gets_the_handlers_422_before_402(x402_on, mb):
+    r = TestClient(_app()).post(f"/api/v1/chunks/credit?mb={mb}")
+    assert r.status_code == 422, r.text
+    assert r.json()["detail"] == f"'mb' must be a whole number of megabytes, got {mb!r}"
+    x402_on.assert_not_awaited()  # never priced
+
+
+@pytest.mark.parametrize("mb", BAD_MB)
+def test_free_tier_bad_topup_amount_does_not_use_a_slot(x402_on, mb):
+    spy = MagicMock(side_effect=check_rate_limit)
+    with patch.object(dependency, "check_rate_limit", spy):
+        r = TestClient(_app()).post(f"/api/v1/chunks/credit?mb={mb}", headers={"X-Payment-Mode": "free"})
+    assert r.status_code == 422, r.text
+    spy.assert_not_called()
+
+
+@pytest.mark.parametrize("mb", BAD_MB)
+def test_paid_bad_topup_amount_is_not_verified(x402_on, mb):
+    fac = _facilitator()
+    with patch.object(dependency, "_get_facilitator_client", return_value=fac):
+        r = TestClient(_app(fac)).post(
+            f"/api/v1/chunks/credit?mb={mb}", headers={"X-PAYMENT": create_valid_payment_header(payer=PAYER)},
+        )
+    assert r.status_code == 422, r.text
+    fac.verify.assert_not_awaited()
+    fac.settle.assert_not_awaited()
+
+
+def test_well_formed_topup_amount_still_gets_402(x402_on):
+    r = TestClient(_app()).post("/api/v1/chunks/credit?mb=100")
+    assert r.status_code == 402
+
+
+def test_the_handler_and_the_early_check_share_one_rule():
+    from app.api.endpoints import chunks as chunks_module
+    from app.services import bandwidth_credit
+    assert chunks_module.valid_topup_mb is bandwidth_credit.valid_topup_mb
+    assert dependency.valid_topup_mb is bandwidth_credit.valid_topup_mb
+
+
+def test_every_internals_fallback_is_logged_at_debug(x402_on, monkeypatch, caplog):
+    monkeypatch.setattr(dependency, "_PREVALIDATION_WARNED", False)
+    client = TestClient(_app())
+    with caplog.at_level(logging.DEBUG, logger=dependency.logger.name):
+        with patch.object(dependency, "_route_validation_errors", side_effect=AttributeError("gone")):
+            for _ in range(3):
+                client.post("/api/v1/stamps/", json={"depth": 99})
+    msgs = [rec for rec in caplog.records if "validate" in rec.getMessage().lower()
+            or "skipped" in rec.getMessage().lower()]
+    assert [rec.levelno for rec in msgs].count(logging.WARNING) == 1
+    assert [rec.levelno for rec in msgs].count(logging.DEBUG) == 2

@@ -51,6 +51,22 @@ def parse_topup_mb(raw) -> Optional[int]:
         return None
 
 
+def valid_topup_mb(raw) -> Optional[int]:
+    """The top-up amount POST /chunks/credit accepts, or None when it refuses it
+    with 422: not a plain integer (parse_topup_mb), or below 1.
+
+    The endpoint and the x402 dependency both apply this one rule, so a value the
+    endpoint would refuse is refused before payment too (#427).
+    """
+    mb = parse_topup_mb(raw)
+    return mb if mb is not None and mb >= 1 else None
+
+
+def invalid_topup_mb_detail(raw) -> str:
+    """The 422 detail for an amount valid_topup_mb refuses."""
+    return f"'mb' must be a whole number of megabytes, got {raw!r}"
+
+
 def effective_topup_mb(mb: int) -> int:
     """Apply the configured minimum top-up.
 

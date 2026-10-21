@@ -22,6 +22,7 @@ from x402.facilitator import FacilitatorClient
 from app.core.config import settings
 from app.core.client_ip import client_key
 from app.services.metrics import x402_payments_total
+from app.services.bandwidth_credit import invalid_topup_mb_detail, valid_topup_mb
 from app.services.stamp_ownership import normalize_address
 from app.x402.pricing import get_price_quote
 from app.x402.ratelimit import check_rate_limit, get_rate_limit_headers, get_free_tier_stats
@@ -409,6 +410,9 @@ async def _validate_before_payment(request: Request) -> None:
                 "malformed requests are checked after the payment step until this is fixed",
                 type(e).__name__, e,
             )
+        else:
+            logger.debug("x402: early validation skipped, FastAPI internals unavailable (%s: %s)",
+                         type(e).__name__, e)
         return
     except Exception as e:
         # Anything else (for example the client disconnecting while the body is
@@ -418,6 +422,24 @@ async def _validate_before_payment(request: Request) -> None:
         return
     if errors:
         raise RequestValidationError(errors)
+
+
+def _check_before_payment(request: Request) -> None:
+    """Route rules that FastAPI's parameter validation cannot express, applied
+    before payment as well as in the handler (#427).
+
+    POST /chunks/credit takes `mb` as a string on purpose (#260/#261), so FastAPI
+    accepts "abc", "100.0" or "0" and the handler refuses them with 422. The
+    same rule (valid_topup_mb) and the same 422 apply here, so such a request is
+    not priced, counted against the free tier or verified first.
+    """
+    # Keyed to the handler rather than the path, so the rule applies exactly
+    # where the handler that enforces it is mounted.
+    from app.api.endpoints.chunks import top_up_credit
+    if getattr(request.scope.get("route"), "endpoint", None) is top_up_credit:
+        raw = request.query_params.get("mb")
+        if valid_topup_mb(raw) is None:
+            raise HTTPException(status_code=422, detail=invalid_topup_mb_detail(raw))
 
 
 async def settle_payment_if_offered(request: Request) -> None:
@@ -474,6 +496,7 @@ async def require_x402_payment(request: Request) -> None:
     # it is priced, before a 402, before it uses a free-tier slot, and before a
     # payment is verified or reserved.
     await _validate_before_payment(request)
+    _check_before_payment(request)
 
     # No pay-to balance check here (#371). With x402 the facilitator submits
     # the transfer and pays its gas; the pay-to address never sends anything.
