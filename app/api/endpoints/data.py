@@ -33,7 +33,15 @@ from app.services.swarm_api import (
 )
 from app.core.config import settings
 from app.services.stamp_ownership import stamp_ownership_manager
-from app.services.signed_auth import OwnerProofError, consume_owner_proof, verify_owner_proof
+from app.services.signed_auth import (
+    OwnerProofError,
+    OwnerProofReservation,
+    confirm_owner_proof,
+    release_owner_proof,
+    reserve_owner_proof,
+    verify_owner_proof,
+)
+from app.services.spend_budget import spend_certainly_did_not_happen
 from app.services.provenance import (
     get_provenance_service,
     DocumentValidationError,
@@ -151,24 +159,29 @@ def _check_stamp_access(
     stamp_id: str,
     owner_timestamp: Optional[str],
     owner_signature: Optional[str],
-) -> None:
+) -> Optional[OwnerProofReservation]:
     """Raise unless the caller may upload to stamp_id.
 
     The caller is identified by the x402 payer on a paid request, or by a
     signed owner proof (#384). The proof is only examined when the payer alone
-    is not enough, so a proof is not consumed by a request that did not need it.
+    is not enough, so a proof is not touched by a request that did not need it.
+
+    Returns the reservation of the owner proof that granted access, or None.
+    The caller settles it through _upload_to_bee and releases it in a finally
+    block (#470).
     """
     x402_payer = getattr(request.state, 'x402_payer', None)
     x402_mode = getattr(request.state, 'x402_mode', None)
+    reservation = None
     allowed, reason = stamp_ownership_manager.check_access(stamp_id, x402_payer, x402_mode)
     if not allowed and (owner_timestamp or owner_signature):
         try:
             proof = verify_owner_proof(stamp_id, owner_timestamp, owner_signature)
             allowed, reason = stamp_ownership_manager.check_access(stamp_id, proof.signer, x402_mode)
-            # Marked used only when it grants access: a refused proof spends
-            # nothing, and non-owners' proofs do not fill the used set.
+            # Reserved only when it grants access, so non-owners' proofs do not
+            # fill the set. Spent only once Bee has stored the upload.
             if allowed:
-                consume_owner_proof(proof)
+                reservation = reserve_owner_proof(proof)
         except OwnerProofError as e:
             raise HTTPException(
                 status_code=401,
@@ -187,6 +200,27 @@ def _check_stamp_access(
                 "stamp_id": stamp_id
             }
         )
+    return reservation
+
+
+async def _upload_to_bee(reservation: Optional[OwnerProofReservation], upload):
+    """Await the Bee upload and settle the owner proof that granted it (#470).
+
+    The proof is spent once Bee returns a reference. If the upload fails, the
+    proof is given back only when Bee certainly stored nothing (it could not be
+    reached, or it answered 4xx). A timeout, a 5xx or a cancellation may have
+    stored the data, so the proof stays spent.
+    """
+    try:
+        reference = await upload
+    except BaseException as exc:
+        if spend_certainly_did_not_happen(exc):
+            release_owner_proof(reservation)
+        else:
+            confirm_owner_proof(reservation)
+        raise
+    confirm_owner_proof(reservation)
+    return reference
 
 
 _OWNER_TS_DESC = "Owner proof: unix seconds, signed in X-Owner-Signature. See 'Owned stamps' above."
@@ -226,8 +260,10 @@ async def upload_data(
     - `X-Owner-Timestamp`: current unix time in seconds (valid for 5 minutes)
     - `X-Owner-Signature`: EIP-191 `personal_sign` by the owner wallet of
       `swarm-connect-owner-upload:<stamp_id in lowercase>:<timestamp>`
-    - Each proof is accepted once; sign a new one per upload. It is a bearer
-      credential for one upload (not bound to the file): do not log or share it.
+    - Each proof buys one upload; sign a new one per upload. It is spent only
+      when Bee stores the upload. If the request fails before that, you can
+      retry with the same proof while it is fresh. It is a bearer credential
+      for one upload (not bound to the file): do not log or share it.
       A rejected proof
       returns **401** `OWNER_PROOF_INVALID`; a valid proof from another wallet
       returns **403** `STAMP_OWNERSHIP_DENIED`.
@@ -330,6 +366,10 @@ async def upload_data(
     stamp_validate_ms = None
     file_read_ms = None
     bee_upload_ms = None
+    # The owner proof that granted access, if any. Released in the finally
+    # block unless the Bee upload settled it, so a request refused or failed
+    # before Bee does not spend the proof (#470).
+    owner_proof = None
 
     try:
         # Reject an over-sized body before anything else.
@@ -366,7 +406,7 @@ async def upload_data(
 
         # Check stamp ownership
         if settings.X402_ENABLED:
-            _check_stamp_access(request, stamp_id, x_owner_timestamp, x_owner_signature)
+            owner_proof = _check_stamp_access(request, stamp_id, x_owner_timestamp, x_owner_signature)
 
         # Validate redundancy level if provided
         if redundancy is not None and redundancy not in REDUNDANCY_LEVELS:
@@ -475,13 +515,13 @@ async def upload_data(
         # Upload to Swarm
         bee_start = time.perf_counter()
         await settle_payment(request)
-        reference = await upload_data_to_swarm(
+        reference = await _upload_to_bee(owner_proof, upload_data_to_swarm(
             data=data_bytes,
             stamp_id=stamp_id,
             content_type=content_type,
             deferred=deferred,
             redundancy_level=redundancy
-        )
+        ))
         bee_upload_ms = (time.perf_counter() - bee_start) * 1000
 
         total_ms = (time.perf_counter() - start_time) * 1000
@@ -548,6 +588,8 @@ async def upload_data(
         uploads_total.labels(status="error").inc()
         logger.error(f"Unexpected error during upload: {e}")
         raise HTTPException(status_code=500, detail="Internal server error during upload")
+    finally:
+        release_owner_proof(owner_proof)
 
 
 @router.get("/{reference}")
@@ -701,8 +743,10 @@ async def upload_manifest(
     - `X-Owner-Timestamp`: current unix time in seconds (valid for 5 minutes)
     - `X-Owner-Signature`: EIP-191 `personal_sign` by the owner wallet of
       `swarm-connect-owner-upload:<stamp_id in lowercase>:<timestamp>`
-    - Each proof is accepted once; sign a new one per upload. It is a bearer
-      credential for one upload (not bound to the file): do not log or share it.
+    - Each proof buys one upload; sign a new one per upload. It is spent only
+      when Bee stores the upload. If the request fails before that, you can
+      retry with the same proof while it is fresh. It is a bearer credential
+      for one upload (not bound to the file): do not log or share it.
       A rejected proof
       returns **401** `OWNER_PROOF_INVALID`; a valid proof from another wallet
       returns **403** `STAMP_OWNERSHIP_DENIED`.
@@ -796,6 +840,10 @@ async def upload_manifest(
     tar_validate_ms = None
     tar_count_ms = None
     bee_upload_ms = None
+    # The owner proof that granted access, if any. Released in the finally
+    # block unless the Bee upload settled it, so a request refused or failed
+    # before Bee does not spend the proof (#470).
+    owner_proof = None
 
     try:
         # Reject an over-sized body before anything else.
@@ -832,7 +880,7 @@ async def upload_manifest(
 
         # Check stamp ownership
         if settings.X402_ENABLED:
-            _check_stamp_access(request, stamp_id, x_owner_timestamp, x_owner_signature)
+            owner_proof = _check_stamp_access(request, stamp_id, x_owner_timestamp, x_owner_signature)
 
         # Validate redundancy level if provided
         if redundancy is not None and redundancy not in REDUNDANCY_LEVELS:
@@ -905,9 +953,9 @@ async def upload_manifest(
         # Upload to Swarm as collection
         bee_start = time.perf_counter()
         await settle_payment(request)
-        reference = await upload_collection_to_swarm(
+        reference = await _upload_to_bee(owner_proof, upload_collection_to_swarm(
             tar_bytes, stamp_id, deferred=deferred, redundancy_level=redundancy
-        )
+        ))
         bee_upload_ms = (time.perf_counter() - bee_start) * 1000
 
         total_ms = (time.perf_counter() - start_time) * 1000
@@ -986,3 +1034,5 @@ async def upload_manifest(
         uploads_total.labels(status="error").inc()
         logger.error(f"Unexpected error during manifest upload: {e}")
         raise HTTPException(status_code=500, detail="Internal server error during manifest upload")
+    finally:
+        release_owner_proof(owner_proof)

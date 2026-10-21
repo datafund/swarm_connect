@@ -314,6 +314,19 @@ class TestOwnerProofSpentOnlyOnSuccess:
         assert manifest().status_code == 400
         self._retry_succeeds(client, h)
 
+    def test_cancellation_before_bee_does_not_spend_the_proof(self, client):
+        # A client disconnect reaches the handler as a cancellation.
+        import asyncio
+        h = self._headers()
+        with patch("app.api.endpoints.data.validate_stamp_for_upload",
+                   side_effect=asyncio.CancelledError()), \
+             patch("app.api.endpoints.data.upload_data_to_swarm", return_value="ref123") as up:
+            with pytest.raises(BaseException):
+                self._upload(client, h, "&validate_stamp=true")
+            up.assert_not_called()
+        assert signed_auth._used_owner_proofs == {}
+        self._retry_succeeds(client, h)
+
     # --- Bee may have stored the data: the proof stays spent -----------------
 
     def test_bee_timeout_spends_the_proof(self, client):
@@ -370,3 +383,100 @@ class TestOwnerProofSpentOnlyOnSuccess:
             assert up.call_count == 1
         assert results["a"].status_code == 200, results["a"].text
         self._retry_refused(client, h)
+
+
+class TestOwnerProofReservation:
+    """reserve / confirm / release on the proof set itself (#470)."""
+
+    def _verified(self):
+        return verify_owner_proof(STAMP, *_proof(OWNER))
+
+    def test_reserved_proof_is_refused_as_in_use_until_released(self):
+        ts, sig = _proof(OWNER)
+        proof = verify_owner_proof(STAMP, ts, sig)
+        hold = signed_auth.reserve_owner_proof(proof)
+        with pytest.raises(OwnerProofError, match="in use"):
+            signed_auth.reserve_owner_proof(proof)
+        with pytest.raises(OwnerProofError, match="in use"):
+            verify_owner_proof(STAMP, ts, sig)
+        signed_auth.release_owner_proof(hold)
+        assert signed_auth._used_owner_proofs == {}
+        signed_auth.reserve_owner_proof(proof)
+
+    def test_confirmed_proof_is_used_and_cannot_be_released(self):
+        proof = self._verified()
+        hold = signed_auth.reserve_owner_proof(proof)
+        signed_auth.confirm_owner_proof(hold)
+        signed_auth.release_owner_proof(hold)
+        with pytest.raises(OwnerProofError, match="already been used"):
+            signed_auth.reserve_owner_proof(proof)
+
+    def test_a_settled_hold_cannot_release_a_later_reservation(self):
+        proof = self._verified()
+        first = signed_auth.reserve_owner_proof(proof)
+        signed_auth.release_owner_proof(first)
+        second = signed_auth.reserve_owner_proof(proof)
+        signed_auth.release_owner_proof(first)  # late, duplicate release
+        with pytest.raises(OwnerProofError, match="in use"):
+            signed_auth.reserve_owner_proof(proof)
+        signed_auth.confirm_owner_proof(second)
+
+    def test_none_is_a_no_op(self):
+        signed_auth.confirm_owner_proof(None)
+        signed_auth.release_owner_proof(None)
+
+    def test_an_abandoned_reservation_expires_with_the_proof_window(self):
+        proof = self._verified()
+        signed_auth.reserve_owner_proof(proof)
+        with patch("app.services.signed_auth.time.time", return_value=proof.expires + 1):
+            other = verify_owner_proof(STAMP, *_proof(OTHER))
+            signed_auth.reserve_owner_proof(other)  # purges expired entries
+        assert proof.key not in signed_auth._used_owner_proofs
+
+
+class TestUploadToBeeSettlesTheProof:
+    """How _upload_to_bee settles the reservation for each outcome (#470)."""
+
+    def _run(self, upload):
+        import asyncio
+        from app.api.endpoints.data import _upload_to_bee
+        proof = verify_owner_proof(STAMP, *_proof(OWNER))
+        hold = signed_auth.reserve_owner_proof(proof)
+
+        async def go():
+            return await _upload_to_bee(hold, upload())
+        try:
+            result = asyncio.run(go())
+        except BaseException as exc:
+            result = exc
+        return proof, result
+
+    def _state(self, proof):
+        entry = signed_auth._used_owner_proofs.get(proof.key)
+        return entry[1] if entry else None
+
+    def test_success_confirms(self):
+        async def ok():
+            return "ref"
+        proof, result = self._run(ok)
+        assert result == "ref" and self._state(proof) == "used"
+
+    def test_connect_error_releases(self):
+        async def fail():
+            raise httpx.ConnectError("refused")
+        proof, result = self._run(fail)
+        assert isinstance(result, httpx.ConnectError) and self._state(proof) is None
+
+    def test_cancellation_during_the_bee_call_keeps_it_spent(self):
+        import asyncio
+
+        async def cancelled():
+            raise asyncio.CancelledError()
+        proof, result = self._run(cancelled)
+        assert isinstance(result, asyncio.CancelledError) and self._state(proof) == "used"
+
+    def test_unrecognised_error_keeps_it_spent(self):
+        async def missing_reference():
+            raise ValueError("API Response missing 'reference' from upload")
+        proof, _ = self._run(missing_reference)
+        assert self._state(proof) == "used"
