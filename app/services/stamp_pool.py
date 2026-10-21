@@ -28,7 +28,7 @@ from app.core.atomic_io import atomic_write_json, unreadable_state
 from app.core.config import settings
 from app.services import swarm_api
 from app.services.swarm_api import coerce_int
-from app.services.stamp_ownership import stamp_ownership_manager
+from app.services.stamp_ownership import POOL_OWNER, stamp_ownership_manager
 
 logger = logging.getLogger(__name__)
 
@@ -605,6 +605,42 @@ class StampPoolManager:
                 # would put a sold batch back up for sale.
                 known_ids &= self._load_state()
                 for batch_id in known_ids:
+                    # Never put a batch registered to someone else up for sale
+                    # (#477). _save_state swallows write errors, so a failed
+                    # save after a release leaves the sold batch in the state
+                    # file; without this check the next sync re-imported it as
+                    # AVAILABLE. Unregistered batches (pre-#312 inventory) and
+                    # the pool's own still import.
+                    try:
+                        record = stamp_ownership_manager.get_stamp_info(batch_id)
+                    except Exception as e:
+                        # Fail safe: neither import nor forget it. Kept in
+                        # state so the next sync tries again.
+                        logger.error(
+                            f"Cannot read the ownership record of pool batch {batch_id[:16]}...: "
+                            f"{e}; not importing it this cycle, keeping it in state"
+                        )
+                        if batch_id in self._pool:
+                            # Already held: nothing is imported, so leave it.
+                            valid_ids.add(batch_id)
+                        else:
+                            unreadable_ids.add(batch_id)
+                        continue
+                    if record is not None and record.get("owner") != POOL_OWNER:
+                        logger.error(
+                            f"Pool state lists {batch_id[:16]}..., but it is registered to "
+                            f"{str(record.get('owner'))[:16]}; not importing it, dropping it "
+                            "from pool state (an earlier pool-state save probably failed)"
+                        )
+                        held = self._pool.get(batch_id)
+                        if held is not None and held.status == PoolStampStatus.RESERVED:
+                            # Mid-acquire: release_reserved_stamp must still
+                            # find it, or a paid caller gets nothing.
+                            valid_ids.add(batch_id)
+                        else:
+                            self._pool.pop(batch_id, None)
+                        continue
+
                     # Skip if already in pool
                     if batch_id in self._pool:
                         valid_ids.add(batch_id)
