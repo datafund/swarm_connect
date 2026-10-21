@@ -2,9 +2,10 @@
 """
 FastAPI dependency for x402 payment verification.
 
-This dependency runs AFTER FastAPI's request validation (Pydantic models,
-path parameters, query parameters), ensuring that malformed requests
-get proper 422 validation errors instead of generic 402 Payment Required.
+FastAPI runs router dependencies BEFORE it validates the route's own
+parameters, so require_x402_payment validates them itself first
+(_validate_before_payment, #427): a malformed request gets 422, not 402, and
+is not counted against the free tier or verified with the facilitator.
 
 The middleware (middleware.py) handles post-response processing only:
 settlement and response headers.
@@ -247,6 +248,142 @@ async def _calculate_price_for_request(request: Request) -> dict:
     }
 
 
+# --- Validate the request before pricing or counting it (#427) ---------------
+#
+# The payment dependency is attached to the routers, and FastAPI runs a route's
+# dependencies before it validates the route's own parameters. Without this
+# check a malformed request was priced and then answered 402 (unpaid), used up a
+# free-tier slot (free tier), or was verified with the facilitator (paid), and
+# only then rejected with 422.
+#
+# The check repeats what FastAPI does after the dependencies: it validates the
+# path, query, header, cookie and body parameters of the matched route and its
+# sub-dependencies, with FastAPI's own functions. FastAPI has already read the
+# body into this same Request object (Starlette caches it), so nothing is read
+# twice. It uses FastAPI internals; the shapes of 0.127 and 0.141 are handled
+# below. If a future FastAPI changes them, the check is skipped with one
+# WARNING per process and the request is handled as before: FastAPI still
+# validates it, only after the payment step.
+
+_PREVALIDATION_WARNED = False
+
+
+class _InternalsUnavailable(Exception):
+    """FastAPI's internals do not have the shape this check expects."""
+
+
+def _route_for_validation(request: Request):
+    """The matched route as FastAPI's request handler sees it.
+
+    FastAPI 0.141 keeps the original APIRoute in scope["route"] and the route as
+    included (router prefix and dependencies applied) in an "effective route
+    context" in the scope. 0.127 has only scope["route"], already the included
+    copy. Both carry dependant, body_field and _embed_body_fields.
+    """
+    scope = request.scope
+    route = scope.get("route")
+    try:
+        from fastapi.routing import _get_scope_effective_route_context  # 0.141+
+    except ImportError:  # 0.127
+        effective = None
+    else:
+        effective = _get_scope_effective_route_context(scope)
+        if effective is not None and getattr(effective, "original_route", None) is not route:
+            effective = None
+    target = effective if effective is not None and getattr(effective, "dependant", None) is not None else route
+    if target is None or not all(hasattr(target, a) for a in ("dependant", "body_field", "_embed_body_fields")):
+        raise _InternalsUnavailable(f"no route details on {type(target).__name__}")
+    return target
+
+
+def _strict_content_type(route) -> bool:
+    """0.141 added strict_content_type (default True): a body sent without a
+    Content-Type is not parsed as JSON. 0.127 has no such setting and parses it."""
+    value = getattr(route, "strict_content_type", False)
+    from fastapi.datastructures import DefaultPlaceholder
+    if isinstance(value, DefaultPlaceholder):
+        value = value.value
+    return bool(value)
+
+
+async def _received_body(request: Request, route):
+    """The body as FastAPI's request handler passes it to validation."""
+    import email.message
+    from fastapi import params
+
+    body_field = route.body_field
+    if not body_field:
+        return None
+    if isinstance(body_field.field_info, params.Form):
+        return await request.form()  # cached by Starlette: the same FormData
+    body_bytes = await request.body()
+    if not body_bytes:
+        return None
+    content_type = request.headers.get("content-type")
+    if not content_type:
+        return body_bytes if _strict_content_type(route) else await request.json()
+    message = email.message.Message()
+    message["content-type"] = content_type
+    if message.get_content_maintype() == "application":
+        subtype = message.get_content_subtype()
+        if subtype == "json" or subtype.endswith("+json"):
+            return await request.json()
+    return body_bytes
+
+
+async def _route_validation_errors(request: Request) -> list:
+    """Validation errors FastAPI would report for this request, in its order."""
+    try:
+        from fastapi.dependencies.utils import request_body_to_args, request_params_to_args
+    except ImportError as e:
+        raise _InternalsUnavailable(str(e)) from e
+
+    route = _route_for_validation(request)
+    body = await _received_body(request, route)
+    embed = route._embed_body_fields
+    errors: list = []
+
+    async def walk(dependant) -> None:
+        # Mirrors solve_dependencies: sub-dependencies first, then own params.
+        for sub in dependant.dependencies:
+            await walk(sub)
+        for fields, received in (
+            (dependant.path_params, request.path_params),
+            (dependant.query_params, request.query_params),
+            (dependant.header_params, request.headers),
+            (dependant.cookie_params, request.cookies),
+        ):
+            errors.extend(request_params_to_args(fields, received)[1])
+        if dependant.body_params:
+            _, body_errors = await request_body_to_args(
+                body_fields=dependant.body_params, received_body=body, embed_body_fields=embed,
+            )
+            errors.extend(body_errors)
+
+    await walk(route.dependant)
+    return errors
+
+
+async def _validate_before_payment(request: Request) -> None:
+    """Raise the route's 422 now, before the request is priced, counted against
+    the free tier, or its payment verified."""
+    global _PREVALIDATION_WARNED
+    from fastapi.exceptions import RequestValidationError
+    try:
+        errors = await _route_validation_errors(request)
+    except Exception as e:
+        if not _PREVALIDATION_WARNED:
+            _PREVALIDATION_WARNED = True
+            logger.warning(
+                "x402: could not validate the request before payment (%s: %s); "
+                "malformed requests are checked after the payment step until this is fixed",
+                type(e).__name__, e,
+            )
+        return
+    if errors:
+        raise RequestValidationError(errors)
+
+
 async def settle_payment_if_offered(request: Request) -> None:
     """Settle an x402 payment when one is presented; otherwise let the request pass.
 
@@ -280,8 +417,9 @@ async def require_x402_payment(request: Request) -> None:
     """
     FastAPI dependency that enforces x402 payment on protected endpoints.
 
-    Runs AFTER FastAPI routing and Pydantic validation, so invalid requests
-    get 422 errors before payment is checked.
+    Runs after FastAPI routing but before FastAPI validates the route's
+    parameters, so it validates them itself first (#427): invalid requests get
+    422 before payment is checked.
 
     Stores payment state on request.state for the middleware to use:
     - request.state.x402_mode: "free-tier" | "paid" | None
@@ -295,6 +433,11 @@ async def require_x402_payment(request: Request) -> None:
     # Skip if not a protected endpoint (e.g. GET requests on these routers)
     if not is_protected_endpoint(request.method, request.url.path):
         return
+
+    # A malformed request gets its 422 before anything else here (#427): before
+    # it is priced, before a 402, before it uses a free-tier slot, and before a
+    # payment is verified or reserved.
+    await _validate_before_payment(request)
 
     # No pay-to balance check here (#371). With x402 the facilitator submits
     # the transfer and pays its gas; the pay-to address never sends anything.
