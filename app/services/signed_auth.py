@@ -113,7 +113,10 @@ def authorize_signed_request(
 # - release_owner_proof, when the request fails before Bee could have stored
 #   anything: a later validation refused it, the payment did not settle, Bee
 #   could not be reached, or Bee answered 4xx. The owner can retry with the
-#   same proof while it is fresh. When the outcome at Bee is unknown (timeout,
+#   same proof while it is fresh. A Bee 4xx (for example "batch overissued")
+#   can follow a partial store; releasing then never yields a second
+#   successful upload from one proof, but a retry may use some stamp capacity
+#   again. When the outcome at Bee is unknown (timeout,
 #   5xx, cancelled mid-upload) the proof stays spent: failing closed costs the
 #   owner one signature, failing open could give a copied proof a second upload.
 #

@@ -327,6 +327,65 @@ class TestOwnerProofSpentOnlyOnSuccess:
         assert signed_auth._used_owner_proofs == {}
         self._retry_succeeds(client, h)
 
+    def test_failed_settlement_does_not_spend_the_proof(self, client):
+        from fastapi import HTTPException
+        errors = (HTTPException(status_code=402, detail="settlement failed"), RuntimeError("boom"))
+        for age, err in enumerate(errors):
+            # A distinct timestamp per case, so each case signs its own proof.
+            ts, sig = _proof(OWNER, ts=int(time.time()) + age)
+            h = {"X-Owner-Timestamp": ts, "X-Owner-Signature": sig}
+            with patch("app.api.endpoints.data.settle_payment", side_effect=err), \
+                 patch("app.api.endpoints.data.upload_data_to_swarm", return_value="ref123") as up:
+                r = self._upload(client, h)
+                assert r.status_code in (402, 500), r.text
+                up.assert_not_called()
+            self._retry_succeeds(client, h)
+
+    # --- manifest route: Bee outcomes ------------------------------------------
+
+    @staticmethod
+    def _tar():
+        import io
+        import tarfile
+        buf = io.BytesIO()
+        with tarfile.open(fileobj=buf, mode="w") as tar:
+            info = tarfile.TarInfo("a.json")
+            data = b'{"a": 1}'
+            info.size = len(data)
+            tar.addfile(info, io.BytesIO(data))
+        return buf.getvalue()
+
+    def _manifest(self, client, h):
+        return client.post(
+            f"/api/v1/data/manifest?stamp_id={STAMP}",
+            files={"file": ("t.tar", self._tar(), "application/x-tar")},
+            headers=h,
+        )
+
+    def _bee_status_error(self, code):
+        req = httpx.Request("POST", "http://bee/bzz")
+        return httpx.HTTPStatusError("bad", request=req, response=httpx.Response(code, request=req))
+
+    def test_manifest_bee_4xx_does_not_spend_the_proof(self, client):
+        h = self._headers()
+        with patch("app.api.endpoints.data.upload_collection_to_swarm",
+                   side_effect=self._bee_status_error(400)):
+            assert self._manifest(client, h).status_code == 502
+        with patch("app.api.endpoints.data.upload_collection_to_swarm", return_value="ref123"):
+            r = self._manifest(client, h)
+        assert r.status_code == 200, r.text
+
+    def test_manifest_bee_5xx_spends_the_proof(self, client):
+        h = self._headers()
+        with patch("app.api.endpoints.data.upload_collection_to_swarm",
+                   side_effect=self._bee_status_error(500)):
+            assert self._manifest(client, h).status_code == 502
+        with patch("app.api.endpoints.data.upload_collection_to_swarm", return_value="ref123") as up:
+            r = self._manifest(client, h)
+        assert r.status_code == 401, r.text
+        assert "already been used" in r.json()["detail"]["message"]
+        up.assert_not_called()
+
     # --- Bee may have stored the data: the proof stays spent -----------------
 
     def test_bee_timeout_spends_the_proof(self, client):
@@ -420,6 +479,21 @@ class TestOwnerProofReservation:
         with pytest.raises(OwnerProofError, match="in use"):
             signed_auth.reserve_owner_proof(proof)
         signed_auth.confirm_owner_proof(second)
+
+    def test_an_expired_unsettled_hold_cannot_release_a_newer_reservation(self):
+        # The first hold's entry is purged by expiry while it is still unsettled,
+        # and another request reserves the same key. Releasing the first hold
+        # must not drop the second one.
+        proof = self._verified()
+        first = signed_auth.reserve_owner_proof(proof)
+        with patch("app.services.signed_auth.time.time", return_value=proof.expires + 1):
+            signed_auth.reserve_owner_proof(verify_owner_proof(STAMP, *_proof(OTHER)))
+        assert proof.key not in signed_auth._used_owner_proofs
+        second = signed_auth.reserve_owner_proof(proof)
+        signed_auth.release_owner_proof(first)
+        assert signed_auth._used_owner_proofs[proof.key][2] is second
+        with pytest.raises(OwnerProofError, match="in use"):
+            signed_auth.reserve_owner_proof(proof)
 
     def test_none_is_a_no_op(self):
         signed_auth.confirm_owner_proof(None)

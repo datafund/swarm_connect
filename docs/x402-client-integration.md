@@ -517,7 +517,9 @@ requests.post(
   fails before that, you can retry with the same proof while it is still fresh.
   This covers a proof from a wallet that does not own the stamp, a later
   validation error (stamp not usable, file too large, invalid TAR), a Bee node that
-  cannot be reached, and a Bee 4xx refusal.
+  cannot be reached, and a Bee 4xx refusal. A Bee 4xx (for example "batch
+  overissued") can follow a partial store. A retry with the same proof still gives
+  you at most one successful upload, but it may use some stamp capacity again.
 - If the outcome at Bee is unknown (a timeout, a Bee 5xx, or a connection closed
   during the upload), the proof stays used, because the data may have been stored.
   Sign a new proof to retry.
