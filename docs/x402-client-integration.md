@@ -107,6 +107,7 @@ Content-Type: application/json
 | `network` | Blockchain network (`base-sepolia` for testnet, `base` for mainnet) |
 | `payTo` | Gateway's receiving wallet address |
 | `asset` | USDC contract address on the network |
+| `extra` | EIP-712 domain `name` and `version` of that USDC contract. Build the signing domain from these, never from a constant: the name is `"USDC"` on `base-sepolia` but `"USD Coin"` on `base` |
 
 The price is at least the gateway's minimum (`X402_MIN_PRICE_USD`, $0.01 by
 default), so sign exactly `maxAmountRequired`, never less.
