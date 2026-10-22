@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # Local restore drill for the Bee keystore backup (#494). Uses a THROWAWAY Bee
-# identity in local Docker only: nothing here touches a real node, a real key or
-# the network (every Bee container runs with --network none).
+# identity in local Docker only: nothing here touches a real node or a real key.
+# Every Bee container and every helper that sees keystore bytes runs with
+# --network none. Pulling the images, and the two alpine containers of the
+# step-10 log-driver probe (which see no keys), may use Docker's default network.
 #
 # Steps: create an identity with a mined (non-zero) overlay nonce -> back it up with backup_bee_keys.sh while the node
 # runs (read-only mount) -> verify -> confirm a second run uploads nothing ->
@@ -53,14 +55,17 @@ PY
   echo "note: no flock on this machine; the drill uses a python fcntl stand-in"
 fi
 # no_daemon_log <pattern> <what>: every recorded `docker run` matching the
-# pattern must have used --log-driver none, and there must be at least one.
+# pattern must have used --log-driver none and --network none, and there must
+# be at least one.
 no_daemon_log() {
-  local n bad
+  local n bad nonet
   n="$(grep -c -- "$1" "$WORK/docker-argv.log")"
   bad="$(grep -- "$1" "$WORK/docker-argv.log" | grep -vc -- '--log-driver none')"
+  nonet="$(grep -- "$1" "$WORK/docker-argv.log" | grep -vc -- '--network none')"
   [ "$n" -gt 0 ] || die "no $2 run was recorded"
   [ "$bad" -eq 0 ] || die "$bad $2 run(s) without --log-driver none"
-  echo "all $n $2 run(s) used --log-driver none: the plaintext stream never reached a container log"
+  [ "$nonet" -eq 0 ] || die "$nonet $2 run(s) without --network none"
+  echo "all $n $2 run(s) used --log-driver none and --network none: the plaintext stream never reached a container log or a network"
 }
 export BEE_PASSWORD="drill-$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')"
 cleanup() {
