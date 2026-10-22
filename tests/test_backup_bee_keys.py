@@ -28,10 +28,16 @@ RECIPIENT = "age1" + "q" * 58
 # presence of rsync (and of docker/age) is fully controlled by each test.
 TOOLS = ["bash", "sh", "date", "mkdir", "mv", "rm", "cmp", "ls", "sort", "cut",
          "touch", "mktemp", "cat", "tail", "cp", "env", "tr", "sed", "head", "dirname",
-         "basename", "seq", "awk", "tar", "chown", "chmod", "id", "kill", "rmdir"]
+         "basename", "seq", "awk", "tar", "chown", "chmod", "id", "kill", "rmdir", "find",
+         "grep", "ln", "readlink", "xargs", "printf", "wc", "stat", "sleep"]
 
+# Fake docker. `volume inspect/create` work on directories under FAKE_VOLUMES.
+# `run` executes the container's command LOCALLY with every mount point (and
+# /dev/shm, the container's tmpfs) rewritten to a directory, so the real shell
+# scripts are exercised with real find/sort/tar and the sha256sum shim. The
+# /dev/shm stand-in is removed afterwards, as `--rm` would.
 DOCKER = r'''#!PY
-import hashlib, io, os, sys, tarfile
+import os, shutil, subprocess, sys, tempfile
 args = sys.argv[1:]
 with open(os.environ["SHIM_LOG"], "a") as f:
     f.write("docker " + " ".join(args) + "\n")
@@ -41,51 +47,41 @@ if args[:2] == ["volume", "inspect"]:
 if args[:2] == ["volume", "create"]:
     os.makedirs(os.path.join(root, args[2]), exist_ok=True)
     sys.exit(0)
-if args[0] == "run" and "--entrypoint" in args and "id" in args:
+if args[0] != "run":
+    sys.exit(99)
+if "--entrypoint" in args and "id" in args:
     print(os.getuid() if args[-1] == "-u" else os.getgid())
     sys.exit(0)
-if args[0] == "run" and any(a.endswith(":/dst") for a in args):
-    # Run the container's `sh -c SCRIPT` locally, with the mount points
-    # rewritten to the fake volume and the manifest path.
-    import subprocess
-    env = dict(os.environ)
-    mounts, i = {}, 1
-    while i < len(args):
-        a = args[i]
-        if a == "-v":
-            src, dst = args[i + 1].split(":")[:2]
-            mounts[dst] = src if src.startswith("/") else os.path.join(root, src)
-            i += 2
-        elif a == "-e":
-            k, v = args[i + 1].split("=", 1)
-            env[k] = v
-            i += 2
-        elif a.startswith("-"):
-            i += 1
-        else:
-            break
-    cmd = args[i + 1:]
-    script = cmd[-1]
+env = dict(os.environ)
+mounts, i = {}, 1
+while i < len(args):
+    a = args[i]
+    if a == "-v":
+        src, dst = args[i + 1].split(":")[:2]
+        mounts[dst] = src if src.startswith("/") else os.path.join(root, src)
+        i += 2
+    elif a == "-e":
+        k, v = args[i + 1].split("=", 1)
+        env[k] = v
+        i += 2
+    elif a.startswith("-"):
+        i += 1
+    else:
+        break
+cmd = args[i + 1:]
+if os.environ.get("FAKE_DOCKER_TAR_FAIL") and cmd and cmd[-1] == "tar":
+    sys.exit(1)
+shm = tempfile.mkdtemp(dir=os.environ["FAKE_SHM_ROOT"])
+mounts["/dev/shm"] = shm
+def rewrite(a):
     for dst in sorted(mounts, key=len, reverse=True):
-        script = script.replace(dst, mounts[dst])
-    sys.exit(subprocess.run(cmd[:-1] + [script], env=env).returncode)
-if args[0] == "run":
-    vol = next(a for a in args if a.endswith(":/src:ro")).split(":")[0]
-    keys = os.path.join(root, vol, "keys")
-    if "sha256sum" in " ".join(args):
-        for n in sorted(os.listdir(keys)):
-            h = hashlib.sha256(open(os.path.join(keys, n), "rb").read()).hexdigest()
-            print(f"{h}  {n}")
-        sys.exit(0)
-    if "tar" in args:
-        if os.environ.get("FAKE_DOCKER_TAR_FAIL"):
-            sys.exit(1)
-        buf = io.BytesIO()
-        with tarfile.open(fileobj=buf, mode="w") as t:
-            t.add(keys, arcname="keys")
-        sys.stdout.buffer.write(buf.getvalue())
-        sys.exit(0)
-sys.exit(99)
+        a = a.replace(dst, mounts[dst])
+    return a
+try:
+    rc = subprocess.run([rewrite(a) for a in cmd], env=env).returncode
+finally:
+    shutil.rmtree(shm, ignore_errors=True)
+sys.exit(rc)
 '''
 
 # Fake age: "encrypts" by reversing and hex-encoding, so the marker is not
@@ -156,6 +152,8 @@ class Env:
         self.remote.mkdir()
         self.tmpdir = tmp / "tmp"
         self.tmpdir.mkdir()
+        self.shm = tmp / "shm"
+        self.shm.mkdir()
         self.log = tmp / "shim.log"
         self.log.write_text("")
         self.add_volume("vol-prod")
@@ -166,6 +164,7 @@ class Env:
             "TMPDIR": str(self.tmpdir),
             "SHIM_LOG": str(self.log),
             "FAKE_VOLUMES": str(self.volumes),
+            "FAKE_SHM_ROOT": str(self.shm),
             "BEE_KEYS_NODES": "prod:vol-prod dev:vol-dev",
             "BEE_KEYS_DIR": str(self.local),
             "BEE_KEYS_REMOTE": str(self.remote),
@@ -191,7 +190,7 @@ class Env:
         return [l for l in self.log.read_text().splitlines() if l.startswith(tool + " ")]
 
     def assert_no_plaintext(self):
-        for base in (self.local, self.remote, self.tmpdir):
+        for base in (self.local, self.remote, self.tmpdir, self.shm):
             if not base.exists():
                 continue
             for p in base.rglob("*"):
@@ -345,7 +344,10 @@ def test_unchanged_keys_upload_nothing(e):
     assert r.returncode == 0, r.stderr
     assert r.stdout.count("unchanged:") == 2
     assert e.calls("rsync") == before
-    assert len(e.calls("age")) == 2, "age must not run again"
+    # The manifest and the archive come from one snapshot, so the run encrypts
+    # and then discards the unchanged archive: nothing new is kept or sent.
+    assert len(e.archives(e.local)) == 2
+    assert not list(e.local.glob("*.part"))
     assert (e.local / ".last_success").exists()
 
 
@@ -356,8 +358,8 @@ def test_changed_key_is_uploaded_again(e):
     assert r.returncode == 0, r.stderr
     assert "unchanged: dev" in r.stdout
     assert "encrypted prod" in r.stdout
-    # Same-second stamps would collide, so count calls rather than files.
-    assert len(e.calls("age")) == 3
+    # Same-second stamps would collide, so count uploads rather than files.
+    assert len(e.calls("rsync")) == 3
     e.assert_no_plaintext()
 
 
@@ -521,14 +523,16 @@ def test_refuses_bad_node_names(e, nodes):
     assert e.calls("docker") == []
 
 
-def test_prune_does_not_touch_a_node_sharing_the_prefix(e):
-    e.add_volume("vol-prodx")
+@pytest.mark.parametrize("other", ["prod-x", "prod-2", "prod-20200101"])
+def test_prune_does_not_touch_a_node_sharing_the_prefix(e, other):
     e.local.mkdir()
     for i in range(3):
-        (e.local / f"bee-keys-prod-x-2020010{i}T000000Z.tar.age").write_text("other node")
+        (e.local / f"bee-keys-{other}-2020010{i}T000000Z.tar.age").write_text("other node")
+        (e.local / f"bee-keys-{other}-2020010{i}T000000Z.sha256").write_text("other node")
     r = e.run(BEE_KEYS_NODES="prod:vol-prod", BEE_KEYS_KEEP="1")
     assert r.returncode == 0, r.stderr
-    assert len(list(e.local.glob("bee-keys-prod-x-*.tar.age"))) == 3
+    assert len(list(e.local.glob(f"bee-keys-{other}-*.tar.age"))) == 3
+    assert len(list(e.local.glob(f"bee-keys-{other}-*.sha256"))) == 3
 
 
 def test_ssh_connect_timeout_is_set_for_rsync_and_scp(tmp_path):
@@ -545,14 +549,13 @@ def test_ssh_connect_timeout_is_set_for_rsync_and_scp(tmp_path):
 def test_a_concurrent_run_is_refused_and_leaves_the_other_runs_files(e):
     e.local.mkdir()
     lock = e.local / ".lock"
-    lock.mkdir()
-    (lock / "pid").write_text(str(os.getpid()))      # a live process holds it
+    lock.symlink_to(str(os.getpid()))                 # a live process holds it
     (e.local / "bee-keys-prod-x.tar.age.part").write_text("in flight")
     r = e.run()
     assert r.returncode == 1
     assert "FAILED: another run" in r.stderr
     assert (e.local / "bee-keys-prod-x.tar.age.part").exists()
-    assert lock.exists(), "must not remove a lock it does not own"
+    assert os.readlink(lock) == str(os.getpid()), "must not remove a lock it does not own"
     assert e.calls("docker") == []
     assert not (e.local / ".last_success").exists()
 
@@ -560,16 +563,35 @@ def test_a_concurrent_run_is_refused_and_leaves_the_other_runs_files(e):
 def test_a_stale_lock_is_taken_over(e):
     e.local.mkdir()
     lock = e.local / ".lock"
-    lock.mkdir()
-    (lock / "pid").write_text("999999")               # no such process
+    lock.symlink_to("999999")                         # no such process
     r = e.run()
     assert r.returncode == 0, r.stderr
-    assert not lock.exists(), "lock released at exit"
+    assert "stale lock" in r.stdout
+    assert not os.path.lexists(lock), "lock released at exit"
+
+
+@pytest.mark.parametrize("kind", ["empty-dir", "dir-with-pid-file", "file"])
+def test_a_lock_without_a_readable_pid_is_treated_as_held(e, kind):
+    # e.g. another run between creating and naming its lock, or a lock left by
+    # an older version of this script. Never taken over automatically.
+    e.local.mkdir()
+    lock = e.local / ".lock"
+    if kind == "file":
+        lock.write_text("")
+    else:
+        lock.mkdir()
+        if kind == "dir-with-pid-file":
+            (lock / "pid").write_text("999999")
+    r = e.run()
+    assert r.returncode == 1
+    assert "FAILED:" in r.stderr and ".lock" in r.stderr
+    assert lock.exists()
+    assert e.calls("docker") == []
 
 
 def test_lock_is_released_after_a_failed_run(e):
     assert e.run(FAKE_COPY_FAIL="1").returncode == 1
-    assert not (e.local / ".lock").exists()
+    assert not os.path.lexists(e.local / ".lock")
 
 
 def test_failed_mv_is_a_failure(e):
@@ -699,3 +721,111 @@ def test_empty_input_fails_cleanly(e):
     r = restore(e, "vol-r", b"", m)
     assert r.returncode == 1
     assert not (e.volumes / "vol-r" / "keys").exists()
+
+
+# --- review round 2 ----------------------------------------------------------
+
+def decode_fake_age(path):
+    data = path.read_bytes()
+    assert data.startswith(b"FAKE-AGE\n")
+    return bytes.fromhex(data.split(b"\n", 1)[1].decode())[::-1]
+
+
+def tar_members(data):
+    import io
+    import tarfile
+    with tarfile.open(fileobj=io.BytesIO(data)) as t:
+        return {m.name: t.extractfile(m).read() for m in t.getmembers() if m.isfile()}
+
+
+def test_one_container_run_per_node_gives_archive_and_manifest(e):
+    assert e.run().returncode == 0
+    runs = [c for c in e.calls("docker") if c.startswith("docker run")]
+    assert len(runs) == 2, runs
+    for node in ("prod", "dev"):
+        archive = next(e.remote.glob(f"bee-keys-{node}-*.tar.age"))
+        files = tar_members(decode_fake_age(archive))
+        want = [f"{hashlib.sha256(files[n]).hexdigest()}  {n[len('keys/'):]}" for n in sorted(files)]
+        manifest = archive.with_name(archive.name.replace(".tar.age", ".sha256")).read_text().splitlines()
+        assert manifest == want
+
+
+def test_dotfiles_are_in_the_manifest_and_survive_a_round_trip(e):
+    (e.volumes / "vol-prod/keys/.hidden").write_text("dot")
+    assert e.run(BEE_KEYS_NODES="prod:vol-prod").returncode == 0
+    archive = next(e.remote.glob("bee-keys-prod-*.tar.age"))
+    manifest = archive.with_name(archive.name.replace(".tar.age", ".sha256"))
+    assert "  .hidden" in manifest.read_text()
+    r = restore(e, "vol-r", decode_fake_age(archive), manifest)
+    assert r.returncode == 0, r.stderr
+    hidden = e.volumes / "vol-r/keys/.hidden"
+    assert hidden.read_text() == "dot"
+    assert stat.S_IMODE(hidden.stat().st_mode) == 0o600
+
+
+def test_restore_refuses_an_extra_dotfile(e):
+    m = make_manifest(e.tmp / "m.sha256", KEYS)
+    r = restore(e, "vol-r", make_tar(dict(KEYS, **{".extra": b"x"})), m)
+    assert r.returncode == 1
+    assert not (e.volumes / "vol-r" / "keys").exists()
+
+
+def test_a_non_file_entry_in_keys_fails_the_node(e):
+    (e.volumes / "vol-prod/keys/link").symlink_to("swarm.key")
+    r = e.run()
+    assert r.returncode == 1
+    assert "FAILED: prod" in r.stderr
+    assert "unchanged" not in r.stdout
+    assert [n.split("-")[2] for n in e.archives(e.remote)] == ["dev"]
+    e.assert_no_plaintext()
+
+
+def test_empty_keys_dir_fails_the_node(e):
+    for p in (e.volumes / "vol-dev/keys").iterdir():
+        p.unlink()
+    r = e.run()
+    assert r.returncode == 1
+    assert "FAILED: dev" in r.stderr
+
+
+def test_a_new_destination_counts_as_a_change(e):
+    assert e.run().returncode == 0
+    other = e.tmp / "remote2"
+    other.mkdir()
+    r = e.run(BEE_KEYS_REMOTE=str(other) + "/")
+    assert r.returncode == 0, r.stderr
+    assert "unchanged" not in r.stdout
+    assert len(e.archives(other)) == 2
+    # and the same destination spelled differently is not a change
+    r = e.run(BEE_KEYS_REMOTE=str(other) + "//")
+    assert r.stdout.count("unchanged:") == 2
+
+
+def test_verify_uses_the_destination_of_the_last_upload(e):
+    assert e.run().returncode == 0
+    other = e.tmp / "remote2"
+    other.mkdir()
+    r = e.run("--verify", BEE_KEYS_REMOTE=str(other))
+    assert r.returncode == 1
+    assert "destination" in r.stderr
+
+
+def test_interrupted_restore_leaves_no_partial_keys(e):
+    import signal
+    import time
+    m = make_manifest(e.tmp / "m.sha256", KEYS)
+    data = make_tar(KEYS)
+    p = subprocess.Popen(["bash", str(RESTORE), "restore", "vol-r", str(m)], env=e.env,
+                         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                         start_new_session=True)
+    p.stdin.write(data[:1536])                  # header, swarm-ish file, then stall
+    p.stdin.flush()
+    keys = e.volumes / "vol-r" / "keys"
+    deadline = time.time() + 20
+    while not keys.exists() and time.time() < deadline:
+        time.sleep(0.1)
+    assert keys.exists(), "restore never started writing"
+    os.killpg(p.pid, signal.SIGINT)             # Ctrl-C reaches the whole group
+    p.wait(timeout=30)
+    assert p.returncode != 0
+    assert not keys.exists(), "partial keys/ left behind"

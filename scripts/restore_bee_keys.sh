@@ -11,9 +11,12 @@
 #       so neither the identity nor a plaintext keystore file touches the host's
 #       disk outside the volume. Refuses any volume that is not empty. The
 #       restored files must match the manifest exactly (same names, same
-#       checksums, nothing extra), be owned by the Bee image's user and be
+#       checksums, nothing extra; every regular file counts, dotfiles included), be owned by the Bee image's user and be
 #       readable by it alone; on any failure, including a truncated or corrupt
-#       input, the restored keys/ is removed so the restore can be retried.
+#       input or an interrupt (Ctrl-C, a dropped ssh session), the restored keys/
+#       is removed so the restore can be retried. If a restore was killed so hard
+#       that neither trap ran (kill -9 of both sides), clear the volume with
+#         docker run --rm -v <volume>:/dst alpine:3.20 rm -rf /dst/keys
 #
 #   BEE_PASSWORD=... restore_bee_keys.sh check <volume> <overlay> [<ethereum-address>]
 #       Starts Bee on <volume> with --network none and no blockchain endpoint
@@ -50,7 +53,7 @@ set -o pipefail
 BEE_IMAGE="${BEE_IMAGE:-ethersphere/bee:${BEE_VERSION:-2.8.1}}"
 HELPER="${BEE_KEYS_HELPER_IMAGE:-alpine:3.20}"
 CURL="${BEE_KEYS_CURL_IMAGE:-curlimages/curl:8.10.1}"
-usage() { sed -n '5,41p' "$0" >&2; exit 2; }
+usage() { sed -n '5,/^# Environment/p' "$0" >&2; exit 2; }
 
 cmd="${1:-}"; [ $# -ge 2 ] || usage
 vol="$2"
@@ -61,14 +64,18 @@ vol="$2"
 read -r -d '' RESTORE_SH <<'SH'
 set -u
 fail() { rm -rf /dst/keys; exit "$1"; }
+trap 'fail 130' INT TERM HUP PIPE
 tar -C /dst -xf - keys || fail 3
 [ -d /dst/keys ] || fail 3
 cd /dst/keys || fail 3
-got="$(for f in $(ls -A); do sha256sum -- "$f"; done | sort)"
-want="$(sort /m.sha256)"
+# Same enumeration as the backup's manifest: every regular file, dotfiles
+# included; anything else (link, directory) is refused.
+[ -z "$(find . ! -type f ! -path .)" ] || fail 4
+got="$(find . -type f | sed 's|^\./||' | LC_ALL=C sort | while IFS= read -r f; do sha256sum -- "$f"; done | LC_ALL=C sort)"
+want="$(LC_ALL=C sort /m.sha256)"
 [ -n "$want" ] && [ "$got" = "$want" ] || fail 4
 cd / || fail 5
-chown -R "$U:$G" /dst && chmod 700 /dst/keys && chmod 600 /dst/keys/* || fail 5
+chown -R "$U:$G" /dst && chmod 700 /dst/keys && find /dst/keys -type f -exec chmod 600 {} + || fail 5
 ls -lnd /dst/keys | awk -v u="$U" -v g="$G" 'substr($1,1,10) != "drwx------" || $3 != u || $4 != g { bad = 1 } END { exit bad }' || fail 5
 ls -lnA /dst/keys | awk -v u="$U" -v g="$G" '$1 == "total" { next } substr($1,1,10) != "-rw-------" || $3 != u || $4 != g { bad = 1 } END { exit bad }' || fail 5
 SH
@@ -88,9 +95,14 @@ restore)
   gid="$(docker run --rm --entrypoint id "$BEE_IMAGE" -g)" || { echo "FAILED: could not read the gid of $BEE_IMAGE" >&2; exit 1; }
   case "$uid:$gid" in *[!0-9:]*|:*|*:) echo "FAILED: unexpected uid:gid '$uid:$gid' from $BEE_IMAGE" >&2; exit 1 ;; esac
   m_abs="$(cd "$(dirname "$manifest")" && pwd)/$(basename "$manifest")"
-  # Only keys/ is extracted, whatever else the tar holds.
+  # Only keys/ is extracted, whatever else the tar holds. If this run is
+  # interrupted (Ctrl-C on the ssh pipe, a dropped session), the container's own
+  # trap removes keys/; this trap repeats that from outside in case the container
+  # was killed first. The volume was empty before, so keys/ can only be ours.
+  trap 'docker run --rm -v "$vol:/dst" "$HELPER" rm -rf /dst/keys >/dev/null 2>&1; echo "FAILED: interrupted; removed the partial keys/ from $vol" >&2; exit 1' INT TERM HUP
   docker run -i --rm -v "$vol:/dst" -v "$m_abs:/m.sha256:ro" -e U="$uid" -e G="$gid" "$HELPER" sh -c "$RESTORE_SH"
   rc=$?
+  trap - INT TERM HUP
   case "$rc" in
     0) echo "restored keys into $vol (owner $uid:$gid)" ;;
     3) echo "FAILED: could not extract keys/ from the archive on stdin (truncated or corrupt?); removed the partial keys/" >&2; exit 1 ;;

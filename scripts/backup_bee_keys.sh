@@ -155,28 +155,70 @@ copy() {  # copy <dest> <src>...  (rsync, else scp)
 umask 077
 mkdir -p "$DIR" || exit 1
 
-# One run at a time per BEE_KEYS_DIR (mkdir is atomic; flock is not on every
-# target). A lock whose process is gone is taken over.
+# One run at a time per BEE_KEYS_DIR. The lock is a symlink whose target is the
+# holder's pid: creating it is atomic and carries the pid in the same step, so
+# there is never a lock without a pid. A symlink to a dead pid is taken over;
+# anything else at that path (a directory, a file) is treated as held and must
+# be removed by hand.
 LOCK="$DIR/.lock"
-if ! mkdir "$LOCK" 2>/dev/null; then
-  holder="$(cat "$LOCK/pid" 2>/dev/null)"
-  if [ -n "$holder" ] && kill -0 "$holder" 2>/dev/null; then
+if [ ! -L "$LOCK" ] && [ -e "$LOCK" ]; then
+  # ln -s would create the link INSIDE a directory and report success.
+  echo "FAILED: $LOCK exists and is not a lock this script holds; if no run is active, remove it by hand" >&2; exit 1
+fi
+if ! ln -s "$$" "$LOCK" 2>/dev/null; then
+  holder="$(readlink "$LOCK" 2>/dev/null)"
+  case "$holder" in
+    ''|*[!0-9]*)
+      echo "FAILED: $LOCK exists and is not a lock this script holds; if no run is active, remove it by hand" >&2; exit 1 ;;
+  esac
+  if kill -0 "$holder" 2>/dev/null; then
     echo "FAILED: another run (pid $holder) holds $LOCK" >&2; exit 1
   fi
-  echo "warning: taking over a stale lock (pid ${holder:-unknown})"
-  rm -rf "$LOCK"; mkdir "$LOCK" || { echo "FAILED: could not take $LOCK" >&2; exit 1; }
+  echo "warning: taking over a stale lock (pid $holder)"
+  rm -f "$LOCK"
+  ln -s "$$" "$LOCK" 2>/dev/null || { echo "FAILED: another run took $LOCK" >&2; exit 1; }
 fi
-echo "$$" > "$LOCK/pid"
 WORK=""
 # The work dir only ever holds checksum lists and ciphertext, never plaintext keys.
-cleanup() { [ -n "$WORK" ] && rm -rf "$WORK"; rm -f "$DIR"/*.part; rm -rf "$LOCK"; }
+cleanup() {
+  [ -n "$WORK" ] && rm -rf "$WORK"
+  rm -f "$DIR"/*.part
+  [ "$(readlink "$LOCK" 2>/dev/null)" = "$$" ] && rm -f "$LOCK"
+}
 trap cleanup EXIT
 trap 'exit 1' INT TERM HUP
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/bee_keys.XXXXXX")" || exit 1
 
-# Checksums of the plaintext keystore files, read inside the helper container.
+# Runs in the helper container. It copies keys/ once into the container's
+# tmpfs (/dev/shm: memory, gone with the container), and takes both the
+# manifest and the archive from that one copy, so they always describe the
+# same files. Every regular file counts, dotfiles included; any other entry
+# (link, directory, device) fails the node because a restore would refuse it.
+# Manifest lines: "<sha256>  <name relative to keys/>", byte-sorted by name.
+# "$1" = manifest: print the manifest. "$1" = tar: write the tar to stdout and
+# the manifest to stderr, each line prefixed "MANIFEST ".
+read -r -d '' SNAP <<'SH'
+set -eu
+mkdir /dev/shm/k
+cp -a /src/keys /dev/shm/k/keys
+cd /dev/shm/k/keys
+if [ -n "$(find . ! -type f ! -path .)" ]; then echo "keys/ holds an entry that is not a regular file" >&2; exit 5; fi
+m="$(find . -type f | sed 's|^\./||' | LC_ALL=C sort | while IFS= read -r f; do sha256sum -- "$f"; done)"
+[ -n "$m" ] || { echo "keys/ is empty" >&2; exit 6; }
+if [ "$1" = tar ]; then
+  printf '%s\n' "$m" | sed 's/^/MANIFEST /' >&2
+  cd /dev/shm/k && tar -cf - keys
+else
+  printf '%s\n' "$m"
+fi
+SH
+
 live_manifest() {  # live_manifest <volume> <out>
-  docker run --rm -v "$1:/src:ro" "$IMAGE" sh -c 'cd /src/keys && sha256sum -- *' > "$2" && [ -s "$2" ]
+  docker run --rm -v "$1:/src:ro" "$IMAGE" sh -c "$SNAP" sh manifest > "$2" && [ -s "$2" ]
+}
+split_err() {  # split_err <stderr file> <manifest out>: manifest lines out, the rest to stderr
+  sed -n 's/^MANIFEST //p' "$1" > "$2"
+  grep -v '^MANIFEST ' "$1" >&2 || true
 }
 
 for pair in $NODES; do
@@ -186,7 +228,7 @@ for pair in $NODES; do
     echo "FAILED: $node: volume $vol does not exist" >&2; failed=1; continue
   fi
   man="$WORK/$node.manifest"
-  if ! live_manifest "$vol" "$man"; then
+  if [ "$MODE" = verify ] && ! live_manifest "$vol" "$man"; then
     echo "FAILED: $node: could not read keystore checksums from $vol" >&2; failed=1; continue
   fi
 
@@ -197,7 +239,10 @@ for pair in $NODES; do
     if ! cmp -s "$man" "$record"; then
       echo "FAILED: $node: checksum mismatch, live keystores differ from the backed-up copy" >&2; failed=1; continue
     fi
-    read -r want name < "$last"
+    read -r want name rec_remote < "$last"
+    if [ "$rec_remote" != "$c_remote" ]; then
+      echo "FAILED: $node: the last upload went to another destination than BEE_KEYS_REMOTE; run without --verify to upload here" >&2; failed=1; continue
+    fi
     fetched="$WORK/fetch-$node"; mkdir -p "$fetched"
     if ! copy "$fetched/" "$REMOTE/$name" "$REMOTE/${name%.tar.age}.sha256"; then
       echo "FAILED: $node: could not fetch $name from $BEE_KEYS_REMOTE" >&2; failed=1; continue
@@ -212,17 +257,22 @@ for pair in $NODES; do
     continue
   fi
 
-  if [ -f "$record" ] && [ -f "$last" ] && cmp -s "$man" "$record"; then
-    echo "unchanged: $node ($vol), nothing uploaded"; continue
-  fi
-
   base="bee-keys-${node}-${STAMP}"
   out="$DIR/$base.tar.age"
-  docker run --rm -v "$vol:/src:ro" "$IMAGE" tar -C /src -cf - keys | age "${age_args[@]}" -o "$out.part"
+  # One snapshot gives both the archive (stdout, straight into age) and its
+  # manifest (stderr), so they always match.
+  docker run --rm -v "$vol:/src:ro" "$IMAGE" sh -c "$SNAP" sh tar 2> "$WORK/$node.err" | age "${age_args[@]}" -o "$out.part"
   rc=("${PIPESTATUS[@]}")
-  if [ "${rc[0]}" -ne 0 ] || [ "${rc[1]}" -ne 0 ]; then
+  split_err "$WORK/$node.err" "$man"
+  if [ "${rc[0]}" -ne 0 ] || [ "${rc[1]}" -ne 0 ] || [ ! -s "$man" ]; then
     echo "FAILED: $node: archiving or encrypting $vol (docker exit ${rc[0]}, age exit ${rc[1]})" >&2
     rm -f "$out.part"; failed=1; continue
+  fi
+  rec_remote=""
+  [ -f "$last" ] && read -r _ _ rec_remote < "$last"
+  if [ -f "$record" ] && cmp -s "$man" "$record" && [ "$rec_remote" = "$c_remote" ]; then
+    rm -f "$out.part"
+    echo "unchanged: $node ($vol), nothing uploaded"; continue
   fi
   if ! mv "$out.part" "$out" || ! cp "$man" "$DIR/$base.sha256"; then
     echo "FAILED: $node: could not write $out or its manifest" >&2
@@ -233,13 +283,14 @@ for pair in $NODES; do
   if ! copy "$REMOTE/" "$out" "$DIR/$base.sha256"; then
     echo "FAILED: off-host copy of $out to $BEE_KEYS_REMOTE" >&2; failed=1; continue
   fi
-  cp "$man" "$record" && printf '%s %s\n' "$cipher" "$base.tar.age" > "$last" || {
+  cp "$man" "$record" && printf '%s %s %s\n' "$cipher" "$base.tar.age" "$c_remote" > "$last" || {
     echo "FAILED: $node: could not update the local record" >&2; failed=1; continue; }
   echo "copied off-host to $BEE_KEYS_REMOTE"
 
   # Keep the newest $KEEP encrypted archives (and their manifests) for this node.
-  # Names sort by their UTC stamp.
-  ls "$DIR"/bee-keys-"$node"-[0-9]*.tar.age 2>/dev/null | sort -r | tail -n +"$((KEEP + 1))" | while read -r old; do
+  # Names sort by their UTC stamp. The glob matches only this script's exact
+  # stamp, so a node whose name extends this one (prod-2) is never touched.
+  ls "$DIR"/bee-keys-"$node"-[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]T[0-9][0-9][0-9][0-9][0-9][0-9]Z.tar.age 2>/dev/null | sort -r | tail -n +"$((KEEP + 1))" | while read -r old; do
     rm -f "$old" "${old%.tar.age}.sha256"; echo "pruned $old"
   done
 done
