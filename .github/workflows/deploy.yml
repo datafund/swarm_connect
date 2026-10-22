@@ -309,6 +309,26 @@ jobs:
           # nothing in the host env file can override it.
           echo "COMPOSE_PROJECT_NAME=swarm_connect" >> .env
 
+          # === x402 configuration check (#485) ===
+          # Run the gateway's own startup validation (validate_x402_config)
+          # BEFORE the running gateway is stopped. `compose run` uses the new
+          # image with exactly the env_file and environment the new container
+          # will get; --no-deps starts nothing else, --rm removes it after.
+          # A configuration the gateway would refuse (for example
+          # X402_NETWORK=base with the testnet-only x402.org facilitator) then
+          # fails this job here, and the previous container keeps serving.
+          # Without this, the new container would be created, refuse to start,
+          # and leave the gateway down until the next good deploy.
+          # Note: the env file above already holds the new values. After a
+          # failure, fix the GitHub variables/secrets and re-run the deploy; do
+          # not force-recreate by hand (docs/mainnet-runbook.md, section 1).
+          echo "Checking x402 configuration for $BRANCH_SERVICE"
+          if ! docker compose run --rm --no-deps -T "$BRANCH_SERVICE" \
+            python -m app.x402.check_config; then
+            echo "::error title=x402 configuration refused::$BRANCH_SERVICE would refuse to start with this x402 configuration (see the message above); the running gateway was not touched"
+            exit 1
+          fi
+
           # Recreate ONLY the service this branch owns. `docker compose up -d
           # --force-recreate` with no argument recreates every service, so a push
           # to dev restarted production and vice versa. On 2026-08-25 one such
