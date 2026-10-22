@@ -8,6 +8,7 @@ import json
 import time
 from unittest.mock import patch
 
+import httpx
 import pytest
 from eth_account import Account
 from eth_account.messages import encode_defunct
@@ -212,3 +213,344 @@ class TestUploadWithOwnerProof:
         # the ownership check (and is then refused for the invalid TAR).
         assert manifest(self._headers(OTHER)).status_code == 403
         assert manifest(self._headers(OWNER)).status_code == 400
+
+
+class TestOwnerProofSpentOnlyOnSuccess:
+    """A proof is spent only by an upload that reached Bee and stored data (#470).
+
+    It used to be marked used as soon as it granted access, so a request
+    refused afterwards (bad redundancy, stamp validation, the exact size check,
+    an unreachable Bee) cost the owner the proof and they had to sign again.
+    """
+
+    @pytest.fixture
+    def ds(self, manager, x402_on):
+        manager.register_stamp(STAMP, owner=OWNER.address, mode="paid", source="direct_purchase")
+        with patch("app.api.endpoints.data.settings") as ds, \
+             patch("app.api.endpoints.data.stamp_ownership_manager", manager), \
+             patch("app.api.endpoints.data.check_upload_failure_reason", return_value=None), \
+             patch("app.api.endpoints.data.get_batch_expiry", return_value=None):
+            ds.X402_ENABLED = True
+            ds.MAX_UPLOAD_SIZE_MB = 10
+            yield ds
+
+    @pytest.fixture
+    def client(self, ds):
+        from app.main import app
+        return TestClient(app)
+
+    def _upload(self, client, headers, query="", body=b'{"data": 1}'):
+        return client.post(
+            f"/api/v1/data/?stamp_id={STAMP}{query}",
+            files={"file": ("t.json", body, "application/json")},
+            headers=headers,
+        )
+
+    def _headers(self):
+        ts, sig = _proof(OWNER)
+        return {"X-Owner-Timestamp": ts, "X-Owner-Signature": sig}
+
+    def _retry_succeeds(self, client, h):
+        with patch("app.api.endpoints.data.upload_data_to_swarm", return_value="ref123"):
+            r = self._upload(client, h)
+        assert r.status_code == 200, r.text
+
+    def _retry_refused(self, client, h, match="already been used"):
+        with patch("app.api.endpoints.data.upload_data_to_swarm", return_value="ref123") as up:
+            r = self._upload(client, h)
+        assert r.status_code == 401, r.text
+        assert r.json()["detail"]["code"] == "OWNER_PROOF_INVALID"
+        assert match in r.json()["detail"]["message"]
+        up.assert_not_called()
+
+    # --- refused before Bee: the proof is released --------------------------
+
+    def test_failed_stamp_validation_does_not_spend_the_proof(self, client):
+        from app.services.swarm_api import StampValidationError
+        h = self._headers()
+        err = StampValidationError("full", status="full", code="STAMP_FULL")
+        with patch("app.api.endpoints.data.validate_stamp_for_upload", side_effect=err):
+            assert self._upload(client, h, "&validate_stamp=true").status_code == 400
+        self._retry_succeeds(client, h)
+
+    def test_exact_size_check_does_not_spend_the_proof(self, client, ds):
+        h = self._headers()
+        ds.MAX_UPLOAD_SIZE_MB = 0  # envelope allowance passes; the file's own length does not
+        assert self._upload(client, h).status_code == 413
+        ds.MAX_UPLOAD_SIZE_MB = 10
+        self._retry_succeeds(client, h)
+
+    def test_invalid_sign_option_does_not_spend_the_proof(self, client):
+        h = self._headers()
+        assert self._upload(client, h, "&sign=bogus").status_code == 400
+        self._retry_succeeds(client, h)
+
+    def test_unreachable_bee_does_not_spend_the_proof(self, client):
+        h = self._headers()
+        with patch("app.api.endpoints.data.upload_data_to_swarm",
+                   side_effect=httpx.ConnectError("refused")):
+            assert self._upload(client, h).status_code == 502
+        self._retry_succeeds(client, h)
+
+    def test_bee_4xx_refusal_does_not_spend_the_proof(self, client):
+        h = self._headers()
+        req = httpx.Request("POST", "http://bee/bytes")
+        err = httpx.HTTPStatusError("bad", request=req, response=httpx.Response(400, request=req))
+        with patch("app.api.endpoints.data.upload_data_to_swarm", side_effect=err):
+            assert self._upload(client, h).status_code == 502
+        self._retry_succeeds(client, h)
+
+    def test_manifest_invalid_tar_does_not_spend_the_proof(self, client):
+        h = self._headers()
+
+        def manifest():
+            return client.post(
+                f"/api/v1/data/manifest?stamp_id={STAMP}",
+                files={"file": ("t.tar", b"x", "application/x-tar")},
+                headers=h,
+            )
+        assert manifest().status_code == 400
+        # The same proof is accepted again: it gets past access to the TAR check.
+        assert manifest().status_code == 400
+        self._retry_succeeds(client, h)
+
+    def test_cancellation_before_bee_does_not_spend_the_proof(self, client):
+        # A client disconnect reaches the handler as a cancellation.
+        import asyncio
+        h = self._headers()
+        with patch("app.api.endpoints.data.validate_stamp_for_upload",
+                   side_effect=asyncio.CancelledError()), \
+             patch("app.api.endpoints.data.upload_data_to_swarm", return_value="ref123") as up:
+            with pytest.raises(BaseException):
+                self._upload(client, h, "&validate_stamp=true")
+            up.assert_not_called()
+        assert signed_auth._used_owner_proofs == {}
+        self._retry_succeeds(client, h)
+
+    def test_failed_settlement_does_not_spend_the_proof(self, client):
+        from fastapi import HTTPException
+        errors = (HTTPException(status_code=402, detail="settlement failed"), RuntimeError("boom"))
+        for age, err in enumerate(errors):
+            # A distinct timestamp per case, so each case signs its own proof.
+            ts, sig = _proof(OWNER, ts=int(time.time()) + age)
+            h = {"X-Owner-Timestamp": ts, "X-Owner-Signature": sig}
+            with patch("app.api.endpoints.data.settle_payment", side_effect=err), \
+                 patch("app.api.endpoints.data.upload_data_to_swarm", return_value="ref123") as up:
+                r = self._upload(client, h)
+                assert r.status_code in (402, 500), r.text
+                up.assert_not_called()
+            self._retry_succeeds(client, h)
+
+    # --- manifest route: Bee outcomes ------------------------------------------
+
+    @staticmethod
+    def _tar():
+        import io
+        import tarfile
+        buf = io.BytesIO()
+        with tarfile.open(fileobj=buf, mode="w") as tar:
+            info = tarfile.TarInfo("a.json")
+            data = b'{"a": 1}'
+            info.size = len(data)
+            tar.addfile(info, io.BytesIO(data))
+        return buf.getvalue()
+
+    def _manifest(self, client, h):
+        return client.post(
+            f"/api/v1/data/manifest?stamp_id={STAMP}",
+            files={"file": ("t.tar", self._tar(), "application/x-tar")},
+            headers=h,
+        )
+
+    def _bee_status_error(self, code):
+        req = httpx.Request("POST", "http://bee/bzz")
+        return httpx.HTTPStatusError("bad", request=req, response=httpx.Response(code, request=req))
+
+    def test_manifest_bee_4xx_does_not_spend_the_proof(self, client):
+        h = self._headers()
+        with patch("app.api.endpoints.data.upload_collection_to_swarm",
+                   side_effect=self._bee_status_error(400)):
+            assert self._manifest(client, h).status_code == 502
+        with patch("app.api.endpoints.data.upload_collection_to_swarm", return_value="ref123"):
+            r = self._manifest(client, h)
+        assert r.status_code == 200, r.text
+
+    def test_manifest_bee_5xx_spends_the_proof(self, client):
+        h = self._headers()
+        with patch("app.api.endpoints.data.upload_collection_to_swarm",
+                   side_effect=self._bee_status_error(500)):
+            assert self._manifest(client, h).status_code == 502
+        with patch("app.api.endpoints.data.upload_collection_to_swarm", return_value="ref123") as up:
+            r = self._manifest(client, h)
+        assert r.status_code == 401, r.text
+        assert "already been used" in r.json()["detail"]["message"]
+        up.assert_not_called()
+
+    # --- Bee may have stored the data: the proof stays spent -----------------
+
+    def test_bee_timeout_spends_the_proof(self, client):
+        h = self._headers()
+        with patch("app.api.endpoints.data.upload_data_to_swarm",
+                   side_effect=httpx.ReadTimeout("slow")):
+            assert self._upload(client, h).status_code == 502
+        self._retry_refused(client, h)
+
+    def test_bee_5xx_spends_the_proof(self, client):
+        h = self._headers()
+        req = httpx.Request("POST", "http://bee/bytes")
+        err = httpx.HTTPStatusError("bad", request=req, response=httpx.Response(500, request=req))
+        with patch("app.api.endpoints.data.upload_data_to_swarm", side_effect=err):
+            assert self._upload(client, h).status_code == 502
+        self._retry_refused(client, h)
+
+    def test_failure_after_a_stored_upload_spends_the_proof(self, client):
+        h = self._headers()
+        with patch("app.api.endpoints.data.upload_data_to_swarm", return_value="ref123"), \
+             patch("app.api.endpoints.data.get_batch_expiry", side_effect=RuntimeError("boom")):
+            assert self._upload(client, h).status_code == 500
+        self._retry_refused(client, h)
+
+    def test_success_spends_the_proof(self, client):
+        h = self._headers()
+        self._retry_succeeds(client, h)
+        self._retry_refused(client, h)
+
+    # --- concurrency -----------------------------------------------------------
+
+    def test_concurrent_request_with_the_same_proof_is_refused_while_in_flight(self, client):
+        import asyncio
+        import threading
+        h = self._headers()
+        entered, finish = threading.Event(), threading.Event()
+
+        async def slow_upload(**kwargs):
+            entered.set()
+            await asyncio.to_thread(finish.wait, 10)
+            return "ref123"
+
+        results = {}
+        with patch("app.api.endpoints.data.upload_data_to_swarm", side_effect=slow_upload) as up:
+            t = threading.Thread(target=lambda: results.setdefault("a", self._upload(client, h)))
+            t.start()
+            assert entered.wait(10)
+            r = self._upload(client, h)
+            assert r.status_code == 401, r.text
+            assert r.json()["detail"]["code"] == "OWNER_PROOF_INVALID"
+            assert "in use" in r.json()["detail"]["message"]
+            finish.set()
+            t.join(10)
+            assert up.call_count == 1
+        assert results["a"].status_code == 200, results["a"].text
+        self._retry_refused(client, h)
+
+
+class TestOwnerProofReservation:
+    """reserve / confirm / release on the proof set itself (#470)."""
+
+    def _verified(self):
+        return verify_owner_proof(STAMP, *_proof(OWNER))
+
+    def test_reserved_proof_is_refused_as_in_use_until_released(self):
+        ts, sig = _proof(OWNER)
+        proof = verify_owner_proof(STAMP, ts, sig)
+        hold = signed_auth.reserve_owner_proof(proof)
+        with pytest.raises(OwnerProofError, match="in use"):
+            signed_auth.reserve_owner_proof(proof)
+        with pytest.raises(OwnerProofError, match="in use"):
+            verify_owner_proof(STAMP, ts, sig)
+        signed_auth.release_owner_proof(hold)
+        assert signed_auth._used_owner_proofs == {}
+        signed_auth.reserve_owner_proof(proof)
+
+    def test_confirmed_proof_is_used_and_cannot_be_released(self):
+        proof = self._verified()
+        hold = signed_auth.reserve_owner_proof(proof)
+        signed_auth.confirm_owner_proof(hold)
+        signed_auth.release_owner_proof(hold)
+        with pytest.raises(OwnerProofError, match="already been used"):
+            signed_auth.reserve_owner_proof(proof)
+
+    def test_a_settled_hold_cannot_release_a_later_reservation(self):
+        proof = self._verified()
+        first = signed_auth.reserve_owner_proof(proof)
+        signed_auth.release_owner_proof(first)
+        second = signed_auth.reserve_owner_proof(proof)
+        signed_auth.release_owner_proof(first)  # late, duplicate release
+        with pytest.raises(OwnerProofError, match="in use"):
+            signed_auth.reserve_owner_proof(proof)
+        signed_auth.confirm_owner_proof(second)
+
+    def test_an_expired_unsettled_hold_cannot_release_a_newer_reservation(self):
+        # The first hold's entry is purged by expiry while it is still unsettled,
+        # and another request reserves the same key. Releasing the first hold
+        # must not drop the second one.
+        proof = self._verified()
+        first = signed_auth.reserve_owner_proof(proof)
+        with patch("app.services.signed_auth.time.time", return_value=proof.expires + 1):
+            signed_auth.reserve_owner_proof(verify_owner_proof(STAMP, *_proof(OTHER)))
+        assert proof.key not in signed_auth._used_owner_proofs
+        second = signed_auth.reserve_owner_proof(proof)
+        signed_auth.release_owner_proof(first)
+        assert signed_auth._used_owner_proofs[proof.key][2] is second
+        with pytest.raises(OwnerProofError, match="in use"):
+            signed_auth.reserve_owner_proof(proof)
+
+    def test_none_is_a_no_op(self):
+        signed_auth.confirm_owner_proof(None)
+        signed_auth.release_owner_proof(None)
+
+    def test_an_abandoned_reservation_expires_with_the_proof_window(self):
+        proof = self._verified()
+        signed_auth.reserve_owner_proof(proof)
+        with patch("app.services.signed_auth.time.time", return_value=proof.expires + 1):
+            other = verify_owner_proof(STAMP, *_proof(OTHER))
+            signed_auth.reserve_owner_proof(other)  # purges expired entries
+        assert proof.key not in signed_auth._used_owner_proofs
+
+
+class TestUploadToBeeSettlesTheProof:
+    """How _upload_to_bee settles the reservation for each outcome (#470)."""
+
+    def _run(self, upload):
+        import asyncio
+        from app.api.endpoints.data import _upload_to_bee
+        proof = verify_owner_proof(STAMP, *_proof(OWNER))
+        hold = signed_auth.reserve_owner_proof(proof)
+
+        async def go():
+            return await _upload_to_bee(hold, upload())
+        try:
+            result = asyncio.run(go())
+        except BaseException as exc:
+            result = exc
+        return proof, result
+
+    def _state(self, proof):
+        entry = signed_auth._used_owner_proofs.get(proof.key)
+        return entry[1] if entry else None
+
+    def test_success_confirms(self):
+        async def ok():
+            return "ref"
+        proof, result = self._run(ok)
+        assert result == "ref" and self._state(proof) == "used"
+
+    def test_connect_error_releases(self):
+        async def fail():
+            raise httpx.ConnectError("refused")
+        proof, result = self._run(fail)
+        assert isinstance(result, httpx.ConnectError) and self._state(proof) is None
+
+    def test_cancellation_during_the_bee_call_keeps_it_spent(self):
+        import asyncio
+
+        async def cancelled():
+            raise asyncio.CancelledError()
+        proof, result = self._run(cancelled)
+        assert isinstance(result, asyncio.CancelledError) and self._state(proof) == "used"
+
+    def test_unrecognised_error_keeps_it_spent(self):
+        async def missing_reference():
+            raise ValueError("API Response missing 'reference' from upload")
+        proof, _ = self._run(missing_reference)
+        assert self._state(proof) == "used"

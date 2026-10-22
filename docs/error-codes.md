@@ -120,7 +120,7 @@ None of these responses charges the new payment.
 |---|---|---|---|
 | `FILE_TOO_LARGE` | 413 (422 from `/pricing`) | The upload, or `upload_bytes` on `/pricing`, is over the gateway's maximum upload size. | Split the data, or use chunk uploads. |
 | `DOWNLOAD_TOO_LARGE` | 413 | The content behind the reference is larger than the gateway will fetch. `detail.max_size_mb` is the limit. | Fetch it from a Swarm node directly. |
-| `OWNER_PROOF_INVALID` | 401 | An upload to an owned stamp carried an owner proof (`X-Owner-Timestamp`, `X-Owner-Signature`) that was incomplete, malformed, expired, already used, or not a valid signature. `message` says which. See [x402-client-integration.md](x402-client-integration.md#uploading-to-your-own-stamp). | Sign a fresh proof for this stamp and upload again. Each proof is accepted once. |
+| `OWNER_PROOF_INVALID` | 401 | An upload to an owned stamp carried an owner proof (`X-Owner-Timestamp`, `X-Owner-Signature`) that was incomplete, malformed, expired, in use by another request, already used, or not a valid signature. `message` says which. See [x402-client-integration.md](x402-client-integration.md#uploading-to-your-own-stamp). | Sign a fresh proof for this stamp and upload again. Each proof buys one upload, and is used up only when Bee stores it. |
 | `STAMP_OWNERSHIP_DENIED` | 403 | The stamp belongs to another payer, or is pool inventory that was not handed to you. | Use a stamp you bought or acquired. |
 | `NOTARY_NOT_ENABLED` | 400 | `sign=notary` was requested, but the notary is off. | Upload without `sign`. |
 | `NOTARY_NOT_CONFIGURED` | 400 | `sign=notary` was requested, but the notary has no key. | Upload without `sign`, or ask the operator. |

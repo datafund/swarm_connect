@@ -517,14 +517,25 @@ requests.post(
 ```
 
 - The timestamp must be within 5 minutes of the gateway's clock.
-- Each proof is accepted once. Sign a new one for every upload. A proof that is
-  refused (for example, signed by a wallet that does not own the stamp) is not used up.
+- Each proof buys one upload. Sign a new one for every upload.
+- A proof is used up only when Bee stores the upload. If the request is refused or
+  fails before that, you can retry with the same proof while it is still fresh.
+  This covers a proof from a wallet that does not own the stamp, a later
+  validation error (stamp not usable, file too large, invalid TAR), a Bee node that
+  cannot be reached, and a Bee 4xx refusal. A Bee 4xx (for example "batch
+  overissued") can follow a partial store. A retry with the same proof still gives
+  you at most one successful upload, but it may use some stamp capacity again.
+- If the outcome at Bee is unknown (a timeout, a Bee 5xx, or a connection closed
+  during the upload), the proof stays used, because the data may have been stored.
+  Sign a new proof to retry.
+- While one request is using a proof, a second request with the same proof is
+  refused with `401 OWNER_PROOF_INVALID` ("in use by another request").
 - A proof signed before the gateway last restarted is refused; sign a new one.
 - A proof is a **bearer credential** for one upload to that stamp. It is not bound to the
   file, so whoever presents it first gets the upload. Send it only over HTTPS, and do not
   log or share it.
 - The proof names the stamp, so it cannot be used for any other stamp.
-- Errors: `401 OWNER_PROOF_INVALID` (malformed, stale or reused proof);
+- Errors: `401 OWNER_PROOF_INVALID` (malformed, stale, in use or already used proof);
   `403 STAMP_OWNERSHIP_DENIED` (valid proof, but the signer does not own the stamp).
 - Owner addresses are compared case-insensitively.
 
