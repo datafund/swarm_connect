@@ -64,11 +64,19 @@ while i < len(args):
         k, v = args[i + 1].split("=", 1)
         env[k] = v
         i += 2
+    elif a in ("--log-driver", "--name", "--network", "--entrypoint"):
+        i += 2
     elif a.startswith("-"):
         i += 1
     else:
         break
 cmd = args[i + 1:]
+if os.environ.get("FAKE_DOCKER_KILL") and "-i" in args:
+    # The container dies mid-extraction (OOM kill, daemon restart): a partial
+    # keys/ stays on the volume and docker exits 137.
+    os.makedirs(os.path.join(mounts["/dst"], "keys"), exist_ok=True)
+    open(os.path.join(mounts["/dst"], "keys", "swarm.key"), "wb").write(b"partial")
+    sys.exit(137)
 if os.environ.get("FAKE_DOCKER_TAR_FAIL") and cmd and cmd[-1] == "tar":
     sys.exit(1)
 shm = tempfile.mkdtemp(dir=os.environ["FAKE_SHM_ROOT"])
@@ -121,6 +129,19 @@ for s in srcs:
     shutil.copy(s, dest)
 '''
 
+# util-linux `flock -n <fd>` for macOS: locks the open file description the
+# shell passed as <fd>, so the lock lasts until the shell closes it, as with the
+# real tool. Only the form the script uses is supported.
+FLOCK = r'''#!PY
+import fcntl, sys
+args = sys.argv[1:]
+assert args[0] == "-n" and args[1].isdigit(), args
+try:
+    fcntl.flock(int(args[1]), fcntl.LOCK_EX | fcntl.LOCK_NB)
+except BlockingIOError:
+    sys.exit(1)
+'''
+
 SHA = r'''#!PY
 import hashlib, sys
 for p in sys.argv[1:]:
@@ -131,7 +152,7 @@ for p in sys.argv[1:]:
 
 
 class Env:
-    def __init__(self, tmp: Path, rsync=True):
+    def __init__(self, tmp: Path, rsync=True, flock=True):
         self.tmp = tmp
         self.bin = tmp / "bin"
         self.bin.mkdir()
@@ -140,6 +161,10 @@ class Env:
             if real:
                 (self.bin / t).symlink_to(real)
         shims = {"docker": DOCKER, "age": AGE, "sha256sum": SHA, "scp": COPY}
+        if flock and not shutil.which("flock"):
+            shims["flock"] = FLOCK
+        elif flock:
+            (self.bin / "flock").symlink_to(shutil.which("flock"))
         if rsync:
             shims["rsync"] = COPY
         for name, body in shims.items():
@@ -546,52 +571,64 @@ def test_ssh_connect_timeout_is_set_for_rsync_and_scp(tmp_path):
     assert e2.calls("scp") and all("ConnectTimeout=" in c for c in e2.calls("scp"))
 
 
+def hold_lock(e):
+    import fcntl
+    e.local.mkdir(exist_ok=True)
+    f = open(e.local / ".lock", "a")
+    fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    return f
+
+
 def test_a_concurrent_run_is_refused_and_leaves_the_other_runs_files(e):
-    e.local.mkdir()
-    lock = e.local / ".lock"
-    lock.symlink_to(str(os.getpid()))                 # a live process holds it
+    held = hold_lock(e)                               # another run holds the lock
     (e.local / "bee-keys-prod-x.tar.age.part").write_text("in flight")
     r = e.run()
+    held.close()
     assert r.returncode == 1
     assert "FAILED: another run" in r.stderr
     assert (e.local / "bee-keys-prod-x.tar.age.part").exists()
-    assert os.readlink(lock) == str(os.getpid()), "must not remove a lock it does not own"
     assert e.calls("docker") == []
     assert not (e.local / ".last_success").exists()
 
 
-def test_a_stale_lock_is_taken_over(e):
+def test_a_leftover_unheld_lock_file_does_not_block(e):
     e.local.mkdir()
-    lock = e.local / ".lock"
-    lock.symlink_to("999999")                         # no such process
+    (e.local / ".lock").write_text("whatever an earlier run left")
     r = e.run()
     assert r.returncode == 0, r.stderr
-    assert "stale lock" in r.stdout
-    assert not os.path.lexists(lock), "lock released at exit"
-
-
-@pytest.mark.parametrize("kind", ["empty-dir", "dir-with-pid-file", "file"])
-def test_a_lock_without_a_readable_pid_is_treated_as_held(e, kind):
-    # e.g. another run between creating and naming its lock, or a lock left by
-    # an older version of this script. Never taken over automatically.
-    e.local.mkdir()
-    lock = e.local / ".lock"
-    if kind == "file":
-        lock.write_text("")
-    else:
-        lock.mkdir()
-        if kind == "dir-with-pid-file":
-            (lock / "pid").write_text("999999")
-    r = e.run()
-    assert r.returncode == 1
-    assert "FAILED:" in r.stderr and ".lock" in r.stderr
-    assert lock.exists()
-    assert e.calls("docker") == []
 
 
 def test_lock_is_released_after_a_failed_run(e):
     assert e.run(FAKE_COPY_FAIL="1").returncode == 1
-    assert not os.path.lexists(e.local / ".lock")
+    held = hold_lock(e)                               # would raise if still held
+    held.close()
+
+
+def test_lock_is_released_when_the_run_is_killed(e):
+    import signal
+    import time
+    e.local.mkdir()
+    (e.bin / "age").unlink()
+    (e.bin / "age").write_text("#!/bin/sh\nsleep 30\n")   # hang inside the run
+    (e.bin / "age").chmod(0o755)
+    env = dict(e.env)
+    p = subprocess.Popen(["bash", str(SCRIPT)], env=env, start_new_session=True,
+                         stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    deadline = time.time() + 20
+    while not e.calls("docker") and time.time() < deadline:
+        time.sleep(0.1)
+    os.killpg(p.pid, signal.SIGKILL)                   # no trap runs on SIGKILL
+    p.wait(timeout=30)
+    held = hold_lock(e)                                # the kernel released it
+    held.close()
+
+
+def test_refuses_to_run_without_flock(tmp_path):
+    e = Env(tmp_path, flock=False)
+    r = e.run()
+    assert r.returncode == 2
+    assert "flock" in r.stderr
+    assert e.calls("docker") == []
 
 
 def test_failed_mv_is_a_failure(e):
@@ -639,9 +676,9 @@ def make_manifest(path, files):
     return path
 
 
-def restore(e, vol, data, manifest):
+def restore(e, vol, data, manifest, **extra):
     args = ["bash", str(RESTORE), "restore", vol] + ([str(manifest)] if manifest else [])
-    return subprocess.run(args, env=e.env, input=data, capture_output=True, timeout=60)
+    return subprocess.run(args, env=dict(e.env, **extra), input=data, capture_output=True, timeout=60)
 
 
 def test_restore_writes_keys_owner_only(e):
@@ -811,21 +848,86 @@ def test_verify_uses_the_destination_of_the_last_upload(e):
 
 
 def test_interrupted_restore_leaves_no_partial_keys(e):
+    # tar implementations buffer differently (GNU tar reads whole 10240-byte
+    # records before extracting; busybox and bsdtar do not). The first member
+    # is large, and three full records are fed before stalling, so every tar
+    # has created keys/ and started writing a file by then.
     import signal
     import time
-    m = make_manifest(e.tmp / "m.sha256", KEYS)
-    data = make_tar(KEYS)
+    files = {"big.key": os.urandom(64 * 1024), **KEYS}
+    m = make_manifest(e.tmp / "m.sha256", files)
+    data = make_tar(files)
+    assert len(data) > 4 * 10240
     p = subprocess.Popen(["bash", str(RESTORE), "restore", "vol-r", str(m)], env=e.env,
                          stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                          start_new_session=True)
-    p.stdin.write(data[:1536])                  # header, swarm-ish file, then stall
+    p.stdin.write(data[:3 * 10240])
     p.stdin.flush()
     keys = e.volumes / "vol-r" / "keys"
     deadline = time.time() + 20
-    while not keys.exists() and time.time() < deadline:
+    while not (keys / "big.key").exists() and time.time() < deadline:
         time.sleep(0.1)
-    assert keys.exists(), "restore never started writing"
+    assert (keys / "big.key").exists(), "restore never started writing"
     os.killpg(p.pid, signal.SIGINT)             # Ctrl-C reaches the whole group
     p.wait(timeout=30)
     assert p.returncode != 0
     assert not keys.exists(), "partial keys/ left behind"
+
+
+# --- review round 3 ----------------------------------------------------------
+
+def test_helper_runs_that_carry_keystore_bytes_have_no_container_log(e):
+    assert e.run().returncode == 0
+    assert e.run("--verify").returncode == 0
+    m = make_manifest(e.tmp / "m.sha256", KEYS)
+    assert restore(e, "vol-r", make_tar(KEYS), m).returncode == 0
+    runs = [c.split() for c in e.calls("docker") if c.startswith("docker run")]
+    sensitive = [a for a in runs if any(x.endswith(":/src:ro") for x in a) or "-i" in a]
+    assert len(sensitive) >= 5          # 2 backup, 2 verify, 1 restore
+    for argv in sensitive:
+        i = argv.index("--log-driver")
+        assert argv[i + 1] == "none", argv
+
+
+def test_container_killed_mid_restore_is_cleaned_up(e):
+    m = make_manifest(e.tmp / "m.sha256", KEYS)
+    r = restore(e, "vol-r", make_tar(KEYS), m, FAKE_DOCKER_KILL="1")
+    assert r.returncode == 1
+    assert b"removed" in r.stderr
+    assert not (e.volumes / "vol-r" / "keys").exists()
+
+
+def test_a_new_recipient_counts_as_a_change(e):
+    assert e.run().returncode == 0
+    r = e.run(BEE_KEYS_AGE_RECIPIENT="age1" + "z" * 58)
+    assert r.returncode == 0, r.stderr
+    assert "unchanged" not in r.stdout
+    assert all("age1" + "z" * 58 in c for c in e.calls("age")[-2:])
+    # the same recipients in another order are not a change
+    two = f"{RECIPIENT} age1{'z' * 58}"
+    assert e.run(BEE_KEYS_AGE_RECIPIENT=two).returncode == 0
+    r = e.run(BEE_KEYS_AGE_RECIPIENT=f"age1{'z' * 58} {RECIPIENT}")
+    assert r.stdout.count("unchanged:") == 2
+
+
+def test_failed_copies_do_not_pile_up_local_archives(e):
+    e.local.mkdir()
+    for i in range(5):
+        (e.local / f"bee-keys-prod-2020010{i}T000000Z.tar.age").write_text("old")
+        (e.local / f"bee-keys-prod-2020010{i}T000000Z.sha256").write_text("old")
+    r = e.run(FAKE_COPY_FAIL="1", BEE_KEYS_KEEP="2", BEE_KEYS_NODES="prod:vol-prod")
+    assert r.returncode == 1
+    kept = e.archives(e.local)
+    assert len(kept) == 2
+    assert "bee-keys-prod-20200104T000000Z.tar.age" in kept
+    assert any(n.startswith("bee-keys-prod-20") and not n.startswith("bee-keys-prod-2020") for n in kept), \
+        "the archive just written must be kept"
+
+
+def test_keep_one_never_removes_the_archive_just_written_on_failure(e):
+    e.local.mkdir()
+    (e.local / "bee-keys-prod-20991231T235959Z.tar.age").write_text("clock skew: newer than now")
+    r = e.run(FAKE_COPY_FAIL="1", BEE_KEYS_KEEP="1", BEE_KEYS_NODES="prod:vol-prod")
+    assert r.returncode == 1
+    kept = e.archives(e.local)
+    assert len([n for n in kept if not n.startswith("bee-keys-prod-2099")]) == 1

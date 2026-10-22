@@ -99,8 +99,16 @@ restore)
   # interrupted (Ctrl-C on the ssh pipe, a dropped session), the container's own
   # trap removes keys/; this trap repeats that from outside in case the container
   # was killed first. The volume was empty before, so keys/ can only be ours.
-  trap 'docker run --rm -v "$vol:/dst" "$HELPER" rm -rf /dst/keys >/dev/null 2>&1; echo "FAILED: interrupted; removed the partial keys/ from $vol" >&2; exit 1' INT TERM HUP
-  docker run -i --rm -v "$vol:/dst" -v "$m_abs:/m.sha256:ro" -e U="$uid" -e G="$gid" "$HELPER" sh -c "$RESTORE_SH"
+  clear_keys() {
+    if docker run --rm -v "$vol:/dst" "$HELPER" rm -rf /dst/keys >/dev/null 2>&1; then
+      echo "removed the partial keys/ from $vol"
+    else
+      echo "could NOT remove the partial keys/ from $vol; clear it with: docker run --rm -v $vol:/dst $HELPER rm -rf /dst/keys"
+    fi
+  }
+  trap 'echo "FAILED: interrupted; $(clear_keys)" >&2; exit 1' INT TERM HUP
+  # --log-driver none: nothing the extraction prints may reach the daemon's log.
+  docker run -i --rm --log-driver none -v "$vol:/dst" -v "$m_abs:/m.sha256:ro" -e U="$uid" -e G="$gid" "$HELPER" sh -c "$RESTORE_SH"
   rc=$?
   trap - INT TERM HUP
   case "$rc" in
@@ -108,7 +116,9 @@ restore)
     3) echo "FAILED: could not extract keys/ from the archive on stdin (truncated or corrupt?); removed the partial keys/" >&2; exit 1 ;;
     4) echo "FAILED: restored files do not match $manifest (checksum, missing or extra file); removed them" >&2; exit 1 ;;
     5) echo "FAILED: could not set or confirm owner $uid:$gid and modes 700/600; removed the restored keys/" >&2; exit 1 ;;
-    *) echo "FAILED: restore into $vol (exit $rc)" >&2; exit 1 ;;
+    *) # docker itself failed (125), the container was killed (137, OOM, daemon
+       # restart): its own cleanup may not have run.
+       echo "FAILED: restore into $vol (exit $rc); $(clear_keys)" >&2; exit 1 ;;
   esac
   ;;
 check)
@@ -121,7 +131,9 @@ check)
   n=$((16#${overlay:0:8})); bits=""
   for i in $(seq 31 -1 1); do bits="$bits$(( (n >> i) & 1 ))"; done
   name="bee-identity-check-$$"; probe="bee-identity-probe-$$"
-  trap 'docker rm -f "$name" "$probe" >/dev/null 2>&1; docker volume rm -f "$probe" >/dev/null 2>&1' EXIT
+  # Stop before removing, so Bee shuts its statestore (leveldb) down cleanly on
+  # the volume that goes to production.
+  trap 'docker stop -t 30 "$name" "$probe" >/dev/null 2>&1; docker rm -f "$name" "$probe" >/dev/null 2>&1; docker volume rm -f "$probe" >/dev/null 2>&1' EXIT
 
   # bee_addresses <container> <volume> [start flags...]: start a networkless
   # ultra-light Bee and print its /addresses JSON.
@@ -155,7 +167,7 @@ check)
 
   # Nonce-0 probe on a throwaway copy of keys/ only, so the volume under test is untouched.
   docker volume create "$probe" >/dev/null || exit 1
-  docker run --rm -v "$vol:/src:ro" -v "$probe:/dst" "$HELPER" sh -c 'cp -a /src/keys /dst/ && chown "$(stat -c %u:%g /src/keys)" /dst' || {
+  docker run --rm --log-driver none -v "$vol:/src:ro" -v "$probe:/dst" "$HELPER" sh -c 'cp -a /src/keys /dst/ && chown "$(stat -c %u:%g /src/keys)" /dst' || {
     echo "FAILED: could not copy keys/ for the nonce probe" >&2; exit 1; }
   zero="$(bee_addresses "$probe" "$probe" --neighborhood-suggester= | field overlay)" || exit 1
   [ -n "$zero" ] || { echo "FAILED: nonce probe gave no overlay" >&2; exit 1; }
