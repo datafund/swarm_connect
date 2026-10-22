@@ -154,11 +154,16 @@ It is separate from `backup_state.sh`, not a flag on it. The wallet class needs 
 apt-get install -y age util-linux     # util-linux provides flock(1), which the script requires
 install -m 0700 /opt/swarm_connect/scripts/backup_bee_keys.sh  /usr/local/sbin/swarm_connect_backup_bee_keys
 install -m 0700 /opt/swarm_connect/scripts/restore_bee_keys.sh /usr/local/sbin/swarm_connect_restore_bee_keys
-cat > /etc/cron.d/swarm_connect_backup_bee_keys <<'CRON'
-SHELL=/bin/bash
+# settings: one root-only file, read by the script itself on every run (cron and by hand)
+install -d -m 0700 /etc/swarm_connect
+install -m 0600 /dev/null /etc/swarm_connect/bee_keys.env
+cat > /etc/swarm_connect/bee_keys.env <<'ENV'
 BEE_KEYS_REMOTE=<bee-keys-backup-user>@<backup-host>:<bee-keys-path>
 BEE_KEYS_AGE_RECIPIENT=<bee-keys-age-recipient>
 BACKUP_REMOTE=<the same value as the gateway-state cron line>
+ENV
+cat > /etc/cron.d/swarm_connect_backup_bee_keys <<'CRON'
+SHELL=/bin/bash
 # on change: hourly, uploads only when a keystore file changed
 40 * * * * root /usr/local/sbin/swarm_connect_backup_bee_keys >> /var/log/swarm_connect_backup_bee_keys.log 2>&1
 # weekly re-check by checksum: live keys and the remote copy against the record
@@ -169,11 +174,13 @@ CRON
 
 root needs an ssh key authorised on `<backup-host>` for `<bee-keys-backup-user>`, and `<backup-host>` in `/root/.ssh/known_hosts`. The copy runs with `BatchMode=yes`, so an unknown host key fails the run instead of prompting. Add the key once by hand (`ssh <bee-keys-backup-user>@<backup-host> true`, and compare the fingerprint with one obtained out of band).
 
+The script reads `/etc/swarm_connect/bee_keys.env` on every run, so a manual run (`/usr/local/sbin/swarm_connect_backup_bee_keys`, or with `--verify`) uses exactly what cron uses; there is nothing to export first. It refuses the file if root does not own it or if group or others can write it, and values in the file override the environment. `BEE_KEYS_ENV_FILE` names another file. The file holds only public values: the age recipient is the public half, never the `AGE-SECRET-KEY-…` identity, which the script refuses.
+
 `BACKUP_REMOTE` is repeated in this file only so the script can refuse a shared destination. Without it, the script logs a warning. Both values must be absolute (`/path` or `[user@]host:/path`). The script refuses a relative or empty remote path, because it cannot compare one. It compares them after dropping `user@`, lower-casing the host and collapsing `//`, `/./` and a trailing `/`. The check is best effort: it cannot tell that an ssh alias and the host name it points to are the same host. Keep the two paths distinct yourself. Use a different remote path from the gateway-state archives, and if possible a different account with its own ssh key. The defaults read the compose volumes `swarm_connect_bee-data` (node `prod`) and `swarm_connect_bee-dev-data` (node `dev`). Set `BEE_KEYS_NODES` to change them.
 
-**What a run does.** Each run starts one helper container per node. The container copies `keys/` once into its own tmpfs (memory, gone with the container), and takes both the archive and its manifest from that copy, so the two always describe the same files. The manifest is the sha256 of every regular file in `keys/`, dotfiles included; any other kind of entry fails the node. The archive is encrypted on the way out. Every helper run that carries keystore bytes or the manifest uses `--log-driver none`, because the default `json-file` driver would otherwise copy the container's stdout (the plaintext tar) to `/var/lib/docker/containers/` on the host disk, and a `journald` or `syslog` driver would keep it or ship it off the host. The run compares the manifest with the one recorded at the last successful upload (`/var/backups/swarm_connect_bee_keys/<node>.manifest`). It also compares the destination and the set of age recipients with those recorded in `<node>.last`. If none of them changed, it discards the new ciphertext and uploads nothing. A different `BEE_KEYS_REMOTE` or `BEE_KEYS_AGE_RECIPIENT` counts as a change, so moving the destination or rotating the age key uploads a fresh copy on the next run. Otherwise it keeps `bee-keys-<node>-<stamp>.tar.age` and its manifest `bee-keys-<node>-<stamp>.sha256` (checksums only, not secret), copies both off-host with rsync (or scp when rsync is missing), and only then updates the record. A failed copy is therefore retried on the next run. Old local archives are pruned to the newest `BEE_KEYS_KEEP` (default 3) after failed copies too, so a backup host that stays unreachable cannot fill the disk; the archive just written is always kept. `--verify` recomputes the live checksums and fetches the remote ciphertext and manifest back from the destination of the last upload; if `BEE_KEYS_REMOTE` now names another destination, it fails and asks for a normal run first. It compares the live checksums with the record and the ciphertext with the sha256 recorded at upload. It needs no decryption key and uploads nothing.
+**What a run does.** Each run starts one helper container per node. The container copies `keys/` once into its own tmpfs (memory, gone with the container), and takes both the archive and its manifest from that copy, so the two always describe the same files. tmpfs pages can be written to swap, and the gateway hosts have swap. Under a non-default Docker `default-ipc-mode: host`, `/dev/shm` would be the host's own and the copy could outlive the container. The keystore files are scrypt-encrypted with the keystore password, so the exposure is small. If it matters, run the hosts without swap (or with encrypted swap) and keep Docker's default IPC mode. The manifest is the sha256 of every regular file in `keys/`, dotfiles included; any other kind of entry fails the node. The archive is encrypted on the way out. Every helper run that carries keystore bytes or the manifest uses `--log-driver none`, because the default `json-file` driver would otherwise copy the container's stdout (the plaintext tar) to `/var/lib/docker/containers/` on the host disk, and a `journald` or `syslog` driver would keep it or ship it off the host. The run compares the manifest with the one recorded at the last successful upload (`/var/backups/swarm_connect_bee_keys/<node>.manifest`). It also compares the destination and the set of age recipients with those recorded in `<node>.last`. If none of them changed, it discards the new ciphertext and uploads nothing. A different `BEE_KEYS_REMOTE` or `BEE_KEYS_AGE_RECIPIENT` counts as a change, so moving the destination or rotating the age key uploads a fresh copy on the next run. Otherwise it keeps `bee-keys-<node>-<stamp>.tar.age` and its manifest `bee-keys-<node>-<stamp>.sha256` (checksums only, not secret), copies both off-host with rsync (or scp when rsync is missing), and only then updates the record. A failed copy is therefore retried on the next run. Old local archives are pruned to the newest `BEE_KEYS_KEEP` (default 3) after failed copies too, so a backup host that stays unreachable cannot fill the disk; the archive just written is always kept. `--verify` recomputes the live checksums and fetches the remote ciphertext and manifest back from the destination of the last upload; if `BEE_KEYS_REMOTE` now names another destination, it fails and asks for a normal run first. It compares the live checksums with the record and the ciphertext with the sha256 recorded at upload. It needs no decryption key and uploads nothing.
 
-Only one run at a time works in `/var/backups/swarm_connect_bee_keys`. The lock is `flock -n` (util-linux) on `.lock`. A run that overlaps another fails with `FAILED: another run …`. The kernel releases the lock when the process exits, however it exits, so there is never a stale lock to clear. The script refuses to run without `flock`. rsync and scp use `ssh -o ConnectTimeout=20 -o BatchMode=yes` (`BEE_KEYS_SSH_TIMEOUT` changes the timeout), so an unreachable backup host fails the run instead of hanging it.
+Only one run at a time works in `/var/backups/swarm_connect_bee_keys`. The lock is `flock -n` (util-linux) on `.lock`. A run that overlaps another fails with `FAILED: another run …`. The kernel releases the lock when the script exits, however it exits. Its children (docker, age, rsync, scp, ssh) are started without the lock's file descriptor, so a stray child that outlives the script does not keep the lock. The script refuses to run without `flock`. rsync and scp use `ssh -o ConnectTimeout=20 -o BatchMode=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=4` (`BEE_KEYS_SSH_TIMEOUT` changes the connect timeout), so an unreachable or stalled backup host fails the run instead of hanging it. If runs keep failing with `another run holds …` while no run should be active, a hung run is holding it: find it with `fuser -v /var/backups/swarm_connect_bee_keys/.lock` (package `psmisc`) or `lsof /var/backups/swarm_connect_bee_keys/.lock`, and kill that process.
 
 Failure semantics are the same as `backup_state.sh`. Every failure logs a `FAILED:` line, and the other nodes are still processed. The exit status is 1 on any failure and 2 on a configuration refusal. `.last_success` (normal run) and `.last_verify` (`--verify`) in `/var/backups/swarm_connect_bee_keys/` are touched only when every node succeeded. Alert when either is older than its cron period plus a margin. A `checksum mismatch, live keystores differ` from `--verify` means a keystore changed without a successful backup run. Investigate it, because keys change only at provisioning.
 
@@ -192,6 +199,8 @@ Mining is deterministic: it starts at nonce 0 and stops at the first nonce that 
 `check` tells you whether an identity is nonce-0. It starts Bee on a temporary copy of `keys/` with an empty `--neighborhood-suggester`, which gives the nonce-0 overlay, and compares that with the recorded overlay. It prints either `nonce: non-zero; …` or `WARNING: this identity uses overlay nonce 0 … BEE_TARGET_NEIGHBORHOOD=<bits>`. Run it on a scratch restore from the backup (the manual drill below) to learn this for a live node without touching it.
 
 For a nonce-0 node, every start must carry the hint. Bee 2.8.1 reads it from `BEE_TARGET_NEIGHBORHOOD` (measured locally). `docker-compose.host.yml` does not yet pass that variable to the `bee` and `bee-dev` services. That is an open follow-up, and adding it recreates the Bee containers on the next deploy. Until it is in place, avoid restarting a nonce-0 node, and do not start a restored nonce-0 node with network.
+
+**Before you start:** step 5 is a deploy, so the new host needs a self-hosted GitHub Actions runner registered for this repository, with a label listed in the `DEPLOY_RUNNERS` repository variable (see the `build` job in `.github/workflows/deploy.yml`). Register it before step 5, and keep `COMPOSE_PROFILES=bee` out of `/opt/swarm_connect_host.env` until every node is restored.
 
 0. **Get the restore script onto the new host without a deploy.** A deploy would create `/opt/swarm_connect`, but with `COMPOSE_PROFILES=bee` it would also start Bee on an empty volume (step 1). Install Docker, then copy the script from a checkout of this repository at the commit the gateways run:
 
@@ -229,13 +238,15 @@ For a nonce-0 node, every start must carry the hint. Bee 2.8.1 reads it from `BE
 
    `-e BEE_PASSWORD` puts the password into the check containers' configuration, so `docker inspect` shows it while they run. Anyone who can use Docker on the host can read it. Run `check` only on a host where only root can use Docker (no one else in the `docker` group). The script removes its containers when it exits. If it was killed hard, run `docker rm -f $(docker ps -aq --filter name=bee-identity-)`, and `docker volume rm` any `bee-identity-probe-*` volume.
 
+   If it prints `MISMATCH` instead (a mistyped overlay, the wrong node's archive), do not deploy on that volume: Bee may have mined and stored a nonce for the wrong target in its statestore. Remove the volume (`docker volume rm swarm_connect_bee-data`), restore again from step 3, and check with the recorded values.
+
    This must print `identity matches`, then either `nonce: non-zero` (the original nonce is now stored in the volume) or the nonce-0 `WARNING` (see above). It uses `ethersphere/bee:${BEE_VERSION:-2.8.1}`, so export the host's `BEE_VERSION` first if it differs.
-5. Put the password into `/opt/swarm_connect_host.env` (`BEE_PASSWORD=` or `BEE_DEV_PASSWORD=`), along with the rest of the host settings (`COMPOSE_PROFILES=bee` and so on). Compose reads it from `/opt/swarm_connect/.env`, which the deploy rebuilds from `/opt/swarm_connect_host.env`, so **deploy** (re-run the deploy workflow for this host). The deploy runs `docker compose -f docker-compose.host.yml up -d`, which creates `bee` on the restored volume. If the checkout and its `.env` already exist and you cannot deploy now, this is the equivalent by hand:
+5. **Restore and check every node on the host first.** `COMPOSE_PROFILES=bee` starts both `bee` and `bee-dev`, so a node not yet restored would start on an empty volume and create a NEW identity. Repeat steps 2-4 for `swarm_connect_bee-dev-data` (node `dev`, `BEE_DEV_PASSWORD`) before going on. Then put the password into `/opt/swarm_connect_host.env` (`BEE_PASSWORD=` or `BEE_DEV_PASSWORD=`), along with the rest of the host settings (`COMPOSE_PROFILES=bee` and so on). Compose reads it from `/opt/swarm_connect/.env`, which the deploy rebuilds from `/opt/swarm_connect_host.env`, so **deploy** (re-run the deploy workflow for this host). The deploy runs `docker compose -f docker-compose.host.yml up -d`, which creates `bee` on the restored volume. If the checkout and its `.env` already exist and you cannot deploy now, this is the equivalent by hand:
 
    ```sh
    cd /opt/swarm_connect
-   grep '^BEE_PASSWORD=' /opt/swarm_connect_host.env >> .env          # BEE_DEV_PASSWORD for staging
-   docker compose -f docker-compose.host.yml up -d bee                # bee-dev for staging
+   grep -E '^(BEE_PASSWORD|BEE_DEV_PASSWORD)=' /opt/swarm_connect_host.env >> .env
+   docker compose -f docker-compose.host.yml up -d bee bee-dev
    ```
 
    The next deploy rebuilds `.env` from the host file, so the two stay consistent. Check the running node (`swarm_connect-bee-dev-1` for staging):
@@ -255,8 +266,16 @@ For a nonce-0 node, every start must carry the hint. Bee 2.8.1 reads it from `BE
 **Drill on the real nodes (manual; do it once per host and after every change to these scripts).** It touches only the real keys' ciphertext and a scratch volume. It never touches the live volume.
 
 - [ ] The age identity holder and the password holder are both available. Have the recorded address and overlay of the node.
-- [ ] On the gateway host, fetch the newest archive and manifest back from `<bee-keys-path>` into a root-only temp directory.
-- [ ] Copy the archive to the identity holder's machine, then run `age -d -i <age-identity-file> <archive> | ssh root@<gateway-host> /usr/local/sbin/swarm_connect_restore_bee_keys restore beedrill-scratch <manifest>`. Expect `restored keys into beedrill-scratch`.
+- [ ] On the gateway host, fetch the newest archive and manifest back from `<bee-keys-path>` into a root-only temp directory:
+
+  ```sh
+  install -d -m 0700 /root/beedrill && cd /root/beedrill
+  newest="$(ssh <bee-keys-backup-user>@<backup-host> 'ls -1 <bee-keys-path>/bee-keys-prod-*.tar.age | sort | tail -n 1')"
+  rsync -a "<bee-keys-backup-user>@<backup-host>:$newest" "<bee-keys-backup-user>@<backup-host>:${newest%.tar.age}.sha256" .
+  ls -l    # bee-keys-prod-<stamp>.tar.age and bee-keys-prod-<stamp>.sha256
+  ```
+
+- [ ] Copy the archive to the identity holder's machine, then run `age -d -i <age-identity-file> bee-keys-prod-<stamp>.tar.age | ssh root@<gateway-host> /usr/local/sbin/swarm_connect_restore_bee_keys restore beedrill-scratch /root/beedrill/bee-keys-prod-<stamp>.sha256`. Expect `restored keys into beedrill-scratch`.
 - [ ] On the host, with `BEE_PASSWORD` read as in step 4: `swarm_connect_restore_bee_keys check beedrill-scratch <recorded-overlay> <recorded-ethereum-address>`. Expect `identity matches`, and note whether it prints `nonce: non-zero` or the nonce-0 `WARNING` in the private record. The check containers have `--network none`, so the two copies of the identity never meet on the network.
 - [ ] Remove the scratch volume: `docker volume rm beedrill-scratch`. The keystore files in it are still encrypted with the password, but remove them anyway. Delete the fetched files.
 - [ ] Record the date, the archive name and the result in the private ops record. Do not record the identifiers in this repository.
@@ -298,8 +317,8 @@ Use a dedicated age key for keystores (`age-keygen`). It must be different from 
 
 **If the age identity is lost** (both copies): the existing archives can no longer be decrypted.
 1. While the nodes still run, generate a new identity and update `BEE_KEYS_AGE_RECIPIENT` on every host.
-2. Run the script by hand. A new recipient counts as a change, so it uploads fresh archives.
-3. Run `--verify`, then delete the old archives.
+2. Run `/usr/local/sbin/swarm_connect_backup_bee_keys` by hand; it reads the same settings file as cron. A new recipient counts as a change, so it uploads fresh archives.
+3. Run `/usr/local/sbin/swarm_connect_backup_bee_keys --verify`, then delete the old archives.
 
 If a host was lost at the same time, its node identity is gone: its wallet funds cannot be recovered.
 
@@ -308,7 +327,7 @@ If a host was lost at the same time, its node identity is gone: its wallet funds
 - Without a whitelist, the wallet's funds cannot be sent out of the node. Use them only for what the node itself spends, such as stamps, stand up a new identity, and treat the rest as lost.
 - The archive alone does not help. The key in it is encrypted with the lost password.
 
-**If an archive or the backup host is lost:** if the destination changes, the next run uploads to it on its own. If the replacement keeps the same `BEE_KEYS_REMOTE`, nothing looks changed to the script, so remove the change records (`rm /var/backups/swarm_connect_bee_keys/*.manifest`) and run it by hand. Then run `--verify`.
+**If an archive or the backup host is lost:** if the destination changes, the next run uploads to it on its own. If the replacement keeps the same `BEE_KEYS_REMOTE`, nothing looks changed to the script, so remove the change records (`rm /var/backups/swarm_connect_bee_keys/*.manifest`) and run `/usr/local/sbin/swarm_connect_backup_bee_keys` by hand. Then run it with `--verify`.
 
 **Rotation.**
 - *age key:* yearly, and whenever a holder leaves. Generate a new identity, switch the recipient on the hosts (the next run uploads fresh archives), and decrypt one new archive as a test. Only then destroy the old identity and the archives encrypted to it.
