@@ -8,7 +8,9 @@
 # wipe the node and its volume -> decrypt and restore with restore_bee_keys.sh
 # into a fresh volume -> show that a networkless start without the overlay hint
 # fails -> check that a fresh networkless container reports the same Ethereum
-# address and overlay, and that the nonce is reported non-zero -> restart without
+# address and overlay, and that the nonce is reported non-zero. Every helper run
+# that carries keystore bytes must use --log-driver none (checked from the
+# recorded docker argv, and shown against the daemon) -> restart without
 # the hint and check the overlay again. Also: a truncated restore leaves the
 # volume empty and can be retried, and `check` flags a nonce-0 identity.
 #
@@ -27,6 +29,39 @@ for t in docker age age-keygen; do command -v "$t" >/dev/null || { echo "drill n
 ID="beedrill$$"
 SRC_VOL="${ID}-src"; DST_VOL="${ID}-dst"; NEG_VOL="${ID}-neg"; ZERO_VOL="${ID}-zero"
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/bee_keys_drill.XXXXXX")"
+# Record every docker invocation (the scripts' included) to check their flags.
+REAL_DOCKER="$(command -v docker)"
+mkdir "$WORK/bin"
+printf '#!/bin/sh\nprintf "%%s\\n" "$*" >> "%s/docker-argv.log"\nexec "%s" "$@"\n' "$WORK" "$REAL_DOCKER" > "$WORK/bin/docker"
+chmod +x "$WORK/bin/docker"
+export PATH="$WORK/bin:$PATH"
+# backup_bee_keys.sh needs util-linux flock (present on the Ubuntu hosts). macOS
+# has none, so this local drill alone supplies a stand-in with the same fd
+# semantics: it locks the open file description the shell passed in.
+if ! command -v flock >/dev/null 2>&1; then
+  command -v python3 >/dev/null || { echo "drill needs flock or python3" >&2; exit 2; }
+  cat > "$WORK/bin/flock" <<'PY'
+#!/usr/bin/env python3
+import fcntl, sys
+assert sys.argv[1] == "-n" and sys.argv[2].isdigit(), sys.argv
+try:
+    fcntl.flock(int(sys.argv[2]), fcntl.LOCK_EX | fcntl.LOCK_NB)
+except BlockingIOError:
+    sys.exit(1)
+PY
+  chmod +x "$WORK/bin/flock"
+  echo "note: no flock on this machine; the drill uses a python fcntl stand-in"
+fi
+# no_daemon_log <pattern> <what>: every recorded `docker run` matching the
+# pattern must have used --log-driver none, and there must be at least one.
+no_daemon_log() {
+  local n bad
+  n="$(grep -c -- "$1" "$WORK/docker-argv.log")"
+  bad="$(grep -- "$1" "$WORK/docker-argv.log" | grep -vc -- '--log-driver none')"
+  [ "$n" -gt 0 ] || die "no $2 run was recorded"
+  [ "$bad" -eq 0 ] || die "$bad $2 run(s) without --log-driver none"
+  echo "all $n $2 run(s) used --log-driver none: the plaintext stream never reached a container log"
+}
 export BEE_PASSWORD="drill-$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')"
 cleanup() {
   docker rm -f "$ID-zero" "$ID-src" "$ID-neg" "$ID-again" >/dev/null 2>&1
@@ -95,6 +130,7 @@ echo "node still running after the backup"
 ls "$BEE_KEYS_REMOTE"
 if grep -rlq '"crypto"' "$BEE_KEYS_DIR" "$BEE_KEYS_REMOTE"; then die "a plaintext keystore was found on disk"; fi
 echo "no plaintext keystore in the local or remote backup directories"
+no_daemon_log ':/src:ro' "snapshot (keys/ read)"
 
 step "3. Weekly --verify against the remote copy"
 env -u BEE_PASSWORD "$HERE/backup_bee_keys.sh" --verify || die "--verify failed"
@@ -122,6 +158,9 @@ echo "truncated restore failed and left $NEG_VOL empty"
 age -d -i "$WORK/age-identity.txt" "$archive" | "$HERE/restore_bee_keys.sh" restore "$NEG_VOL" "$manifest" || die "retry after the truncated restore failed"
 age -d -i "$WORK/age-identity.txt" "$archive" | "$HERE/restore_bee_keys.sh" restore "$ZERO_VOL" "$manifest" >/dev/null || die "third restore failed"
 
+no_daemon_log 'run -i ' "restore (decrypted tar on stdin)"
+no_daemon_log ':/src:ro' "snapshot (keys/ read, all backup and verify runs so far)"
+
 step "7. Control: a networkless start without the overlay hint"
 start_bee "$ID-neg" "$NEG_VOL"
 if addresses "$ID-neg" >/dev/null; then die "expected the unhinted networkless start to fail"; fi
@@ -142,6 +181,18 @@ json="$(addresses "$ID-again")" || { docker logs --tail 5 "$ID-again"; die "rest
 [ "$(printf '%s' "$json" | field overlay)" = "$OVERLAY" ] || die "overlay changed after restart"
 [ "$(printf '%s' "$json" | field ethereum)" = "$ETH" ] || die "address changed after restart"
 echo "overlay and address unchanged after restart"
+
+step "10. What --log-driver none prevents, measured on this daemon"
+marker="KEYSTORE-LOG-PROBE-$$"
+c1="$(docker run -d alpine:3.20 sh -c "echo $marker")"
+c2="$(docker run -d --log-driver none alpine:3.20 sh -c "echo $marker")"
+docker wait "$c1" "$c2" >/dev/null
+docker logs "$c1" 2>&1 | grep -q "$marker" || die "expected the default log driver to keep the output"
+echo "default driver ($(docker inspect -f '{{.HostConfig.LogConfig.Type}}' "$c1")): docker logs returns the container's stdout"
+out2="$(docker logs "$c2" 2>&1)"
+case "$out2" in *"$marker"*) die "--log-driver none kept the output" ;; esac
+echo "--log-driver none: docker logs -> ${out2:-<nothing>}"
+docker rm -f "$c1" "$c2" >/dev/null
 
 echo
 echo "DRILL PASSED: restored node reports ethereum $ETH and overlay $OVERLAY, same as the original"
