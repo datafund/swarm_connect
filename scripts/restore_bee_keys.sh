@@ -108,7 +108,8 @@ restore)
   }
   trap 'echo "FAILED: interrupted; $(clear_keys)" >&2; exit 1' INT TERM HUP
   # --log-driver none: nothing the extraction prints may reach the daemon's log.
-  docker run -i --rm --log-driver none -v "$vol:/dst" -v "$m_abs:/m.sha256:ro" -e U="$uid" -e G="$gid" "$HELPER" sh -c "$RESTORE_SH"
+  # --network none: a container that sees keystore bytes has no network.
+  docker run -i --rm --log-driver none --network none -v "$vol:/dst" -v "$m_abs:/m.sha256:ro" -e U="$uid" -e G="$gid" "$HELPER" sh -c "$RESTORE_SH"
   rc=$?
   trap - INT TERM HUP
   case "$rc" in
@@ -172,7 +173,7 @@ check)
 
   # Nonce-0 probe on a throwaway copy of keys/ only, so the volume under test is untouched.
   docker volume create "$probe" >/dev/null || exit 1
-  docker run --rm --log-driver none -v "$vol:/src:ro" -v "$probe:/dst" "$HELPER" sh -c 'cp -a /src/keys /dst/ && chown "$(stat -c %u:%g /src/keys)" /dst' || {
+  docker run --rm --log-driver none --network none -v "$vol:/src:ro" -v "$probe:/dst" "$HELPER" sh -c 'cp -a /src/keys /dst/ && chown "$(stat -c %u:%g /src/keys)" /dst' || {
     echo "FAILED: could not copy keys/ for the nonce probe" >&2; exit 1; }
   zero="$(bee_addresses "$probe" "$probe" --neighborhood-suggester= | field overlay)" || exit 1
   [ -n "$zero" ] || { echo "FAILED: nonce probe gave no overlay" >&2; exit 1; }

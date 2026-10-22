@@ -889,6 +889,8 @@ def test_helper_runs_that_carry_keystore_bytes_have_no_container_log(e):
     for argv in sensitive:
         i = argv.index("--log-driver")
         assert argv[i + 1] == "none", argv
+        i = argv.index("--network")              # no network for anything that sees keys
+        assert argv[i + 1] == "none", argv
 
 
 def test_container_killed_mid_restore_is_cleaned_up(e):
@@ -1022,3 +1024,131 @@ def test_refuses_duplicate_node_names(e):
     assert r.returncode == 2
     assert "duplicate" in r.stderr
     assert e.calls("docker") == []
+
+
+# --- review round 5: the settings file is parsed, not sourced ------------------
+
+GOOD = None
+
+
+def good_env(e):
+    return (f"BEE_KEYS_REMOTE={e.remote}\nBEE_KEYS_AGE_RECIPIENT={RECIPIENT}\n"
+            f"BACKUP_REMOTE={e.tmp / 'state-remote'}\n")
+
+
+def run_with_file(e, body, *args, mode=0o600, **extra):
+    f = write_env_file(e, body, mode)
+    env = dict(BEE_KEYS_ENV_FILE=str(f), BEE_KEYS_REMOTE=None, BEE_KEYS_AGE_RECIPIENT=None,
+               BACKUP_REMOTE=None)
+    env.update(extra)
+    return e.run(*args, **env)
+
+
+def test_an_exit_line_in_the_env_file_is_refused(e):
+    r = run_with_file(e, "exit 0\n" + good_env(e))
+    assert r.returncode == 2
+    assert "line 1" in r.stderr
+    assert e.calls("docker") == []
+
+
+def test_an_unknown_key_is_refused(e):
+    r = run_with_file(e, good_env(e) + "PATH=/tmp/evil\n")
+    assert r.returncode == 2
+    assert "line 4" in r.stderr and "PATH" in r.stderr
+
+
+@pytest.mark.parametrize("line", [
+    "export BEE_KEYS_KEEP=3",
+    "BEE_KEYS_KEEP",
+    "BEE_KEYS_AGE_RECIPIENT=age1a age1b",          # unquoted space: not one value
+    "BEE_KEYS_DIR=$(touch TMP/pwned)",
+    "BEE_KEYS_DIR=\"/var/$HOME\"",
+    "BEE_KEYS_DIR=`id`",
+    "BEE_KEYS_DIR=\"/var/x",                       # unbalanced quote
+    "bee_keys_keep=3",
+])
+def test_a_malformed_line_is_refused_without_echoing_it(e, line):
+    line = line.replace("TMP", str(e.tmp))
+    r = run_with_file(e, good_env(e) + line + "\n")
+    assert not (e.tmp / "pwned").exists(), "the file was executed"
+    assert r.returncode == 2, r.stdout
+    assert "line 4" in r.stderr
+    value = line.split("=", 1)[1] if "=" in line else None
+    if value and len(value) > 3:
+        assert value not in r.stderr, "the value must not be echoed"
+    assert e.calls("docker") == []
+
+
+def test_comments_blank_lines_and_quotes_are_accepted(e):
+    second = "age1" + "z" * 58
+    body = (f"# keystore backup settings\n\n   # indented comment\nBEE_KEYS_REMOTE='{e.remote}'\n"
+            f'BEE_KEYS_AGE_RECIPIENT="{RECIPIENT} {second}"\n'
+            f"BACKUP_REMOTE={e.tmp / 'state-remote'}\n")
+    r = run_with_file(e, body)
+    assert r.returncode == 0, r.stderr
+    assert all(f"-r {RECIPIENT}" in c and f"-r {second}" in c for c in e.calls("age"))
+
+
+def test_the_file_value_beats_the_environment(e):
+    other = e.tmp / "remote-env"
+    other.mkdir()
+    r = run_with_file(e, good_env(e), BEE_KEYS_REMOTE=str(other))
+    assert r.returncode == 0, r.stderr
+    assert len(e.archives(e.remote)) == 2
+    assert e.archives(other) == []
+
+
+def test_values_are_taken_literally(e):
+    weird = e.tmp / "remote with space"
+    weird.mkdir()
+    r = run_with_file(e, f"BEE_KEYS_REMOTE='{weird}'\nBEE_KEYS_AGE_RECIPIENT={RECIPIENT}\n")
+    assert r.returncode == 0, r.stderr
+    assert len(e.archives(weird)) == 2
+
+
+@pytest.mark.skipif(os.geteuid() != 0, reason="needs root to give the file to another uid")
+def test_a_file_owned_by_another_uid_is_refused(e):
+    f = write_env_file(e, good_env(e))
+    os.chown(f, 12345, 12345)
+    r = e.run(BEE_KEYS_ENV_FILE=str(f))
+    assert r.returncode == 2 and "owned" in r.stderr
+
+
+def test_a_symlinked_env_file_is_refused(e):
+    real = write_env_file(e, good_env(e))
+    link = e.tmp / "link.env"
+    link.symlink_to(real)
+    r = e.run(BEE_KEYS_ENV_FILE=str(link))
+    assert r.returncode == 2 and "symlink" in r.stderr
+
+
+def test_a_non_regular_env_file_is_refused(e):
+    d = e.tmp / "dir.env"
+    d.mkdir()
+    r = e.run(BEE_KEYS_ENV_FILE=str(d))
+    assert r.returncode == 2 and "regular file" in r.stderr
+
+
+@pytest.mark.parametrize("mode", [0o770, 0o707, 0o777])
+def test_an_env_file_in_a_writable_directory_is_refused(e, mode):
+    d = e.tmp / "etc"
+    d.mkdir()
+    f = d / "bee_keys.env"
+    f.write_text(good_env(e))
+    f.chmod(0o600)
+    d.chmod(mode)
+    try:
+        r = e.run(BEE_KEYS_ENV_FILE=str(f))
+    finally:
+        d.chmod(0o700)
+    assert r.returncode == 2 and "directory" in r.stderr
+
+
+@pytest.mark.parametrize("name", ["-rf.env", "relative.env"])
+def test_a_relative_env_file_path_is_refused(e, name):
+    f = e.tmp / name
+    f.write_text(good_env(e))
+    f.chmod(0o600)
+    r = subprocess.run(["bash", str(SCRIPT)], env=dict(e.env, BEE_KEYS_ENV_FILE=name), cwd=e.tmp,
+                       capture_output=True, text=True, timeout=60)
+    assert r.returncode == 2 and "absolute" in r.stderr

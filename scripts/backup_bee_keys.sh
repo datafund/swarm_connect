@@ -16,12 +16,15 @@
 #   install -m 0700 scripts/backup_bee_keys.sh /usr/local/sbin/swarm_connect_backup_bee_keys
 # Cron lines: see docs/mainnet-runbook.md §4 (an "on change" run and a weekly --verify).
 #
-# Settings live in one root-only file, /etc/swarm_connect/bee_keys.env (VAR=value
-# lines, sourced by the script), so cron and manual runs use the same values.
-# BEE_KEYS_ENV_FILE names another file; set it empty to read none. Values in the
-# file override the environment. The script refuses a file that is not owned by
-# the user running it or that group or others can write. The file holds only
-# public values (the age recipient is the PUBLIC half), never a secret key.
+# Settings live in one root-only file, /etc/swarm_connect/bee_keys.env, so cron
+# and manual runs use the same values. It is parsed, not sourced: KEY=VALUE lines
+# for the settings below, blank lines and # comments only, values literal and
+# optionally in one pair of quotes (see load_env). BEE_KEYS_ENV_FILE names
+# another absolute path; set it empty to read none. Values in the file override
+# the environment. The script refuses a symlink, a non-regular file, a file not
+# owned by the user running it, and a file or directory that group or others
+# can write. The file holds only public values (the age recipient is the PUBLIC
+# half), never a secret key.
 #
 # Usage: backup_bee_keys.sh            back up every node whose keys changed
 #        backup_bee_keys.sh --verify   weekly re-check, uploads nothing
@@ -80,14 +83,44 @@ esac
 refuse() { echo "REFUSED: $*" >&2; exit 2; }
 
 ENV_FILE="${BEE_KEYS_ENV_FILE-/etc/swarm_connect/bee_keys.env}"
+ENV_KEYS="BEE_KEYS_REMOTE BEE_KEYS_AGE_RECIPIENT BEE_KEYS_NODES BEE_KEYS_DIR BEE_KEYS_KEEP BEE_KEYS_HELPER_IMAGE BEE_KEYS_SSH_TIMEOUT BACKUP_REMOTE BACKUP_DIR"
+# load_env <file>: read KEY=VALUE lines. The file is parsed, never sourced, so
+# nothing in it runs. Allowed: blank lines, # comments, and KEY=VALUE where KEY
+# is one of $ENV_KEYS and VALUE is one word, or is wrapped in one pair of single
+# or double quotes. Values are literal: $, ` and \ are refused, nothing is
+# expanded. Any other line is refused by number, without echoing its value.
+load_env() {
+  local f="$1" n=0 line key val
+  while IFS= read -r line || [ -n "$line" ]; do
+    n=$((n + 1))
+    line="${line%$'\r'}"
+    case "${line#"${line%%[![:space:]]*}"}" in ''|'#'*) continue ;; esac
+    case "$line" in
+      [A-Z_]*=*) key="${line%%=*}"; val="${line#*=}" ;;
+      *) refuse "$f line $n is not KEY=VALUE" ;;
+    esac
+    case " $ENV_KEYS " in *" $key "*) ;; *) refuse "$f line $n: '$key' is not a known setting" ;; esac
+    case "$val" in
+      \"*\") val="${val#\"}"; val="${val%\"}"; case "$val" in *\"*) refuse "$f line $n: malformed quoting" ;; esac ;;
+      \'*\') val="${val#\'}"; val="${val%\'}"; case "$val" in *\'*) refuse "$f line $n: malformed quoting" ;; esac ;;
+      *[[:space:]\"\']*) refuse "$f line $n: quote a value that contains spaces or quotes" ;;
+    esac
+    case "$val" in *[\$\`\\]*) refuse "$f line $n: \$, \` and \\ are not allowed; values are literal" ;; esac
+    printf -v "$key" '%s' "$val"
+    export "$key"
+  done < "$f"
+}
 if [ -n "$ENV_FILE" ]; then
-  if [ -f "$ENV_FILE" ]; then
+  case "$ENV_FILE" in /*) ;; *) refuse "BEE_KEYS_ENV_FILE must be an absolute path" ;; esac
+  if [ -L "$ENV_FILE" ]; then
+    refuse "$ENV_FILE is a symlink; point BEE_KEYS_ENV_FILE at the real file"
+  elif [ -e "$ENV_FILE" ]; then
+    [ -f "$ENV_FILE" ] || refuse "$ENV_FILE is not a regular file"
     [ -n "$(find "$ENV_FILE" -user "$(id -u)")" ] || refuse "$ENV_FILE is not owned by uid $(id -u)"
     [ -z "$(find "$ENV_FILE" \( -perm -020 -o -perm -002 \))" ] || refuse "$ENV_FILE is writable by group or others; chmod 600 it"
-    set -a
-    # shellcheck disable=SC1090
-    . "$ENV_FILE" || refuse "could not read $ENV_FILE"
-    set +a
+    env_dir="$(dirname "$ENV_FILE")"
+    [ -z "$(find "$env_dir" -maxdepth 0 \( -perm -020 -o -perm -002 \))" ] || refuse "the directory $env_dir is writable by group or others; chmod 700 it"
+    load_env "$ENV_FILE"
   elif [ -n "${BEE_KEYS_ENV_FILE:-}" ]; then
     refuse "BEE_KEYS_ENV_FILE names $ENV_FILE, which does not exist"
   fi
@@ -236,7 +269,7 @@ SH
 # container's stdout (the plaintext tar) to /var/lib/docker/containers/ on the
 # host disk, and journald or syslog would keep or ship it.
 live_manifest() {  # live_manifest <volume> <out>
-  docker run --rm --log-driver none -v "$1:/src:ro" "$IMAGE" sh -c "$SNAP" sh manifest > "$2" 9>&- && [ -s "$2" ]
+  docker run --rm --log-driver none --network none -v "$1:/src:ro" "$IMAGE" sh -c "$SNAP" sh manifest > "$2" 9>&- && [ -s "$2" ]
 }
 split_err() {  # split_err <stderr file> <manifest out>: manifest lines out, the rest to stderr
   sed -n 's/^MANIFEST //p' "$1" > "$2"
@@ -296,7 +329,7 @@ for pair in $NODES; do
   out="$DIR/$base.tar.age"
   # One snapshot gives both the archive (stdout, straight into age) and its
   # manifest (stderr), so they always match.
-  docker run --rm --log-driver none -v "$vol:/src:ro" "$IMAGE" sh -c "$SNAP" sh tar 2> "$WORK/$node.err" 9>&- \
+  docker run --rm --log-driver none --network none -v "$vol:/src:ro" "$IMAGE" sh -c "$SNAP" sh tar 2> "$WORK/$node.err" 9>&- \
     | age "${age_args[@]}" -o "$out.part" 9>&-
   rc=("${PIPESTATUS[@]}")
   split_err "$WORK/$node.err" "$man"
