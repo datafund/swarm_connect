@@ -47,6 +47,16 @@ RUN_LIVE_TESTS=1 pytest tests/test_integration_gateway.py -v -s          # stagi
 RUN_LIVE_TESTS=1 GATEWAY_URL=http://localhost:8000 pytest ... -v -s      # a local gateway
 ```
 
+`tests/test_bee_keys_drill.py`, the Bee keystore restore drill (#494), is opt-in
+on its own switch, `RUN_BEE_DRILL=1`. It needs a local Docker daemon and the `age`
+CLI. It uses only a throwaway identity, runs every Bee container with `--network
+none`, and reaches no gateway or chain. The hermetic checks of the same scripts are
+in `tests/test_backup_bee_keys.py` and run by default.
+
+```bash
+RUN_BEE_DRILL=1 pytest tests/test_bee_keys_drill.py -s
+```
+
 ### Why staging, and why not the branch you are on
 
 Production is never a default and has to be named. That is the property that
