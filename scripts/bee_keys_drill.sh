@@ -3,12 +3,14 @@
 # identity in local Docker only: nothing here touches a real node, a real key or
 # the network (every Bee container runs with --network none).
 #
-# Steps: create an identity -> back it up with backup_bee_keys.sh while the node
+# Steps: create an identity with a mined (non-zero) overlay nonce -> back it up with backup_bee_keys.sh while the node
 # runs (read-only mount) -> verify -> confirm a second run uploads nothing ->
 # wipe the node and its volume -> decrypt and restore with restore_bee_keys.sh
 # into a fresh volume -> show that a networkless start without the overlay hint
 # fails -> check that a fresh networkless container reports the same Ethereum
-# address and overlay -> restart without the hint and check the overlay again.
+# address and overlay, and that the nonce is reported non-zero -> restart without
+# the hint and check the overlay again. Also: a truncated restore leaves the
+# volume empty and can be retried, and `check` flags a nonce-0 identity.
 #
 # Needs: docker, age, age-keygen. Run: scripts/bee_keys_drill.sh
 # Or via pytest: RUN_BEE_DRILL=1 python -m pytest tests/test_bee_keys_drill.py -s
@@ -23,12 +25,12 @@ export BEE_IMAGE
 for t in docker age age-keygen; do command -v "$t" >/dev/null || { echo "drill needs $t on PATH" >&2; exit 2; }; done
 
 ID="beedrill$$"
-SRC_VOL="${ID}-src"; DST_VOL="${ID}-dst"; NEG_VOL="${ID}-neg"
+SRC_VOL="${ID}-src"; DST_VOL="${ID}-dst"; NEG_VOL="${ID}-neg"; ZERO_VOL="${ID}-zero"
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/bee_keys_drill.XXXXXX")"
 export BEE_PASSWORD="drill-$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')"
 cleanup() {
-  docker rm -f "$ID-src" "$ID-neg" "$ID-again" >/dev/null 2>&1
-  docker volume rm -f "$SRC_VOL" "$DST_VOL" "$NEG_VOL" >/dev/null 2>&1
+  docker rm -f "$ID-zero" "$ID-src" "$ID-neg" "$ID-again" >/dev/null 2>&1
+  docker volume rm -f "$SRC_VOL" "$DST_VOL" "$NEG_VOL" "$ZERO_VOL" >/dev/null 2>&1
   rm -rf "$WORK"
 }
 trap cleanup EXIT
@@ -55,16 +57,26 @@ field() { sed -n "s/.*\"$1\":\"\\([0-9a-fA-Fx]*\\)\".*/\\1/p" | tr 'A-F' 'a-f'; 
 step "1. Create a throwaway identity (Bee $BEE_IMAGE, --network none)"
 # A mainnet node mines its overlay nonce at first start; a networkless node cannot
 # fetch the suggested neighbourhood, so give it a random 10-bit target instead.
-# This reproduces the non-zero nonce production nodes have.
-n=$((RANDOM % 1024)); target=""
-for i in 9 8 7 6 5 4 3 2 1 0; do target="$target$(( (n >> i) & 1 ))"; done
+# This reproduces the non-zero nonce production nodes have. First start once with
+# an empty suggester to learn the nonce-0 overlay (Bee stores no nonce then), and
+# reroll the target until the nonce-0 overlay is NOT in it, so mining always runs.
 docker volume create "$SRC_VOL" >/dev/null
+start_bee "$ID-zero" "$SRC_VOL" --neighborhood-suggester= || die "could not start the source node"
+json="$(addresses "$ID-zero")" || { docker logs --tail 5 "$ID-zero"; die "source node did not answer /addresses"; }
+ZERO_OVERLAY="$(printf '%s' "$json" | field overlay)"
+docker rm -f "$ID-zero" >/dev/null
+z=$(( 16#${ZERO_OVERLAY:0:3} >> 2 ))     # first 10 bits of the nonce-0 overlay
+n=$z; while [ "$n" -eq "$z" ]; do n=$((RANDOM % 1024)); done
+target=""; for i in 9 8 7 6 5 4 3 2 1 0; do target="$target$(( (n >> i) & 1 ))"; done
 start_bee "$ID-src" "$SRC_VOL" --target-neighborhood="$target" || die "could not start the source node"
 json="$(addresses "$ID-src")" || { docker logs --tail 5 "$ID-src"; die "source node did not answer /addresses"; }
 ETH="$(printf '%s' "$json" | field ethereum)"; OVERLAY="$(printf '%s' "$json" | field overlay)"
 echo "original ethereum address: $ETH"
 echo "original overlay:          $OVERLAY"
-docker logs "$ID-src" 2>&1 | grep -q 'mining a new overlay' && echo "original node mined a non-zero overlay nonce (target $target)"
+echo "nonce-0 overlay:           $ZERO_OVERLAY"
+docker logs "$ID-src" 2>&1 | grep -q 'mining a new overlay' || die "the source node did not mine a nonce"
+[ "$OVERLAY" != "$ZERO_OVERLAY" ] || die "the mined overlay equals the nonce-0 overlay"
+echo "original node mined a non-zero overlay nonce (target $target)"
 
 step "2. Back up the keys with backup_bee_keys.sh while the node runs"
 [ "$(docker inspect -f '{{.State.Running}}' "$ID-src")" = true ] || die "source node is not running"
@@ -97,7 +109,15 @@ echo "removed container and volume $SRC_VOL"
 step "6. Decrypt and restore into a fresh volume"
 archive="$(ls "$BEE_KEYS_REMOTE"/*.tar.age)"; manifest="${archive%.tar.age}.sha256"
 age -d -i "$WORK/age-identity.txt" "$archive" | "$HERE/restore_bee_keys.sh" restore "$DST_VOL" "$manifest" || die "restore failed"
-age -d -i "$WORK/age-identity.txt" "$archive" | "$HERE/restore_bee_keys.sh" restore "$NEG_VOL" "$manifest" >/dev/null || die "second restore failed"
+# A truncated stream must fail, leave the volume empty, and allow a retry.
+if age -d -i "$WORK/age-identity.txt" "$archive" | head -c 1024 | "$HERE/restore_bee_keys.sh" restore "$NEG_VOL" "$manifest" 2> "$WORK/trunc.err"; then
+  die "a truncated restore succeeded"
+fi
+grep FAILED "$WORK/trunc.err"
+[ -z "$(docker run --rm -v "$NEG_VOL:/dst" alpine:3.20 ls -A /dst)" ] || die "a truncated restore left files behind"
+echo "truncated restore failed and left $NEG_VOL empty"
+age -d -i "$WORK/age-identity.txt" "$archive" | "$HERE/restore_bee_keys.sh" restore "$NEG_VOL" "$manifest" || die "retry after the truncated restore failed"
+age -d -i "$WORK/age-identity.txt" "$archive" | "$HERE/restore_bee_keys.sh" restore "$ZERO_VOL" "$manifest" >/dev/null || die "third restore failed"
 
 step "7. Control: a networkless start without the overlay hint"
 start_bee "$ID-neg" "$NEG_VOL"
@@ -106,7 +126,12 @@ docker logs "$ID-neg" 2>&1 | grep -o '"msg"="failed to build bee node" "error"="
 echo "as expected: without the hint Bee 2.8.1 needs the network to choose an overlay"
 
 step "8. Identity check on the restored volume (restore_bee_keys.sh check)"
-"$HERE/restore_bee_keys.sh" check "$DST_VOL" "$OVERLAY" "$ETH" || die "restored identity does not match"
+"$HERE/restore_bee_keys.sh" check "$DST_VOL" "$OVERLAY" "$ETH" | tee "$WORK/check.out" || die "restored identity does not match"
+grep -q '^nonce: non-zero' "$WORK/check.out" || die "check did not report a non-zero nonce"
+
+step "8b. check flags a nonce-0 identity (same keys, checked against the nonce-0 overlay)"
+"$HERE/restore_bee_keys.sh" check "$ZERO_VOL" "$ZERO_OVERLAY" "$ETH" | tee "$WORK/check0.out" || die "nonce-0 check failed"
+grep -q '^WARNING: this identity uses overlay nonce 0' "$WORK/check0.out" || die "check did not flag nonce 0"
 
 step "9. Restart without the hint: the nonce now lives in the restored statestore"
 start_bee "$ID-again" "$DST_VOL"
