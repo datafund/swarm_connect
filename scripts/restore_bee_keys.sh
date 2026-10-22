@@ -3,14 +3,17 @@
 # prove it with a networkless Bee container. docs/mainnet-runbook.md §4 has the
 # full procedure.
 #
-#   restore_bee_keys.sh restore <volume> [<manifest.sha256>]  < keys.tar
+#   restore_bee_keys.sh restore <volume> <manifest.sha256>  < keys.tar
 #       Reads the DECRYPTED tar on stdin and writes only its keys/ directory into
 #       <volume>. Decrypt where the age identity lives and pipe it in, e.g.
 #         age -d -i <age-identity> bee-keys-prod-<stamp>.tar.age \
-#           | ssh root@<new-host> restore_bee_keys.sh restore swarm_connect_bee-data
+#           | ssh root@<new-host> restore_bee_keys.sh restore swarm_connect_bee-data <manifest>
 #       so neither the identity nor a plaintext keystore file touches the host's
-#       disk outside the volume. Refuses a volume that already has keys/. With a
-#       manifest, the restored files must match its checksums or they are removed.
+#       disk outside the volume. Refuses any volume that is not empty. The
+#       restored files must match the manifest exactly (same names, same
+#       checksums, nothing extra), be owned by the Bee image's user and be
+#       readable by it alone; on any failure, including a truncated or corrupt
+#       input, the restored keys/ is removed so the restore can be retried.
 #
 #   BEE_PASSWORD=... restore_bee_keys.sh check <volume> <overlay> [<ethereum-address>]
 #       Starts Bee on <volume> with --network none and no blockchain endpoint
@@ -20,14 +23,22 @@
 #       environment and is passed by name, never on a command line.
 #
 #       The overlay depends on a nonce kept in the statestore, not in keys/
-#       (bee v2.8.1 pkg/node/node.go:315-370). A mainnet node mines that nonce at
+#       (bee v2.8.1 pkg/node/node.go:315-320). A mainnet node mines that nonce at
 #       first start to land in a suggested neighbourhood, and a networkless node
 #       with no nonce cannot fetch a suggestion and refuses to start. So `check`
 #       passes --target-neighborhood with the first 31 bits of the recorded
 #       overlay: mining starts at nonce 0 and stops at the first match
 #       (pkg/util/nbhdutil/miner.go), which is the original nonce, and Bee stores
-#       it in the volume's statestore. After a passing check the volume keeps the
-#       original overlay without the flag.
+#       it in the volume's statestore (pkg/node/node.go:335-370).
+#
+#       Nonce 0: Bee stores a nonce ONLY when it mines one. If the identity's
+#       overlay uses nonce 0, nothing is stored, and a later start WITH network
+#       and without the hint fetches a new suggestion and may mine a different
+#       overlay. `check` therefore also starts Bee on a temporary copy of the keys
+#       with an empty --neighborhood-suggester, which gives the nonce-0 overlay,
+#       and prints whether this identity is a nonce-0 one. For a nonce-0 node,
+#       every start must carry the hint: BEE_TARGET_NEIGHBORHOOD=<bits> (Bee
+#       2.8.1 reads it from the environment).
 #
 # Environment: BEE_IMAGE (default ethersphere/bee:${BEE_VERSION:-2.8.1}),
 # BEE_KEYS_HELPER_IMAGE (default alpine:3.20), BEE_KEYS_CURL_IMAGE (default
@@ -39,35 +50,52 @@ set -o pipefail
 BEE_IMAGE="${BEE_IMAGE:-ethersphere/bee:${BEE_VERSION:-2.8.1}}"
 HELPER="${BEE_KEYS_HELPER_IMAGE:-alpine:3.20}"
 CURL="${BEE_KEYS_CURL_IMAGE:-curlimages/curl:8.10.1}"
-usage() { sed -n '5,23p' "$0" >&2; exit 2; }
+usage() { sed -n '5,41p' "$0" >&2; exit 2; }
 
 cmd="${1:-}"; [ $# -ge 2 ] || usage
 vol="$2"
 
+# Runs inside the helper container, with the volume at /dst, the manifest at
+# /m.sha256 and the owner in $U:$G. Exit 3: bad input, 4: manifest mismatch,
+# 5: ownership or modes. Every failure removes the restored keys/.
+read -r -d '' RESTORE_SH <<'SH'
+set -u
+fail() { rm -rf /dst/keys; exit "$1"; }
+tar -C /dst -xf - keys || fail 3
+[ -d /dst/keys ] || fail 3
+cd /dst/keys || fail 3
+got="$(for f in $(ls -A); do sha256sum -- "$f"; done | sort)"
+want="$(sort /m.sha256)"
+[ -n "$want" ] && [ "$got" = "$want" ] || fail 4
+cd / || fail 5
+chown -R "$U:$G" /dst && chmod 700 /dst/keys && chmod 600 /dst/keys/* || fail 5
+ls -lnd /dst/keys | awk -v u="$U" -v g="$G" 'substr($1,1,10) != "drwx------" || $3 != u || $4 != g { bad = 1 } END { exit bad }' || fail 5
+ls -lnA /dst/keys | awk -v u="$U" -v g="$G" '$1 == "total" { next } substr($1,1,10) != "-rw-------" || $3 != u || $4 != g { bad = 1 } END { exit bad }' || fail 5
+SH
+
 case "$cmd" in
 restore)
   manifest="${3:-}"
-  if [ -n "$manifest" ] && [ ! -f "$manifest" ]; then echo "FAILED: manifest $manifest not found" >&2; exit 2; fi
+  [ -n "$manifest" ] || { echo "REFUSED: a manifest (.sha256 from the backup) is required" >&2; exit 2; }
+  [ -f "$manifest" ] || { echo "FAILED: manifest $manifest not found" >&2; exit 2; }
   docker volume inspect "$vol" >/dev/null 2>&1 || docker volume create "$vol" >/dev/null || exit 1
-  if docker run --rm -v "$vol:/dst" "$HELPER" test -e /dst/keys; then
-    echo "REFUSED: $vol already has a keys/ directory; restore only into an empty volume" >&2; exit 2
+  first="$(docker run --rm -v "$vol:/dst" "$HELPER" sh -c 'ls -A /dst | head -n 1')" || {
+    echo "FAILED: could not read volume $vol" >&2; exit 1; }
+  if [ -n "$first" ]; then
+    echo "REFUSED: $vol is not empty (it holds $first); restore only into an empty volume" >&2; exit 2
   fi
-  owner="$(docker run --rm --entrypoint id "$BEE_IMAGE" -u):$(docker run --rm --entrypoint id "$BEE_IMAGE" -g)" || exit 1
-  mount_m=(); check='true'
-  if [ -n "$manifest" ]; then
-    mount_m=(-v "$(cd "$(dirname "$manifest")" && pwd)/$(basename "$manifest"):/m.sha256:ro")
-    check='(cd /dst/keys && sha256sum -c -s /m.sha256)'
-  fi
+  uid="$(docker run --rm --entrypoint id "$BEE_IMAGE" -u)" || { echo "FAILED: could not read the uid of $BEE_IMAGE" >&2; exit 1; }
+  gid="$(docker run --rm --entrypoint id "$BEE_IMAGE" -g)" || { echo "FAILED: could not read the gid of $BEE_IMAGE" >&2; exit 1; }
+  case "$uid:$gid" in *[!0-9:]*|:*|*:) echo "FAILED: unexpected uid:gid '$uid:$gid' from $BEE_IMAGE" >&2; exit 1 ;; esac
+  m_abs="$(cd "$(dirname "$manifest")" && pwd)/$(basename "$manifest")"
   # Only keys/ is extracted, whatever else the tar holds.
-  docker run -i --rm -v "$vol:/dst" ${mount_m[@]+"${mount_m[@]}"} "$HELPER" sh -c "
-    tar -C /dst -xf - keys || exit 3
-    if ! $check; then rm -rf /dst/keys; exit 4; fi
-    chown -R $owner /dst && chmod 700 /dst/keys && chmod 600 /dst/keys/*"
+  docker run -i --rm -v "$vol:/dst" -v "$m_abs:/m.sha256:ro" -e U="$uid" -e G="$gid" "$HELPER" sh -c "$RESTORE_SH"
   rc=$?
   case "$rc" in
-    0) echo "restored keys into $vol (owner $owner)" ;;
-    3) echo "FAILED: could not extract keys/ from the archive on stdin" >&2; exit 1 ;;
-    4) echo "FAILED: restored files do not match $manifest; removed them" >&2; exit 1 ;;
+    0) echo "restored keys into $vol (owner $uid:$gid)" ;;
+    3) echo "FAILED: could not extract keys/ from the archive on stdin (truncated or corrupt?); removed the partial keys/" >&2; exit 1 ;;
+    4) echo "FAILED: restored files do not match $manifest (checksum, missing or extra file); removed them" >&2; exit 1 ;;
+    5) echo "FAILED: could not set or confirm owner $uid:$gid and modes 700/600; removed the restored keys/" >&2; exit 1 ;;
     *) echo "FAILED: restore into $vol (exit $rc)" >&2; exit 1 ;;
   esac
   ;;
@@ -80,30 +108,51 @@ check)
   docker volume inspect "$vol" >/dev/null 2>&1 || { echo "FAILED: volume $vol does not exist" >&2; exit 1; }
   n=$((16#${overlay:0:8})); bits=""
   for i in $(seq 31 -1 1); do bits="$bits$(( (n >> i) & 1 ))"; done
-  name="bee-identity-check-$$"
-  trap 'docker rm -f "$name" >/dev/null 2>&1' EXIT
-  docker run -d --name "$name" --network none -v "$vol:/home/bee/.bee" \
-    -e BEE_MAINNET="${BEE_MAINNET:-true}" -e BEE_PASSWORD -e BEE_DATA_DIR=/home/bee/.bee \
-    -e BEE_API_ADDR=127.0.0.1:1633 -e BEE_SWAP_ENABLE=false -e BEE_FULL_NODE=false \
-    "$BEE_IMAGE" start --target-neighborhood="$bits" >/dev/null || exit 1
-  got=""; deadline=$(( $(date +%s) + ${BEE_KEYS_CHECK_TIMEOUT:-90} ))
-  while [ "$(date +%s)" -lt "$deadline" ]; do
-    got="$(docker run --rm --network "container:$name" "$CURL" -sf http://127.0.0.1:1633/addresses 2>/dev/null)" && break
-    if [ "$(docker inspect -f '{{.State.Running}}' "$name" 2>/dev/null)" != true ]; then
-      echo "FAILED: Bee exited; last log lines:" >&2; docker logs --tail 5 "$name" >&2; exit 1
-    fi
-    sleep 2
-  done
-  [ -n "$got" ] || { echo "FAILED: no /addresses answer within the timeout" >&2; docker logs --tail 5 "$name" >&2; exit 1; }
-  got_overlay="$(printf '%s' "$got" | sed -n 's/.*"overlay":"\([0-9a-f]*\)".*/\1/p')"
-  got_address="$(printf '%s' "$got" | sed -n 's/.*"ethereum":"\(0x[0-9a-fA-F]*\)".*/\1/p' | tr 'A-F' 'a-f')"
+  name="bee-identity-check-$$"; probe="bee-identity-probe-$$"
+  trap 'docker rm -f "$name" "$probe" >/dev/null 2>&1; docker volume rm -f "$probe" >/dev/null 2>&1' EXIT
+
+  # bee_addresses <container> <volume> [start flags...]: start a networkless
+  # ultra-light Bee and print its /addresses JSON.
+  bee_addresses() {
+    local c="$1" v="$2" got deadline; shift 2
+    docker run -d --name "$c" --network none -v "$v:/home/bee/.bee" \
+      -e BEE_MAINNET="${BEE_MAINNET:-true}" -e BEE_PASSWORD -e BEE_DATA_DIR=/home/bee/.bee \
+      -e BEE_API_ADDR=127.0.0.1:1633 -e BEE_SWAP_ENABLE=false -e BEE_FULL_NODE=false \
+      "$BEE_IMAGE" start "$@" >/dev/null || return 1
+    deadline=$(( $(date +%s) + ${BEE_KEYS_CHECK_TIMEOUT:-90} ))
+    while [ "$(date +%s)" -lt "$deadline" ]; do
+      got="$(docker run --rm --network "container:$c" "$CURL" -sf http://127.0.0.1:1633/addresses 2>/dev/null)" && { printf '%s' "$got"; return 0; }
+      if [ "$(docker inspect -f '{{.State.Running}}' "$c" 2>/dev/null)" != true ]; then
+        echo "FAILED: Bee exited; last log lines:" >&2; docker logs --tail 5 "$c" >&2; return 1
+      fi
+      sleep 2
+    done
+    echo "FAILED: no /addresses answer within the timeout" >&2; docker logs --tail 5 "$c" >&2; return 1
+  }
+  field() { sed -n "s/.*\"$1\":\"\\([0-9a-fA-Fx]*\\)\".*/\\1/p" | tr 'A-F' 'a-f'; }
+
+  got="$(bee_addresses "$name" "$vol" --target-neighborhood="$bits")" || exit 1
+  got_overlay="$(printf '%s' "$got" | field overlay)"; got_address="$(printf '%s' "$got" | field ethereum)"
   echo "ethereum address: $got_address"
   echo "overlay:          $got_overlay"
   ok=1
   [ "$got_overlay" = "$overlay" ] || { echo "MISMATCH: overlay, expected $overlay" >&2; ok=0; }
   if [ -n "$address" ] && [ "$got_address" != "$address" ]; then echo "MISMATCH: ethereum address, expected $address" >&2; ok=0; fi
-  [ "$ok" -eq 1 ] && { echo "identity matches"; exit 0; }
-  exit 1
+  [ "$ok" -eq 1 ] || exit 1
+  echo "identity matches"
+
+  # Nonce-0 probe on a throwaway copy of keys/ only, so the volume under test is untouched.
+  docker volume create "$probe" >/dev/null || exit 1
+  docker run --rm -v "$vol:/src:ro" -v "$probe:/dst" "$HELPER" sh -c 'cp -a /src/keys /dst/ && chown "$(stat -c %u:%g /src/keys)" /dst' || {
+    echo "FAILED: could not copy keys/ for the nonce probe" >&2; exit 1; }
+  zero="$(bee_addresses "$probe" "$probe" --neighborhood-suggester= | field overlay)" || exit 1
+  [ -n "$zero" ] || { echo "FAILED: nonce probe gave no overlay" >&2; exit 1; }
+  if [ "$zero" = "$overlay" ]; then
+    echo "WARNING: this identity uses overlay nonce 0. Bee 2.8.1 stores a nonce only when it mines one, so none was stored, and a start WITH network and without the hint may mine a different overlay. Start this node every time with BEE_TARGET_NEIGHBORHOOD=$bits."
+  else
+    echo "nonce: non-zero; Bee keeps it in the statestore of $vol after this check, so later starts keep this overlay"
+  fi
+  exit 0
   ;;
 *) usage ;;
 esac

@@ -35,6 +35,13 @@
 #                           (default: /var/backups/swarm_connect)
 #   BEE_KEYS_KEEP           encrypted archives kept locally per node (default: 3)
 #   BEE_KEYS_HELPER_IMAGE   image used to read the volume (default: alpine:3.20)
+#   BEE_KEYS_SSH_TIMEOUT    ssh ConnectTimeout in seconds for rsync/scp (default: 20)
+#
+# BEE_KEYS_REMOTE, BACKUP_REMOTE and the two directories must be absolute paths.
+# They are compared after dropping user@, lower-casing the host and collapsing
+# //, /./ and a trailing /. That is best effort: an ssh alias and the host name
+# it points to cannot be told apart, so keep the two destinations distinct.
+# Only one run at a time holds $BEE_KEYS_DIR/.lock; an overlapping run fails.
 #
 # On change: the live keystore checksums are compared with those recorded at the
 # last successful upload; unchanged nodes upload nothing. The record is updated
@@ -69,13 +76,43 @@ STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 failed=0
 
 refuse() { echo "REFUSED: $*" >&2; exit 2; }
-strip() { local p="$1"; while [ "${#p}" -gt 1 ] && [ "${p%/}" != "$p" ]; do p="${p%/}"; done; printf '%s' "$p"; }
-# Equal, or one inside the other.
+# canon <dest>: print "host|/path" for a local absolute path or an rsync/scp
+# [user@]host:/absolute/path, with the user dropped, the host lower-cased, and
+# //, /./ and a trailing / or /. collapsed. Fails for a relative or empty path,
+# an empty host, rsync daemon syntax (host::module) or a .. segment, because
+# those cannot be compared reliably. Best effort only: an ssh alias and the
+# host name it points to look different here, so keep the paths distinct.
+canon() {
+  local s="$1" host="" path
+  case "$s" in
+    /*) path="$s" ;;
+    *:*) host="${s%%:*}"; path="${s#*:}"
+         case "$host" in ''|*/*) return 1 ;; esac
+         host="$(printf '%s' "${host##*@}" | tr 'A-Z' 'a-z')"
+         [ -n "$host" ] || return 1 ;;
+    *) return 1 ;;
+  esac
+  case "$path" in /*) ;; *) return 1 ;; esac
+  while :; do
+    case "$path" in
+      *//*) path="${path%%//*}/${path#*//}" ;;
+      */./*) path="${path%%/./*}/${path#*/./}" ;;
+      */.) path="${path%/.}" ;;
+      ?*/) path="${path%/}" ;;
+      *) break ;;
+    esac
+  done
+  [ -n "$path" ] || path=/
+  case "$path/" in */../*) return 1 ;; esac
+  printf '%s|%s' "$host" "$path"
+}
+# overlaps <canon-a> <canon-b>: same host and one path equal to or inside the other.
 overlaps() {
-  local a b; a="$(strip "$1")"; b="$(strip "$2")"
-  [ "$a" = "$b" ] && return 0
-  case "$a/" in "$b/"*) return 0 ;; esac
-  case "$b/" in "$a/"*) return 0 ;; esac
+  local ha="${1%%|*}" pa="${1#*|}" hb="${2%%|*}" pb="${2#*|}"
+  [ "$ha" = "$hb" ] || return 1
+  [ "$pa" = / ] || [ "$pb" = / ] || [ "$pa" = "$pb" ] && return 0
+  case "$pa/" in "$pb/"*) return 0 ;; esac
+  case "$pb/" in "$pa/"*) return 0 ;; esac
   return 1
 }
 
@@ -91,30 +128,51 @@ for r in $RECIPIENTS; do
   esac
 done
 case "$KEEP" in ''|*[!0-9]*|0) refuse "BEE_KEYS_KEEP must be a whole number of at least 1, got '$KEEP'" ;; esac
+c_remote="$(canon "$REMOTE")" || refuse "BEE_KEYS_REMOTE must be an absolute path: /path or [user@]host:/path (got '$REMOTE')"
 if [ -n "${BACKUP_REMOTE:-}" ]; then
-  overlaps "$REMOTE" "$BACKUP_REMOTE" && refuse "BEE_KEYS_REMOTE and BACKUP_REMOTE are the same destination or nested; keystores must go to a separate path"
+  c_state="$(canon "$BACKUP_REMOTE")" || refuse "BACKUP_REMOTE is not an absolute path, so the separation cannot be checked; pass its absolute form (/path or [user@]host:/path)"
+  overlaps "$c_remote" "$c_state" && refuse "BEE_KEYS_REMOTE and BACKUP_REMOTE are the same destination or nested; keystores must go to a separate path"
 else
   echo "warning: BACKUP_REMOTE is not set, so BEE_KEYS_REMOTE could not be checked against the gateway-state destination"
 fi
-overlaps "$DIR" "$STATE_DIR" && refuse "BEE_KEYS_DIR and BACKUP_DIR are the same directory or nested"
+c_dir="$(canon "$DIR")" && [ "${c_dir%%|*}" = "" ] || refuse "BEE_KEYS_DIR must be an absolute local path"
+c_sdir="$(canon "$STATE_DIR")" && [ "${c_sdir%%|*}" = "" ] || refuse "BACKUP_DIR must be an absolute local path"
+overlaps "$c_dir" "$c_sdir" && refuse "BEE_KEYS_DIR and BACKUP_DIR are the same directory or nested"
 for pair in $NODES; do
   case "$pair" in *?:?*) ;; *) refuse "BEE_KEYS_NODES entry '$pair' is not node:volume" ;; esac
+  case "${pair%%:*}" in *[!A-Za-z0-9_-]*) refuse "BEE_KEYS_NODES node name '${pair%%:*}' may only use A-Z, a-z, 0-9, _ and -" ;; esac
 done
 
 if command -v sha256sum >/dev/null 2>&1; then sha() { sha256sum "$1" | cut -d' ' -f1; }
 else sha() { shasum -a 256 "$1" | cut -d' ' -f1; }; fi
+SSH_OPTS="-o ConnectTimeout=${BEE_KEYS_SSH_TIMEOUT:-20} -o BatchMode=yes"
 copy() {  # copy <dest> <src>...  (rsync, else scp)
   local dest="$1"; shift
-  if command -v rsync >/dev/null 2>&1; then rsync -a "$@" "$dest"; else scp -q "$@" "$dest"; fi
+  if command -v rsync >/dev/null 2>&1; then rsync -a -e "ssh $SSH_OPTS" "$@" "$dest"
+  else scp -q $SSH_OPTS "$@" "$dest"; fi
 }
 
 umask 077
 mkdir -p "$DIR" || exit 1
-WORK="$(mktemp -d "${TMPDIR:-/tmp}/bee_keys.XXXXXX")" || exit 1
+
+# One run at a time per BEE_KEYS_DIR (mkdir is atomic; flock is not on every
+# target). A lock whose process is gone is taken over.
+LOCK="$DIR/.lock"
+if ! mkdir "$LOCK" 2>/dev/null; then
+  holder="$(cat "$LOCK/pid" 2>/dev/null)"
+  if [ -n "$holder" ] && kill -0 "$holder" 2>/dev/null; then
+    echo "FAILED: another run (pid $holder) holds $LOCK" >&2; exit 1
+  fi
+  echo "warning: taking over a stale lock (pid ${holder:-unknown})"
+  rm -rf "$LOCK"; mkdir "$LOCK" || { echo "FAILED: could not take $LOCK" >&2; exit 1; }
+fi
+echo "$$" > "$LOCK/pid"
+WORK=""
 # The work dir only ever holds checksum lists and ciphertext, never plaintext keys.
-cleanup() { rm -rf "$WORK"; rm -f "$DIR"/*.part; }
+cleanup() { [ -n "$WORK" ] && rm -rf "$WORK"; rm -f "$DIR"/*.part; rm -rf "$LOCK"; }
 trap cleanup EXIT
 trap 'exit 1' INT TERM HUP
+WORK="$(mktemp -d "${TMPDIR:-/tmp}/bee_keys.XXXXXX")" || exit 1
 
 # Checksums of the plaintext keystore files, read inside the helper container.
 live_manifest() {  # live_manifest <volume> <out>
@@ -166,8 +224,10 @@ for pair in $NODES; do
     echo "FAILED: $node: archiving or encrypting $vol (docker exit ${rc[0]}, age exit ${rc[1]})" >&2
     rm -f "$out.part"; failed=1; continue
   fi
-  mv "$out.part" "$out"
-  cp "$man" "$DIR/$base.sha256"
+  if ! mv "$out.part" "$out" || ! cp "$man" "$DIR/$base.sha256"; then
+    echo "FAILED: $node: could not write $out or its manifest" >&2
+    rm -f "$out.part" "$out" "$DIR/$base.sha256"; failed=1; continue
+  fi
   cipher="$(sha "$out")"
   echo "encrypted $node ($vol) -> $out"
   if ! copy "$REMOTE/" "$out" "$DIR/$base.sha256"; then
@@ -179,7 +239,7 @@ for pair in $NODES; do
 
   # Keep the newest $KEEP encrypted archives (and their manifests) for this node.
   # Names sort by their UTC stamp.
-  ls "$DIR"/bee-keys-"$node"-*.tar.age 2>/dev/null | sort -r | tail -n +"$((KEEP + 1))" | while read -r old; do
+  ls "$DIR"/bee-keys-"$node"-[0-9]*.tar.age 2>/dev/null | sort -r | tail -n +"$((KEEP + 1))" | while read -r old; do
     rm -f "$old" "${old%.tar.age}.sha256"; echo "pruned $old"
   done
 done
