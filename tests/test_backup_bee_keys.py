@@ -1152,3 +1152,105 @@ def test_a_relative_env_file_path_is_refused(e, name):
     r = subprocess.run(["bash", str(SCRIPT)], env=dict(e.env, BEE_KEYS_ENV_FILE=name), cwd=e.tmp,
                        capture_output=True, text=True, timeout=60)
     assert r.returncode == 2 and "absolute" in r.stderr
+
+
+# --- review round 6 ----------------------------------------------------------
+
+@pytest.mark.parametrize("line", [
+    "BEE_KEYS_KEEP BEE_KEYS_HELPER_IMAGE=foo",      # space inside the key
+    "BEE_KEYS_KEEP-X=3",
+    "BEE_KEYS_KEEPX=3",                             # a near miss of a real key
+    "BEE_KEYS=3",                                   # a prefix of real keys
+    "_=3",
+    "BEE_KEYS_KEEP.=3",
+])
+def test_a_bad_key_is_refused(e, line):
+    r = run_with_file(e, good_env(e) + line + "\n")
+    assert r.returncode == 2, r.stdout + r.stderr
+    assert "line 4" in r.stderr
+    assert e.calls("docker") == []
+
+
+def test_a_duplicate_key_in_the_env_file_is_refused(e):
+    other = e.tmp / "elsewhere"
+    other.mkdir()
+    r = run_with_file(e, good_env(e) + f"BEE_KEYS_REMOTE={other}\n")
+    assert r.returncode == 2
+    assert "BEE_KEYS_REMOTE" in r.stderr and "line 4" in r.stderr
+    assert e.calls("docker") == [] and e.archives(other) == []
+
+
+@pytest.mark.parametrize("var,value", [
+    ("BEE_KEYS_AGE_RECIPIENT", "age1*"),
+    ("BEE_KEYS_AGE_RECIPIENT", "age1?" + "q" * 57),
+    ("BEE_KEYS_NODES", "prod:vol-*"),
+    ("BEE_KEYS_NODES", "[p]rod:vol-prod"),
+])
+def test_glob_characters_are_refused_and_never_expanded(e, var, value):
+    # A file in the working directory that the glob would match.
+    (e.tmp / ("age1" + "q" * 58)).write_text("")
+    (e.tmp / "vol-prod").write_text("")
+    (e.tmp / "prod").write_text("")
+    r = subprocess.run(["bash", str(SCRIPT)], env=dict(e.env, **{var: value}), cwd=e.tmp,
+                       capture_output=True, text=True, timeout=60)
+    assert r.returncode == 2, r.stdout + r.stderr
+    assert e.calls("docker") == [] and e.calls("age") == []
+
+
+@pytest.mark.parametrize("value", ["0", "abc", "20 -o ProxyCommand=evil", "3601", "08", "-1"])
+def test_ssh_timeout_must_be_a_plain_number(e, value):
+    r = e.run(BEE_KEYS_SSH_TIMEOUT=value)
+    assert r.returncode == 2
+    assert "BEE_KEYS_SSH_TIMEOUT" in r.stderr
+    assert e.calls("docker") == []
+
+
+def test_ssh_timeout_from_the_file_cannot_inject_options(e):
+    r = run_with_file(e, good_env(e) + 'BEE_KEYS_SSH_TIMEOUT="20 -o ProxyCommand=evil"\n')
+    assert r.returncode == 2
+    assert e.calls("rsync") == []
+
+
+def test_a_valid_ssh_timeout_is_used(e):
+    assert e.run(BEE_KEYS_SSH_TIMEOUT="45").returncode == 0
+    assert all("ConnectTimeout=45" in c for c in e.calls("rsync"))
+
+
+@pytest.mark.parametrize("value", ["08", "1 2", "-3"])
+def test_keep_must_be_a_plain_number(e, value):
+    r = e.run(BEE_KEYS_KEEP=value)
+    assert r.returncode == 2 and "BEE_KEYS_KEEP" in r.stderr
+
+
+@pytest.mark.parametrize("nodes", ["prod:/", "prod:/etc", "prod:./vol", "prod:-vol", "prod:vol/x", "prod:.vol"])
+def test_the_volume_must_be_a_docker_volume_name(e, nodes):
+    r = e.run(BEE_KEYS_NODES=nodes)
+    assert r.returncode == 2
+    assert "volume" in r.stderr
+    assert e.calls("docker") == []
+
+
+def test_a_volume_name_with_dots_and_dashes_is_accepted(e):
+    e.add_volume("swarm_connect_bee-data.v2")
+    r = e.run(BEE_KEYS_NODES="prod:swarm_connect_bee-data.v2")
+    assert r.returncode == 0, r.stderr
+
+
+@pytest.mark.skipif(os.geteuid() != 0, reason="needs root to give the directory to another uid")
+def test_a_settings_directory_owned_by_another_uid_is_refused(e):
+    d = e.tmp / "etc"
+    d.mkdir(mode=0o700)
+    f = d / "bee_keys.env"
+    f.write_text(good_env(e))
+    f.chmod(0o600)
+    os.chown(d, 12345, 12345)
+    r = e.run(BEE_KEYS_ENV_FILE=str(f))
+    assert r.returncode == 2 and "directory" in r.stderr and "owned" in r.stderr
+
+
+@pytest.mark.parametrize("var", ["BEE_KEYS_NODES", "BEE_KEYS_AGE_RECIPIENT"])
+def test_a_blank_list_is_refused(e, var):
+    r = e.run(**{var: "   "})
+    assert r.returncode == 2
+    assert var in r.stderr
+    assert "unbound" not in r.stderr

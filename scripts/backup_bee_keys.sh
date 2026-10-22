@@ -90,24 +90,31 @@ ENV_KEYS="BEE_KEYS_REMOTE BEE_KEYS_AGE_RECIPIENT BEE_KEYS_NODES BEE_KEYS_DIR BEE
 # or double quotes. Values are literal: $, ` and \ are refused, nothing is
 # expanded. Any other line is refused by number, without echoing its value.
 load_env() {
-  local f="$1" n=0 line key val
+  local f="$1" n=0 line key val k known seen=" "
   while IFS= read -r line || [ -n "$line" ]; do
     n=$((n + 1))
     line="${line%$'\r'}"
     case "${line#"${line%%[![:space:]]*}"}" in ''|'#'*) continue ;; esac
     case "$line" in
-      [A-Z_]*=*) key="${line%%=*}"; val="${line#*=}" ;;
+      *=*) key="${line%%=*}"; val="${line#*=}" ;;
       *) refuse "$f line $n is not KEY=VALUE" ;;
     esac
-    case " $ENV_KEYS " in *" $key "*) ;; *) refuse "$f line $n: '$key' is not a known setting" ;; esac
+    case "$key" in
+      ''|[!A-Z_]*|*[!A-Z0-9_]*) refuse "$f line $n is not KEY=VALUE (a key is A-Z, 0-9 and _)" ;;
+    esac
+    known=""
+    for k in $ENV_KEYS; do [ "$k" = "$key" ] && known=1; done
+    [ -n "$known" ] || refuse "$f line $n: '$key' is not a known setting"
+    case "$seen" in *" $key "*) refuse "$f line $n: '$key' is set twice" ;; esac
+    seen="$seen$key "
     case "$val" in
       \"*\") val="${val#\"}"; val="${val%\"}"; case "$val" in *\"*) refuse "$f line $n: malformed quoting" ;; esac ;;
       \'*\') val="${val#\'}"; val="${val%\'}"; case "$val" in *\'*) refuse "$f line $n: malformed quoting" ;; esac ;;
       *[[:space:]\"\']*) refuse "$f line $n: quote a value that contains spaces or quotes" ;;
     esac
     case "$val" in *[\$\`\\]*) refuse "$f line $n: \$, \` and \\ are not allowed; values are literal" ;; esac
-    printf -v "$key" '%s' "$val"
-    export "$key"
+    printf -v "$key" '%s' "$val" 2>/dev/null || refuse "$f line $n: could not set '$key'"
+    export "$key" || refuse "$f line $n: could not set '$key'"
   done < "$f"
 }
 if [ -n "$ENV_FILE" ]; then
@@ -118,7 +125,11 @@ if [ -n "$ENV_FILE" ]; then
     [ -f "$ENV_FILE" ] || refuse "$ENV_FILE is not a regular file"
     [ -n "$(find "$ENV_FILE" -user "$(id -u)")" ] || refuse "$ENV_FILE is not owned by uid $(id -u)"
     [ -z "$(find "$ENV_FILE" \( -perm -020 -o -perm -002 \))" ] || refuse "$ENV_FILE is writable by group or others; chmod 600 it"
+    # The file's own directory must be owned by this user or root and not be
+    # writable by others. The directories above it are assumed to be root-owned
+    # system paths (/etc).
     env_dir="$(dirname "$ENV_FILE")"
+    [ -n "$(find "$env_dir" -maxdepth 0 \( -user "$(id -u)" -o -user 0 \))" ] || refuse "the directory $env_dir is not owned by uid $(id -u) or root"
     [ -z "$(find "$env_dir" -maxdepth 0 \( -perm -020 -o -perm -002 \))" ] || refuse "the directory $env_dir is writable by group or others; chmod 700 it"
     load_env "$ENV_FILE"
   elif [ -n "${BEE_KEYS_ENV_FILE:-}" ]; then
@@ -179,16 +190,28 @@ overlaps() {
 # --- configuration checks: nothing is read or written before these pass ---
 [ -n "$REMOTE" ] || refuse "BEE_KEYS_REMOTE is not set; a keystore backup without an off-host copy is lost with the host"
 [ -n "$RECIPIENTS" ] || refuse "BEE_KEYS_AGE_RECIPIENT is not set"
+# Split the lists into arrays with globbing off, and refuse glob characters
+# outright, so nothing can expand against the working directory.
+case "$RECIPIENTS$NODES" in *[\*\?\[]*) refuse "BEE_KEYS_AGE_RECIPIENT and BEE_KEYS_NODES may not contain *, ? or [" ;; esac
+set -f
+recips=($RECIPIENTS)
+nodes=($NODES)
+set +f
+[ "${#recips[@]}" -gt 0 ] || refuse "BEE_KEYS_AGE_RECIPIENT is blank"
+[ "${#nodes[@]}" -gt 0 ] || refuse "BEE_KEYS_NODES is blank"
 age_args=()
-for r in $RECIPIENTS; do
+for r in "${recips[@]}"; do
   case "$r" in
     AGE-SECRET-KEY-*) refuse "BEE_KEYS_AGE_RECIPIENT holds an age SECRET key; the host must only hold the public recipient (age1...)" ;;
     age1*) age_args+=(-r "$r") ;;
     *) refuse "BEE_KEYS_AGE_RECIPIENT entry is not an age public recipient (age1...)" ;;
   esac
 done
-case "$KEEP" in ''|*[!0-9]*|0) refuse "BEE_KEYS_KEEP must be a whole number of at least 1, got '$KEEP'" ;; esac
-c_recips="$(printf '%s\n' $RECIPIENTS | LC_ALL=C sort -u | tr '\n' ' ')"
+case "$KEEP" in ''|*[!0-9]*|0*) refuse "BEE_KEYS_KEEP must be a whole number of at least 1 (no leading zero), got '$KEEP'" ;; esac
+SSH_TIMEOUT="${BEE_KEYS_SSH_TIMEOUT:-20}"
+case "$SSH_TIMEOUT" in ''|*[!0-9]*|0*) refuse "BEE_KEYS_SSH_TIMEOUT must be a number of seconds from 1 to 3600" ;; esac
+[ "${#SSH_TIMEOUT}" -le 4 ] && [ "$SSH_TIMEOUT" -le 3600 ] || refuse "BEE_KEYS_SSH_TIMEOUT must be a number of seconds from 1 to 3600"
+c_recips="$(printf '%s\n' "${recips[@]}" | LC_ALL=C sort -u | tr '\n' ' ')"
 c_remote="$(canon "$REMOTE")" || refuse "BEE_KEYS_REMOTE must be an absolute path: /path or [user@]host:/path (got '$REMOTE')"
 if [ -n "${BACKUP_REMOTE:-}" ]; then
   c_state="$(canon "$BACKUP_REMOTE")" || refuse "BACKUP_REMOTE is not an absolute path, so the separation cannot be checked; pass its absolute form (/path or [user@]host:/path)"
@@ -200,8 +223,12 @@ c_dir="$(canon "$DIR")" && [ "${c_dir%%|*}" = "" ] || refuse "BEE_KEYS_DIR must 
 c_sdir="$(canon "$STATE_DIR")" && [ "${c_sdir%%|*}" = "" ] || refuse "BACKUP_DIR must be an absolute local path"
 overlaps "$c_dir" "$c_sdir" && refuse "BEE_KEYS_DIR and BACKUP_DIR are the same directory or nested"
 seen=" "
-for pair in $NODES; do
+for pair in "${nodes[@]}"; do
   case "$pair" in *?:?*) ;; *) refuse "BEE_KEYS_NODES entry '$pair' is not node:volume" ;; esac
+  # A Docker volume NAME, never a path: "prod:/" would bind-mount the host's /.
+  case "${pair#*:}" in
+    ''|[!A-Za-z0-9]*|*[!A-Za-z0-9_.-]*) refuse "BEE_KEYS_NODES volume '${pair#*:}' is not a Docker volume name ([A-Za-z0-9][A-Za-z0-9_.-]*)" ;;
+  esac
   case "$seen" in *" ${pair%%:*} "*) refuse "BEE_KEYS_NODES names node '${pair%%:*}' twice (duplicate)" ;; esac
   seen="$seen${pair%%:*} "
   case "${pair%%:*}" in *[!A-Za-z0-9_-]*) refuse "BEE_KEYS_NODES node name '${pair%%:*}' may only use A-Z, a-z, 0-9, _ and -" ;; esac
@@ -209,7 +236,7 @@ done
 
 if command -v sha256sum >/dev/null 2>&1; then sha() { sha256sum "$1" | cut -d' ' -f1; }
 else sha() { shasum -a 256 "$1" | cut -d' ' -f1; }; fi
-SSH_OPTS="-o ConnectTimeout=${BEE_KEYS_SSH_TIMEOUT:-20} -o BatchMode=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=4"
+SSH_OPTS="-o ConnectTimeout=$SSH_TIMEOUT -o BatchMode=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=4"
 copy() {  # copy <dest> <src>...  (rsync, else scp)
   local dest="$1"; shift
   if command -v rsync >/dev/null 2>&1; then rsync -a -e "ssh $SSH_OPTS" "$@" "$dest" 9>&-
@@ -289,7 +316,7 @@ prune() {
     done
 }
 
-for pair in $NODES; do
+for pair in "${nodes[@]}"; do
   node="${pair%%:*}"; vol="${pair#*:}"
   record="$DIR/$node.manifest"; last="$DIR/$node.last"
   if ! docker volume inspect "$vol" >/dev/null 2>&1 9>&-; then
