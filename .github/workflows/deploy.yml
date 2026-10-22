@@ -322,12 +322,23 @@ jobs:
           # Note: the env file above already holds the new values. After a
           # failure, fix the GitHub variables/secrets and re-run the deploy; do
           # not force-recreate by hand (docs/mainnet-runbook.md, section 1).
+          # Exit 3 means the gateway would refuse the configuration. Any other
+          # non-zero exit means the check itself could not run (a compose
+          # interpolation or daemon error, or a settings error), so it is not
+          # reported as a refusal. Both stop here, before the gateway is touched.
           echo "Checking x402 configuration for $BRANCH_SERVICE"
-          if ! docker compose run --rm --no-deps -T "$BRANCH_SERVICE" \
-            python -m app.x402.check_config; then
-            echo "::error title=x402 configuration refused::$BRANCH_SERVICE would refuse to start with this x402 configuration (see the message above); the running gateway was not touched"
-            exit 1
-          fi
+          CHECK_RC=0
+          docker compose run --rm --no-deps -T "$BRANCH_SERVICE" \
+            python -m app.x402.check_config || CHECK_RC=$?
+          case "$CHECK_RC" in
+            0) ;;
+            3)
+              echo "::error title=x402 configuration refused::$BRANCH_SERVICE would refuse to start with this x402 configuration (see the message above); the running gateway was not touched"
+              exit 1 ;;
+            *)
+              echo "::error title=x402 configuration check could not run::exit $CHECK_RC, see the output above; the running gateway was not touched"
+              exit 1 ;;
+          esac
 
           # Recreate ONLY the service this branch owns. `docker compose up -d
           # --force-recreate` with no argument recreates every service, so a push

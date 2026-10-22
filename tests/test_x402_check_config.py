@@ -17,6 +17,10 @@ import pytest
 from app.core.config import settings
 from app.x402 import facilitator
 
+# check_config's exit codes: deploy.yml labels a refusal differently from a
+# check that could not run at all (a compose, daemon or settings error).
+OK, REFUSED = 0, 3
+
 REPO = Path(__file__).resolve().parent.parent
 DEPLOY_YML = REPO / ".github" / "workflows" / "deploy.yml"
 
@@ -55,28 +59,36 @@ def run_check(tmp_path, overrides=None, bee_url="http://localhost:1"):
 
 def test_valid_config_passes(tmp_path):
     code, out = run_check(tmp_path)
-    assert code == 0, out
+    assert code == OK, out
     assert "x402 configuration OK" in out
 
 
 def test_mainnet_with_testnet_facilitator_fails_with_the_startup_message(tmp_path):
     code, out = run_check(tmp_path, {"X402_NETWORK": "base"})
-    assert code != 0
+    assert code == REFUSED, out
     assert "Refusing to start with x402 enabled" in out
     assert "mainnet" in out
 
 
 def test_disabled_x402_passes_without_checking(tmp_path):
     code, out = run_check(tmp_path, {"X402_ENABLED": "false", "X402_NETWORK": "nonsense"})
-    assert code == 0, out
+    assert code == OK, out
 
 
 def test_missing_bee_url_fails_like_startup(tmp_path):
-    """A settings error stops startup, so it must stop the check too."""
-    code, out = run_check(tmp_path, bee_url=None)
-    assert code != 0
+    """A settings error stops startup, so it must stop the check too.
+
+    It is not an x402 refusal, so it must not get the refusal exit code: under
+    `python -m`, importing the app.x402 package builds Settings before main()
+    runs, and the error is pydantic's traceback (input hidden), exit 1.
+    """
+    code, out = run_check(tmp_path, bee_url=None, overrides={
+        "X402_FACILITATOR_BEARER_TOKEN": BEARER, "X402_FACILITATOR_CDP_API_KEY_SECRET": CDP_SECRET})
+    assert code not in (OK, REFUSED), out
     assert "SWARM_BEE_API_URL" in out
-    assert PAY_TO not in out
+    assert "Refusing to start" not in out
+    for value in (PAY_TO, BEARER, CDP_SECRET):
+        assert value not in out
 
 
 @pytest.mark.parametrize("overrides", [
@@ -135,7 +147,7 @@ def test_check_agrees_with_startup(tmp_path, x402, overrides):
     except RuntimeError:
         startup_refuses = True
     code, out = run_check(tmp_path, overrides)
-    assert (code != 0) == startup_refuses, out
+    assert code == (REFUSED if startup_refuses else OK), out
 
 
 def test_check_is_the_startup_check(x402, capsys):
@@ -148,9 +160,25 @@ def test_check_is_the_startup_check(x402, capsys):
         raise RuntimeError("Refusing to start with x402 enabled: from the startup check")
 
     x402.setattr(facilitator, "validate_x402_config", fake)
-    assert check_config.main() == 1
+    assert check_config.main() == REFUSED
     assert calls == [1]
     assert "from the startup check" in capsys.readouterr().err
+
+
+def test_an_error_that_is_not_a_refusal_is_not_labelled_one(x402, capsys):
+    """Only validate_x402_config's refusal gets exit 3; anything else means the
+    check could not decide, and deploy.yml must not call that a refusal."""
+    from app.x402 import check_config
+
+    def broken():
+        raise ImportError("something unrelated is missing")
+
+    x402.setattr(facilitator, "validate_x402_config", broken)
+    code = check_config.main()
+    assert code not in (OK, REFUSED)
+    err = capsys.readouterr().err
+    assert "could not run" in err
+    assert "Refusing to start" not in err
 
 
 # --- deploy.yml: the check runs before the running gateway is replaced -------
@@ -182,4 +210,12 @@ def test_deploy_check_uses_the_new_containers_env_and_fails_the_job():
     block = step[:step.find('docker compose stop "$BRANCH_SERVICE"')]
     # The service's own env_file and environment, the new image, no other services.
     assert re.search(r'docker compose run --rm --no-deps -T "\$BRANCH_SERVICE"[\s\\]+python -m app\.x402\.check_config', block)
-    assert "exit 1" in block[block.find("python -m app.x402.check_config"):]
+    after = block[block.find("python -m app.x402.check_config"):]
+    # Exit 3 is a refusal; any other non-zero exit (compose interpolation,
+    # the daemon, a settings error) is labelled as a check that could not run.
+    # Both stop the job before the gateway is touched.
+    refused = re.search(r"\n\s*3\)(.*?);;", after, re.S)
+    assert refused and "x402 configuration refused" in refused.group(1) and "exit 1" in refused.group(1)
+    other = re.search(r"\n\s*\*\)(.*?);;", after, re.S)
+    assert other and "could not run" in other.group(1) and "exit 1" in other.group(1)
+    assert "refused" not in other.group(1)
