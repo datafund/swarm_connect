@@ -672,8 +672,10 @@ checkout and `.env` are assembled and before `docker compose stop`. It runs
 through `docker compose run --rm --no-deps -T "$BRANCH_SERVICE"`, so it uses
 the new image and the same `env_file` and `environment` as the new container.
 It calls the startup check itself (`validate_x402_config`). A configuration
-the gateway would refuse fails the job with `x402 configuration refused`, and
-the running gateway stays up.
+the gateway would refuse exits 3 and fails the job with `x402 configuration
+refused`. Any other failure (compose, the Docker daemon, a settings error)
+fails it with `x402 configuration check could not run`. Either way the running
+gateway stays up, and the rest of the step (host services, Alloy) is skipped.
 
 The env file has already been rewritten by then. After a refused deploy, fix
 the GitHub variables or secrets and re-run the deploy. Do **not**
