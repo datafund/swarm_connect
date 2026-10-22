@@ -74,7 +74,10 @@ ETH="$(printf '%s' "$json" | field ethereum)"; OVERLAY="$(printf '%s' "$json" | 
 echo "original ethereum address: $ETH"
 echo "original overlay:          $OVERLAY"
 echo "nonce-0 overlay:           $ZERO_OVERLAY"
-docker logs "$ID-src" 2>&1 | grep -q 'mining a new overlay' || die "the source node did not mine a nonce"
+# Read the logs first: with pipefail, `docker logs | grep -q` can fail when grep
+# exits early and docker logs gets SIGPIPE.
+src_logs="$(docker logs "$ID-src" 2>&1)"
+case "$src_logs" in *'mining a new overlay'*) ;; *) die "the source node did not mine a nonce" ;; esac
 [ "$OVERLAY" != "$ZERO_OVERLAY" ] || die "the mined overlay equals the nonce-0 overlay"
 echo "original node mined a non-zero overlay nonce (target $target)"
 
