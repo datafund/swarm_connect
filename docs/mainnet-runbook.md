@@ -13,8 +13,8 @@ Do these in order. Rehearse on staging first, with the same settings and a tiny 
 | # | Item | How |
 |---|---|---|
 | 1 | **Pay-to address** | A new mainnet address you control. Ideally cold or multisig, and not shared with staging. It needs no ETH: the facilitator pays settlement gas. Set `X402_PAY_TO_ADDRESS`. |
-| 2 | **Network** | `X402_NETWORK=base`. The gateway refuses to start with an unknown network name. |
-| 3 | **Facilitator** | x402.org serves test networks only. Configure a mainnet facilitator: CDP credentials (`X402_FACILITATOR_CDP_API_KEY_ID` / `_SECRET` as GitHub **secrets**, with `cdp-sdk` in the image), or `X402_FACILITATOR_URL` plus `X402_FACILITATOR_BEARER_TOKEN`. First confirm the facilitator accepts the gateway's x402 protocol version (see the x402 version decision). |
+| 2 | **Network** | `X402_NETWORK=base`. The gateway refuses to start with an unknown network name. Change it **in the same deploy** as items 1 and 3: see [Items 1–3 change in one deploy](#items-13-change-in-one-deploy). |
+| 3 | **Facilitator** | x402.org serves test networks only. Configure a mainnet facilitator: CDP credentials (`X402_FACILITATOR_CDP_API_KEY_ID` / `_SECRET` as GitHub **secrets**, with `cdp-sdk` in the image), or `X402_FACILITATOR_URL` plus `X402_FACILITATOR_BEARER_TOKEN`. First confirm the facilitator accepts the gateway's x402 protocol version (see the x402 version decision). `cdp-sdk` is **not** in `requirements.lock` today, so the CDP route is refused at startup (`cdp-sdk package is not installed`) until it is added. |
 | 4 | **Pricing** | Set `X402_BZZ_USD_RATE` to a reviewed value, and check `X402_MARKUP_PERCENT` and `X402_MIN_PRICE_USD`. Set `X402_BZZ_PRICE_FEED_URL` so drift is alerted *(requires #410)*. |
 | 5 | **Spend ceilings** | Set `GATEWAY_DAILY_BZZ_CEILING` and `GATEWAY_DAILY_BZZ_FREE_CEILING` to what the Bee wallet can afford per day *(requires #408)*. |
 | 6 | **Free tier** | Decide whether it stays on (`X402_FREE_TIER_ENABLED`) and at what rate (`X402_FREE_TIER_RATE_LIMIT`). It is bounded by the free ceiling. |
@@ -22,6 +22,41 @@ Do these in order. Rehearse on staging first, with the same settings and a tiny 
 | 8 | **Alerts** | Apply the alert rules (`scripts/apply_grafana.py`) and check they reach someone (section 5). |
 | 9 | **Terms** | Terms and refund policy published and linked *(requires the terms PR for #383)*. |
 | 10 | **Smoke test** | One real payment of a few cents, end to end: 402 → pay → 2xx, a `payment_settled` and a `payment_delivered` audit line with the same transaction, and the USDC visible at the pay-to address. |
+
+
+### Items 1–3 change in one deploy
+
+The network, the facilitator URL, the pay-to address and the facilitator credentials must all change **together, in the same deploy**. They cannot be changed one at a time.
+
+The reason: x402.org serves test networks only. At startup, `validate_x402_config` (in `app/x402/facilitator.py`) refuses a mainnet `X402_NETWORK` with the x402.org facilitator. So if you set only `X402_NETWORK=base` while `X402_FACILITATOR_URL` still points at x402.org, the gateway refuses to start. It also refuses a missing or malformed pay-to address, CDP credentials without `cdp-sdk` in the image, CDP credentials together with a bearer token, and a plain `http://` facilitator URL on a mainnet or with credentials.
+
+Set every row below **before** the deploy that ships the cutover. Then deploy once. Rehearse the same change on `staging` first. All of them are rendered into the env file by `.github/workflows/deploy.yml`: `/opt/swarm_connect.env` for `production` (`main`) and `/opt/swarm_connect_dev.env` for `staging` (`dev`).
+
+| GitHub setting | Kind | Environment | At cutover (production) | If unset |
+|---|---|---|---|---|
+| `X402_ENABLED` | variable (`vars.*`) | production | `true` (already set) | `false` in both environments |
+| `X402_NETWORK` | variable (`vars.*`) | production | `base` | production: **empty**, and the gateway refuses to start (#370); staging: `base-sepolia` |
+| `X402_FACILITATOR_URL` | variable (`vars.*`) | production | the mainnet facilitator's `https://` URL, for example `https://<mainnet-facilitator>/…`. With CDP credentials, leave it empty or use a URL on the CDP host. | production: **empty**, and the gateway refuses to start unless CDP credentials are set; staging: `https://x402.org/facilitator` |
+| `X402_PAY_TO_ADDRESS` | variable (`vars.*`) | production | `<mainnet pay-to address>`: the new address from item 1, not the staging one | empty, and the gateway refuses to start |
+| `X402_FACILITATOR_CDP_API_KEY_ID` | **secret** (`secrets.*`) | production | `<CDP API key id>` (CDP route only) | empty |
+| `X402_FACILITATOR_CDP_API_KEY_SECRET` | **secret** (`secrets.*`) | production | `<CDP API key secret>` on one line (CDP route only) | empty |
+| `X402_FACILITATOR_BEARER_TOKEN` | **secret** (`secrets.*`) | production | `<bearer token>` (bearer route only; leave empty with CDP) | empty |
+
+Use **one** credential route: the two CDP secrets, or the bearer token. Do not use both. Set these settings on the `production` **environment**, not on the repository: an environment value overrides a repository value of the same name, and a repository value would also reach staging. For the staging rehearsal, set the same names on the `staging` environment.
+
+```sh
+gh variable set X402_NETWORK         --repo datafund/swarm_connect --env production --body base
+gh variable set X402_FACILITATOR_URL --repo datafund/swarm_connect --env production --body '<mainnet facilitator URL>'
+gh variable set X402_PAY_TO_ADDRESS  --repo datafund/swarm_connect --env production --body '<mainnet pay-to address>'
+gh secret set X402_FACILITATOR_BEARER_TOKEN --repo datafund/swarm_connect --env production    # prompts for the value
+```
+
+**What a refused configuration looks like.** The deploy job runs the startup check (`python -m app.x402.check_config`) in a throwaway container. It uses the new image and the env the new container will get, and it runs **before** the running gateway is stopped (#485).
+
+- **With the check (current `deploy.yml`):** the `deploy` run fails in its `deploy` step, with an `x402 configuration refused` error annotation. The step log shows `x402 configuration check failed: RuntimeError: Refusing to start with x402 enabled: …` and the reason. The previous container is **not** stopped or recreated, and it keeps serving with its old configuration.
+- **Without the check (deploys before #485, or a container recreated by hand):** the new container is created, refuses to start, and restarts in a loop. The `deploy` run fails at `wait for healthy`. `Refusing to start with x402 enabled: …` appears in the container log (`docker compose logs provenance_gateway`) and in the log tail of the failed step. The gateway is down until a good configuration is deployed.
+
+**Recovering from a refused deploy.** Fix the GitHub variables and secrets, then re-run the deploy, or push again to `main`. Until then, **do not recreate the gateway by hand** (`docker compose up -d --force-recreate`, or `up -d` after a change): the deploy has already rewritten `/opt/swarm_connect.env` with the refused values, and a recreated container would read them and fail to start. `docker restart` and a host reboot keep the old values, because Docker reads `env_file` only when it creates a container.
 
 ## 2. Stopping traffic fast (kill switch)
 
