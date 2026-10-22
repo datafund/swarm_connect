@@ -196,6 +196,8 @@ class Env:
             "BEE_KEYS_AGE_RECIPIENT": RECIPIENT,
             "BACKUP_DIR": str(tmp / "state-local"),
             "BACKUP_REMOTE": str(tmp / "state-remote"),
+            # Never pick up a real /etc/swarm_connect/bee_keys.env on the machine.
+            "BEE_KEYS_ENV_FILE": "",
         }
 
     def add_volume(self, name):
@@ -931,3 +933,92 @@ def test_keep_one_never_removes_the_archive_just_written_on_failure(e):
     assert r.returncode == 1
     kept = e.archives(e.local)
     assert len([n for n in kept if not n.startswith("bee-keys-prod-2099")]) == 1
+
+
+# --- review round 4 ----------------------------------------------------------
+
+def write_env_file(e, body, mode=0o600):
+    f = e.tmp / "bee_keys.env"
+    f.write_text(body)
+    f.chmod(mode)
+    return f
+
+
+def test_settings_come_from_the_env_file(e):
+    f = write_env_file(e, f"BEE_KEYS_REMOTE={e.remote}\nBEE_KEYS_AGE_RECIPIENT={RECIPIENT}\n"
+                          f"BACKUP_REMOTE={e.tmp / 'state-remote'}\n")
+    r = e.run(BEE_KEYS_ENV_FILE=str(f), BEE_KEYS_REMOTE=None, BEE_KEYS_AGE_RECIPIENT=None,
+              BACKUP_REMOTE=None)
+    assert r.returncode == 0, r.stderr
+    assert len(e.archives(e.remote)) == 2
+    r = e.run("--verify", BEE_KEYS_ENV_FILE=str(f), BEE_KEYS_REMOTE=None,
+              BEE_KEYS_AGE_RECIPIENT=None, BACKUP_REMOTE=None)
+    assert r.returncode == 0, r.stderr
+
+
+def test_the_env_file_refusals_still_apply(e):
+    f = write_env_file(e, f"BEE_KEYS_REMOTE={e.tmp / 'state-remote'}\nBEE_KEYS_AGE_RECIPIENT={RECIPIENT}\n"
+                          f"BACKUP_REMOTE={e.tmp / 'state-remote'}\n")
+    r = e.run(BEE_KEYS_ENV_FILE=str(f))
+    assert r.returncode == 2 and "same destination" in r.stderr
+
+
+@pytest.mark.parametrize("mode", [0o620, 0o602, 0o666])
+def test_refuses_an_env_file_others_can_write(e, mode):
+    f = write_env_file(e, f"BEE_KEYS_REMOTE={e.remote}\n", mode)
+    r = e.run(BEE_KEYS_ENV_FILE=str(f))
+    assert r.returncode == 2
+    assert "writable" in r.stderr
+    assert e.calls("docker") == []
+
+
+def test_refuses_a_named_env_file_that_does_not_exist(e):
+    r = e.run(BEE_KEYS_ENV_FILE=str(e.tmp / "missing.env"))
+    assert r.returncode == 2
+    assert "missing.env" in r.stderr
+
+
+def test_refuses_a_secret_key_in_the_env_file(e):
+    f = write_env_file(e, f"BEE_KEYS_REMOTE={e.remote}\nBEE_KEYS_AGE_RECIPIENT=AGE-SECRET-KEY-1{'Q' * 58}\n")
+    r = e.run(BEE_KEYS_ENV_FILE=str(f))
+    assert r.returncode == 2 and "SECRET key" in r.stderr
+
+
+@pytest.mark.parametrize("tool", ["age", "docker", "rsync"])
+def test_a_child_that_outlives_the_run_does_not_hold_the_lock(e, tool):
+    # The tool starts a background process that inherits its file descriptors
+    # and keeps running after the script exits (a hung ssh, a stray docker
+    # client). It must not have inherited the lock.
+    real = e.bin / f"real-{tool}"
+    (e.bin / tool).rename(real)
+    pidfile = e.tmp / "child.pid"
+    (e.bin / tool).write_text(
+        "#!/bin/sh\n"
+        f"sleep 60 </dev/null >/dev/null 2>&1 &\necho $! >> {pidfile}\n"
+        f'exec "{real}" "$@"\n')
+    (e.bin / tool).chmod(0o755)
+    try:
+        r = e.run()
+        assert r.returncode == 0, r.stderr
+        assert pidfile.exists()
+        held = hold_lock(e)                       # raises if a child still holds it
+        held.close()
+    finally:
+        import signal
+        for pid in pidfile.read_text().split() if pidfile.exists() else []:
+            try:
+                os.kill(int(pid), signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+
+
+def test_ssh_keepalive_is_set(e):
+    assert e.run().returncode == 0
+    assert all("ServerAliveInterval=15" in c and "ServerAliveCountMax=4" in c for c in e.calls("rsync"))
+
+
+def test_refuses_duplicate_node_names(e):
+    r = e.run(BEE_KEYS_NODES="prod:vol-prod prod:vol-dev")
+    assert r.returncode == 2
+    assert "duplicate" in r.stderr
+    assert e.calls("docker") == []

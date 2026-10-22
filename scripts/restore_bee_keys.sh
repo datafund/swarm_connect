@@ -162,7 +162,12 @@ check)
   ok=1
   [ "$got_overlay" = "$overlay" ] || { echo "MISMATCH: overlay, expected $overlay" >&2; ok=0; }
   if [ -n "$address" ] && [ "$got_address" != "$address" ]; then echo "MISMATCH: ethereum address, expected $address" >&2; ok=0; fi
-  [ "$ok" -eq 1 ] || exit 1
+  if [ "$ok" -ne 1 ]; then
+    # With a wrong overlay (a typo, the wrong node) Bee may have mined and stored
+    # a nonce for the wrong target in this volume's statestore.
+    echo "Do not deploy on $vol: it may now hold a nonce for the wrong overlay. Remove it (docker volume rm $vol), restore again, and re-run check with the recorded values." >&2
+    exit 1
+  fi
   echo "identity matches"
 
   # Nonce-0 probe on a throwaway copy of keys/ only, so the volume under test is untouched.

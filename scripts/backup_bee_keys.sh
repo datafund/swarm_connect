@@ -16,6 +16,13 @@
 #   install -m 0700 scripts/backup_bee_keys.sh /usr/local/sbin/swarm_connect_backup_bee_keys
 # Cron lines: see docs/mainnet-runbook.md §4 (an "on change" run and a weekly --verify).
 #
+# Settings live in one root-only file, /etc/swarm_connect/bee_keys.env (VAR=value
+# lines, sourced by the script), so cron and manual runs use the same values.
+# BEE_KEYS_ENV_FILE names another file; set it empty to read none. Values in the
+# file override the environment. The script refuses a file that is not owned by
+# the user running it or that group or others can write. The file holds only
+# public values (the age recipient is the PUBLIC half), never a secret key.
+#
 # Usage: backup_bee_keys.sh            back up every node whose keys changed
 #        backup_bee_keys.sh --verify   weekly re-check, uploads nothing
 #
@@ -35,7 +42,10 @@
 #                           (default: /var/backups/swarm_connect)
 #   BEE_KEYS_KEEP           encrypted archives kept locally per node (default: 3)
 #   BEE_KEYS_HELPER_IMAGE   image used to read the volume (default: alpine:3.20)
-#   BEE_KEYS_SSH_TIMEOUT    ssh ConnectTimeout in seconds for rsync/scp (default: 20)
+#   BEE_KEYS_SSH_TIMEOUT    ssh ConnectTimeout in seconds for rsync/scp (default: 20);
+#                           ServerAliveInterval=15 x 4 also ends a connection that stalls
+#   BEE_KEYS_ENV_FILE       settings file to source (default: /etc/swarm_connect/bee_keys.env;
+#                           empty: none)
 #
 # BEE_KEYS_REMOTE, BACKUP_REMOTE and the two directories must be absolute paths.
 # They are compared after dropping user@, lower-casing the host and collapsing
@@ -67,6 +77,22 @@ case "${1:-}" in
   *) echo "usage: $0 [--verify]" >&2; exit 2 ;;
 esac
 
+refuse() { echo "REFUSED: $*" >&2; exit 2; }
+
+ENV_FILE="${BEE_KEYS_ENV_FILE-/etc/swarm_connect/bee_keys.env}"
+if [ -n "$ENV_FILE" ]; then
+  if [ -f "$ENV_FILE" ]; then
+    [ -n "$(find "$ENV_FILE" -user "$(id -u)")" ] || refuse "$ENV_FILE is not owned by uid $(id -u)"
+    [ -z "$(find "$ENV_FILE" \( -perm -020 -o -perm -002 \))" ] || refuse "$ENV_FILE is writable by group or others; chmod 600 it"
+    set -a
+    # shellcheck disable=SC1090
+    . "$ENV_FILE" || refuse "could not read $ENV_FILE"
+    set +a
+  elif [ -n "${BEE_KEYS_ENV_FILE:-}" ]; then
+    refuse "BEE_KEYS_ENV_FILE names $ENV_FILE, which does not exist"
+  fi
+fi
+
 NODES="${BEE_KEYS_NODES:-prod:swarm_connect_bee-data dev:swarm_connect_bee-dev-data}"
 DIR="${BEE_KEYS_DIR:-/var/backups/swarm_connect_bee_keys}"
 STATE_DIR="${BACKUP_DIR:-/var/backups/swarm_connect}"
@@ -77,7 +103,6 @@ RECIPIENTS="${BEE_KEYS_AGE_RECIPIENT:-}"
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 failed=0
 
-refuse() { echo "REFUSED: $*" >&2; exit 2; }
 # canon <dest>: print "host|/path" for a local absolute path or an rsync/scp
 # [user@]host:/absolute/path, with the user dropped, the host lower-cased, and
 # //, /./ and a trailing / or /. collapsed. Fails for a relative or empty path,
@@ -141,18 +166,21 @@ fi
 c_dir="$(canon "$DIR")" && [ "${c_dir%%|*}" = "" ] || refuse "BEE_KEYS_DIR must be an absolute local path"
 c_sdir="$(canon "$STATE_DIR")" && [ "${c_sdir%%|*}" = "" ] || refuse "BACKUP_DIR must be an absolute local path"
 overlaps "$c_dir" "$c_sdir" && refuse "BEE_KEYS_DIR and BACKUP_DIR are the same directory or nested"
+seen=" "
 for pair in $NODES; do
   case "$pair" in *?:?*) ;; *) refuse "BEE_KEYS_NODES entry '$pair' is not node:volume" ;; esac
+  case "$seen" in *" ${pair%%:*} "*) refuse "BEE_KEYS_NODES names node '${pair%%:*}' twice (duplicate)" ;; esac
+  seen="$seen${pair%%:*} "
   case "${pair%%:*}" in *[!A-Za-z0-9_-]*) refuse "BEE_KEYS_NODES node name '${pair%%:*}' may only use A-Z, a-z, 0-9, _ and -" ;; esac
 done
 
 if command -v sha256sum >/dev/null 2>&1; then sha() { sha256sum "$1" | cut -d' ' -f1; }
 else sha() { shasum -a 256 "$1" | cut -d' ' -f1; }; fi
-SSH_OPTS="-o ConnectTimeout=${BEE_KEYS_SSH_TIMEOUT:-20} -o BatchMode=yes"
+SSH_OPTS="-o ConnectTimeout=${BEE_KEYS_SSH_TIMEOUT:-20} -o BatchMode=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=4"
 copy() {  # copy <dest> <src>...  (rsync, else scp)
   local dest="$1"; shift
-  if command -v rsync >/dev/null 2>&1; then rsync -a -e "ssh $SSH_OPTS" "$@" "$dest"
-  else scp -q $SSH_OPTS "$@" "$dest"; fi
+  if command -v rsync >/dev/null 2>&1; then rsync -a -e "ssh $SSH_OPTS" "$@" "$dest" 9>&-
+  else scp -q $SSH_OPTS "$@" "$dest" 9>&-; fi
 }
 
 command -v flock >/dev/null 2>&1 || refuse "flock (util-linux) is required; apt-get install util-linux"
@@ -161,8 +189,10 @@ umask 077
 mkdir -p "$DIR" || exit 1
 
 # One run at a time per BEE_KEYS_DIR, with util-linux flock(1) on fd 9. The
-# kernel drops the lock when the process exits however it exits, so there is no
-# stale lock to detect or take over.
+# kernel drops the lock when the last holder of fd 9 exits, however it exits.
+# Every long-running child (docker, age, rsync/scp and their ssh) is started
+# with 9>&-, so only this script holds it: a stray child that outlives the
+# script cannot keep the lock.
 exec 9>>"$DIR/.lock" || { echo "FAILED: cannot open $DIR/.lock" >&2; exit 1; }
 if ! flock -n 9; then
   echo "FAILED: another run holds $DIR/.lock" >&2; exit 1
@@ -206,7 +236,7 @@ SH
 # container's stdout (the plaintext tar) to /var/lib/docker/containers/ on the
 # host disk, and journald or syslog would keep or ship it.
 live_manifest() {  # live_manifest <volume> <out>
-  docker run --rm --log-driver none -v "$1:/src:ro" "$IMAGE" sh -c "$SNAP" sh manifest > "$2" && [ -s "$2" ]
+  docker run --rm --log-driver none -v "$1:/src:ro" "$IMAGE" sh -c "$SNAP" sh manifest > "$2" 9>&- && [ -s "$2" ]
 }
 split_err() {  # split_err <stderr file> <manifest out>: manifest lines out, the rest to stderr
   sed -n 's/^MANIFEST //p' "$1" > "$2"
@@ -229,7 +259,7 @@ prune() {
 for pair in $NODES; do
   node="${pair%%:*}"; vol="${pair#*:}"
   record="$DIR/$node.manifest"; last="$DIR/$node.last"
-  if ! docker volume inspect "$vol" >/dev/null 2>&1; then
+  if ! docker volume inspect "$vol" >/dev/null 2>&1 9>&-; then
     echo "FAILED: $node: volume $vol does not exist" >&2; failed=1; continue
   fi
   man="$WORK/$node.manifest"
@@ -266,7 +296,8 @@ for pair in $NODES; do
   out="$DIR/$base.tar.age"
   # One snapshot gives both the archive (stdout, straight into age) and its
   # manifest (stderr), so they always match.
-  docker run --rm --log-driver none -v "$vol:/src:ro" "$IMAGE" sh -c "$SNAP" sh tar 2> "$WORK/$node.err" | age "${age_args[@]}" -o "$out.part"
+  docker run --rm --log-driver none -v "$vol:/src:ro" "$IMAGE" sh -c "$SNAP" sh tar 2> "$WORK/$node.err" 9>&- \
+    | age "${age_args[@]}" -o "$out.part" 9>&-
   rc=("${PIPESTATUS[@]}")
   split_err "$WORK/$node.err" "$man"
   if [ "${rc[0]}" -ne 0 ] || [ "${rc[1]}" -ne 0 ] || [ ! -s "$man" ]; then
