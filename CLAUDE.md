@@ -632,6 +632,7 @@ made, something reports success, and nothing happens.
 | `monitoring/alloy/config.alloy` | Alloy container is recreated | yes, but see below |
 | `deploy/Caddyfile` | **never automatically** — copy to `/etc/caddy/` and `systemctl reload caddy` | no |
 | `monitoring/alerting/*.json`, dashboards | **never automatically** — run `scripts/apply_grafana.py` | no |
+| `scripts/backup_state.sh`, `scripts/backup_bee_keys.sh`, `scripts/restore_bee_keys.sh` | **never automatically** — install under `/usr/local/sbin` and cron them by hand (`docs/mainnet-runbook.md` §4) | no |
 
 ### `docker restart` does not reload `env_file`
 
