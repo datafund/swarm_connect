@@ -424,7 +424,7 @@ When `X402_ENABLED=true`, protected endpoints (`POST /stamps/`, `POST /data/`) r
 | `POST /api/v1/data/manifest` | Yes |
 | `GET /api/v1/data/{ref}` | No (free) |
 | `GET /api/v1/stamps/` | No (free) |
-| `GET /api/v1/pricing` | No (free): current price quotes for the paid operations, so a client can learn a price without triggering a 402 |
+| `GET /api/v1/pricing` | No (free): current price quotes for the paid operations, so a client can learn a price without triggering a 402. Pass `upload_bytes` and `redundancy` to quote an upload. |
 
 ### Configuration
 
@@ -629,15 +629,15 @@ Upload data to Swarm (JSON or binary).
 | Deferred | `deferred=true` | Data goes to local node first, syncs to network asynchronously. Faster upload response but data may not be immediately retrievable. |
 
 **Redundancy Levels (Erasure Coding):**
-| Level | Name | Chunk Loss Tolerance | Use Case |
-|-------|------|---------------------|----------|
-| 0 | none | 0% | Maximum storage efficiency, no redundancy |
-| 1 | medium | 1% | Basic redundancy for stable networks |
-| 2 | strong | 5% | **Default** - Good balance of durability and cost |
-| 3 | insane | 10% | High durability for important data |
-| 4 | paranoid | 50% | Maximum durability for critical data |
+| Level | Name | Chunk Loss Tolerance | Parity per full group of data chunks | Use Case |
+|-------|------|---------------------|----------------------------|----------|
+| 0 | none | 0% | none (1.00x) | Maximum storage efficiency, no redundancy |
+| 1 | medium | 1% | 9 per 119 (about 1.08x) | Basic redundancy for stable networks |
+| 2 | strong | 5% | 21 per 107 (about 1.20x) | **Default** - Good balance of durability and cost |
+| 3 | insane | 10% | 31 per 97 (about 1.32x) | High durability for important data |
+| 4 | paranoid | 50% | 89 per 39 (about 3.28x) | Maximum durability for critical data |
 
-Higher redundancy levels increase data durability at the cost of more storage space (and stamp usage).
+Higher redundancy levels increase data durability at the cost of more storage space (and stamp usage). The parity counts come from Bee v2.8.1 (`pkg/file/redundancy/level.go`). When x402 is enabled, a paid upload is priced for the data plus this parity (see the operator guide).
 
 **Examples:**
 ```bash

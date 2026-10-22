@@ -98,6 +98,10 @@ async def get_pricing(
                     "overhead (a few hundred bytes), which is what the 402 prices."),
     mb: Optional[int] = Query(
         None, ge=1, description="Bandwidth credit top-up in MB, as in POST /chunks/credit?mb=."),
+    redundancy: Optional[int] = Query(
+        None, ge=0, le=4,
+        description="Erasure-coding level of the upload (0-4), as in POST /data/?redundancy=. "
+                    "Omitted means the upload's default (2). Parity chunks are priced as bandwidth."),
 ):
     """
     Quote the price of each paid operation **without paying**.
@@ -114,7 +118,8 @@ async def get_pricing(
     - `stamp_purchase`: `POST /api/v1/stamps/` (`size`, `depth`, `duration_hours`)
     - `pool_acquire`: `POST /api/v1/pool/acquire` (`size`, `depth`). Payment is
       optional here; the free daily allowance is used first.
-    - `data_upload`: `POST /api/v1/data/` (`upload_bytes`)
+    - `data_upload`: `POST /api/v1/data/` (`upload_bytes`, `redundancy`). The
+      price covers the parity chunks Bee adds at that redundancy level.
     - `bandwidth_credit`: `POST /api/v1/chunks/credit` (`mb`)
     """
     if not settings.X402_ENABLED:
@@ -164,7 +169,9 @@ async def get_pricing(
         quotes["stamp_purchase"], requirements = await _quote(f"{api}/stamps/", body=stamp_body)
         if settings.STAMP_POOL_ENABLED:
             quotes["pool_acquire"], _ = await _quote(f"{api}/pool/acquire", body=size_body)
-        quotes["data_upload"], _ = await _quote(f"{api}/data/", content_length=upload_bytes)
+        upload_query = f"redundancy={redundancy}" if redundancy is not None else ""
+        quotes["data_upload"], _ = await _quote(
+            f"{api}/data/", query=upload_query, content_length=upload_bytes)
         if settings.CHUNK_UPLOAD_ENABLED:
             query = f"mb={mb}" if mb is not None else ""
             quotes["bandwidth_credit"], _ = await _quote(f"{api}/chunks/credit", query=query)
