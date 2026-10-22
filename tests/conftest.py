@@ -102,3 +102,22 @@ def _reset_payment_replay_guard():
     yield
     replay_guard.reset()
     idempotency_store.reset()
+
+
+@pytest.fixture(autouse=True)
+def _isolate_ownership_registry():
+    """Restore the global ownership registry after each test.
+
+    Tests that buy or acquire through the real endpoints register batches in the
+    module-level singleton and never remove them. Pool sync skips any batch
+    registered to an owner other than the pool (#477), so a record left behind
+    by one test changes the outcome of a later pool test that reuses the batch id.
+    """
+    from app.services.stamp_ownership import stamp_ownership_manager
+
+    registry = stamp_ownership_manager._registry
+    snapshot = {k: dict(v) if isinstance(v, dict) else v for k, v in registry.items()}
+    yield
+    stamp_ownership_manager._registry = registry
+    registry.clear()
+    registry.update(snapshot)
