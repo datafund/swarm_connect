@@ -120,6 +120,8 @@ step "2. Back up the keys with backup_bee_keys.sh while the node runs"
 [ "$(docker inspect -f '{{.State.Running}}' "$ID-src")" = true ] || die "source node is not running"
 age-keygen -o "$WORK/age-identity.txt" 2>/dev/null
 export BEE_KEYS_AGE_RECIPIENT="$(age-keygen -y "$WORK/age-identity.txt")"
+# Never read a real host's /etc/swarm_connect/bee_keys.env: the drill's own values only.
+export BEE_KEYS_ENV_FILE=""
 export BEE_KEYS_NODES="drill:$SRC_VOL" BEE_KEYS_DIR="$WORK/keys-local" BEE_KEYS_REMOTE="$WORK/keys-remote"
 export BACKUP_DIR="$WORK/state-local" BACKUP_REMOTE="$WORK/state-remote"
 mkdir -p "$BEE_KEYS_REMOTE"
