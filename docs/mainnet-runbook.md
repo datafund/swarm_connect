@@ -179,7 +179,10 @@ The script reads `/etc/swarm_connect/bee_keys.env` on every run, so a manual run
 - `KEY=VALUE` lines for the known settings only (`BEE_KEYS_REMOTE`, `BEE_KEYS_AGE_RECIPIENT`, `BACKUP_REMOTE`, `BEE_KEYS_NODES`, `BEE_KEYS_DIR`, `BEE_KEYS_KEEP`, `BEE_KEYS_HELPER_IMAGE`, `BEE_KEYS_SSH_TIMEOUT`, `BACKUP_DIR`), with no `export` and no spaces around `=`;
 - a value that is one word, or that is in one pair of single or double quotes. Quotes are required for several recipients, as in `BEE_KEYS_AGE_RECIPIENT="age1… age1…"`.
 
-Values are literal. `$`, backquote and backslash are refused, and nothing is expanded. Any other line is refused (exit 2) with its line number, and its value is not echoed. The script also refuses the file if it is a symlink, is not a regular file, is not owned by root, can be written by group or others, or sits in a directory that group or others can write. Values in the file override the environment. `BEE_KEYS_ENV_FILE` names another file, by absolute path. The file holds only public values: the age recipient is the public half, never the `AGE-SECRET-KEY-…` identity, which the script refuses.
+Values are literal. `$`, backquote and backslash are refused, and nothing is expanded. Any other line is refused (exit 2) with its line number, and its value is not echoed. That includes a key that is not exactly one of the names above, and a key set twice. The script also refuses the file if it is a symlink, is not a regular file, is not owned by root, or can be written by group or others. It refuses a parent directory not owned by root, or one that group or others can write. The directories above that, `/etc` itself, are assumed to be root-owned system paths. The values are checked too:
+- `BEE_KEYS_SSH_TIMEOUT` must be 1 to 3600, and `BEE_KEYS_KEEP` a whole number with no leading zero;
+- the volume half of each `BEE_KEYS_NODES` entry must be a Docker volume name, never a path;
+- recipients and nodes may not contain `*`, `?` or `[`. Values in the file override the environment. `BEE_KEYS_ENV_FILE` names another file, by absolute path. The file holds only public values: the age recipient is the public half, never the `AGE-SECRET-KEY-…` identity, which the script refuses.
 
 `BACKUP_REMOTE` is repeated in this file only so the script can refuse a shared destination. Without it, the script logs a warning. Both values must be absolute (`/path` or `[user@]host:/path`). The script refuses a relative or empty remote path, because it cannot compare one. It compares them after dropping `user@`, lower-casing the host and collapsing `//`, `/./` and a trailing `/`. The check is best effort: it cannot tell that an ssh alias and the host name it points to are the same host. Keep the two paths distinct yourself. Use a different remote path from the gateway-state archives, and if possible a different account with its own ssh key. The defaults read the compose volumes `swarm_connect_bee-data` (node `prod`) and `swarm_connect_bee-dev-data` (node `dev`). Set `BEE_KEYS_NODES` to change them.
 
@@ -280,9 +283,17 @@ For a nonce-0 node, every start must carry the hint. Bee 2.8.1 reads it from `BE
   ls -l    # bee-keys-prod-<stamp>.tar.age and bee-keys-prod-<stamp>.sha256
   ```
 
-- [ ] Copy the archive to the identity holder's machine, then run `age -d -i <age-identity-file> bee-keys-prod-<stamp>.tar.age | ssh root@<gateway-host> /usr/local/sbin/swarm_connect_restore_bee_keys restore beedrill-scratch /root/beedrill/bee-keys-prod-<stamp>.sha256`. Expect `restored keys into beedrill-scratch`.
+- [ ] On the identity holder's machine, fetch the archive (ciphertext only) and pipe the decryption into the restore. The identity never leaves that machine:
+
+  ```sh
+  scp root@<gateway-host>:/root/beedrill/bee-keys-prod-<stamp>.tar.age .
+  age -d -i <age-identity-file> bee-keys-prod-<stamp>.tar.age \
+    | ssh root@<gateway-host> /usr/local/sbin/swarm_connect_restore_bee_keys restore beedrill-scratch /root/beedrill/bee-keys-prod-<stamp>.sha256
+  ```
+
+  Expect `restored keys into beedrill-scratch`.
 - [ ] On the host, with `BEE_PASSWORD` read as in step 4: `swarm_connect_restore_bee_keys check beedrill-scratch <recorded-overlay> <recorded-ethereum-address>`. Expect `identity matches`, and note whether it prints `nonce: non-zero` or the nonce-0 `WARNING` in the private record. The check containers have `--network none`, so the two copies of the identity never meet on the network.
-- [ ] Remove the scratch volume: `docker volume rm beedrill-scratch`. The keystore files in it are still encrypted with the password, but remove them anyway. Delete the fetched files.
+- [ ] Remove the scratch volume and the fetched files: `docker volume rm beedrill-scratch && rm -rf /root/beedrill` on the gateway host. The keystore files in the volume are still encrypted with the password, but remove them anyway. On the identity holder's machine, delete the copied `bee-keys-prod-<stamp>.tar.age`.
 - [ ] Record the date, the archive name and the result in the private ops record. Do not record the identifiers in this repository.
 
 ## 5. Alerts that matter for money
