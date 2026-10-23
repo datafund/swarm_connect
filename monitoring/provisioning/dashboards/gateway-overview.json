@@ -453,6 +453,73 @@
         "gridPos": { "h": 8, "w": 12, "x": 12, "y": 143 },
         "targets": [{ "expr": "sum by (environment) (gateway_distinct_callers{environment=~\"$environment\"})", "legendFormat": "{{environment}}" }],
         "fieldConfig": { "defaults": { "unit": "short", "custom": { "drawStyle": "line", "lineInterpolation": "smooth", "fillOpacity": 10 } } }
+      },
+      {
+        "id": 110, "title": "Product KPIs (production)", "type": "row", "collapsed": false, "panels": [],
+        "gridPos": { "h": 1, "w": 24, "x": 0, "y": 151 }
+      },
+      {
+        "id": 111, "title": "Records Stored (7 days)", "type": "stat",
+        "description": "Primary KPI (dataprovenance-app#34): successful uploads in the last 7 days. Production only — this row ignores the Environment dropdown, so dev and test traffic never inflates a product number. Counts every client: app, CLI, MCP and SDK.",
+        "gridPos": { "h": 4, "w": 4, "x": 0, "y": 152 },
+        "targets": [{ "expr": "sum(increase(gateway_uploads_total{environment=\"main\",status=\"success\"}[7d])) or vector(0)", "legendFormat": "uploads" }],
+        "fieldConfig": { "defaults": { "unit": "short", "decimals": 0, "thresholds": { "mode": "absolute", "steps": [{ "value": null, "color": "purple" }] } } }
+      },
+      {
+        "id": 112, "title": "Notarized Share (7 days)", "type": "stat",
+        "description": "Successful notary signatures divided by successful uploads, last 7 days, production. The share of stored data that got a provenance signature.",
+        "gridPos": { "h": 4, "w": 4, "x": 4, "y": 152 },
+        "targets": [{ "expr": "sum(increase(gateway_notary_signatures_total{environment=\"main\",status=\"success\"}[7d])) / sum(increase(gateway_uploads_total{environment=\"main\",status=\"success\"}[7d]))", "legendFormat": "notarized" }],
+        "fieldConfig": { "defaults": { "unit": "percentunit", "decimals": 0, "thresholds": { "mode": "absolute", "steps": [{ "value": null, "color": "blue" }] } } }
+      },
+      {
+        "id": 113, "title": "Downloads (7 days)", "type": "stat",
+        "description": "Successful downloads in the last 7 days, production. Shows whether stored data is being read back.",
+        "gridPos": { "h": 4, "w": 4, "x": 8, "y": 152 },
+        "targets": [{ "expr": "sum(increase(gateway_downloads_total{environment=\"main\",status=\"success\"}[7d])) or vector(0)", "legendFormat": "downloads" }],
+        "fieldConfig": { "defaults": { "unit": "short", "decimals": 0, "thresholds": { "mode": "absolute", "steps": [{ "value": null, "color": "purple" }] } } }
+      },
+      {
+        "id": 114, "title": "Read-back Ratio (7 days)", "type": "stat",
+        "description": "Successful downloads divided by successful uploads, last 7 days, production. Above 1 means stored data is retrieved, not only written.",
+        "gridPos": { "h": 4, "w": 4, "x": 12, "y": 152 },
+        "targets": [{ "expr": "sum(increase(gateway_downloads_total{environment=\"main\",status=\"success\"}[7d])) / sum(increase(gateway_uploads_total{environment=\"main\",status=\"success\"}[7d]))", "legendFormat": "read-back" }],
+        "fieldConfig": { "defaults": { "unit": "none", "decimals": 2, "thresholds": { "mode": "absolute", "steps": [{ "value": null, "color": "blue" }] } } }
+      },
+      {
+        "id": 115, "title": "Pool Stamp Acquires (7 days)", "type": "stat",
+        "description": "Successful pool stamp acquisitions in the last 7 days, production. How many users get as far as needing their own storage.",
+        "gridPos": { "h": 4, "w": 4, "x": 16, "y": 152 },
+        "targets": [{ "expr": "sum(increase(gateway_pool_acquires_total{environment=\"main\",status=\"success\"}[7d])) or vector(0)", "legendFormat": "acquires" }],
+        "fieldConfig": { "defaults": { "unit": "short", "decimals": 0, "thresholds": { "mode": "absolute", "steps": [{ "value": null, "color": "purple" }] } } }
+      },
+      {
+        "id": 116, "title": "Distinct Callers Today", "type": "stat",
+        "description": "Separate callers seen since midnight UTC, production. A count only, no identities. Resets daily and on every restart, so after a deploy it undercounts the day.",
+        "gridPos": { "h": 4, "w": 4, "x": 20, "y": 152 },
+        "targets": [{ "expr": "sum(gateway_distinct_callers{environment=\"main\"}) or vector(0)", "legendFormat": "callers" }],
+        "fieldConfig": { "defaults": { "unit": "short", "decimals": 0, "thresholds": { "mode": "absolute", "steps": [{ "value": null, "color": "purple" }] } } }
+      },
+      {
+        "id": 117, "title": "KPIs per Day (30 days)", "type": "timeseries",
+        "description": "Daily totals of the KPIs above, production, over the last 30 days regardless of the dashboard time picker. Each bar is the 24 hours ending at that point.",
+        "gridPos": { "h": 8, "w": 16, "x": 0, "y": 156 },
+        "timeFrom": "30d", "interval": "1d",
+        "targets": [
+          { "expr": "sum(increase(gateway_uploads_total{environment=\"main\",status=\"success\"}[1d]))", "legendFormat": "records stored" },
+          { "expr": "sum(increase(gateway_notary_signatures_total{environment=\"main\",status=\"success\"}[1d]))", "legendFormat": "notarized" },
+          { "expr": "sum(increase(gateway_downloads_total{environment=\"main\",status=\"success\"}[1d]))", "legendFormat": "downloads" },
+          { "expr": "sum(increase(gateway_pool_acquires_total{environment=\"main\",status=\"success\"}[1d]))", "legendFormat": "pool acquires" }
+        ],
+        "fieldConfig": { "defaults": { "unit": "short", "decimals": 0, "custom": { "drawStyle": "bars", "fillOpacity": 60, "barAlignment": -1 } } }
+      },
+      {
+        "id": 118, "title": "Distinct Callers per Day (30 days)", "type": "timeseries",
+        "description": "Highest distinct-caller count reached each day, production, last 30 days. Approximate: the count resets on restart, so a day with a deploy shows less than the true number.",
+        "gridPos": { "h": 8, "w": 8, "x": 16, "y": 156 },
+        "timeFrom": "30d", "interval": "1d",
+        "targets": [{ "expr": "max_over_time(sum(gateway_distinct_callers{environment=\"main\"})[1d:5m])", "legendFormat": "callers" }],
+        "fieldConfig": { "defaults": { "unit": "short", "decimals": 0, "custom": { "drawStyle": "bars", "fillOpacity": 60, "barAlignment": -1 } } }
       }
     ],
     "schemaVersion": 39
