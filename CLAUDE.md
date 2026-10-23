@@ -240,7 +240,7 @@ Owner addresses are canonical (lowercase, `0x`-prefixed, validated) on `register
 
 The gateway supports x402 payment protocol for pay-per-request access without user accounts. When enabled, clients pay in USDC on Base chain to access stamp purchase and data upload endpoints.
 
-**Current Status**: Deployed on both staging (`dev`) and production (`main`); switched per environment by the `X402_ENABLED` / `X402_NETWORK` repository variables read in `deploy.yml` (`X402_ENABLED` defaults to `false` there, so the repo variable is what turns it on; network defaults: `base-sepolia` for dev, `base` for main). `GET /` reports `x402.enabled` for a running gateway.
+**Current Status**: Deployed on both staging (`dev`) and production (`main`); switched per environment by the `X402_ENABLED` / `X402_NETWORK` GitHub variables read in `deploy.yml` (`X402_ENABLED` defaults to `false` there, so the variable is what turns it on). Network and facilitator defaults: `base-sepolia` and `https://x402.org/facilitator` for dev; **none** for main (#370), so a missing value stops production at startup. Network, facilitator URL, pay-to address and facilitator credentials change together in one deploy at the mainnet cutover (`docs/mainnet-runbook.md` §1). `GET /` reports `x402.enabled` for a running gateway.
 
 **Parent Issue**: [datafund/provenance-fellowship#23](https://github.com/datafund/provenance-fellowship/issues/23)
 
@@ -664,6 +664,23 @@ Both, in this order, or the change is temporary:
 
 Doing only (2) means the next deploy reverts it. Doing only (1) means nothing
 changes until someone deploys.
+
+### The deploy checks the x402 configuration before replacing the gateway
+
+The `deploy` step runs `python -m app.x402.check_config` (#485) after the
+checkout and `.env` are assembled and before `docker compose stop`. It runs
+through `docker compose run --rm --no-deps -T "$BRANCH_SERVICE"`, so it uses
+the new image and the same `env_file` and `environment` as the new container.
+It calls the startup check itself (`validate_x402_config`). A configuration
+the gateway would refuse exits 3 and fails the job with `x402 configuration
+refused`. Any other failure (compose, the Docker daemon, a settings error)
+fails it with `x402 configuration check could not run`. Either way the running
+gateway stays up, and the rest of the step (host services, Alloy) is skipped.
+
+The env file has already been rewritten by then. After a refused deploy, fix
+the GitHub variables or secrets and re-run the deploy. Do **not**
+force-recreate by hand in between: the new container would read the refused
+values and stay down.
 
 ### A bind-mounted FILE pins its inode
 
