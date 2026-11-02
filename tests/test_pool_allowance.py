@@ -381,10 +381,12 @@ class TestPaidAcquireBypassesTheAllowance:
     ):
         """Sending someone to pay on a path that will still refuse them is worse
         than not offering it. On a testnet the bypass is withheld, so the message
-        must point at direct purchase instead."""
+        must point at direct purchase instead. x402 is on here, so the testnet
+        rule is what withholds the offer, not x402 being off (#480)."""
+        monkeypatch.setattr(settings, "X402_ENABLED", True)
         monkeypatch.setattr(settings, "X402_NETWORK", "base-sepolia")
         monkeypatch.setattr(settings, "X402_ALLOW_TESTNET_PAID_BYPASS", False)
-        d = self._exhausted(monkeypatch, tmp_path)
+        d = self._exhausted(monkeypatch, tmp_path, expected_status=429)
         assert d["alternative"]["endpoint"] == "POST /api/v1/stamps/"
         assert "X-PAYMENT" not in d["message"]
         assert "header" not in d["alternative"]
