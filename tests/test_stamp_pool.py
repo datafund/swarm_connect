@@ -1732,6 +1732,171 @@ class TestTopUpSkipsReservedBatches:
         assert len(manager._spend_times) == 1
 
 
+class TestNoReservationDuringTopUp:
+    """A batch whose top-up is in flight cannot be reserved or sold (#540).
+
+    #475 checks, under the lock, that a batch is still AVAILABLE right before
+    the extend call. The extend call itself awaits Bee for a few seconds; an
+    acquire that reserved the batch during that call would buy a batch the pool
+    had just paid to extend. While the top-up runs, the acquire takes another
+    batch, and the batch still counts toward the reserve target.
+    """
+
+    A = "a" * 64
+    B = "b" * 64
+
+    @pytest.fixture
+    def manager(self, tmp_path):
+        return StampPoolManager(state_file=str(tmp_path / "pool_state.json"))
+
+    @staticmethod
+    def _chainstate():
+        return patch('app.services.stamp_pool.swarm_api.get_chainstate',
+                     new=AsyncMock(return_value={"currentPrice": "24000"}))
+
+    @pytest.mark.asyncio
+    async def test_reservation_during_extend_does_not_get_the_batch(self, manager):
+        manager.add_stamp_to_pool(self.A, 17, 1_000_000, 3600)
+        seen = {}
+
+        async def extend_while_reserving(batch_id, amount):
+            seen["reserved"] = manager.reserve_stamp(batch_id, reserved_for="buyer")
+            seen["status"] = manager._pool[batch_id].status
+
+        with self._chainstate(), \
+             patch('app.services.stamp_pool.swarm_api.extend_postage_stamp',
+                   side_effect=extend_while_reserving):
+            result = await manager._topup_stamp(self.A)
+
+        assert result is True
+        assert seen["reserved"] is None, "a batch being topped up was reserved for an acquire"
+        assert seen["status"] == PoolStampStatus.AVAILABLE
+        # Once the top-up is over the batch can be acquired as usual.
+        assert manager.reserve_stamp(self.A, reserved_for="buyer") is not None
+
+    @pytest.mark.asyncio
+    async def test_acquire_during_extend_picks_another_batch(self, manager):
+        manager.add_stamp_to_pool(self.A, 17, 1_000_000, 3600)
+        manager.add_stamp_to_pool(self.B, 17, 1_000_000, 3600)
+        seen = {}
+
+        async def extend_while_acquiring(batch_id, amount):
+            exact = manager.get_available_stamp(17)
+            any_size = manager.get_available_stamp_any_size(17)
+            seen["exact"] = exact.batch_id if exact else None
+            seen["any_size"] = any_size.batch_id if any_size else None
+            seen["reserved_other"] = manager.reserve_stamp(self.B, reserved_for="buyer")
+
+        with self._chainstate(), \
+             patch('app.services.stamp_pool.swarm_api.extend_postage_stamp',
+                   side_effect=extend_while_acquiring):
+            assert await manager._topup_stamp(self.A) is True
+
+        assert seen["exact"] == self.B
+        assert seen["any_size"] == self.B
+        assert seen["reserved_other"] is not None
+
+    @pytest.mark.asyncio
+    async def test_only_batch_of_a_size_being_topped_up_reads_as_none_available(self, manager):
+        manager.add_stamp_to_pool(self.A, 17, 1_000_000, 3600)
+        seen = {}
+
+        async def extend_while_acquiring(batch_id, amount):
+            seen["exact"] = manager.get_available_stamp(17)
+            seen["any_size"] = manager.get_available_stamp_any_size(17)
+
+        with self._chainstate(), \
+             patch('app.services.stamp_pool.swarm_api.extend_postage_stamp',
+                   side_effect=extend_while_acquiring):
+            await manager._topup_stamp(self.A)
+
+        assert seen["exact"] is None
+        assert seen["any_size"] is None
+
+    @pytest.mark.asyncio
+    async def test_release_stamp_refuses_batch_being_topped_up(self, manager):
+        manager.add_stamp_to_pool(self.A, 17, 1_000_000, 3600)
+        seen = {}
+
+        async def extend_while_releasing(batch_id, amount):
+            seen["released"] = manager.release_stamp(batch_id, released_to="buyer")
+
+        with self._chainstate(), \
+             patch('app.services.stamp_pool.swarm_api.extend_postage_stamp',
+                   side_effect=extend_while_releasing):
+            await manager._topup_stamp(self.A)
+
+        assert seen["released"] is None
+        assert self.A in manager._pool
+
+    @pytest.mark.asyncio
+    async def test_batch_being_topped_up_still_counts_toward_the_reserve(self, manager):
+        """A running top-up must not look like a shortfall and trigger a purchase."""
+        manager.add_stamp_to_pool(self.A, 17, 1_000_000, 3600)
+        seen = {}
+
+        async def extend_while_counting(batch_id, amount):
+            status = manager.get_status()
+            seen["level"] = status.current_levels.get(17, 0)
+            seen["total"] = status.total_stamps
+            seen["triggered"] = manager.trigger_replenishment_if_needed(17)
+
+        with self._chainstate(), \
+             patch.object(manager, 'get_reserve_config', return_value={17: 1}), \
+             patch('app.services.stamp_pool.settings.STAMP_POOL_IMMEDIATE_REPLENISH', True), \
+             patch.object(manager, '_purchase_stamp', new=AsyncMock(return_value=None)) as buy, \
+             patch('app.services.stamp_pool.swarm_api.extend_postage_stamp',
+                   side_effect=extend_while_counting):
+            await manager._topup_stamp(self.A)
+
+        assert seen["level"] == 1
+        assert seen["total"] == 1
+        assert seen["triggered"] is False
+        buy.assert_not_called()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("outcome", ["bee_error", "cancelled"])
+    async def test_batch_is_released_for_acquire_when_extend_fails(self, manager, outcome):
+        import asyncio
+        manager.add_stamp_to_pool(self.A, 17, 1_000_000, 3600)
+        error = RuntimeError("bee refused") if outcome == "bee_error" else asyncio.CancelledError()
+
+        with self._chainstate(), \
+             patch('app.services.stamp_pool.swarm_api.extend_postage_stamp',
+                   new=AsyncMock(side_effect=error)):
+            with pytest.raises(type(error)):
+                await manager._topup_stamp(self.A)
+
+        assert manager.reserve_stamp(self.A, reserved_for="buyer") is not None
+
+    @pytest.mark.asyncio
+    async def test_batch_is_released_for_acquire_when_gateway_ceiling_refuses(self, manager):
+        manager.add_stamp_to_pool(self.A, 17, 1_000_000, 3600)
+        extend = AsyncMock()
+
+        with self._chainstate(), \
+             patch.object(manager, '_reserve_gateway_spend', return_value=None), \
+             patch('app.services.stamp_pool.swarm_api.extend_postage_stamp', new=extend):
+            assert await manager._topup_stamp(self.A) is False
+
+        extend.assert_not_called()
+        assert manager.reserve_stamp(self.A, reserved_for="buyer") is not None
+
+    @pytest.mark.asyncio
+    async def test_skipped_topup_leaves_reservation_alone(self, manager):
+        """A batch already reserved (the #475 skip) is not marked, so its
+        acquire can still finish and cancel normally."""
+        manager.add_stamp_to_pool(self.A, 17, 1_000_000, 3600)
+        assert manager.reserve_stamp(self.A, reserved_for="buyer") is not None
+
+        with self._chainstate(), \
+             patch('app.services.stamp_pool.swarm_api.extend_postage_stamp', new=AsyncMock()):
+            assert await manager._topup_stamp(self.A) is None
+
+        manager.unreserve_stamp(self.A)
+        assert manager.get_available_stamp(17).batch_id == self.A
+
+
 class TestSpendReservation:
     """The hourly slot and the gateway ceiling are taken before the Bee call (#363)."""
 
