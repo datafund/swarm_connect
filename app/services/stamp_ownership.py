@@ -6,6 +6,7 @@ When x402 is enabled, stamps acquired via paid requests are exclusive
 to the payer's wallet address. Free tier stamps are shared/communal.
 Batches not in the registry are denied unless STAMP_OWNERSHIP_ALLOW_UNTRACKED
 is set (#312); the registry is loaded at startup (#349).
+Batch ids are keyed in lowercase on every read and write (#558).
 """
 import json
 import logging
@@ -46,6 +47,43 @@ def normalize_address(address: Optional[str]) -> Optional[str]:
     return address if address.startswith("0x") else "0x" + address
 
 
+def _batch_key(batch_id: str) -> str:
+    """Return the registry key for a batch id: the id in lowercase (#558).
+
+    Bee lists batch ids in lowercase, but the API path and query patterns accept
+    either case. Keying the registry by the lowercase id means a caller that
+    forgets to lowercase cannot miss a record and wrongly deny its owner.
+    """
+    return batch_id.lower() if isinstance(batch_id, str) else batch_id
+
+
+def _merge_case_collision(key: str, kept: dict, other: dict, state_file: str) -> dict:
+    """Pick the record to keep for two batch keys that differ only in case.
+
+    The rule never grants access to a wallet that did not own the batch and
+    never silently drops a real owner:
+    - the same owner on both: one record is enough, keep ``kept``;
+    - a wallet against "shared" or "pool": the wallet wins. "shared" would open
+      the batch to everyone and "pool" would let the gateway sell it again; the
+      wallet is the only real owner, and owner -> pool/shared is never an
+      expected transition (register_stamp logs it as an error);
+    - anything else (two different wallets, "shared" against "pool"): there is
+      no safe guess, so the registry is refused as unreadable and the operator
+      resolves it in the file.
+    """
+    a, b = kept["owner"], other["owner"]
+    if a == b:
+        return kept
+    a_special, b_special = a in _SPECIAL_OWNERS, b in _SPECIAL_OWNERS
+    if a_special != b_special:
+        return other if a_special else kept
+    raise unreadable_state(
+        state_file,
+        f"batch {key[:16]} is registered under two spellings with different owners "
+        f"({a!r} and {b!r}); keep the right record and delete the other",
+    )
+
+
 class StampOwnershipManager:
     """
     Tracks stamp ownership and enforces access control.
@@ -54,7 +92,7 @@ class StampOwnershipManager:
     """
 
     def __init__(self, state_file: Optional[str] = None):
-        self._registry: Dict[str, dict] = {}  # batch_id -> {owner, mode, acquired_at, source}
+        self._registry: Dict[str, dict] = {}  # lowercase batch_id -> {owner, mode, acquired_at, source}
         self._lock = Lock()
         self._state_file = state_file
 
@@ -100,9 +138,39 @@ class StampOwnershipManager:
             if canonical != owner:
                 entry["owner"] = canonical
                 normalized += 1
-        if normalized:
-            logger.info(f"Normalised {normalized} owner address(es) in {state_file}")
-        self._registry = data
+
+        # Keys are lowercase batch ids (#558). A file written before that may
+        # hold mixed-case keys; lowercase them once here. Two keys that differ
+        # only in case are resolved by _merge_case_collision. A record whose key
+        # was already lowercase is visited first, so it is the one kept when
+        # both spellings name the same owner.
+        registry: Dict[str, dict] = {}
+        lowered = merged = 0
+        for batch_id in sorted(data, key=lambda k: k != _batch_key(k)):
+            entry = data[batch_id]
+            key = _batch_key(batch_id)
+            if key != batch_id:
+                lowered += 1
+            if key in registry:
+                kept = _merge_case_collision(key, registry[key], entry, state_file)
+                logger.warning(
+                    f"Ownership registry has batch {key[:16]} under two spellings, owners "
+                    f"{registry[key]['owner']!r} and {entry['owner']!r}; keeping {kept['owner']!r}")
+                registry[key] = kept
+                merged += 1
+            else:
+                registry[key] = entry
+
+        self._registry = registry
+        if normalized or lowered:
+            logger.info(
+                f"Migrated {state_file}: {lowered} batch key(s) lowercased, {merged} case "
+                f"collision(s) merged, {normalized} owner address(es) normalised")
+            # Persist so the file ends lowercase. _save_state writes atomically
+            # and only logs on failure: the original file is then left intact,
+            # the registry in memory is complete, and the next load migrates the
+            # same file again.
+            self._save_state()
         logger.info(f"Loaded ownership state: {len(self._registry)} stamps from {state_file}")
 
     def register_stamp(
@@ -134,6 +202,7 @@ class StampOwnershipManager:
             if canonical is None:
                 raise ValueError(f"invalid owner address: {owner!r}")
             owner = canonical
+        batch_id = _batch_key(batch_id)
         with self._lock:
             existing = self._registry.get(batch_id)
             if existing is not None:
@@ -176,6 +245,7 @@ class StampOwnershipManager:
         if not settings.X402_ENABLED:
             return True, "x402 disabled, no ownership enforcement"
 
+        batch_id = _batch_key(batch_id)
         with self._lock:
             entry = self._registry.get(batch_id)
 
@@ -222,6 +292,7 @@ class StampOwnershipManager:
 
     def remove_stamp(self, batch_id: str):
         """Remove a stamp from the ownership registry."""
+        batch_id = _batch_key(batch_id)
         with self._lock:
             if batch_id in self._registry:
                 del self._registry[batch_id]
@@ -235,6 +306,7 @@ class StampOwnershipManager:
         Args:
             valid_batch_ids: Set of batch IDs that are still valid on the Bee node
         """
+        valid_batch_ids = {_batch_key(bid) for bid in valid_batch_ids}
         with self._lock:
             to_remove = [
                 bid for bid in self._registry
@@ -249,7 +321,7 @@ class StampOwnershipManager:
     def get_stamp_info(self, batch_id: str) -> Optional[dict]:
         """Get ownership info for a stamp (for debugging/status endpoints)."""
         with self._lock:
-            return self._registry.get(batch_id)
+            return self._registry.get(_batch_key(batch_id))
 
     def load_on_startup(self):
         """Load ownership state on application startup."""

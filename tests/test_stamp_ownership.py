@@ -510,3 +510,181 @@ class TestPoolInventoryIsReportedDistinctly:
         import typing
         allowed = typing.get_args(typing.get_args(StampDetails.model_fields["accessMode"].annotation)[0])
         assert "pool" in allowed, f"accessMode Literal does not permit 'pool': {allowed}"
+
+
+class TestBatchIdCase:
+    """The registry keys batch ids in lowercase on every read and write (#558).
+
+    Callers used to have to lowercase the id themselves (#543, #557); one that
+    forgot denied the owner of a batch registered under the lowercase id.
+    """
+
+    BATCH = "ab" * 32
+    UPPER = BATCH.upper()
+    MIXED = "Ab" * 32
+    OWNER = "0x" + "11" * 20
+    OTHER = "0x" + "22" * 20
+
+    @pytest.fixture
+    def state_file(self, tmp_path):
+        return str(tmp_path / "stamp_owners.json")
+
+    @pytest.fixture
+    def x402_on(self):
+        with patch('app.services.stamp_ownership.settings') as mock_settings:
+            mock_settings.X402_ENABLED = True
+            mock_settings.STAMP_OWNERSHIP_ALLOW_UNTRACKED = False
+            yield
+
+    def _write(self, state_file, data):
+        with open(state_file, "w") as f:
+            json.dump(data, f)
+
+    def _read(self, state_file):
+        with open(state_file) as f:
+            return json.load(f)
+
+    # --- lookups, writes, deletes -------------------------------------------
+
+    def test_uppercase_and_mixed_lookup_find_lowercase_record(self, state_file, x402_on):
+        mgr = StampOwnershipManager(state_file=state_file)
+        mgr.register_stamp(self.BATCH, owner=self.OWNER, mode="paid", source="pool_acquire")
+        for spelling in (self.BATCH, self.UPPER, self.MIXED):
+            assert mgr.get_stamp_info(spelling)["owner"] == self.OWNER
+            assert mgr.check_access(spelling, self.OWNER, "paid") == (True, "owner match")
+            allowed, _ = mgr.check_access(spelling, self.OTHER, "paid")
+            assert allowed is False
+
+    def test_uppercase_register_stores_lowercase_key(self, state_file):
+        mgr = StampOwnershipManager(state_file=state_file)
+        mgr.register_stamp(self.UPPER, owner=self.OWNER, mode="paid", source="direct_purchase")
+        assert list(mgr._registry) == [self.BATCH]
+        assert list(self._read(state_file)) == [self.BATCH]
+        assert mgr.get_stamp_info(self.BATCH)["owner"] == self.OWNER
+
+    def test_only_if_unowned_refuses_a_case_variant(self, state_file):
+        mgr = StampOwnershipManager(state_file=state_file)
+        mgr.register_stamp(self.BATCH, owner=self.OWNER, mode="paid", source="direct_purchase")
+        assert mgr.register_stamp(self.MIXED, owner=self.OTHER, mode="paid", source="direct_purchase",
+                                  only_if_unowned=True) is False
+        assert mgr.get_stamp_info(self.BATCH)["owner"] == self.OWNER
+        assert list(mgr._registry) == [self.BATCH]
+
+    def test_reregister_under_other_case_replaces_not_duplicates(self, state_file):
+        from app.services.stamp_ownership import POOL_OWNER
+        mgr = StampOwnershipManager(state_file=state_file)
+        mgr.register_stamp(self.BATCH, owner=POOL_OWNER, mode="pool", source="pool_purchase")
+        mgr.register_stamp(self.UPPER, owner=self.OWNER, mode="paid", source="pool_acquire")
+        assert list(mgr._registry) == [self.BATCH]
+        assert mgr.get_stamp_info(self.BATCH)["owner"] == self.OWNER
+
+    def test_uppercase_remove_deletes_lowercase_record(self, state_file):
+        mgr = StampOwnershipManager(state_file=state_file)
+        mgr.register_stamp(self.BATCH, owner=self.OWNER, mode="paid", source="pool")
+        mgr.remove_stamp(self.UPPER)
+        assert mgr.get_stamp_info(self.BATCH) is None
+        assert self._read(state_file) == {}
+
+    def test_cleanup_expired_matches_case_insensitively(self, state_file):
+        mgr = StampOwnershipManager(state_file=state_file)
+        mgr.register_stamp(self.BATCH, owner=self.OWNER, mode="paid", source="pool")
+        mgr.register_stamp("cd" * 32, owner=self.OTHER, mode="paid", source="pool")
+        mgr.cleanup_expired(valid_batch_ids={self.UPPER})
+        assert mgr.get_stamp_info(self.BATCH) is not None
+        assert mgr.get_stamp_info("cd" * 32) is None
+        assert list(self._read(state_file)) == [self.BATCH]
+
+    # --- load-time migration ---------------------------------------------------
+
+    def test_load_lowercases_mixed_case_keys_and_persists(self, state_file, x402_on):
+        self._write(state_file, {
+            self.UPPER: {"owner": "0x" + "AA" * 20, "mode": "paid", "source": "pool"},
+            "Cd" * 32: {"owner": "shared", "mode": "free", "source": "pool"},
+            "ef" * 32: {"owner": "pool", "mode": "pool", "source": "pool"},
+        })
+        mgr = StampOwnershipManager(state_file=state_file)
+        mgr.load_on_startup()
+
+        expected_keys = {self.BATCH, "cd" * 32, "ef" * 32}
+        assert set(mgr._registry) == expected_keys
+        assert mgr.check_access(self.BATCH, "0x" + "aa" * 20, "paid")[0] is True
+        assert mgr.check_access("CD" * 32, None, None)[0] is True
+
+        saved = self._read(state_file)
+        assert set(saved) == expected_keys
+        assert saved[self.BATCH]["owner"] == "0x" + "aa" * 20
+
+    def test_clean_file_is_not_rewritten(self, state_file):
+        self._write(state_file, {self.BATCH: {"owner": self.OWNER, "mode": "paid"}})
+        mgr = StampOwnershipManager(state_file=state_file)
+        with patch("app.services.stamp_ownership.atomic_write_json") as write:
+            mgr.load_on_startup()
+        write.assert_not_called()
+        assert mgr.get_stamp_info(self.UPPER)["owner"] == self.OWNER
+
+    def test_migration_save_failure_keeps_file_and_memory(self, state_file):
+        self._write(state_file, {self.UPPER: {"owner": self.OWNER, "mode": "paid"}})
+        before = open(state_file).read()
+        mgr = StampOwnershipManager(state_file=state_file)
+        with patch("app.services.stamp_ownership.atomic_write_json", side_effect=OSError("disk full")):
+            mgr.load_on_startup()
+        assert open(state_file).read() == before
+        assert mgr.get_stamp_info(self.BATCH)["owner"] == self.OWNER
+
+        # The next start migrates the same file again.
+        mgr2 = StampOwnershipManager(state_file=state_file)
+        mgr2.load_on_startup()
+        assert list(self._read(state_file)) == [self.BATCH]
+        assert mgr2.get_stamp_info(self.BATCH)["owner"] == self.OWNER
+
+    # --- keys that differ only in case -----------------------------------------
+
+    def test_collision_same_owner_keeps_the_lowercase_record(self, state_file):
+        # Uppercase first in file order: the lowercase-key record must still win.
+        self._write(state_file, {
+            self.UPPER: {"owner": "0x" + "11" * 20, "mode": "paid", "source": "old"},
+            self.BATCH: {"owner": self.OWNER, "mode": "paid", "source": "new"},
+        })
+        mgr = StampOwnershipManager(state_file=state_file)
+        mgr.load_on_startup()
+        assert list(mgr._registry) == [self.BATCH]
+        assert mgr.get_stamp_info(self.BATCH)["source"] == "new"
+        assert list(self._read(state_file)) == [self.BATCH]
+
+    @pytest.mark.parametrize("special", ["shared", "pool"])
+    @pytest.mark.parametrize("wallet_key_is_lower", [True, False])
+    def test_collision_wallet_beats_special_owner(self, state_file, x402_on, caplog, special, wallet_key_is_lower):
+        wallet_key, special_key = (self.BATCH, self.UPPER) if wallet_key_is_lower else (self.UPPER, self.BATCH)
+        self._write(state_file, {
+            special_key: {"owner": special, "mode": "free"},
+            wallet_key: {"owner": self.OWNER, "mode": "paid"},
+        })
+        mgr = StampOwnershipManager(state_file=state_file)
+        with caplog.at_level("WARNING", logger="app.services.stamp_ownership"):
+            mgr.load_on_startup()
+        assert list(mgr._registry) == [self.BATCH]
+        assert mgr.get_stamp_info(self.BATCH)["owner"] == self.OWNER
+        assert mgr.check_access(self.BATCH, self.OWNER, "paid")[0] is True
+        assert mgr.check_access(self.BATCH, self.OTHER, "paid")[0] is False
+        assert mgr.check_access(self.BATCH, None, None)[0] is False
+        assert self._read(state_file)[self.BATCH]["owner"] == self.OWNER
+        assert any("two spellings" in r.message for r in caplog.records)
+
+    @pytest.mark.parametrize("owners", [
+        ("0x" + "11" * 20, "0x" + "22" * 20),
+        ("shared", "pool"),
+    ])
+    def test_collision_without_safe_choice_refuses_to_load(self, state_file, owners):
+        import glob
+        from app.core.atomic_io import StateLoadError
+        self._write(state_file, {
+            self.BATCH: {"owner": owners[0], "mode": "paid"},
+            self.MIXED: {"owner": owners[1], "mode": "paid"},
+        })
+        before = open(state_file).read()
+        mgr = StampOwnershipManager(state_file=state_file)
+        with pytest.raises(StateLoadError, match="two spellings"):
+            mgr.load_on_startup()
+        assert open(state_file).read() == before
+        assert glob.glob(state_file + ".corrupt-*")
+        assert mgr._registry == {}
