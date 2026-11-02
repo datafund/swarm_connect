@@ -498,7 +498,7 @@ class TestDayRollover:
         allowed, info = t.check("1.2.3.4", 1.0)
         assert allowed, "the budget did not reset when the day turned"
         assert info["spent_bzz"] == 0
-        assert info["resets_at"].startswith("2099-01-01")
+        assert info["resets_at"] == "2099-01-02T00:00:00Z"
 
     def test_the_reset_is_persisted_not_just_in_memory(self, tmp_path, monkeypatch):
         """Otherwise a restart just after midnight would reload yesterday's
@@ -1017,3 +1017,135 @@ class TestFreeCeilingRefusalOffersPaymentOnlyWherePayingHelps:
         assert d["code"] == "GATEWAY_DAILY_SPEND_CEILING"
         assert d["message"] == f"The gateway has reached its daily spending limit. It resets at {d['resets_at']}."
         assert "paid" not in d["message"].lower()
+
+
+class TestResetsAtIsParseable:
+    """resets_at used to read "<day>T24:00:00Z", which fromisoformat rejects (#512)."""
+
+    END_OF_YEAR = "2026-12-31"
+    NEXT = "2027-01-01T00:00:00Z"
+
+    @staticmethod
+    def _assert_parseable(value):
+        from datetime import datetime
+        assert datetime.fromisoformat(value.replace("Z", "+00:00")).hour == 0
+
+    @pytest.fixture
+    def tracker(self, tmp_path, monkeypatch):
+        from app.services import spend_budget
+        monkeypatch.setattr(settings, "STAMP_DAILY_BZZ_PER_CALLER", 1.0)
+        monkeypatch.setattr(spend_budget, "_today", lambda: self.END_OF_YEAR)
+        return SpendBudgetTracker(state_file=str(tmp_path / "spend.json"))
+
+    def test_check(self, tracker):
+        _, info = tracker.check("1.2.3.4", 0.5)
+        assert info["resets_at"] == self.NEXT
+        self._assert_parseable(info["resets_at"])
+
+    def test_reserve(self, tracker):
+        _, info = tracker.reserve("1.2.3.4", 0.5)
+        assert info["resets_at"] == self.NEXT
+        self._assert_parseable(info["resets_at"])
+
+    def test_reserve_all_refusal(self, tracker):
+        hold, key, info = tracker.reserve_all([("1.2.3.4", 2.0, 1.0)])
+        assert hold is None and key == "1.2.3.4"
+        assert info["resets_at"] == self.NEXT
+        self._assert_parseable(info["resets_at"])
+
+    def test_reserve_all_refusal_on_an_unreadable_record(self, tmp_path, monkeypatch):
+        from app.services import spend_budget
+        monkeypatch.setattr(spend_budget, "_today", lambda: self.END_OF_YEAR)
+        path = tmp_path / "spend.json"
+        path.write_text("{not json")
+        t = SpendBudgetTracker(state_file=str(path))
+        hold, _, info = t.reserve_all([("1.2.3.4", 0.1, 1.0)])
+        assert hold is None and info["state_unreadable"]
+        assert info["resets_at"] == self.NEXT
+        self._assert_parseable(info["resets_at"])
+
+
+class TestResetsAtInRefusalResponses:
+    """Each spend refusal states resets_at in its body and in its message (#531).
+
+    The tracker tests above pin the value; these pin what a client receives, so
+    a message template cannot bring back an unparseable "T24:00:00Z".
+    """
+
+    END_OF_YEAR = "2026-12-31"
+    NEXT = "2027-01-01T00:00:00Z"
+
+    @pytest.fixture
+    def tracker(self, tmp_path, monkeypatch):
+        from app.services import spend_budget
+        monkeypatch.setattr(spend_budget, "_today", lambda: self.END_OF_YEAR)
+        t = SpendBudgetTracker(state_file=str(tmp_path / "spend.json"))
+        monkeypatch.setattr(spend_budget, "spend_budget_tracker", t)
+        import app.api.endpoints.stamps as stamps_ep
+        monkeypatch.setattr(stamps_ep, "spend_budget_tracker", t)
+        monkeypatch.setattr(settings, "X402_MAX_STAMP_BZZ", 0.0)
+        return t
+
+    def _assert_reset_in(self, detail):
+        from datetime import datetime
+        value = detail["resets_at"]
+        assert datetime.fromisoformat(value.replace("Z", "+00:00")).hour == 0
+        assert value == self.NEXT
+        assert value in detail["message"]
+        assert "T24" not in detail["message"]
+
+    @staticmethod
+    def _purchase():
+        with patch("app.services.swarm_api.get_chainstate",
+                   new=AsyncMock(return_value=CHAINSTATE)), \
+             patch("app.services.swarm_api.check_sufficient_funds",
+                   new=AsyncMock(return_value=FUNDS_OK)), \
+             patch("app.services.swarm_api.purchase_postage_stamp",
+                   new=AsyncMock(return_value=STAMP_ID)) as buy:
+            r = TestClient(app).post("/api/v1/stamps/",
+                                     json={"depth": 17, "duration_hours": 24})
+        return r, buy
+
+    def test_the_daily_budget_refusal_on_purchase(self, tracker, monkeypatch):
+        monkeypatch.setattr(settings, "STAMP_DAILY_BZZ_PER_CALLER", 0.001)
+        tracker.consume("testclient", 0.001)
+        r, buy = self._purchase()
+        assert r.status_code == 429, r.text
+        d = r.json()["detail"]
+        assert d["code"] == "DAILY_SPEND_BUDGET_EXHAUSTED"
+        self._assert_reset_in(d)
+        buy.assert_not_called()
+
+    @pytest.mark.parametrize("ceiling", ["GATEWAY_DAILY_BZZ_CEILING",
+                                         "GATEWAY_DAILY_BZZ_FREE_CEILING"])
+    def test_the_gateway_ceiling_refusal_on_purchase(self, tracker, monkeypatch, ceiling):
+        """The total and the free ceiling build different messages."""
+        monkeypatch.setattr(settings, "STAMP_DAILY_BZZ_PER_CALLER", UNLIMITED)
+        monkeypatch.setattr(settings, "GATEWAY_DAILY_BZZ_CEILING", 100.0)
+        monkeypatch.setattr(settings, "GATEWAY_DAILY_BZZ_FREE_CEILING", 100.0)
+        monkeypatch.setattr(settings, ceiling, 0.000001)
+        r, buy = self._purchase()
+        assert r.status_code == 503, r.text
+        d = r.json()["detail"]
+        assert d["code"] == "GATEWAY_DAILY_SPEND_CEILING"
+        self._assert_reset_in(d)
+        buy.assert_not_called()
+
+    def test_the_gateway_ceiling_refusal_on_for_owner(self, tracker, monkeypatch):
+        from app.api.endpoints import stamps_for_owner as ep
+        monkeypatch.setattr(settings, "STAMP_PURCHASE_FOR_OTHERS_ENABLED", True)
+        monkeypatch.setattr(settings, "STAMP_FOR_OTHERS_REQUIRE_WHITELIST", False)
+        monkeypatch.setattr(settings, "STAMP_FOR_OTHERS_FREE_TIER_ENABLED", True)
+        monkeypatch.setattr(settings, "GATEWAY_DAILY_BZZ_CEILING", 0.000001)
+        chain = ep.gnosis_chain_client
+        with patch("app.services.swarm_api.get_chainstate", new=AsyncMock(return_value=CHAINSTATE)), \
+             patch.object(type(chain), "is_configured", new=property(lambda self: True)), \
+             patch.object(chain, "preflight", new=AsyncMock(return_value={"is_critical": False, "warnings": []})), \
+             patch.object(chain, "create_batch", new=AsyncMock()) as create:
+            r = TestClient(app).post("/api/v1/stamps/for-owner", json={
+                "owner": "0x" + "1" * 40, "depth": 17, "duration_hours": 24})
+        assert r.status_code == 503, r.text
+        d = r.json()["detail"]
+        assert d["code"] == "GATEWAY_DAILY_SPEND_CEILING"
+        self._assert_reset_in(d)
+        create.assert_not_called()

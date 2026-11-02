@@ -18,13 +18,14 @@ import asyncio
 import json
 import os
 import logging
+import re
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import Dict, List, Optional, Set
 from threading import Lock
 
-from app.core.atomic_io import atomic_write_json, unreadable_state
+from app.core.atomic_io import StateLoadError, atomic_write_json, unreadable_state
 from app.core.config import settings
 from app.services import swarm_api
 from app.services.swarm_api import coerce_int
@@ -52,6 +53,33 @@ def _bee_error_message(exc) -> Optional[str]:
         pass
     text = (getattr(response, "text", "") or "").strip()
     return text[:200] or None
+
+
+def _error_cause(exc) -> str:
+    """Name a failure for /pool/status without quoting its text (#534).
+
+    /pool/status is unauthenticated, and httpx's HTTPStatusError text names
+    the request URL, which is the internal Bee API address. The entry there
+    gets the HTTP status, or the exception class when there is no response;
+    the caller logs the full text.
+    """
+    status = getattr(getattr(exc, "response", None), "status_code", None)
+    if status is not None:
+        return f"HTTP {status}"
+    return type(exc).__name__
+
+
+_URL_RE = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*://[^\s\"'<>]+")
+
+
+def _without_urls(text: str) -> str:
+    """Replace URL-shaped substrings with <url> for /pool/status (#534).
+
+    Bee's own message is worth showing, but it is response text: a proxy's
+    HTML error page or a Bee message quoting its RPC endpoint can name an
+    internal address. The log keeps the original.
+    """
+    return _URL_RE.sub("<url>", text)
 
 
 
@@ -110,6 +138,11 @@ class StampPoolManager:
         # Single-flight guard for check_and_replenish. See its docstring:
         # overlapping runs each buy to cover the same shortfall.
         self._replenishing = False
+        # Batches whose top-up is running (#540). Kept AVAILABLE and counted as
+        # held, but never selected, reserved or sold: an acquire during the
+        # extend call would otherwise buy a batch the pool had just paid to
+        # extend. Changed only under self._lock; see _topup_stamp.
+        self._topup_in_flight: Set[str] = set()
         # Timestamps of recent purchases, for the hourly ceiling. See
         # _spend_budget_remaining().
         self._spend_times: List[datetime] = []
@@ -126,6 +159,11 @@ class StampPoolManager:
         # False until a sync has actually read the node. Starts False so the very
         # first check cannot purchase against an unverified (empty) pool.
         self._last_sync_ok: bool = False
+        # Why the last sync failed: "state_file" when the pool's own state file
+        # could not be read, "bee" for anything else. The skip message names
+        # the cause, so operators do not go looking at Bee for a file problem.
+        self._last_sync_failure: Optional[str] = None
+        self._last_sync_error: Optional[str] = None
         # Per-depth backoff after a failed purchase. A failure is usually
         # persistent — out of funds, an amount below Bee's minimum validity —
         # and retrying it every cycle achieves nothing while blocking a request
@@ -283,7 +321,8 @@ class StampPoolManager:
         """
         with self._lock:
             for batch_id, stamp in self._pool.items():
-                if stamp.depth == depth and stamp.status == PoolStampStatus.AVAILABLE:
+                if (stamp.depth == depth and stamp.status == PoolStampStatus.AVAILABLE
+                        and batch_id not in self._topup_in_flight):
                     return stamp
             return None
 
@@ -298,6 +337,7 @@ class StampPoolManager:
             available = [
                 s for s in self._pool.values()
                 if s.status == PoolStampStatus.AVAILABLE and s.depth >= min_depth
+                and s.batch_id not in self._topup_in_flight
             ]
             if not available:
                 return None
@@ -327,6 +367,8 @@ class StampPoolManager:
         with self._lock:
             stamp = self._pool.get(batch_id)
             if not stamp or stamp.status != PoolStampStatus.AVAILABLE:
+                return None
+            if batch_id in self._topup_in_flight:
                 return None
 
             stamp.status = PoolStampStatus.RELEASED
@@ -359,13 +401,18 @@ class StampPoolManager:
         or unreserve_stamp() if it has not. Statuses are not persisted, so a
         batch reserved when the process dies is simply available after restart.
 
+        A batch whose top-up is in flight is not reserved (#540): the pool has
+        just paid to extend it, so the acquire takes another batch.
+
         Returns:
             The reserved stamp, or None if not found/not available (another
-            request got it first)
+            request got it first, or it is being topped up)
         """
         with self._lock:
             stamp = self._pool.get(batch_id)
             if not stamp or stamp.status != PoolStampStatus.AVAILABLE:
+                return None
+            if batch_id in self._topup_in_flight:
                 return None
             stamp.status = PoolStampStatus.RESERVED
             stamp.released_to = reserved_for
@@ -394,6 +441,31 @@ class StampPoolManager:
             stamp.released_to = None
         logger.info(f"Reservation on {batch_id[:16]}... cancelled, back in the pool")
 
+    def _immediate_replenish_paused(self, depth: int) -> bool:
+        """True when the last sync failed, so a release must not buy (#533).
+
+        The same rule as the maintenance path (see _check_and_replenish_locked):
+        after any failed sync the pool's contents are unknown. For an unreadable
+        state file, buying would also add a batch the gateway cannot reliably
+        record, and the skip message promises spending is paused until the file
+        is repaired. A Bee failure is usually transient; the next good sync
+        lifts the pause and maintenance refills the pool.
+
+        Only the last sync's result is known here: a file that breaks after
+        that sync is not noticed until the next one.
+        """
+        if self._last_sync_ok:
+            return False
+        if self._last_sync_failure == "state_file":
+            cause = "the pool state file could not be read"
+        else:
+            cause = "the last sync with the Bee node failed"
+        logger.warning(
+            f"Pool depth {depth}: not replenishing immediately because {cause}; "
+            "the pool's current contents are unknown."
+        )
+        return True
+
     def trigger_replenishment_if_needed(self, depth: int) -> bool:
         """
         Check if replenishment is needed for the given depth and trigger async purchase.
@@ -409,6 +481,9 @@ class StampPoolManager:
         """
         if not settings.STAMP_POOL_IMMEDIATE_REPLENISH:
             logger.debug(f"Immediate replenishment disabled, skipping for depth {depth}")
+            return False
+
+        if self._immediate_replenish_paused(depth):
             return False
 
         reserve_config = self.get_reserve_config()
@@ -459,6 +534,10 @@ class StampPoolManager:
         This is fire-and-forget - errors are logged but don't affect the caller.
         """
         try:
+            # Checked again here: a sync can fail between spawning this task
+            # and the task running.
+            if self._immediate_replenish_paused(depth):
+                return
             logger.info(f"Immediate replenishment: starting purchase for depth {depth}")
             batch_id = await self._purchase_stamp(depth)
             if batch_id:
@@ -467,7 +546,8 @@ class StampPoolManager:
                 logger.warning(f"Immediate replenishment: purchase returned no batch_id for depth {depth}")
         except Exception as e:
             logger.error(f"Immediate replenishment failed for depth {depth}: {e}")
-            self._errors.append(f"Immediate replenishment failed (depth {depth}): {str(e)}")
+            self._errors.append(f"Immediate replenishment failed (depth {depth}): "
+                                f"{_error_cause(e)}; see the gateway log for details.")
         finally:
             # Remove from pending count
             with self._lock:
@@ -587,6 +667,8 @@ class StampPoolManager:
                 logger.info("No known stamps in state file, pool will be filled by purchase logic")
                 # A genuinely empty state is a reliable answer, not a failure.
                 self._last_sync_ok = True
+                self._last_sync_failure = None
+                self._last_sync_error = None
                 return 0
 
             all_stamps = await swarm_api.get_all_stamps_processed()
@@ -722,11 +804,31 @@ class StampPoolManager:
             self._register_pool_ownership(valid_ids)
 
             self._last_sync_ok = True
+            self._last_sync_failure = None
+            self._last_sync_error = None
             return synced_count
 
+        except StateLoadError as e:
+            # The full text names the absolute state-file path and its backup.
+            # It goes to the log only: /pool/status is unauthenticated, so the
+            # entry there names the file by its base name.
+            logger.error(f"Error syncing pool: cannot read the pool state file: {e}")
+            name = os.path.basename(self._get_state_file_path())
+            self._last_sync_error = (f"Sync error: the pool state file ({name}) could not "
+                                     "be read; see the gateway log for details.")
+            self._errors.append(self._last_sync_error)
+            self._last_sync_failure = "state_file"
+            self._last_sync_ok = False
+            return 0
+
         except Exception as e:
+            # The full text can name the Bee API address (httpx puts the URL
+            # in HTTPStatusError). It goes to the log only (#534).
             logger.error(f"Error syncing stamps from Bee node: {e}")
-            self._errors.append(f"Sync error: {str(e)}")
+            self._last_sync_error = (f"Sync error: could not read stamps from the Bee node "
+                                     f"({_error_cause(e)}); see the gateway log for details.")
+            self._errors.append(self._last_sync_error)
+            self._last_sync_failure = "bee"
             # The pool's contents are now UNKNOWN, not known-to-be-empty. Record
             # that so replenishment does not read the empty pool as a real deficit.
             self._last_sync_ok = False
@@ -795,11 +897,30 @@ class StampPoolManager:
             # has finished syncing), which is precisely when the gateway restarts
             # alongside it, so the race is the normal case rather than a rare one.
             if not self._last_sync_ok:
-                msg = ("Skipping replenishment: could not read stamp state from the "
-                       "Bee node, so the pool's current contents are unknown. "
-                       "Will retry on the next check.")
+                if self._last_sync_failure == "state_file":
+                    # Base name and setting only: /pool/status is unauthenticated.
+                    # The full path and backup location are logged by
+                    # _load_state and sync_from_bee_node, never put in _errors.
+                    name = os.path.basename(self._get_state_file_path())
+                    msg = (f"Skipping replenishment: the pool state file ({name}, set by "
+                           "STAMP_POOL_STATE_FILE) could not be read, so the pool's "
+                           "current contents are unknown. Pool spending is paused until "
+                           "the file is repaired or restored.")
+                else:
+                    msg = ("Skipping replenishment: could not read stamp state from the "
+                           "Bee node, so the pool's current contents are unknown. "
+                           "Will retry on the next check.")
                 logger.warning(msg)
+                # Replace _errors with this run's entries, as the normal path
+                # does. Returning without it let sync append one "Sync error"
+                # per failed cycle, and a corrupt state file fails every cycle
+                # until repaired, so the list grew without limit (#482).
+                if self._last_sync_error:
+                    results["errors"].append(self._last_sync_error)
                 results["errors"].append(msg)
+                results["errors"].extend(self._refusals)
+                self._refusals.clear()
+                self._errors = results["errors"]
                 results["skipped"] = True
                 return results
 
@@ -839,11 +960,12 @@ class StampPoolManager:
                                 self._backoff_count.pop(depth, None)
                         except Exception as e:
                             detail = _bee_error_message(e)
-                            error_msg = f"Failed to purchase depth-{depth} stamp: {e}"
-                            if detail:
-                                error_msg += f" — Bee said: {detail}"
-                            logger.error(error_msg)
-                            results["errors"].append(error_msg)
+                            said = f" — Bee said: {detail}" if detail else ""
+                            logger.error(f"Failed to purchase depth-{depth} stamp: {e}{said}")
+                            # Bee's own message, not str(e): that names the Bee URL (#534).
+                            results["errors"].append(
+                                f"Failed to purchase depth-{depth} stamp: "
+                                f"{_error_cause(e)}{_without_urls(said)}")
                             # Back off this depth. Without this the next check
                             # tries again immediately and keeps failing: an
                             # underfunded pool retried an unaffordable purchase
@@ -903,15 +1025,19 @@ class StampPoolManager:
                 }
                 if current_ttl is not None and current_ttl < min_ttl_seconds:
                     try:
-                        if await self._topup_stamp(stamp.batch_id):
+                        outcome = await self._topup_stamp(stamp.batch_id)
+                        if outcome is True:
                             results["stamps_topped_up"] += 1
                             debug["result"] = "topped_up"
+                        elif outcome is None:
+                            debug["result"] = "skipped: batch reserved or no longer in the pool"
                         else:
                             debug["result"] = "refused by a spending ceiling"
                     except Exception as e:
-                        error_msg = f"Failed to top up stamp {stamp.batch_id[:16]}...: {e}"
-                        logger.error(error_msg)
-                        results["errors"].append(error_msg)
+                        logger.error(f"Failed to top up stamp {stamp.batch_id[:16]}...: {e}")
+                        results["errors"].append(
+                            f"Failed to top up stamp {stamp.batch_id[:16]}...: "
+                            f"{_error_cause(e)}; see the gateway log for details.")
                         debug["result"] = f"error: {e}"
                 elif current_ttl is None:
                     debug["result"] = "skipped: ttl_lookup_returned_none"
@@ -924,8 +1050,8 @@ class StampPoolManager:
             self._errors = results["errors"]
 
         except Exception as e:
-            error_msg = f"Pool check failed: {e}"
-            logger.error(error_msg)
+            logger.error(f"Pool check failed: {e}")
+            error_msg = f"Pool check failed: {_error_cause(e)}; see the gateway log for details."
             results["errors"].append(error_msg)
             self._errors = [error_msg]
 
@@ -1251,8 +1377,12 @@ class StampPoolManager:
         except Exception as e:
             logger.warning(f"Error updating stamp TTLs: {e}")
 
-    async def _topup_stamp(self, batch_id: str) -> bool:
+    async def _topup_stamp(self, batch_id: str) -> Optional[bool]:
         """Top up a stamp with additional TTL.
+
+        Returns True when topped up, False when a spending ceiling refused it,
+        and None when it was skipped because the batch is no longer an
+        AVAILABLE pool batch (reserved for an acquire, or gone; #475).
 
         Subject to the same hourly ceiling as buying a batch (#334). Extending
         spends BZZ, so leaving it uncounted made this the only spending path in
@@ -1289,25 +1419,46 @@ class StampPoolManager:
 
             logger.info(f"Topping up stamp {batch_id[:16]}... with {topup_hours}h ({amount} PLUR)")
 
-            if batch_id not in self._pool:
-                # Only pool inventory is topped up here; without its depth the
-                # cost cannot be charged correctly against the ceiling.
-                logger.error(f"Not topping up {batch_id[:16]}...: not in the pool")
+            # Checked here, under the lock and after the last await before the
+            # spend, because the top-up list was built from AVAILABLE batches
+            # before the TTL and price lookups awaited (#475). Since #439 a
+            # reservation keeps the batch in the pool while its payment settles,
+            # so being in the pool is not enough: a RESERVED batch is about to
+            # be sold. Nothing below awaits until the extend call. In the same
+            # locked step the batch is marked as being topped up, so no acquire
+            # can reserve or sell it while the extend call is in flight (#540).
+            with self._lock:
+                held = self._pool.get(batch_id)
+                status = held.status if held is not None else None
+                depth = held.depth if held is not None else None
+                if status == PoolStampStatus.AVAILABLE:
+                    self._topup_in_flight.add(batch_id)
+            if status != PoolStampStatus.AVAILABLE:
+                # A skip, not a failure: the batch was reserved or handed out
+                # after the list was built. Not recorded as an error or refusal.
+                reason = "not in the pool" if status is None else f"status is {status.value}"
+                logger.info(f"Not topping up {batch_id[:16]}...: {reason}; it is leaving the pool")
                 self._release_spend_slot(slot)
-                return False
-            depth = self._pool[batch_id].depth
-            cost_bzz = swarm_api.plur_to_bzz(swarm_api.calculate_stamp_total_cost(amount, depth))
-            hold = self._reserve_gateway_spend(cost_bzz, f"top up batch {batch_id[:16]}...", "pool top-up")
-            if hold is None:
-                self._release_spend_slot(slot)
-                return False
+                return None
             try:
-                await swarm_api.extend_postage_stamp(batch_id, amount)
-            except BaseException as e:
-                self._release_if_unspent(slot, hold, e)
-                slot = None  # handled
-                raise
-            return True
+                cost_bzz = swarm_api.plur_to_bzz(swarm_api.calculate_stamp_total_cost(amount, depth))
+                hold = self._reserve_gateway_spend(cost_bzz, f"top up batch {batch_id[:16]}...", "pool top-up")
+                if hold is None:
+                    self._release_spend_slot(slot)
+                    slot = None  # handled
+                    return False
+                try:
+                    await swarm_api.extend_postage_stamp(batch_id, amount)
+                except BaseException as e:
+                    self._release_if_unspent(slot, hold, e)
+                    slot = None  # handled
+                    raise
+                return True
+            finally:
+                # Every exit, including a refusal, an error and a cancellation:
+                # the batch can be acquired again.
+                with self._lock:
+                    self._topup_in_flight.discard(batch_id)
 
         except BaseException as e:
             if slot is not None:

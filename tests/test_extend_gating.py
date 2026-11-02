@@ -153,3 +153,46 @@ def test_unknown_current_price_is_refused(gated):
         r = _patch(headers={"X-Payment-Mode": "free"}, body={"amount": 1_000_000_000})
     assert r.status_code == 503
     gated.assert_not_called()
+
+
+# An uppercase batch ID (#542). The path pattern allows A-F, but Bee lists
+# batch IDs in lowercase and the ownership registry keys are lowercase, so the
+# handler and the price quote must both match the batch case-insensitively.
+UPPER = BATCH.upper()
+
+
+def _patch_upper(headers=None, body=None):
+    return TestClient(app).patch(f"/api/v1/stamps/{UPPER}/extend",
+                                 json=body or {"duration_hours": 24}, headers=headers or {})
+
+
+def test_uppercase_id_is_quoted_at_the_batch_depth(gated):
+    lower = _patch().json()["detail"]["accepts"][0]
+    r = _patch_upper()
+    assert r.status_code == 402
+    accepts = r.json()["detail"]["accepts"][0]
+    assert "depth 20" in accepts["description"]
+    assert accepts["maxAmountRequired"] == lower["maxAmountRequired"]
+    gated.assert_not_called()
+
+
+def test_uppercase_id_extends_a_shared_batch(gated):
+    stamp_ownership_manager._registry[BATCH] = {"owner": "shared", "mode": "free"}
+    r = _patch_upper(headers={"X-Payment-Mode": "free"})
+    assert r.status_code == 200, r.text
+    assert r.json()["batchID"] == BATCH
+    gated.assert_awaited_once()
+    assert gated.await_args.kwargs["stamp_id"] == BATCH
+
+
+def test_uppercase_id_gets_the_same_ownership_check(gated):
+    stamp_ownership_manager._registry[BATCH] = {"owner": OWNER, "mode": "paid"}
+    with _paying(OTHER):
+        r = _patch_upper(headers={"X-PAYMENT": create_valid_payment_header(payer=OTHER)})
+    assert r.status_code == 403
+    assert r.json()["detail"]["code"] == "STAMP_OWNERSHIP_DENIED"
+    gated.assert_not_called()
+    with _paying(OWNER):
+        r = _patch_upper(headers={"X-PAYMENT": create_valid_payment_header(payer=OWNER)})
+    assert r.status_code == 200, r.text
+    assert gated.await_args.kwargs["stamp_id"] == BATCH

@@ -120,10 +120,12 @@ async def _calculate_price_for_request(request: Request) -> dict:
             parsed = StampExtensionRequest.model_validate(b)
         except Exception:
             parsed = StampExtensionRequest()
-        batch_id = path.rstrip("/").split("/")[-2]
+        # Case-insensitive, like the endpoint (#542): an uppercase ID priced at
+        # the default depth would be topped up at the batch's real depth.
+        batch_id = path.rstrip("/").split("/")[-2].lower()
         depth = 17
         for stamp in await swarm_api.get_all_stamps_processed():
-            if stamp.get("batchID") == batch_id:
+            if str(stamp.get("batchID", "")).lower() == batch_id:
                 depth = int(stamp.get("depth", 17))
                 break
         quote = await get_price_quote(

@@ -138,6 +138,11 @@ Or with explicit depth, which must be one of the pool sizes: 17 (small), 20 (med
 }
 ```
 
+The error examples below show only `detail`. Each of these bodies also carries
+`code` and `message` at the top level, next to `detail`. Where `detail` has no
+`code`, the top-level `code` is `HTTP_<status>`, for example `HTTP_409`. See
+[error-codes.md](error-codes.md).
+
 **Response (pool exhausted): HTTP 409**
 ```json
 {
@@ -149,6 +154,28 @@ Or with explicit depth, which must be one of the pool sizes: 17 (small), 20 (med
 ```
 Another request taking the same stamp at the same moment also returns 409
 (`"Stamp was acquired by another request."`); retrying is safe.
+You get this 409 only when nothing was charged.
+
+**Response (paid, stamp not handed over): HTTP 500**
+
+A paid acquire collects the payment before it hands over the stamp. In rare
+cases the payment goes through but the gateway cannot hand over the stamp.
+The response then says that you paid and got nothing:
+```json
+{
+  "detail": {
+    "code": "DELIVERY_FAILED_AFTER_PAYMENT",
+    "message": "The payment was collected but the stamp could not be handed over. Contact the operator with this transaction for a refund.",
+    "transaction": "0x...",
+    "x402_status": "settled_not_delivered"
+  }
+}
+```
+`detail.transaction` is the payment transfer. The payment middleware also sets
+the `X-Payment-Transaction` and `X-Payment-Status: settled_not_delivered`
+headers. Do not retry blindly, and do not pay again. Contact the operator with
+the transaction for a refund. See
+[error-codes.md](error-codes.md) for this code.
 
 **Response (daily allowance used up): HTTP 429**
 ```json
@@ -164,8 +191,9 @@ Another request taking the same stamp at the same moment also returns 409
   }
 }
 ```
-`alternative` points to paying for the acquire with x402 instead where a payment
-is allowed to bypass the allowance (see below), otherwise to a direct purchase.
+`alternative` points to paying for the acquire with x402 instead where x402 is
+enabled and a payment is allowed to bypass the allowance (see below), otherwise
+to a direct purchase.
 
 **Response (fallback to larger)**, for free acquires only. The daily allowance is charged for the size actually handed out. If that larger size's allowance is used up, the response is 409 `REQUESTED_SIZE_UNAVAILABLE`. A paid acquire always gets exactly the size it paid for, or a 409 without being charged.
 ```json
@@ -279,6 +307,13 @@ Check the `errors` array in status response for:
 - Failed stamp purchases (insufficient BZZ balance)
 - Failed top-ups
 - Bee node connectivity issues
+- An unreadable pool state file (`pool_state.json`, set by `STAMP_POOL_STATE_FILE`):
+  pool spending stays paused until the file is repaired or restored. This
+  includes the immediate replacement purchase after a stamp is released, which
+  is also skipped after any failed sync
+
+While replenishment is skipped, each check replaces `errors` with that run's
+entries, so the list does not grow across failed cycles.
 
 ### Health and Metrics
 

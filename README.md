@@ -885,7 +885,7 @@ A request over the per-request ceiling receives **400**:
 A caller who has spent their daily budget receives **429**, with the reset time and what remains:
 ```json
 {"code": "DAILY_SPEND_BUDGET_EXHAUSTED", "message": "...", "remaining_bzz": 0.02,
- "daily_budget_bzz": 0.5, "resets_at": "2026-09-09T24:00:00Z"}
+ "daily_budget_bzz": 0.5, "resets_at": "2026-09-10T00:00:00Z"}
 ```
 
 Both are checked before the wallet balance, so the answer does not depend on how much money happens to be left, and charged only after the money is actually spent — a purchase the Swarm node refuses costs the caller nothing.

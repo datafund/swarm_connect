@@ -22,6 +22,18 @@ from app.services.pool_allowance import PoolAllowanceTracker, UNLIMITED
 APP = "https://dataprovenance.app"
 
 
+def _enable_mainnet_x402(monkeypatch):
+    """x402 on, on a mainnet network, with a fixed price: where paying bypasses
+    the allowance, so the refusal offers the paid route (as a 402)."""
+    from unittest.mock import AsyncMock
+    monkeypatch.setattr(settings, "X402_ENABLED", True)
+    monkeypatch.setattr(settings, "X402_NETWORK", "base")
+    monkeypatch.setattr(settings, "X402_PAY_TO_ADDRESS", "0xc87688A40CE2ff1765BA54497c7471c892755488")
+    from app.x402 import dependency as dep
+    monkeypatch.setattr(dep, "_calculate_price_for_request",
+                        AsyncMock(return_value={"price_usd": 0.05, "description": "Pooled stamp"}))
+
+
 @pytest.fixture
 def tracker(tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "POOL_DAILY_ALLOWANCES", f"{APP}=3")
@@ -153,9 +165,11 @@ class TestEndpointBehaviour:
     def test_exhausted_allowance_returns_a_message_a_person_can_read(self, monkeypatch, tmp_path):
         """The caller is a browser app whose user has never heard of a postage batch."""
         monkeypatch.setattr(settings, "STAMP_POOL_ENABLED", True)
-        # A mainnet network, because this test asserts the x402 route is offered
-        # and that offer is withheld where a payment would not buy a bypass.
-        monkeypatch.setattr(settings, "X402_NETWORK", "base")
+        # x402 on, on a mainnet network, because this test asserts the x402
+        # route is offered and that offer is withheld where a payment would not
+        # buy a bypass (testnet, or x402 off: #480). There the refusal is a 402
+        # whose body carries the same fields as the 429.
+        _enable_mainnet_x402(monkeypatch)
         monkeypatch.setattr(settings, "POOL_DAILY_ALLOWANCES", f"{APP}=0")
         monkeypatch.setattr(settings, "POOL_DEFAULT_DAILY_ALLOWANCE", 0)
 
@@ -171,7 +185,7 @@ class TestEndpointBehaviour:
 
         resp = TestClient(app).post("/api/v1/pool/acquire", json={"size": "small"},
                                     headers={"Origin": APP})
-        assert resp.status_code == 429, resp.text
+        assert resp.status_code == 402, resp.text
         d = resp.json()["detail"]
         assert d["code"] == "DAILY_STAMP_ALLOWANCE_EXHAUSTED"
         assert "resets" in d["message"].lower()
@@ -338,8 +352,8 @@ class TestPaidAcquireBypassesTheAllowance:
         before = tracker.check(APP, "small")[1]["used"]
         assert before == 1
 
-    def _exhausted(self, monkeypatch, tmp_path):
-        """Drive an acquire into the 429 and hand back its detail block."""
+    def _exhausted(self, monkeypatch, tmp_path, expected_status=429):
+        """Drive an acquire into the refusal and hand back its detail block."""
         monkeypatch.setattr(settings, "STAMP_POOL_ENABLED", True)
         monkeypatch.setattr(settings, "POOL_DAILY_ALLOWANCES", f"{APP}=0")
         monkeypatch.setattr(settings, "POOL_DEFAULT_DAILY_ALLOWANCE", 0)
@@ -351,13 +365,13 @@ class TestPaidAcquireBypassesTheAllowance:
 
         resp = TestClient(app).post("/api/v1/pool/acquire", json={"size": "small"},
                                     headers={"Origin": APP})
-        assert resp.status_code == 429
+        assert resp.status_code == expected_status, resp.text
         return resp.json()["detail"]
 
     def test_the_exhausted_message_offers_the_paid_route_on_this_endpoint(self, monkeypatch, tmp_path):
         """Not a different endpoint with different latency — this one, paid."""
-        monkeypatch.setattr(settings, "X402_NETWORK", "base")
-        d = self._exhausted(monkeypatch, tmp_path)
+        _enable_mainnet_x402(monkeypatch)
+        d = self._exhausted(monkeypatch, tmp_path, expected_status=402)
         assert d["alternative"]["endpoint"] == "POST /api/v1/pool/acquire"
         assert d["alternative"]["header"] == "X-PAYMENT"
         assert "immediately" in d["message"] or "immediate" in d["alternative"]["note"]
@@ -367,10 +381,12 @@ class TestPaidAcquireBypassesTheAllowance:
     ):
         """Sending someone to pay on a path that will still refuse them is worse
         than not offering it. On a testnet the bypass is withheld, so the message
-        must point at direct purchase instead."""
+        must point at direct purchase instead. x402 is on here, so the testnet
+        rule is what withholds the offer, not x402 being off (#480)."""
+        monkeypatch.setattr(settings, "X402_ENABLED", True)
         monkeypatch.setattr(settings, "X402_NETWORK", "base-sepolia")
         monkeypatch.setattr(settings, "X402_ALLOW_TESTNET_PAID_BYPASS", False)
-        d = self._exhausted(monkeypatch, tmp_path)
+        d = self._exhausted(monkeypatch, tmp_path, expected_status=429)
         assert d["alternative"]["endpoint"] == "POST /api/v1/stamps/"
         assert "X-PAYMENT" not in d["message"]
         assert "header" not in d["alternative"]
@@ -476,3 +492,82 @@ def test_an_unreadable_record_also_refuses_the_per_client_limit(monkeypatch, tmp
     assert t.check(None, "small")[0]                    # the origin bucket is unlimited
     ok, info = t.check_address(None, "small", "1.2.3.4")
     assert not ok and info["state_unreadable"]
+
+
+class TestResetsAtIsParseable:
+    """resets_at used to read "<day>T24:00:00Z", which fromisoformat rejects (#512)."""
+
+    @staticmethod
+    def _parse(value):
+        from datetime import datetime
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+    def test_check_reports_the_next_midnight_at_the_end_of_a_year(self, tmp_path, monkeypatch):
+        from app.services import pool_allowance
+        monkeypatch.setattr(settings, "POOL_DEFAULT_DAILY_ALLOWANCE", 1)
+        monkeypatch.setattr(pool_allowance, "_today", lambda: "2026-12-31")
+        t = PoolAllowanceTracker(state_file=str(tmp_path / "a.json"))
+        _, info = t.check(None, "small")
+        assert info["resets_at"] == "2027-01-01T00:00:00Z"
+        assert self._parse(info["resets_at"]).hour == 0
+
+    def test_check_address_reports_the_next_midnight_at_the_end_of_a_year(self, tmp_path, monkeypatch):
+        from app.services import pool_allowance
+        monkeypatch.setattr(settings, "POOL_ALLOWANCE_PER_IP", 1)
+        monkeypatch.setattr(pool_allowance, "_today", lambda: "2026-12-31")
+        t = PoolAllowanceTracker(state_file=str(tmp_path / "a.json"))
+        _, info = t.check_address(None, "small", "1.2.3.4")
+        assert info["resets_at"] == "2027-01-01T00:00:00Z"
+        assert self._parse(info["resets_at"]).hour == 0
+
+    def test_the_exhausted_response_carries_a_parseable_reset(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(settings, "STAMP_POOL_ENABLED", True)
+        monkeypatch.setattr(settings, "POOL_DAILY_ALLOWANCES", f"{APP}=0")
+        monkeypatch.setattr(settings, "POOL_DEFAULT_DAILY_ALLOWANCE", 0)
+
+        from app.services import pool_allowance
+        monkeypatch.setattr(pool_allowance, "_today", lambda: "2026-10-22")
+        monkeypatch.setattr(pool_allowance, "pool_allowance_tracker",
+                            PoolAllowanceTracker(state_file=str(tmp_path / "a.json")))
+        import app.api.endpoints.pool as pool_ep
+        monkeypatch.setattr(pool_ep, "pool_allowance_tracker",
+                            pool_allowance.pool_allowance_tracker)
+        monkeypatch.setattr(pool_ep.stamp_pool_manager, "get_available_stamp",
+                            lambda d: type("S", (), {"depth": 17})())
+
+        resp = TestClient(app).post("/api/v1/pool/acquire", json={"size": "small"},
+                                    headers={"Origin": APP})
+        assert resp.status_code in (402, 429), resp.text
+        d = resp.json()["detail"]
+        assert d["code"] == "DAILY_STAMP_ALLOWANCE_EXHAUSTED"
+        assert d["resets_at"] == "2026-10-23T00:00:00Z"
+        assert self._parse(d["resets_at"]).hour == 0
+        assert d["resets_at"] in d["message"]
+        assert "T24" not in d["message"]
+
+    def test_the_per_client_exhausted_response_carries_a_parseable_reset(self, monkeypatch, tmp_path):
+        """The per-client refusal builds its own message, so it is checked
+        through the HTTP response as well (#531)."""
+        monkeypatch.setattr(settings, "STAMP_POOL_ENABLED", True)
+        monkeypatch.setattr(settings, "POOL_DAILY_ALLOWANCES", "")
+        monkeypatch.setattr(settings, "POOL_DEFAULT_DAILY_ALLOWANCE", 10)
+        monkeypatch.setattr(settings, "POOL_ALLOWANCE_PER_IP", 0)
+
+        from app.services import pool_allowance
+        monkeypatch.setattr(pool_allowance, "_today", lambda: "2026-12-31")
+        monkeypatch.setattr(pool_allowance, "pool_allowance_tracker",
+                            PoolAllowanceTracker(state_file=str(tmp_path / "a.json")))
+        import app.api.endpoints.pool as pool_ep
+        monkeypatch.setattr(pool_ep, "pool_allowance_tracker",
+                            pool_allowance.pool_allowance_tracker)
+        monkeypatch.setattr(pool_ep.stamp_pool_manager, "get_available_stamp",
+                            lambda d: type("S", (), {"depth": 17})())
+
+        resp = TestClient(app).post("/api/v1/pool/acquire", json={"size": "small"})
+        assert resp.status_code in (402, 429), resp.text
+        d = resp.json()["detail"]
+        assert d["code"] == "DAILY_STAMP_ALLOWANCE_PER_CLIENT_EXHAUSTED"
+        assert d["resets_at"] == "2027-01-01T00:00:00Z"
+        assert self._parse(d["resets_at"]).hour == 0
+        assert d["resets_at"] in d["message"]
+        assert "T24" not in d["message"]

@@ -1,9 +1,15 @@
 # Error codes
 
 Error responses from the gateway carry `code` and `message` at the top level
-of the JSON body. Branch on `code`, and show `message` to a person. The one
-exception is the payment settlement failure described below, which has no
-`code` yet.
+of the JSON body. Branch on `code`, and show `message` to a person.
+Two kinds of crash have no `code`. A crash here means the server raised an
+unexpected error, not a handled one. Handled errors, such as a 502 from the Bee
+node, keep `code` and `message` even on a paid request.
+
+- A paid request that crashes before its payment is settled returns 500
+  `{"detail": "Internal server error. You were not charged."}`. Nothing was
+  charged, so you can retry with the same payment authorization.
+- Any other crash returns 500 with the plain text `Internal Server Error`.
 
 ```json
 {
@@ -21,7 +27,7 @@ where they matter.
 When an endpoint does not raise its own code, `code` is `HTTP_<status>`, for
 example `HTTP_404` or `HTTP_502`, and `message` is the error text.
 
-Two responses keep their own shape:
+One response keeps its own shape:
 
 - **402 Payment Required** from the x402 payment check. Its body is the x402
   payment request (`x402Version`, `error`, `accepts`, `freeTier`) at the top
@@ -30,16 +36,18 @@ Two responses keep their own shape:
   deprecated. See
   [x402-client-integration.md](x402-client-integration.md) for how to pay it.
   To learn a price *without* triggering a 402, call `GET /api/v1/pricing`.
-- **Payment settlement failure** (500) after a paid request. Its body is
-  `{error, detail, x402_status: "settlement_failed", message}`, with **no
-  `code`**; recognise it by `x402_status`. The request was processed, and the
-  failure may be a timeout after the transfer already went through on-chain.
-  **Do not retry automatically or re-pay** because the body says to: that can
-  pay, and run the operation, twice. First check whether your payment
-  authorization's nonce was used (or your USDC balance), and if it was, contact
-  the operator with the payer address and the time of the request. Send an
-  `Idempotency-Key` with every paid request, so that a retry returns the first
-  result instead of charging again (see below).
+
+A failed payment settlement has its own codes, listed under
+[Payments and pricing](#payments-and-pricing):
+
+- `PAYMENT_SETTLEMENT_FAILED` (402): the payment was refused, or, on one
+  path, its outcome is unknown (see its row).
+- `PAYMENT_SETTLEMENT_UNAVAILABLE` (502): the outcome of the payment is unknown.
+- `DELIVERY_FAILED_AFTER_PAYMENT` (500): you paid and got nothing.
+
+Do not pay again without first reading the advice in its row.
+Send an `Idempotency-Key` with every paid request, so that a retry returns the
+first result instead of charging again (see below).
 
 A test (`tests/test_error_codes_doc.py`) fails if a code is raised in `app/`
 without being listed here, or listed here but no longer raised.
@@ -72,8 +80,8 @@ without being listed here, or listed here but no longer raised.
 | `FREE_TIER_DISABLED` | 402 | The free tier is off for this operation (chunk upload, or buy-batch-for-owner). | Pay with `X-PAYMENT`, or for chunks, top up credit. |
 | `FREE_QUOTA_EXCEEDED` | 429 | The free-tier chunk quota for this client is used up. | Wait for the daily quota to reset, or top up credit. |
 | `PAYMENT_SETTLEMENT_UNAVAILABLE` | 502 | The payment could not be settled and **nothing was delivered**: the facilitator errored, so it is unknown whether the transfer was submitted. `detail.x402_status` is `settlement_failed`. | Retry with a fresh payment authorization — a transfer that did go through spent the nonce, so a retry cannot double-charge. If a transfer appears on-chain, contact the operator with this request's authorization for a refund. |
-| `PAYMENT_SETTLEMENT_FAILED` | 402 | The facilitator refused the payment, so **nothing was delivered**. `detail.reason` gives the refusal, `detail.x402_status` is `settlement_failed`. | Fix what `reason` names (usually funds or an expired authorization) and retry. |
-| `DELIVERY_FAILED_AFTER_PAYMENT` | 500 | The payment **was collected** and the request then failed. The only code here that means money moved without a result. `detail.transaction` and the `X-Payment-Transaction` header carry the transfer; `x402_status` is `settled_not_delivered`. | Do not retry blindly. Contact the operator with the transaction for a refund. |
+| `PAYMENT_SETTLEMENT_FAILED` | 402 | The payment was not confirmed as settled, and **nothing was delivered**. `x402_status` is `settlement_failed`. Two forms: **(1) Before the work:** the facilitator refused the payment. `reason` gives the refusal, and `accepts` lets you sign a new payment; both are at the top level and under `detail`. **(2) After the work:** only `code`, `message` and `x402_status`, at the top level. The facilitator refused the payment or did not answer, so the transfer may have gone through. | Form 1: fix what `reason` names (usually funds or an expired authorization) and retry. Form 2: do not simply retry. Check whether your payment authorization's nonce was used (or your USDC balance) before paying again. If it was used, contact the operator with the payer address and the time of the request. |
+| `DELIVERY_FAILED_AFTER_PAYMENT` | 500 | The payment **was collected** and the request then failed. The only code here that is certain money moved without a result. Also returned by `POST /pool/acquire` when the payment settled but the reserved batch could not be handed over. `transaction` carries the transfer and `x402_status` is `settled_not_delivered`. Where those fields are depends on the path. **Pool acquire:** under `detail`. **A paid request that crashed after payment:** at the top level, with no `detail`. **A stamp purchase that answered `202 PURCHASE_PENDING` and whose batch was never found**, retried with the same `Idempotency-Key`: at the top level, with no `detail`. All three set the `X-Payment-Transaction` header. The first two also set `X-Payment-Status: settled_not_delivered`; the stamp-purchase retry does not. | Do not retry blindly. Contact the operator with the transaction for a refund. |
 
 ## Idempotency-Key
 
@@ -101,7 +109,7 @@ None of these responses charges the new payment.
 | `DAILY_SPEND_BUDGET_EXHAUSTED` | 429 | This caller's daily purchase budget is spent. | Wait until the budget resets (see `message`). |
 | `SPEND_BUDGET_UNAVAILABLE` | 503 | Stamp purchase or extension: the gateway could not read today's spend record, so it refuses to spend rather than count from zero. Applies to paid requests too, since the gateway's daily ceiling bounds them as well. **Nothing was charged.** | Retry after the time in `message`, or once the operator has restored the record. |
 | `GATEWAY_DAILY_SPEND_CEILING` | 503 | The gateway itself has spent its daily BZZ allowance, so it is refusing to spend more for anyone. Two variants, distinguished by `message`: the overall ceiling is reached, or only the portion open to unpaid requests is. In the second case paid requests still work where x402 is enabled, on a mainnet or on a testnet with `X402_ALLOW_TESTNET_PAID_BYPASS`, and the message then says so. `detail.resets_at` is when it lifts. Applies to stamp purchase, extension and buy-batch-for-owner. | Wait for `resets_at`. If the message says paid requests still work, pay with `X-PAYMENT` and retry. This is the operator's limit, not yours — if it recurs, tell them. |
-| `DAILY_STAMP_ALLOWANCE_EXHAUSTED` | 429 or 402 | `POST /pool/acquire`: the free daily allowance for this size is used up. `detail` has `allowance`, `used`, `resets_at` and an `alternative`. Where paying bypasses the allowance (x402 on a mainnet), the status is 402 and the body is also an x402 payment request (`accepts`). | Wait for `resets_at`, or follow `detail.alternative`: pay for this same request (402), or buy a stamp directly. |
+| `DAILY_STAMP_ALLOWANCE_EXHAUSTED` | 429 or 402 | `POST /pool/acquire`: the free daily allowance for this size is used up. `detail` has `allowance`, `used`, `resets_at` and an `alternative`. Where paying bypasses the allowance (x402 enabled, on a mainnet or a testnet with `X402_ALLOW_TESTNET_PAID_BYPASS`), the status is 402 and the body is also an x402 payment request (`accepts`). | Wait for `resets_at`, or follow `detail.alternative`: pay for this same request (402), or buy a stamp directly. |
 | `DAILY_STAMP_ALLOWANCE_PER_CLIENT_EXHAUSTED` | 429 or 402 | `POST /pool/acquire`: this client (IPv4 address, or IPv6 /64) has taken its free batches of this size for today within the application's allowance (`POOL_ALLOWANCE_PER_IP`). Same body and 402 rule as above. | As above. |
 | `POOL_ALLOWANCE_UNAVAILABLE` | 503 | `POST /pool/acquire`: the gateway could not read today's allowance record, so free acquires are paused. Where x402 is enabled, on a mainnet or on a testnet with `X402_ALLOW_TESTNET_PAID_BYPASS`, paid acquires bypass the allowance and still work. | Buy a stamp directly with `POST /api/v1/stamps/`, or retry after the time in `message`. Where paid acquires still work (see the previous column), you can also pay for the acquire. |
 | `REQUESTED_SIZE_UNAVAILABLE` | 409 | `POST /pool/acquire`: no stamp of the requested size is in the pool, and although a larger one was, today's allowance for that larger size is spent. `detail.size` is what was asked for. | Retry in a few minutes once the pool refills, or buy directly with `POST /api/v1/stamps/`. |

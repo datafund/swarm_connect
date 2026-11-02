@@ -33,6 +33,7 @@ from urllib.parse import urlparse
 
 from app.core.config import settings
 from app.core.atomic_io import StateLoadError, atomic_write_json, load_json_state, unreadable_state
+from app.core.day_reset import next_reset_at
 
 logger = logging.getLogger(__name__)
 
@@ -179,7 +180,7 @@ class PoolAllowanceTracker:
             self._roll_day()
             used = self._used.get(key, 0)
         info = {"address_allowance": limit, "address_used": used,
-                "resets_at": f"{_today()}T24:00:00Z", "size": size}
+                "resets_at": next_reset_at(_today()), "size": size}
         if limit == UNLIMITED:
             return True, info
         if self._unreadable:
@@ -211,7 +212,7 @@ class PoolAllowanceTracker:
             "allowance": limit,
             "used": used,
             "remaining": UNLIMITED if limit == UNLIMITED else max(0, limit - used),
-            "resets_at": f"{_today()}T24:00:00Z",
+            "resets_at": next_reset_at(_today()),
         }
         if limit == UNLIMITED:
             return True, info
