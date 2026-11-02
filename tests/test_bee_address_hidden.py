@@ -1,0 +1,279 @@
+# tests/test_bee_address_hidden.py
+"""Unauthenticated responses must not reveal the internal Bee API address (#549).
+
+httpx's HTTPStatusError text names the request URL, and Go network errors name
+the address they dialled or the host they failed to resolve. /health x402
+warnings, stamp purchase and extend errors, and /pool/status used to copy such
+text into the response. Each response now names the failure by HTTP status or
+exception class, and Bee's own message keeps its wording with the addresses
+replaced. The full text is still logged for the operator.
+
+All hosts and addresses here are made up (bee.internal, 10.0.0.1, 192.0.2.x,
+fd00::/8).
+"""
+import json
+from unittest.mock import AsyncMock, patch
+
+import httpx
+import pytest
+from fastapi.testclient import TestClient
+
+from app.core.config import settings
+from app.main import app
+from app.services.bee_errors import without_addresses
+
+BEE = "http://bee.internal:1633"
+SECRETS = ("bee.internal", "1633", "10.0.0.1", "192.0.2.7", "127.0.0.11",
+           "fd00::1", "rpc.internal", "8545")
+STAMP_ID = "a" * 64
+
+client = TestClient(app)
+
+
+def _status_error(path, status=503, method="GET", **response_kwargs):
+    """An HTTPStatusError exactly as httpx raises it for a Bee answer."""
+    request = httpx.Request(method, f"{BEE}/{path}")
+    response = httpx.Response(status, request=request, **response_kwargs)
+    try:
+        response.raise_for_status()
+    except httpx.HTTPStatusError as e:
+        assert BEE in str(e)  # the premise: httpx names the URL
+        return e
+    raise AssertionError("raise_for_status did not raise")
+
+
+def _connect_error(path):
+    request = httpx.Request("GET", f"{BEE}/{path}")
+    return httpx.ConnectError(
+        "dial tcp 10.0.0.1:1633: connect: connection refused", request=request)
+
+
+def _assert_hidden(text):
+    leaks = [s for s in SECRETS if s in text]
+    assert leaks == [], f"internal address exposed: {leaks} in {text}"
+
+
+# --------------------------------------------------------------------------- #
+# /health x402 warnings
+# --------------------------------------------------------------------------- #
+class TestHealthWarningsHideBeeAddress:
+
+    def _health(self, exc):
+        with patch.object(settings, "X402_ENABLED", True), \
+             patch("app.services.swarm_api.get_node_status_summary",
+                   new=AsyncMock(return_value={})), \
+             patch("app.x402.preflight.get_wallet_info", new=AsyncMock(side_effect=exc)), \
+             patch("app.x402.preflight.get_chequebook_info", new=AsyncMock(side_effect=exc)), \
+             patch("app.x402.preflight.get_chequebook_balance", new=AsyncMock(side_effect=exc)), \
+             patch("app.x402.preflight.logger") as log:
+            response = client.get("/health")
+        assert response.status_code == 200, response.text
+        logged = " ".join(str(c) for c in log.error.call_args_list)
+        return response.json(), logged
+
+    def test_bee_status_error_hides_url(self):
+        body, logged = self._health(_status_error("wallet", 503))
+
+        _assert_hidden(json.dumps(body))
+        warnings = body["x402"]["warnings"]
+        fetch = [w for w in warnings if w.startswith("Failed to fetch")]
+        assert len(fetch) == 3, warnings
+        assert all("HTTP 503" in w for w in fetch), fetch
+        # The 'Failed to fetch' prefix still triggers the reachability hints.
+        assert any("Bee node may be unreachable" in w for w in warnings), warnings
+        assert BEE in logged, "the log must keep the full text"
+
+    @pytest.mark.parametrize("exc, name", [
+        (_connect_error("wallet"), "ConnectError"),
+        (httpx.ReadTimeout(f"timed out reading {BEE}/wallet",
+                           request=httpx.Request("GET", f"{BEE}/wallet")), "ReadTimeout"),
+    ])
+    def test_bee_transport_error_names_class(self, exc, name):
+        body, logged = self._health(exc)
+
+        _assert_hidden(json.dumps(body))
+        fetch = [w for w in body["x402"]["warnings"] if w.startswith("Failed to fetch")]
+        assert fetch and all(f"({name})" in w for w in fetch), fetch
+        assert "bee.internal" in logged or "10.0.0.1" in logged
+
+
+class TestBaseBalanceWarningHidesRpcUrl:
+    """The Base ETH warning is not in /health today, but must not hold the RPC URL."""
+
+    @pytest.mark.asyncio
+    async def test_rpc_status_error_hides_url_and_key(self):
+        from app.x402 import base_balance
+        rpc = "https://base-rpc.internal/v2/not-a-real-key-123"
+        request = httpx.Request("POST", rpc)
+        exc = httpx.HTTPStatusError(
+            f"Client error '401 Unauthorized' for url '{rpc}'", request=request,
+            response=httpx.Response(401, request=request))
+        base_balance.clear_balance_cache()
+
+        with patch.object(base_balance.settings, "X402_PAY_TO_ADDRESS",
+                          "0x" + "1" * 40), \
+             patch.object(base_balance, "_get_eth_balance_from_rpc",
+                          new=AsyncMock(side_effect=exc)), \
+             patch.object(base_balance, "logger") as log:
+            result = await base_balance.check_base_eth_balance()
+
+        assert "base-rpc.internal" not in result["warning"]
+        assert "not-a-real-key" not in result["warning"]
+        assert "HTTP 401" in result["warning"], result["warning"]
+        assert "not-a-real-key" in " ".join(str(c) for c in log.error.call_args_list)
+
+
+# --------------------------------------------------------------------------- #
+# Stamp purchase and extend
+# --------------------------------------------------------------------------- #
+_FUNDS = {"sufficient": True, "required_bzz": 0.01, "wallet_balance_bzz": 100.0, "shortfall_bzz": 0}
+
+
+def _purchase(exc):
+    with patch("app.services.swarm_api.check_sufficient_funds", return_value=_FUNDS), \
+         patch("app.services.swarm_api.purchase_postage_stamp", new=AsyncMock(side_effect=exc)):
+        return client.post("/api/v1/stamps/", json={"amount": 100, "depth": 17})
+
+
+def _extend(exc):
+    with patch("app.services.swarm_api.get_chainstate",
+               return_value={"currentPrice": "1", "minimumValidityBlocks": 17280}), \
+         patch("app.services.swarm_api.extend_postage_stamp", new=AsyncMock(side_effect=exc)), \
+         patch("app.services.swarm_api.check_sufficient_funds", return_value=_FUNDS), \
+         patch("app.services.swarm_api.calculate_stamp_total_cost", return_value=1000), \
+         patch("app.services.swarm_api.get_all_stamps_processed",
+               return_value=[{"batchID": STAMP_ID, "depth": 17, "local": True}]):
+        return client.patch(f"/api/v1/stamps/{STAMP_ID}/extend", json={"amount": 50000})
+
+
+RPC_MESSAGE = ('Post "http://rpc.internal:8545": dial tcp 10.0.0.1:8545: '
+               'connect: connection refused')
+LOOKUP_TEXT = "dial tcp: lookup bee.internal on 127.0.0.11:53: no such host"
+
+
+@pytest.mark.parametrize("call, verb", [(_purchase, "purchase"), (_extend, "extension")])
+class TestStampErrorsHideBeeAddress:
+
+    def test_empty_body_4xx_gives_status_not_url(self, call, verb):
+        response = call(_status_error("stamps/100/17", 400, method="POST"))
+
+        assert response.status_code == 400, response.text
+        detail = response.json()["detail"]
+        _assert_hidden(detail)
+        assert detail == f"Bee rejected the stamp {verb}: HTTP 400", detail
+
+    def test_bee_json_message_keeps_text_hides_addresses(self, call, verb):
+        exc = _status_error("stamps/100/17", 400, method="POST",
+                            json={"code": 400, "message": RPC_MESSAGE})
+        response = call(exc)
+
+        assert response.status_code == 400, response.text
+        detail = response.json()["detail"]
+        _assert_hidden(detail)
+        assert "connect: connection refused" in detail, detail
+
+    def test_bee_text_body_hides_resolver_host(self, call, verb):
+        exc = _status_error("stamps/100/17", 404, method="POST", text=LOOKUP_TEXT)
+        response = call(exc)
+
+        assert response.status_code == 404, response.text
+        detail = response.json()["detail"]
+        _assert_hidden(detail)
+        assert "lookup <host> on <address>: no such host" in detail, detail
+
+    def test_bee_message_kept_as_is(self, call, verb):
+        exc = _status_error("stamps/100/17", 400, method="POST",
+                            json={"code": 400, "message": "out of funds"})
+        response = call(exc)
+
+        assert response.json()["detail"] == f"Bee rejected the stamp {verb}: out of funds"
+
+    def test_connect_error_is_generic_502(self, call, verb):
+        response = call(_connect_error("stamps/100/17"))
+
+        assert response.status_code == 502, response.text
+        _assert_hidden(response.json()["detail"])
+
+
+# --------------------------------------------------------------------------- #
+# /pool/status
+# --------------------------------------------------------------------------- #
+class TestPoolStatusHidesAddresses:
+    """#534 replaced scheme URLs; bare addresses and resolver hosts went through."""
+
+    @pytest.mark.parametrize("message, kept", [
+        (RPC_MESSAGE, "connect: connection refused"),
+        (LOOKUP_TEXT, "no such host"),
+        ("dial tcp [fd00::1]:1633: i/o timeout; peer 192.0.2.7 gone", "i/o timeout"),
+        ("upstream bee.internal:1633 failed", "upstream <address> failed"),
+    ])
+    @pytest.mark.asyncio
+    async def test_purchase_error_hides_bare_addresses(self, tmp_path, message, kept):
+        from app.services.stamp_pool import StampPoolManager
+        state_file = str(tmp_path / "pool_state.json")
+        with open(state_file, "w") as f:
+            json.dump([], f)
+        manager = StampPoolManager(state_file=state_file)
+        exc = _status_error("stamps/1000/17", 500, method="POST",
+                            json={"code": 500, "message": message})
+
+        with patch("app.services.stamp_pool.settings.STAMP_POOL_ENABLED", True), \
+             patch("app.services.swarm_api.get_all_stamps_processed",
+                   new=AsyncMock(return_value=[])), \
+             patch.object(manager, "_update_stamp_ttls", new=AsyncMock()), \
+             patch.object(manager, "_purchase_stamp", new=AsyncMock(side_effect=exc)):
+            await manager.check_and_replenish()
+
+        with patch("app.api.endpoints.pool.stamp_pool_manager", manager):
+            response = client.get("/api/v1/pool/status")
+        assert response.status_code == 200, response.text
+        errors = response.json()["errors"]
+        failed = [e for e in errors if e.startswith("Failed to purchase")]
+        assert failed, errors
+        _assert_hidden(json.dumps(errors))
+        assert all("HTTP 500" in e and kept in e for e in failed), failed
+
+
+# --------------------------------------------------------------------------- #
+# without_addresses
+# --------------------------------------------------------------------------- #
+class TestWithoutAddresses:
+
+    @pytest.mark.parametrize("text, expected", [
+        ("Get http://bee:1633/x: EOF", "Get <url>: EOF"),
+        ("(see http://bee.internal/x).", "(see <url>)."),
+        ("failed at http://bee.internal:1633/stamps; retry", "failed at <url>; retry"),
+        ("dial tcp 10.0.0.1:8545: connect: refused", "dial tcp <address>: connect: refused"),
+        ("peer 192.0.2.7 gone", "peer <address> gone"),
+        ("lookup bee.internal on 127.0.0.11:53: no such host",
+         "lookup <host> on <address>: no such host"),
+        ("dial tcp [fd00::1]:1633: refused", "dial tcp <address>: refused"),
+        ("peer fd00::1 gone", "peer <address> gone"),
+        ("bee.internal:1633 down", "<address> down"),
+        ("dial tcp bee:1633: refused", "dial tcp <address>: refused"),
+    ])
+    def test_replaces_addresses(self, text, expected):
+        assert without_addresses(text) == expected
+
+    @pytest.mark.parametrize("text", [
+        # Bee messages this gateway already handles (see the existing tests).
+        "out of funds",
+        "insufficient amount for 24h minimum validity",
+        "insufficient funds",
+        "internal error",
+        "not found",
+        # Go and JSON-ish "key:number" forms that are not addresses.
+        "status:500",
+        "code:400",
+        "unexpected response status:500 code:400",
+        "error:1 line:12 depth:17",
+        # Numbers that look like addresses but are not.
+        "at 12:34:56",
+        "slice [0:10]",
+        "bee version 2.8.1",
+        "x 1.2.300.4",
+        "batch 0xabc: not found",
+        "HTTP 400",
+    ])
+    def test_keeps_text_that_is_not_an_address(self, text):
+        assert without_addresses(text) == text

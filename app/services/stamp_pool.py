@@ -18,7 +18,6 @@ import asyncio
 import json
 import os
 import logging
-import re
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from enum import Enum
@@ -28,6 +27,7 @@ from threading import Lock
 from app.core.atomic_io import StateLoadError, atomic_write_json, unreadable_state
 from app.core.config import settings
 from app.services import swarm_api
+from app.services.bee_errors import error_cause, without_addresses
 from app.services.swarm_api import coerce_int
 from app.services.stamp_ownership import POOL_OWNER, stamp_ownership_manager
 
@@ -53,33 +53,6 @@ def _bee_error_message(exc) -> Optional[str]:
         pass
     text = (getattr(response, "text", "") or "").strip()
     return text[:200] or None
-
-
-def _error_cause(exc) -> str:
-    """Name a failure for /pool/status without quoting its text (#534).
-
-    /pool/status is unauthenticated, and httpx's HTTPStatusError text names
-    the request URL, which is the internal Bee API address. The entry there
-    gets the HTTP status, or the exception class when there is no response;
-    the caller logs the full text.
-    """
-    status = getattr(getattr(exc, "response", None), "status_code", None)
-    if status is not None:
-        return f"HTTP {status}"
-    return type(exc).__name__
-
-
-_URL_RE = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*://[^\s\"'<>]+")
-
-
-def _without_urls(text: str) -> str:
-    """Replace URL-shaped substrings with <url> for /pool/status (#534).
-
-    Bee's own message is worth showing, but it is response text: a proxy's
-    HTML error page or a Bee message quoting its RPC endpoint can name an
-    internal address. The log keeps the original.
-    """
-    return _URL_RE.sub("<url>", text)
 
 
 
@@ -547,7 +520,7 @@ class StampPoolManager:
         except Exception as e:
             logger.error(f"Immediate replenishment failed for depth {depth}: {e}")
             self._errors.append(f"Immediate replenishment failed (depth {depth}): "
-                                f"{_error_cause(e)}; see the gateway log for details.")
+                                f"{error_cause(e)}; see the gateway log for details.")
         finally:
             # Remove from pending count
             with self._lock:
@@ -826,7 +799,7 @@ class StampPoolManager:
             # in HTTPStatusError). It goes to the log only (#534).
             logger.error(f"Error syncing stamps from Bee node: {e}")
             self._last_sync_error = (f"Sync error: could not read stamps from the Bee node "
-                                     f"({_error_cause(e)}); see the gateway log for details.")
+                                     f"({error_cause(e)}); see the gateway log for details.")
             self._errors.append(self._last_sync_error)
             self._last_sync_failure = "bee"
             # The pool's contents are now UNKNOWN, not known-to-be-empty. Record
@@ -963,9 +936,10 @@ class StampPoolManager:
                             said = f" — Bee said: {detail}" if detail else ""
                             logger.error(f"Failed to purchase depth-{depth} stamp: {e}{said}")
                             # Bee's own message, not str(e): that names the Bee URL (#534).
+                            # Addresses in Bee's text are replaced too (#549).
                             results["errors"].append(
                                 f"Failed to purchase depth-{depth} stamp: "
-                                f"{_error_cause(e)}{_without_urls(said)}")
+                                f"{error_cause(e)}{without_addresses(said)}")
                             # Back off this depth. Without this the next check
                             # tries again immediately and keeps failing: an
                             # underfunded pool retried an unaffordable purchase
@@ -1037,7 +1011,7 @@ class StampPoolManager:
                         logger.error(f"Failed to top up stamp {stamp.batch_id[:16]}...: {e}")
                         results["errors"].append(
                             f"Failed to top up stamp {stamp.batch_id[:16]}...: "
-                            f"{_error_cause(e)}; see the gateway log for details.")
+                            f"{error_cause(e)}; see the gateway log for details.")
                         debug["result"] = f"error: {e}"
                 elif current_ttl is None:
                     debug["result"] = "skipped: ttl_lookup_returned_none"
@@ -1051,7 +1025,7 @@ class StampPoolManager:
 
         except Exception as e:
             logger.error(f"Pool check failed: {e}")
-            error_msg = f"Pool check failed: {_error_cause(e)}; see the gateway log for details."
+            error_msg = f"Pool check failed: {error_cause(e)}; see the gateway log for details."
             results["errors"].append(error_msg)
             self._errors = [error_msg]
 

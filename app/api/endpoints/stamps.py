@@ -12,6 +12,7 @@ import secrets
 from app.x402.settlement import settle_payment
 from app.core.config import settings
 from app.services import swarm_api
+from app.services.bee_errors import error_cause, without_addresses
 from app.services.swarm_api import expiry_from_amount, get_batch_expiry, plur_to_bzz
 from app.services.stamp_ownership import stamp_ownership_manager
 from app.services.stamp_tracker import record_purchase
@@ -203,12 +204,17 @@ def _bee_error_detail(exc: httpx.HTTPError):
     amount for 24h minimum validity"}. That message names the problem exactly,
     so it is worth surfacing rather than replacing with a generic one.
 
-    Returns (None, str(exc)) when there is no response to read — a timeout or a
+    Returns (None, None) when there is no response to read — a timeout or a
     connection failure, which genuinely is the node being unreachable.
+
+    The message reaches the caller, so it never quotes str(exc): httpx puts
+    the request URL, the internal Bee API address, in that text. An empty
+    body gives "HTTP <status>", and URLs, IPs, host:port and resolved host
+    names in Bee's own text are replaced (#549). Callers log the full error.
     """
     response = getattr(exc, "response", None)
     if response is None:
-        return None, str(exc)
+        return None, None
     message = None
     try:
         body = response.json()
@@ -217,8 +223,8 @@ def _bee_error_detail(exc: httpx.HTTPError):
     except Exception:
         pass
     if not message:
-        message = (response.text or "").strip()[:200] or str(exc)
-    return response.status_code, message
+        message = (response.text or "").strip()[:200] or error_cause(exc)
+    return response.status_code, without_addresses(str(message))
 
 
 def _is_owned_by(batch_id: str, wallet: str) -> bool:
@@ -676,6 +682,8 @@ async def _finish_pending_purchase(request: Request, label: str, depth: int, amo
                 in_flight = False
             except httpx.HTTPError as e:
                 if not _outcome_unknown(e):
+                    # The full text, which _bee_error_detail leaves out (#549).
+                    logger.error(f"Bee refused a paid purchase (label {label}, tx {tx}): {e}")
                     refund_needed(f"refused by Bee ({_bee_error_detail(e)[1] or type(e).__name__})")
                     return
                 logger.error(f"Bee gave no answer to a paid purchase ({type(e).__name__}); looking for the batch")
