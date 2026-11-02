@@ -554,3 +554,83 @@ class TestUploadToBeeSettlesTheProof:
             raise ValueError("API Response missing 'reference' from upload")
         proof, _ = self._run(missing_reference)
         assert self._state(proof) == "used"
+
+
+class TestStampIdCaseOnUpload:
+    """stamp_id is lowercased at the upload endpoints (#473).
+
+    The routes accept uppercase hex, but the ownership registry is keyed in
+    lowercase, so an uppercase stamp_id used to be refused as unregistered even
+    with a valid owner proof.
+    """
+
+    UNREGISTERED = "cd" * 32
+
+    @pytest.fixture
+    def bee(self, manager, x402_on):
+        from unittest.mock import AsyncMock
+        from app.main import app
+        manager.register_stamp(STAMP, owner=OWNER.address, mode="paid", source="direct_purchase")
+        data_up = AsyncMock(return_value="ref123")
+        coll_up = AsyncMock(return_value="ref456")
+        with patch("app.api.endpoints.data.settings") as ds, \
+             patch("app.api.endpoints.data.stamp_ownership_manager", manager), \
+             patch("app.api.endpoints.data.upload_data_to_swarm", data_up), \
+             patch("app.api.endpoints.data.upload_collection_to_swarm", coll_up), \
+             patch("app.api.endpoints.data.get_batch_expiry", AsyncMock(return_value=None)):
+            ds.X402_ENABLED = True
+            ds.MAX_UPLOAD_SIZE_MB = 10
+            yield TestClient(app), data_up, coll_up
+
+    @staticmethod
+    def _headers(account, batch_id=STAMP):
+        ts, sig = _proof(account, batch_id=batch_id)
+        return {"X-Owner-Timestamp": ts, "X-Owner-Signature": sig}
+
+    @staticmethod
+    def _post(client, route, stamp_id, headers):
+        if route == "data":
+            return client.post(
+                f"/api/v1/data/?stamp_id={stamp_id}",
+                files={"file": ("t.json", b'{"data": 1}', "application/json")},
+                headers=headers,
+            )
+        return client.post(
+            f"/api/v1/data/manifest?stamp_id={stamp_id}",
+            files={"file": ("t.tar", TestOwnerProofSpentOnlyOnSuccess._tar(), "application/x-tar")},
+            headers=headers,
+        )
+
+    @pytest.mark.parametrize("route", ["data", "manifest"])
+    @pytest.mark.parametrize("spelling", [STAMP, STAMP.upper()], ids=["lower", "upper"])
+    def test_owner_proof_accepted_in_any_case(self, bee, route, spelling):
+        client, data_up, coll_up = bee
+        r = self._post(client, route, spelling, self._headers(OWNER))
+        assert r.status_code == 200, r.text
+        # Bee is given the canonical lowercase batch id.
+        if route == "data":
+            assert data_up.await_args.kwargs["stamp_id"] == STAMP
+        else:
+            assert coll_up.await_args.args[1] == STAMP
+
+    @pytest.mark.parametrize("route", ["data", "manifest"])
+    def test_proof_signed_over_uppercase_id_is_accepted(self, bee, route):
+        # The proof message lowercases the batch, so the signer's spelling of
+        # the id does not matter either.
+        client, _, _ = bee
+        r = self._post(client, route, STAMP.upper(), self._headers(OWNER, batch_id=STAMP.upper()))
+        assert r.status_code == 200, r.text
+
+    @pytest.mark.parametrize("route", ["data", "manifest"])
+    @pytest.mark.parametrize("spelling", [UNREGISTERED, UNREGISTERED.upper()], ids=["lower", "upper"])
+    @pytest.mark.parametrize("with_proof", [False, True], ids=["no-proof", "proof"])
+    def test_unregistered_stamp_denied_in_any_case(self, bee, route, spelling, with_proof):
+        client, data_up, coll_up = bee
+        headers = self._headers(OWNER, batch_id=self.UNREGISTERED) if with_proof else {}
+        r = self._post(client, route, spelling, headers)
+        assert r.status_code == 403, r.text
+        detail = r.json()["detail"]
+        assert detail["code"] == "STAMP_OWNERSHIP_DENIED"
+        assert detail["stamp_id"] == self.UNREGISTERED
+        data_up.assert_not_called()
+        coll_up.assert_not_called()

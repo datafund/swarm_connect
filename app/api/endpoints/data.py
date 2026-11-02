@@ -362,6 +362,9 @@ async def upload_data(
     }
     ```
     """
+    # The ownership registry is keyed in lowercase; the query accepts either
+    # case (#473).
+    stamp_id = stamp_id.lower()
     start_time = time.perf_counter()
     stamp_validate_ms = None
     file_read_ms = None
@@ -834,6 +837,9 @@ async def upload_manifest(
     }
     ```
     """
+    # The ownership registry is keyed in lowercase; the query accepts either
+    # case (#473).
+    stamp_id = stamp_id.lower()
     start_time = time.perf_counter()
     stamp_validate_ms = None
     file_read_ms = None
