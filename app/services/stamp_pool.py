@@ -18,6 +18,7 @@ import asyncio
 import json
 import os
 import logging
+import re
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from enum import Enum
@@ -66,6 +67,19 @@ def _error_cause(exc) -> str:
     if status is not None:
         return f"HTTP {status}"
     return type(exc).__name__
+
+
+_URL_RE = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*://[^\s\"'<>]+")
+
+
+def _without_urls(text: str) -> str:
+    """Replace URL-shaped substrings with <url> for /pool/status (#534).
+
+    Bee's own message is worth showing, but it is response text: a proxy's
+    HTML error page or a Bee message quoting its RPC endpoint can name an
+    internal address. The log keeps the original.
+    """
+    return _URL_RE.sub("<url>", text)
 
 
 
@@ -904,7 +918,8 @@ class StampPoolManager:
                             logger.error(f"Failed to purchase depth-{depth} stamp: {e}{said}")
                             # Bee's own message, not str(e): that names the Bee URL (#534).
                             results["errors"].append(
-                                f"Failed to purchase depth-{depth} stamp: {_error_cause(e)}{said}")
+                                f"Failed to purchase depth-{depth} stamp: "
+                                f"{_error_cause(e)}{_without_urls(said)}")
                             # Back off this depth. Without this the next check
                             # tries again immediately and keeps failing: an
                             # underfunded pool retried an unaffordable purchase

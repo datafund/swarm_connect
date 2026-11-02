@@ -2108,3 +2108,54 @@ class TestPoolStatusHidesBeeAddress:
         self._assert_no_address(errors)
         assert any(e.startswith("Pool check failed") and "HTTP 503" in e
                    for e in errors), errors
+
+    # Bee's own message is kept for a refused purchase, but it is response
+    # text: a proxy's HTML error page or a Bee message quoting its RPC can
+    # carry an internal URL. Those are replaced in the /pool/status entry.
+    PROXY_HTML = ("<html><head><title>502 Bad Gateway</title></head><body>"
+                  "upstream http://bee.internal.example:1633/stamps/1000/17 "
+                  "failed</body></html>")
+    RPC_JSON = {"code": 500,
+                "message": 'Post "http://rpc.internal.example:8545": dial tcp: refused'}
+
+    def _raw_status_error(self, status, **response_kwargs):
+        import httpx
+        request = httpx.Request("POST", f"{self.BEE}/stamps/1000/17")
+        response = httpx.Response(status, request=request, **response_kwargs)
+        return httpx.HTTPStatusError("err", request=request, response=response)
+
+    async def _purchase_errors(self, state_file, exc):
+        manager = StampPoolManager(state_file=state_file)
+        with open(state_file, "w") as f:
+            json.dump([], f)
+        with patch("app.services.stamp_pool.settings.STAMP_POOL_ENABLED", True), \
+             patch("app.services.swarm_api.get_all_stamps_processed",
+                   new=AsyncMock(return_value=[])), \
+             patch.object(manager, "_update_stamp_ttls", new=AsyncMock()), \
+             patch.object(manager, "_purchase_stamp", new=AsyncMock(side_effect=exc)), \
+             patch("app.services.stamp_pool.logger") as log:
+            await manager.check_and_replenish()
+        failed = [e for e in manager.get_status().errors
+                  if e.startswith("Failed to purchase")]
+        assert failed, manager.get_status().errors
+        logged = " ".join(str(c) for c in log.error.call_args_list)
+        return failed, logged
+
+    @pytest.mark.asyncio
+    async def test_purchase_proxy_html_body_hides_bee_url(self, state_file):
+        exc = self._raw_status_error(502, text=self.PROXY_HTML)
+        failed, logged = await self._purchase_errors(state_file, exc)
+
+        self._assert_no_address(failed)
+        assert all("HTTP 502" in e and "upstream <url> failed" in e for e in failed), failed
+        assert self.HOST in logged, "the log must keep the full text"
+
+    @pytest.mark.asyncio
+    async def test_purchase_bee_message_hides_rpc_url_keeps_rest(self, state_file):
+        exc = self._raw_status_error(500, json=self.RPC_JSON)
+        failed, logged = await self._purchase_errors(state_file, exc)
+
+        leaks = [e for e in failed if "rpc.internal.example" in e or "http://" in e]
+        assert leaks == [], f"RPC address exposed in /pool/status: {leaks}"
+        assert all("dial tcp: refused" in e and "<url>" in e for e in failed), failed
+        assert "rpc.internal.example:8545" in logged, "the log must keep the full text"
