@@ -138,6 +138,11 @@ Or with explicit depth, which must be one of the pool sizes: 17 (small), 20 (med
 }
 ```
 
+The error examples below show only `detail`. Each of these bodies also carries
+`code` and `message` at the top level, next to `detail`. Where `detail` has no
+`code`, the top-level `code` is `HTTP_<status>`, for example `HTTP_409`. See
+[error-codes.md](error-codes.md).
+
 **Response (pool exhausted): HTTP 409**
 ```json
 {
@@ -149,6 +154,28 @@ Or with explicit depth, which must be one of the pool sizes: 17 (small), 20 (med
 ```
 Another request taking the same stamp at the same moment also returns 409
 (`"Stamp was acquired by another request."`); retrying is safe.
+You get this 409 only when nothing was charged.
+
+**Response (paid, stamp not handed over): HTTP 500**
+
+A paid acquire collects the payment before it hands over the stamp. In rare
+cases the payment goes through but the gateway cannot hand over the stamp.
+The response then says that you paid and got nothing:
+```json
+{
+  "detail": {
+    "code": "DELIVERY_FAILED_AFTER_PAYMENT",
+    "message": "The payment was collected but the stamp could not be handed over. Contact the operator with this transaction for a refund.",
+    "transaction": "0x...",
+    "x402_status": "settled_not_delivered"
+  }
+}
+```
+`detail.transaction` is the payment transfer. The payment middleware also sets
+the `X-Payment-Transaction` and `X-Payment-Status: settled_not_delivered`
+headers. Do not retry blindly, and do not pay again. Contact the operator with
+the transaction for a refund. See
+[error-codes.md](error-codes.md) for this code.
 
 **Response (daily allowance used up): HTTP 429**
 ```json
