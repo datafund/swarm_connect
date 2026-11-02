@@ -164,6 +164,17 @@ class StampPoolManager:
         # the cause, so operators do not go looking at Bee for a file problem.
         self._last_sync_failure: Optional[str] = None
         self._last_sync_error: Optional[str] = None
+        # Saves refused because the state file is unreadable (#547). While the
+        # pool is paused for that, nothing may write over the file: it may hold
+        # batch ids the in-memory pool does not. _state_dirty records that the
+        # in-memory pool has changes the file lacks, so the first good sync
+        # writes them. _removed_unsaved holds batches that left the pool (sold,
+        # expired) during the pause, so a restored backup that still lists them
+        # cannot put a sold batch back up for sale. _refused_logged is the last
+        # batch list logged, so a long pause logs it once per change.
+        self._state_dirty: bool = False
+        self._removed_unsaved: Set[str] = set()
+        self._refused_logged: Optional[List[str]] = None
         # Per-depth backoff after a failed purchase. A failure is usually
         # persistent — out of funds, an amount below Bee's minimum validity —
         # and retrying it every cycle achieves nothing while blocking a request
@@ -195,26 +206,92 @@ class StampPoolManager:
         """Get the state file path, using override or settings."""
         return self._state_file or settings.STAMP_POOL_STATE_FILE
 
-    def _save_state(self, extra_ids: Optional[Set[str]] = None):
+    def _save_state(self, extra_ids: Optional[Set[str]] = None, removed: Optional[Set[str]] = None):
         """Persist current pool batch IDs to state file.
 
         `extra_ids` are batch IDs to keep in state that are not in the pool —
         records whose data could not be read this cycle. They are still ours and
         may parse fine next time, so writing only the pool would silently drop
         them.
+
+        `removed` names batches that have just left the pool. If the save is
+        refused they are remembered, so a sync after recovery does not re-import
+        them from a restored file.
+
+        Never writes over an unreadable state file (#547). While the pool is
+        paused for one, or when the file on disk has become unreadable since the
+        last sync, the save is refused: the file may list batches the in-memory
+        pool does not, and writing over it would also end the pause without
+        anyone repairing it. A refused save is written by the first sync that
+        reads the file successfully. A missing file is written as usual.
         """
         state_file = self._get_state_file_path()
+        batch_ids = set(self._pool.keys())
+        if extra_ids:
+            batch_ids |= set(extra_ids)
+        batch_ids = sorted(batch_ids)
+
+        refused = self._last_sync_failure == "state_file"
+        if not refused:
+            try:
+                # Logs, keeps the #440 copy, and raises when the file exists but
+                # cannot be read; returns normally for a readable or missing one.
+                self._load_state(quiet=True)
+            except StateLoadError:
+                refused = True
+                self._mark_state_file_unreadable()
+        if refused:
+            self._state_dirty = True
+            if removed:
+                self._removed_unsaved |= set(removed)
+            if batch_ids != self._refused_logged:
+                self._refused_logged = batch_ids
+                # Full ids, so the operator can rebuild the file if the process
+                # restarts before recovery. Batch ids are public on-chain.
+                logger.error(
+                    f"Pool state file {state_file} is unreadable; not saving pool state "
+                    f"over it. The pool currently holds {len(batch_ids)} batch(es): "
+                    f"{json.dumps(batch_ids)}"
+                    + (f"; released or removed since the last save: {json.dumps(sorted(self._removed_unsaved))}"
+                       if self._removed_unsaved else "")
+                )
+            return
+
         try:
-            batch_ids = set(self._pool.keys())
-            if extra_ids:
-                batch_ids |= set(extra_ids)
-            batch_ids = sorted(batch_ids)
             atomic_write_json(state_file, batch_ids)
             logger.debug(f"Saved pool state: {len(batch_ids)} stamps to {state_file}")
         except Exception as e:
             logger.error(f"Failed to save pool state to {state_file}: {e}")
+            return
+        self._state_dirty = False
+        self._removed_unsaved.clear()
+        self._refused_logged = None
 
-    def _load_state(self) -> Set[str]:
+    def _mark_state_file_unreadable(self) -> None:
+        """Pause pool spending because the state file cannot be read.
+
+        Used by the sync and by a save that finds the file broken between syncs.
+        Base name only in _errors: /pool/status is unauthenticated, and the full
+        path and backup location are already in the log.
+        """
+        name = os.path.basename(self._get_state_file_path())
+        self._last_sync_error = (f"Sync error: the pool state file ({name}) could not "
+                                 "be read; see the gateway log for details.")
+        if self._last_sync_error not in self._errors:
+            self._errors.append(self._last_sync_error)
+        self._last_sync_failure = "state_file"
+        self._last_sync_ok = False
+
+    def _sync_succeeded(self) -> None:
+        """Lift any pause, and write state that was refused during it (#547)."""
+        self._last_sync_ok = True
+        self._last_sync_failure = None
+        self._last_sync_error = None
+        if self._state_dirty:
+            with self._lock:
+                self._save_state()
+
+    def _load_state(self, quiet: bool = False) -> Set[str]:
         """Load the pool's batch IDs from its state file.
 
         A MISSING file is the only case where starting empty is correct: it is a
@@ -263,7 +340,8 @@ class StampPoolManager:
             raise unreadable_state(
                 state_file, f"expected strings, got {type(bad[0]).__name__} among {len(batch_ids)} entries")
 
-        logger.info(f"Loaded pool state: {len(batch_ids)} stamps from {state_file}")
+        if not quiet:
+            logger.info(f"Loaded pool state: {len(batch_ids)} stamps from {state_file}")
         return set(batch_ids)
 
     def get_status(self) -> PoolStatus:
@@ -380,7 +458,7 @@ class StampPoolManager:
             # Remove from pool (we no longer manage it)
             del self._pool[batch_id]
 
-            self._save_state()
+            self._save_state(removed={batch_id})
             return stamp
 
     def reserve_stamp(
@@ -427,7 +505,7 @@ class StampPoolManager:
             stamp.status = PoolStampStatus.RELEASED
             stamp.released_at = datetime.now(timezone.utc)
             del self._pool[batch_id]
-            self._save_state()
+            self._save_state(removed={batch_id})
         logger.info(f"Released stamp {batch_id[:16]}... (depth={stamp.depth}) to {stamp.released_to or 'unknown'}")
         return stamp
 
@@ -660,15 +738,15 @@ class StampPoolManager:
             Number of stamps synced
         """
         try:
-            known_ids = self._load_state()
+            # Batches that left the pool while saves were refused (#547) are not
+            # ours any more, even if a restored file still lists them.
+            known_ids = self._load_state() - self._removed_unsaved
 
             # First run: no state file means empty pool, let purchase logic fill it
             if not known_ids:
                 logger.info("No known stamps in state file, pool will be filled by purchase logic")
                 # A genuinely empty state is a reliable answer, not a failure.
-                self._last_sync_ok = True
-                self._last_sync_failure = None
-                self._last_sync_error = None
+                self._sync_succeeded()
                 return 0
 
             all_stamps = await swarm_api.get_all_stamps_processed()
@@ -685,7 +763,7 @@ class StampPoolManager:
                 # answering has left the pool and the state file, but is still
                 # in the earlier read and still usable on the node; importing it
                 # would put a sold batch back up for sale.
-                known_ids &= self._load_state()
+                known_ids &= self._load_state() - self._removed_unsaved
                 for batch_id in known_ids:
                     # Never put a batch registered to someone else up for sale
                     # (#477). _save_state swallows write errors, so a failed
@@ -785,7 +863,10 @@ class StampPoolManager:
 
             # Save cleaned state (stamps still valid, plus any we could not read
             # this cycle — those are not in the pool but must not be forgotten).
-            if valid_ids != known_ids:
+            # The file was just read, so a state-file pause is over: clear it
+            # first, or this save would be refused as during the pause (#547).
+            self._last_sync_failure = None
+            if valid_ids != known_ids or self._state_dirty:
                 self._save_state(extra_ids=unreadable_ids)
 
             # Adopt everything in the pool as gateway-owned.
@@ -803,9 +884,7 @@ class StampPoolManager:
             # registers its caller only once it has been released.
             self._register_pool_ownership(valid_ids)
 
-            self._last_sync_ok = True
-            self._last_sync_failure = None
-            self._last_sync_error = None
+            self._sync_succeeded()
             return synced_count
 
         except StateLoadError as e:
@@ -813,12 +892,7 @@ class StampPoolManager:
             # It goes to the log only: /pool/status is unauthenticated, so the
             # entry there names the file by its base name.
             logger.error(f"Error syncing pool: cannot read the pool state file: {e}")
-            name = os.path.basename(self._get_state_file_path())
-            self._last_sync_error = (f"Sync error: the pool state file ({name}) could not "
-                                     "be read; see the gateway log for details.")
-            self._errors.append(self._last_sync_error)
-            self._last_sync_failure = "state_file"
-            self._last_sync_ok = False
+            self._mark_state_file_unreadable()
             return 0
 
         except Exception as e:
@@ -1372,7 +1446,7 @@ class StampPoolManager:
                     stamp_ownership_manager.remove_stamp(batch_id)
 
                 if to_remove:
-                    self._save_state()
+                    self._save_state(removed=set(to_remove))
 
         except Exception as e:
             logger.warning(f"Error updating stamp TTLs: {e}")

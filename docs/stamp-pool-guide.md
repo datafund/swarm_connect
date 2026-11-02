@@ -310,7 +310,18 @@ Check the `errors` array in status response for:
 - An unreadable pool state file (`pool_state.json`, set by `STAMP_POOL_STATE_FILE`):
   pool spending stays paused until the file is repaired or restored. This
   includes the immediate replacement purchase after a stamp is released, which
-  is also skipped after any failed sync
+  is also skipped after any failed sync. The gateway never writes over an
+  unreadable file (#547): releases, purchases already in flight and expiry
+  removals change the in-memory pool only. The first refused save, and each
+  later one whose batch list differs, logs an ERROR with the full batch-id
+  list the pool holds and the ids released or removed since the last save, so
+  the file can be rebuilt from the log. A save that finds the file broken
+  between syncs pauses the pool at once. To recover, repair the file, restore
+  it from backup, or move it away to start from the in-memory pool. The next
+  sync then succeeds, the pause lifts, and the held changes are written.
+  Batches released during the pause are not re-imported even if a restored
+  backup still lists them. That memory does not survive a restart, so after a
+  restart only the ownership registry keeps a sold batch out of the pool
 
 While replenishment is skipped, each check replaces `errors` with that run's
 entries, so the list does not grow across failed cycles.
