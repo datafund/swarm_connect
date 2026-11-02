@@ -318,14 +318,14 @@ Check the `errors` array in status response for:
   the file can be rebuilt from the log. A save that finds the file broken
   between syncs pauses the pool at once: nothing more is bought or topped up,
   by a maintenance run already under way or by an immediate replacement,
-  because the pause is checked again right before each purchase or extend
-  call goes to Bee. A call already sent when the pause is set still
-  completes. To recover, repair the file, restore it from backup, or move it
-  away to start from the in-memory pool. The next sync then lifts the pause
-  and writes the held changes, once it has read the file and either found it
-  empty or missing or read the Bee node as well; a sync that reads the file
-  but fails at Bee keeps saves refused. Batches released during the pause are not re-imported even
-  if a restored backup still lists them. That memory does not survive a
+  because the pause is checked again right before each purchase or extend call
+  goes to Bee. A call already sent when the pause is set still completes. To
+  recover, repair the file, restore it from backup, or move it away to start
+  from the in-memory pool. The next sync then lifts the pause and writes the
+  held changes, once it has read the file and either found it empty or missing
+  or read the Bee node as well; a sync that reads the file but fails at Bee
+  keeps saves refused. Batches released during the pause are not re-imported
+  even if a restored backup still lists them. That memory does not survive a
   restart: after a restart only the ownership registry keeps a sold batch out
   of the pool, and a batch bought during the pause is lost from the pool
   unless the file is rebuilt from the logged list

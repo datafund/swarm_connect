@@ -481,20 +481,28 @@ async def test_purchase_retry_does_not_spend_when_paused_during_429_wait(tmp_pat
 
 
 @pytest.mark.asyncio
-async def test_immediate_replenishment_does_not_spend_when_paused_during_price_lookup(tmp_path, monkeypatch):
+async def test_immediate_replenishment_does_not_spend_when_paused_during_price_lookup(tmp_path, monkeypatch, caplog):
     mgr = await _good_pool(tmp_path, monkeypatch, A, B)
-    _spend_mocks(mgr, monkeypatch)
+    hold, released = _spend_mocks(mgr, monkeypatch)
+    budget = mgr._spend_budget_remaining()
 
     async def chainstate():
         _break_file_and_release(mgr, A)
         return {"currentPrice": "24000"}
 
     buy = AsyncMock(return_value=C)
-    with patch("app.services.stamp_pool.swarm_api.get_chainstate", new=chainstate), \
+    with caplog.at_level(logging.WARNING, logger="app.services.stamp_pool"), \
+         patch("app.services.stamp_pool.swarm_api.get_chainstate", new=chainstate), \
          patch("app.services.stamp_pool.swarm_api.purchase_postage_stamp", new=buy):
         await mgr._async_replenish_one(17)
 
     buy.assert_not_called()
+    # Positive evidence that the pause stopped it, rather than an error inside
+    # the mock that _async_replenish_one would swallow.
+    assert released == [hold]
+    assert mgr._spend_budget_remaining() == budget
+    assert any("Not going ahead to buy" in r.getMessage() for r in caplog.records)
+    assert not any("Immediate replenishment failed" in r.getMessage() for r in caplog.records)
 
 
 @pytest.mark.asyncio
@@ -543,3 +551,66 @@ async def test_failed_write_on_recovery_sync_is_logged_once(tmp_path, monkeypatc
     failures = [r for r in caplog.records if "Failed to save pool state" in r.getMessage()]
     assert len(failures) == 1
     assert mgr._state_dirty is True
+
+
+@pytest.mark.asyncio
+async def test_file_breaking_before_the_sync_save_keeps_the_pause(tmp_path, monkeypatch):
+    """The sync read the file, then it broke before the sync's own save."""
+    D = "d" * 64
+    mgr = await _good_pool(tmp_path, monkeypatch, A, B)
+    _write(mgr, [A, B, D])  # D has gone from Bee, so the sync drops it and saves
+    real_lookup = stamp_ownership_manager.get_stamp_info
+
+    def lookup(batch_id):
+        _corrupt(mgr)  # inside the sync's locked read, after its file read
+        return real_lookup(batch_id)
+
+    monkeypatch.setattr(stamp_ownership_manager, "get_stamp_info", lookup)
+    await _sync(mgr, A, B)
+
+    assert _read(mgr) == CORRUPT
+    _assert_paused_for_file(mgr)
+    assert mgr._needs_reconcile is True
+    assert mgr._immediate_replenish_paused(17) is True
+
+
+@pytest.mark.asyncio
+async def test_refused_save_after_restore_and_bee_failure_says_not_reconciled(tmp_path, monkeypatch, caplog):
+    mgr = await _good_pool(tmp_path, monkeypatch, A, B)
+    _corrupt(mgr)
+    assert await _sync(mgr, A, B) == 0
+    _write(mgr, [A, B])
+    with patch("app.services.stamp_pool.swarm_api.get_all_stamps_processed",
+               new=AsyncMock(side_effect=RuntimeError("bee down"))):
+        await mgr.sync_from_bee_node()
+
+    with caplog.at_level(logging.ERROR, logger="app.services.stamp_pool"):
+        assert mgr.release_stamp(A) is not None
+    msgs = [r.getMessage() for r in caplog.records if "not saving pool state" in r.getMessage()]
+    assert len(msgs) == 1
+    assert "no sync has read it back" not in msgs[0]
+    assert "has not been reconciled with a full sync since it was found unreadable" in msgs[0]
+
+
+@pytest.mark.asyncio
+async def test_topup_paused_mid_run_is_reported_as_paused(tmp_path, monkeypatch):
+    mgr = await _good_pool(tmp_path, monkeypatch, A, B)
+    _cycle_patches(mgr, monkeypatch, target=2)
+    _spend_mocks(mgr, monkeypatch)
+    monkeypatch.setattr(mgr, "_get_stamp_ttl", AsyncMock(return_value=1))
+
+    async def chainstate():
+        _break_file_and_release(mgr, B)
+        return {"currentPrice": "24000"}
+
+    extend = AsyncMock()
+    with patch("app.services.stamp_pool.swarm_api.get_all_stamps_processed",
+               new=AsyncMock(return_value=_bee(A, B))), \
+         patch("app.services.stamp_pool.swarm_api.get_chainstate", new=chainstate), \
+         patch("app.services.stamp_pool.swarm_api.extend_postage_stamp", new=extend):
+        results = await mgr.check_and_replenish()
+
+    extend.assert_not_called()
+    assert results.get("skipped") is True
+    [debug] = results["topup_debug"]
+    assert "paused" in debug["result"] and "state file" in debug["result"]

@@ -258,9 +258,9 @@ class StampPoolManager:
                 # Full ids, so the operator can rebuild the file if the process
                 # restarts before recovery. Batch ids are public on-chain.
                 logger.error(
-                    f"Pool state file {state_file} was unreadable and no sync has read it "
-                    f"back since; not saving pool state over it. The pool currently "
-                    f"holds {len(batch_ids)} batch(es): "
+                    f"Pool state file {state_file} has not been reconciled with a full sync "
+                    f"since it was found unreadable; not saving pool state over it. The pool "
+                    f"currently holds {len(batch_ids)} batch(es): "
                     f"{json.dumps(batch_ids)}"
                     + (f"; released or removed since the last save: {json.dumps(sorted(self._removed_unsaved))}"
                        if self._removed_unsaved else "")
@@ -908,8 +908,11 @@ class StampPoolManager:
             # registers its caller only once it has been released.
             self._register_pool_ownership(valid_ids)
 
-            # Held changes were written (or attempted) by the save above.
-            self._sync_succeeded(flush=False)
+            # Held changes were written (or attempted) by the save above. If
+            # that save found the file broken since this sync read it, it has
+            # paused the pool again; do not lift that pause.
+            if not self._needs_reconcile:
+                self._sync_succeeded(flush=False)
             return synced_count
 
         except StateLoadError as e:
@@ -1155,6 +1158,9 @@ class StampPoolManager:
                         if outcome is True:
                             results["stamps_topped_up"] += 1
                             debug["result"] = "topped_up"
+                        elif outcome is None and self._needs_reconcile:
+                            debug["result"] = ("skipped: pool spending paused, the pool state "
+                                               "file could not be read")
                         elif outcome is None:
                             debug["result"] = "skipped: batch reserved or no longer in the pool"
                         else:
@@ -1369,8 +1375,10 @@ class StampPoolManager:
             # money is spent at that point.
             for attempt in range(max_retries):
                 if self._spending_paused_for_state_file(f"buy a depth-{depth} pool batch"):
-                    # Nothing spent: give back the slot and the hold, and answer
-                    # as the other refusals here do.
+                    # Nothing spent: give back the slot and the hold and return
+                    # None. Logged only, not added to _errors: the pause is
+                    # already reported there by the sync or save that set it,
+                    # and a maintenance run reports its skip.
                     from app.services.spend_budget import spend_budget_tracker
                     self._release_spend_slot(slot)
                     spend_budget_tracker.release_hold(hold)
