@@ -5,7 +5,7 @@
     "title": "Provenance Gateway Overview",
     "description": "Operational dashboard for the Provenance Gateway (swarm_connect). Shows request traffic, latency, wallet balances, stamp pool status, x402 payments, and Bee node health. Use the Environment dropdown to filter by deployment (development/main).",
     "tags": ["gateway", "provenance"],
-    "timezone": "browser",
+    "timezone": "utc",
     "refresh": "15s",
     "time": { "from": "now-1h", "to": "now" },
     "templating": {
@@ -504,9 +504,9 @@
       },
       {
         "id": 117, "title": "KPIs per UTC Day (13 days)", "type": "timeseries",
-        "description": "Daily totals of the KPIs above, production, over the last 13 days regardless of the dashboard time picker. Each bar is one UTC calendar day, midnight to midnight. The newest bar is today so far, a partial day that grows until midnight UTC. The range is 13 days because Grafana Cloud keeps 14 days of metrics, and a range of 14 days or more is cut at the retention limit, which breaks the day alignment.",
+        "description": "Daily totals of the KPIs above, production, over the last 13 days regardless of the dashboard time picker. Each bar is one UTC calendar day, midnight to midnight. The newest bar is today so far, a partial day that grows until midnight UTC. The range starts at midnight UTC 13 days ago and ends now, so it shows 13 full days plus today. It starts at midnight UTC because the dashboard shows times in UTC; otherwise the oldest bar would be cut off. It goes back no further because Grafana Cloud keeps 14 days of metrics, and a range of 14 days or more is cut at the retention limit, which breaks the day alignment.",
         "gridPos": { "h": 8, "w": 16, "x": 0, "y": 156 },
-        "timeFrom": "13d", "interval": "1d",
+        "timeFrom": "now-13d/d", "interval": "1d",
         "targets": [
           { "expr": "sum(increase(gateway_uploads_total{environment=\"main\",status=\"success\"}[1d] offset -1d))", "legendFormat": "records stored" },
           { "expr": "sum(increase(gateway_notary_signatures_total{environment=\"main\",status=\"success\"}[1d] offset -1d))", "legendFormat": "notarized" },
@@ -517,9 +517,9 @@
       },
       {
         "id": 118, "title": "Distinct Callers per UTC Day (13 days)", "type": "timeseries",
-        "description": "Highest distinct-caller count reached each UTC day, production, last 13 days. Each bar is one UTC calendar day, midnight to midnight. The newest bar is today so far, a partial day. The count resets at midnight UTC, so each bar is that day's highest count. Bars for days before that midnight reset was deployed can show the previous day's total. Approximate: the count also resets on restart, so a day with a deploy shows less than the true number. The range is 13 days because Grafana Cloud keeps 14 days of metrics, and a range of 14 days or more is cut at the retention limit, which breaks the day alignment.",
+        "description": "Highest distinct-caller count reached each UTC day, production, last 13 days. Each bar is one UTC calendar day, midnight to midnight. The newest bar is today so far, a partial day. The count resets at midnight UTC, so each bar is that day's highest count. Bars for days before that midnight reset was deployed can show the previous day's total. Approximate: the count also resets on restart, so a day with a deploy shows less than the true number. The range starts at midnight UTC 13 days ago and ends now, so it shows 13 full days plus today. It starts at midnight UTC because the dashboard shows times in UTC; otherwise the oldest bar would be cut off. It goes back no further because Grafana Cloud keeps 14 days of metrics, and a range of 14 days or more is cut at the retention limit, which breaks the day alignment.",
         "gridPos": { "h": 8, "w": 8, "x": 16, "y": 156 },
-        "timeFrom": "13d", "interval": "1d",
+        "timeFrom": "now-13d/d", "interval": "1d",
         "targets": [{ "expr": "max_over_time(sum(gateway_distinct_callers{environment=\"main\"})[1d:5m] offset -1d)", "legendFormat": "callers" }],
         "fieldConfig": { "defaults": { "unit": "short", "decimals": 0, "custom": { "drawStyle": "bars", "fillOpacity": 60, "barAlignment": 1 } } }
       }
