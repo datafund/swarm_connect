@@ -14,7 +14,7 @@ Two ways to authenticate, both optional:
   gateway refuses to start if these are set and it is missing). Note: CDP's
   facilitator route is x402 v2, and this gateway speaks x402 v1 (x402==1.0.0);
   whether CDP accepts v1 payloads must be confirmed before relying on it (see
-  #373).
+  #524).
 - X402_FACILITATOR_BEARER_TOKEN: a static bearer token, for facilitators that
   accept one.
 
