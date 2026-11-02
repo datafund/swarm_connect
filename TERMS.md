@@ -31,7 +31,8 @@ Stamps obtained on the free tier are **shared**: anyone can upload with them, an
 ## 3. When something goes wrong
 
 - **A request that is refused** (invalid input, not your stamp, a limit reached, the node unavailable) **is not charged**. Payment is collected only right before the operation is carried out.
-- **If a payment cannot be settled**, nothing is delivered and nothing is charged. The response says so (`PAYMENT_SETTLEMENT_FAILED`).
+- **If a payment is refused** when it is settled, nothing is delivered and nothing is charged. The response says so (`PAYMENT_SETTLEMENT_FAILED`).
+- **If the payment service does not answer** when a payment is settled, nothing is delivered, but it is not known whether the payment was collected: **you may have been charged**. The response says so (`PAYMENT_SETTLEMENT_UNAVAILABLE`, `PAYMENT_SETTLEMENT_UNKNOWN` or `PAYMENT_AUTHORIZATION_OUTCOME_UNKNOWN`) and gives the payment authorization's nonce. Do not pay again until you have checked whether that nonce was used; if it was, contact us with it for a refund or for delivery.
 - **If a payment was collected but the operation then failed**, the response carries `x402_status: settled_not_delivered` and the settlement transaction. Contact us with that transaction for a refund of that amount. Refunds are made in USDC to the paying address. **[to confirm: contact channel and response time]**
 - Refunds are not given for data that expired because its stamp was not extended.
 

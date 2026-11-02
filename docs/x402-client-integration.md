@@ -606,10 +606,10 @@ What the gateway does with the key (payments with `X-PAYMENT` only; the free tie
 | Same key, different body or query | `422` `IDEMPOTENCY_KEY_REUSED`. Not charged |
 | Key longer than 255 characters or not printable ASCII | `400` `IDEMPOTENCY_KEY_INVALID`. Not charged |
 | First request paid, but failed or was interrupted afterwards (including a gateway restart) | `409` `IDEMPOTENCY_KEY_SETTLED_PENDING` with the `transaction`. Not charged again; contact the operator with that transaction for the result or a refund |
-| The first payment was sent for settlement but no answer came back (facilitator error or timeout, or the request was cut off while waiting) | `409` `IDEMPOTENCY_KEY_SETTLEMENT_UNKNOWN` with the first authorization's `nonce`. Not charged. The first payment may or may not have been collected: check whether that nonce was used on-chain (USDC `authorizationState(from, nonce)`) before paying again with a new key; if it was, contact the operator |
+| The first payment was sent for settlement but no answer came back (facilitator error or timeout, or the request was cut off while waiting) | `409` `IDEMPOTENCY_KEY_SETTLEMENT_UNKNOWN` with the first authorization's `nonce`, for 24 h, also when the retry presents the first `X-PAYMENT`. Not charged. The first payment may or may not have been collected, and this key will not complete. Check the `nonce` on-chain; if it was used, contact the operator. If it was not, the facilitator may still submit it later, so before signing a new payment either wait until its `validBefore` has passed or cancel it on-chain with EIP-3009 `cancelAuthorization`. Then pay with a new key |
 | First request succeeded, but its response was too large to keep (over 64 KB) | `409` `IDEMPOTENCY_KEY_DELIVERED_NOT_STORED` with the `transaction`. It was delivered and paid once; look the result up through the resource itself |
 | The facilitator refused the first payment, or the request failed before settlement | Nothing stored; a retry is a new, paid attempt |
-| The retry presents the same `X-PAYMENT` that paid for the original | `402`: sign a new payment. Only a new, unused authorization gets the stored result |
+| The retry presents the same `X-PAYMENT` that paid for the original | `402`: sign a new payment. Only a new, unused authorization gets the stored result. Not when the original's settlement got no answer: that is the `409` `IDEMPOTENCY_KEY_SETTLEMENT_UNKNOWN` above |
 | The gateway cannot read its idempotency store | `503` `IDEMPOTENCY_UNAVAILABLE`. Not charged; retry later with the same key |
 
 Keys are scoped to the payer (the verified signer of `X-PAYMENT`), the method and the path, so another wallet's request with the same key is unaffected.
@@ -628,6 +628,21 @@ What to know about the retry's payment:
 
 If the Bee node has not confirmed a paid purchase within the gateway's deadline (120 s by default), the gateway, having already collected the payment, answers `202` with `code: PURCHASE_PENDING`, the payment `transaction`, and the batch `label`. The batch is registered to the paying wallet as soon as the node reports it: list `GET /api/v1/stamps/?wallet=<your address>` and look for that label, or retry with the same `Idempotency-Key`, which returns the `201` with the `batchID` once it is found (or, if it is never found within 15 minutes, `500 DELIVERY_FAILED_AFTER_PAYMENT` with the transaction for a refund). Do not pay again. A `202` is not a failure. A `503` with `code: PURCHASE_CAPACITY` means too many purchases are waiting on the node; nothing was charged, retry shortly.
 
+## Payment settlement errors
+
+The gateway settles your payment just before it does the work. If settlement does not succeed, the response is one of these. Full detail is in [error-codes.md](error-codes.md#payments-and-pricing).
+
+| Code | Status | Were you charged? | Safe next step |
+|------|--------|-------------------|----------------|
+| `PAYMENT_SETTLEMENT_FAILED` | 402 | No: the facilitator refused the payment, and nothing was delivered | Fix what `reason` or `message` names (usually funds or an expired authorization) and pay again |
+| `PAYMENT_SETTLEMENT_UNAVAILABLE` | 502 | **Maybe**: the facilitator gave no answer. Nothing was delivered | Retry with the **same** `X-PAYMENT` while it is valid: it is settled at most once. Do not sign a new authorization until you have checked `detail.nonce` on-chain (below) |
+| `PAYMENT_SETTLEMENT_UNKNOWN` | 502 | **Maybe**: the work ran, then the facilitator gave no answer. The result is withheld | Do not retry the same `X-PAYMENT` (it is answered `409`). Check `nonce` on-chain (below) |
+| `PAYMENT_AUTHORIZATION_OUTCOME_UNKNOWN` | 409 | This request: no. The earlier request with this authorization: **maybe**, and probably yes if the facilitator refused this one | Do not pay from it. Check `detail.nonce` on-chain (below) |
+
+Checking a nonce: look up the USDC contract's `authorizationState(payer, nonce)` (or the payer's USDC transfers). If the nonce was used, the earlier payment was collected: contact the operator with the nonce for the result or a refund, and do not pay again. If it was not used, the facilitator may still submit that authorization, so before signing a new payment either wait until its `validBefore` has passed or cancel it on-chain with EIP-3009 `cancelAuthorization`. With an `Idempotency-Key`, the old key stays taken for 24 hours (`409 IDEMPOTENCY_KEY_SETTLEMENT_UNKNOWN`), so pay again with a new one.
+
+None of the three "maybe" answers is a `402` or carries `accepts`, so an x402 client that pays automatically on `402` does not pay again from them. Keep it that way in your own client: never sign a new payment from a response with `x402_status: settlement_unknown` or the code `PAYMENT_SETTLEMENT_UNAVAILABLE`.
+
 ## Error Handling
 
 | Error | Cause | Resolution |
@@ -638,7 +653,7 @@ If the Bee node has not confirmed a paid purchase within the gateway's deadline 
 | "Invalid signature" | Wrong private key or network | Check configuration |
 | "Payment verification failed" | Facilitator rejected | Check payment amount |
 | 409 `IDEMPOTENCY_KEY_IN_PROGRESS` | Retry of a paid request still running | Retry with the same key after `Retry-After` |
-| 409 `IDEMPOTENCY_KEY_SETTLEMENT_UNKNOWN` | The first payment's settlement returned no answer | Check the `nonce` on-chain before paying again |
+| 409 `IDEMPOTENCY_KEY_SETTLEMENT_UNKNOWN` | The first payment's settlement returned no answer | See [Payment settlement errors](#payment-settlement-errors); then use a new key |
 | 409 `IDEMPOTENCY_KEY_DELIVERED_NOT_STORED` | The first request succeeded; its response was too large to replay | Look up the result; do not pay again |
 | 422 `IDEMPOTENCY_KEY_REUSED` | Same `Idempotency-Key` for a different request | Use a new key |
 | 409 `IDEMPOTENCY_KEY_SETTLED_PENDING` | The first request was paid but produced no stored result | Contact the operator with the `transaction` |
