@@ -659,6 +659,13 @@ async def require_x402_payment(request: Request) -> None:
     if not verify_response.is_valid:
         invalid_reason = getattr(verify_response, 'invalid_reason', None) or 'Unknown reason'
         logger.warning(f"x402: Payment verification failed: {invalid_reason}")
+        # A facilitator may reject a spent nonce at verify. If this
+        # authorization's earlier settlement got no answer, that is likely
+        # why: no 402 and no `accepts`, or the client pays again (#553).
+        from app.x402.settlement import authorization_key, outcome_unknown, outcome_unknown_refusal
+        unknown_key = authorization_key(payment_payload)
+        if outcome_unknown.contains(unknown_key):
+            raise outcome_unknown_refusal(unknown_key, invalid_reason)
         response_body = {
             "x402Version": X402_VERSION,
             "error": f"Payment verification failed: {invalid_reason}",
@@ -714,6 +721,11 @@ async def require_x402_payment(request: Request) -> None:
 
     if not replay_guard.reserve(auth_key):
         logger.warning(f"x402: Payment authorization reused by {client_ip}")
+        from app.x402.settlement import outcome_unknown, outcome_unknown_refusal
+        if outcome_unknown.contains(auth_key):
+            # Still reserved because its settlement outcome is unknown (the
+            # middleware fallback keeps it): not "sign a new payment" (#553).
+            raise outcome_unknown_refusal(auth_key)
         raise HTTPException(
             status_code=402,
             detail={

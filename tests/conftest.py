@@ -95,12 +95,14 @@ def _reset_payment_replay_guard():
     The guard is process-wide by design (one authorization, one delivery), and
     tests reuse the same signed test authorization.
     """
-    from app.x402.settlement import replay_guard
+    from app.x402.settlement import outcome_unknown, replay_guard
     from app.x402.idempotency import idempotency_store
     replay_guard.reset()
+    outcome_unknown.reset()
     idempotency_store.reset()
     yield
     replay_guard.reset()
+    outcome_unknown.reset()
     idempotency_store.reset()
 
 

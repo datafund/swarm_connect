@@ -206,13 +206,69 @@ def test_fallback_settlement_error_is_audited_and_counted_as_error(env):
                for e in read_audit_log())
 
 
-def test_fallback_settlement_error_keeps_the_authorization_reserved(env):
-    """The work ran and the nonce may be spent: the same authorization is not taken again."""
+def _assert_outcome_unknown(r, nonce="0x" + "00" * 32):
+    """The answer to a retry of an authorization whose settlement outcome is unknown:
+    not a 402 and no `accepts`, so an x402 client does not sign and pay again."""
+    assert r.status_code == 409
+    detail = r.json()["detail"]
+    assert detail["code"] == "PAYMENT_AUTHORIZATION_OUTCOME_UNKNOWN"
+    assert detail["x402_status"] == "settlement_unknown"
+    assert detail["nonce"] == nonce
+    assert "accepts" not in detail and "accepts" not in r.json()
+    return detail
+
+
+def test_fallback_settlement_error_answers_a_retry_without_a_402(env):
+    """#553 review: the work ran and the nonce may be spent. A retry with the same
+    authorization is not run again, and is not told to sign a new payment."""
     fac = _facilitator(RuntimeError("facilitator down"), ok())
     header = create_valid_payment_header()
     assert _run(fac, path="/api/v1/data/manifest", header=header).status_code == 502
-    assert _run(fac, path="/api/v1/data/manifest", header=header).status_code == 402
+    _assert_outcome_unknown(_run(fac, path="/api/v1/data/manifest", header=header))
     assert fac.settle.await_count == 1 and DELIVERED == [1]
+
+
+def test_unavailable_then_refused_retry_is_not_a_402(env):
+    """#553 review: after 502 PAYMENT_SETTLEMENT_UNAVAILABLE the documented retry is the
+    same authorization. If the facilitator then refuses it (for instance because the
+    first transfer went through and spent the nonce), the payer must not be sent to pay
+    again from a 402."""
+    fac = _facilitator(RuntimeError("facilitator down"), refused("invalid_transaction_state"))
+    header = create_valid_payment_header()
+    assert _run(fac, header=header).status_code == 502
+    detail = _assert_outcome_unknown(_run(fac, header=header))
+    assert detail["reason"] == "invalid_transaction_state"
+    assert DELIVERED == []
+
+
+def test_unavailable_then_verify_rejects_the_retry_is_not_a_402(env):
+    """A facilitator may reject a spent nonce at verify rather than at settle."""
+    fac = _facilitator(RuntimeError("facilitator down"))
+    good = VerifyResponse(isValid=True, payer="0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1")
+    fac.verify = AsyncMock(side_effect=[good, VerifyResponse(isValid=False, invalidReason="nonce_used", payer=None)])
+    header = create_valid_payment_header()
+    assert _run(fac, header=header).status_code == 502
+    detail = _assert_outcome_unknown(_run(fac, header=header))
+    assert detail["reason"] == "nonce_used"
+    assert DELIVERED == []
+
+
+def test_unavailable_then_successful_retry_forgets_the_unknown_outcome(env):
+    """A retry of the same authorization that settles proves the first did not; the
+    authorization is then an ordinary settled one."""
+    fac = _facilitator(RuntimeError("facilitator down"), ok())
+    header = create_valid_payment_header()
+    assert _run(fac, header=header).status_code == 502
+    assert _run(fac, header=header).status_code == 200
+    from app.x402.settlement import outcome_unknown
+    assert not outcome_unknown.contains(("0x1234567890abcdef1234567890abcdef12345678", "0x" + "00" * 32))
+
+
+def test_a_refusal_without_an_earlier_unknown_outcome_is_still_a_402(env):
+    fac = _facilitator(refused())
+    r = _run(fac)
+    assert r.status_code == 402
+    assert r.json()["detail"]["code"] == "PAYMENT_SETTLEMENT_FAILED"
 
 
 def test_chunk_credit_is_not_granted_when_settlement_fails(env):

@@ -224,6 +224,11 @@ class IdempotencyStore:
                 if entry["request_hash"] != request_hash:
                     return "mismatch", None, None
                 if entry.get("auth") == auth:
+                    # The authorization that paid for the original. Unless its
+                    # settlement got no answer: then "sign a new payment" (a
+                    # 402 with accepts) could charge twice (#553).
+                    if entry.get("state") == SETTLING:
+                        return SETTLING, entry, None
                     return "original_auth", None, None
                 return entry["state"], entry, None
             token = secrets.token_hex(8)
@@ -473,9 +478,13 @@ async def begin_idempotent_request(request: Request, payer: str,
             "code": "IDEMPOTENCY_KEY_SETTLEMENT_UNKNOWN",
             "message": ("The payment for the first request with this Idempotency-Key was sent for "
                         "settlement but no answer came back, so it may or may not have been "
-                        "collected. This payment was not charged. Before paying again, check "
-                        "whether the original authorization (nonce below) was used on-chain; if "
-                        "it was, contact the operator."),
+                        "collected. This request was not charged, and this key stays taken. "
+                        "Do not pay again from this response. Check on-chain whether the "
+                        "original authorization (nonce below) was used. If it was, contact the "
+                        "operator with the nonce. If it was not, the facilitator may still submit "
+                        "it, so wait until its validBefore has passed, or cancel it on-chain with "
+                        "EIP-3009 cancelAuthorization, then retry with a new payment and a new "
+                        "Idempotency-Key."),
             "nonce": entry.get("nonce"),
             "x402_status": "settlement_unknown",
         })

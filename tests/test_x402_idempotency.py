@@ -427,6 +427,48 @@ def test_unknown_outcome_on_the_fallback_settlement_keeps_the_key(fac):
     assert fac.settle.await_count == 1 and ran == [1]
 
 
+def test_same_authorization_and_key_after_unknown_outcome_is_not_told_to_pay(fac):
+    """#553 review: after 502 PAYMENT_SETTLEMENT_UNAVAILABLE on a keyed request, the same
+    X-PAYMENT with the same key used to get 402 "already used. Sign a new payment." with
+    accepts; an x402 client pays from that. It gets the settlement-unknown answer."""
+    app, bought = _app(fac)
+    c = TestClient(app)
+    fac.settle.side_effect = httpx.ReadTimeout("facilitator slow")
+    nonce = "0x" + "7a" * 32
+    headers = {"X-PAYMENT": pay(nonce=nonce), "Idempotency-Key": "k-same"}
+    assert c.post("/api/v1/stamps/", json={"depth": 17}, headers=headers).status_code == 502
+    retry = c.post("/api/v1/stamps/", json={"depth": 17}, headers=headers)
+    assert retry.status_code == 409
+    detail = retry.json()["detail"]
+    assert detail["code"] == "IDEMPOTENCY_KEY_SETTLEMENT_UNKNOWN"
+    assert detail["nonce"] == nonce
+    assert "accepts" not in detail
+    assert fac.settle.await_count == 1 and not bought
+
+
+def test_same_authorization_and_key_after_fallback_unknown_is_not_told_to_pay(fac):
+    """Same, on the middleware fallback (work ran, then no answer from the facilitator)."""
+    async def no_settle_point(request: Request):
+        return {"reference": "r" * 64}
+
+    router = APIRouter()
+    router.add_api_route("/manifest", no_settle_point, methods=["POST"])
+    app = FastAPI()
+    app.include_router(router, prefix="/api/v1/data", dependencies=[Depends(require_x402_payment)])
+    app.add_middleware(X402Middleware, facilitator_client=fac)
+    c = TestClient(app)
+    fac.settle.side_effect = httpx.ReadTimeout("facilitator slow")
+    nonce = "0x" + "7b" * 32
+    headers = {"X-PAYMENT": pay(nonce=nonce), "Idempotency-Key": "k-fb"}
+    assert c.post("/api/v1/data/manifest", json={}, headers=headers).status_code == 502
+    retry = c.post("/api/v1/data/manifest", json={}, headers=headers)
+    assert retry.status_code == 409
+    detail = retry.json()["detail"]
+    assert detail["nonce"] == nonce and detail["x402_status"] == "settlement_unknown"
+    assert "accepts" not in detail
+    assert fac.settle.await_count == 1
+
+
 def test_settling_entry_survives_a_restart(tmp_path):
     """Killed or cancelled while waiting for the facilitator: still unknown after a restart."""
     path = str(tmp_path / "idem.json")

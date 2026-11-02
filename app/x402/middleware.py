@@ -441,7 +441,8 @@ class X402Middleware(BaseHTTPMiddleware):
         of its own, and then checks the result: SettleResponse reports failure
         with success=False rather than an exception (#355).
         """
-        from app.x402.settlement import replay_guard
+        from app.x402.settlement import (OUTCOME_UNKNOWN_ADVICE, outcome_unknown,
+                                         outcome_unknown_refusal, replay_guard)
         from app.x402.audit import log_payment_failed, log_payment_settled
 
         settlement = getattr(request.state, "x402_settlement", None)
@@ -486,6 +487,7 @@ class X402Middleware(BaseHTTPMiddleware):
                                        wallet_address=payer)
                     x402_settlements_total.labels(result="error").inc()
                     auth_key = getattr(request.state, "x402_auth_key", None)
+                    outcome_unknown.add(auth_key)
                     return JSONResponse(
                         status_code=502,
                         content={
@@ -493,9 +495,7 @@ class X402Middleware(BaseHTTPMiddleware):
                             "message": (
                                 "The request was processed, but the payment facilitator did not "
                                 "answer, so it is unknown whether the payment was collected. The "
-                                "result is withheld. Before paying again, check whether this "
-                                "authorization's nonce was used on-chain; if it was, contact the "
-                                "operator with the nonce."
+                                "result is withheld. " + OUTCOME_UNKNOWN_ADVICE
                             ),
                             "nonce": auth_key[1] if auth_key else None,
                             "x402_status": "settlement_unknown",
@@ -507,6 +507,14 @@ class X402Middleware(BaseHTTPMiddleware):
                     log_payment_settled(client_ip=client_ip, payer=payer, transaction_hash=None,
                                         network=settings.X402_NETWORK, success=False, error_reason=failure)
                     x402_settlements_total.labels(result="refused").inc()
+                    auth_key = getattr(request.state, "x402_auth_key", None)
+                    if outcome_unknown.contains(auth_key):
+                        # An earlier attempt may have spent the nonce: no 402 (#553).
+                        refusal = outcome_unknown_refusal(auth_key, failure)
+                        return JSONResponse(status_code=refusal.status_code,
+                                            content={"detail": refusal.detail},
+                                            headers={"X-Payment-Mode": "failed",
+                                                     "X-Payment-Status": "settlement_unknown"})
                 return JSONResponse(
                     status_code=402,
                     content={
@@ -521,6 +529,7 @@ class X402Middleware(BaseHTTPMiddleware):
                                 network=settings.X402_NETWORK, success=True)
             from app.x402.idempotency import record_settlement
             record_settlement(request, settlement)
+            outcome_unknown.discard(getattr(request.state, "x402_auth_key", None))
             x402_settlements_total.labels(result="settled").inc()
 
         tx_hash = getattr(settlement, "transaction", None) or "unknown"

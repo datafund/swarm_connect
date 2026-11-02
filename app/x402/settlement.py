@@ -78,6 +78,90 @@ class PaymentReplayGuard:
 replay_guard = PaymentReplayGuard()
 
 
+# How long an authorization whose settlement outcome is unknown is remembered.
+# Longer than the replay window: the question "was the first transfer
+# collected?" outlives the reservation. Same span as an Idempotency-Key entry.
+OUTCOME_UNKNOWN_SECONDS = 24 * 3600
+OUTCOME_UNKNOWN_MAX_ENTRIES = 10000
+
+
+class OutcomeUnknownRegistry:
+    """Authorizations sent for settlement that got no answer from the facilitator (#553).
+
+    The transfer may have gone through. A later attempt with the same
+    authorization that the facilitator refuses (at verify or at settle) is then
+    probably refused BECAUSE the first one spent the nonce, so it must not be
+    answered with a 402 and `accepts`: an x402 client pays again from that.
+    In memory, like the replay guard: a gateway restart forgets it (a keyed
+    request is still covered by its persisted Idempotency-Key entry).
+    """
+
+    def __init__(self):
+        self._lock = Lock()
+        self._entries: Dict[Tuple[str, str], float] = {}
+
+    def add(self, key: Optional[Tuple[str, str]]) -> None:
+        if key is None:
+            return
+        now = time.monotonic()
+        with self._lock:
+            for k in [k for k, until in self._entries.items() if until <= now]:
+                del self._entries[k]
+            self._entries[key] = now + OUTCOME_UNKNOWN_SECONDS
+            while len(self._entries) > OUTCOME_UNKNOWN_MAX_ENTRIES:
+                del self._entries[min(self._entries, key=self._entries.get)]
+
+    def contains(self, key: Optional[Tuple[str, str]]) -> bool:
+        if key is None:
+            return False
+        with self._lock:
+            until = self._entries.get(key)
+            if until is not None and until <= time.monotonic():
+                del self._entries[key]
+                until = None
+            return until is not None
+
+    def discard(self, key: Optional[Tuple[str, str]]) -> None:
+        """This authorization has now settled: the earlier attempt did not spend it."""
+        if key is None:
+            return
+        with self._lock:
+            self._entries.pop(key, None)
+
+    def reset(self) -> None:
+        with self._lock:
+            self._entries.clear()
+
+
+outcome_unknown = OutcomeUnknownRegistry()
+
+OUTCOME_UNKNOWN_ADVICE = (
+    "Do not pay again from this response. Check on-chain whether this authorization's nonce "
+    "was used. If it was, contact the operator with the nonce. If it was not, the facilitator "
+    "may still submit it, so before signing a new payment wait until its validBefore has "
+    "passed, or cancel it on-chain with EIP-3009 cancelAuthorization."
+)
+
+
+def outcome_unknown_refusal(auth_key: Tuple[str, str], reason: Optional[str] = None) -> HTTPException:
+    """The answer to a later attempt with an authorization whose settlement outcome is unknown.
+
+    409, not 402, and no `accepts`. Whatever refused it, this request did
+    nothing and was not charged; the earlier attempt may have been.
+    """
+    detail = {
+        "code": "PAYMENT_AUTHORIZATION_OUTCOME_UNKNOWN",
+        "message": ("An earlier request with this payment authorization was sent for settlement "
+                    "and no answer came back, so that transfer may already have been collected. "
+                    "This request did nothing and was not charged. " + OUTCOME_UNKNOWN_ADVICE),
+        "nonce": auth_key[1],
+        "x402_status": "settlement_unknown",
+    }
+    if reason:
+        detail["reason"] = reason
+    return HTTPException(status_code=409, detail=detail)
+
+
 _ADDRESS = re.compile(r"^0x[0-9a-fA-F]{40}$")
 _NONCE = re.compile(r"^(0x)?[0-9a-fA-F]{64}$")
 
@@ -140,15 +224,18 @@ async def settle_payment(request: Request) -> None:
         log_payment_failed(client_ip=client_ip, reason=f"{type(e).__name__}: {e}",
                            stage="settle", wallet_address=payer)
         x402_settlements_total.labels(result="error").inc()
+        outcome_unknown.add(getattr(request.state, "x402_auth_key", None))
         raise HTTPException(
             status_code=502,
             detail={
                 "code": "PAYMENT_SETTLEMENT_UNAVAILABLE",
                 "message": (
-                    "The payment could not be settled, so nothing was delivered. "
-                    "If the transfer nevertheless appears on-chain, contact the operator "
-                    "with this request's payment authorization for a refund."
+                    "The payment could not be settled, so nothing was delivered, but it is "
+                    "unknown whether the transfer was collected. Retry with the same X-PAYMENT "
+                    "while it is valid: if the transfer was collected, the retry is not charged "
+                    "again. " + OUTCOME_UNKNOWN_ADVICE
                 ),
+                "nonce": (getattr(request.state, "x402_auth_key", None) or (None, None))[1],
                 "x402_status": "settlement_failed",
             },
         )
@@ -156,6 +243,16 @@ async def settle_payment(request: Request) -> None:
     if not getattr(result, "success", False):
         settlement_refused(request)
         reason = getattr(result, "error_reason", None) or "unknown"
+        auth_key = getattr(request.state, "x402_auth_key", None)
+        if outcome_unknown.contains(auth_key):
+            # Probably refused because the earlier attempt spent the nonce, but
+            # the reason does not say so reliably: no 402, no `accepts`.
+            logger.warning(f"x402: settlement refused ({reason}) for an authorization whose "
+                           f"earlier settlement outcome is unknown")
+            log_payment_settled(client_ip=client_ip, payer=payer, transaction_hash=None,
+                                network=settings.X402_NETWORK, success=False, error_reason=reason)
+            x402_settlements_total.labels(result="refused").inc()
+            raise outcome_unknown_refusal(auth_key, reason)
         logger.warning(f"x402: settlement refused before delivery: {reason}")
         log_payment_settled(client_ip=client_ip, payer=payer, transaction_hash=None,
                             network=settings.X402_NETWORK, success=False, error_reason=reason)
@@ -178,6 +275,7 @@ async def settle_payment(request: Request) -> None:
         raise HTTPException(status_code=402, detail=detail)
 
     request.state.x402_settlement = result
+    outcome_unknown.discard(getattr(request.state, "x402_auth_key", None))
     # From here on a retry with the same Idempotency-Key must not pay again,
     # whatever happens to this request (#359).
     record_settlement(request, result)
