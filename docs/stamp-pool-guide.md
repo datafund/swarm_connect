@@ -138,6 +138,11 @@ Or with explicit depth, which must be one of the pool sizes: 17 (small), 20 (med
 }
 ```
 
+The error examples below show only `detail`. Each of these bodies also carries
+`code` and `message` at the top level, next to `detail`. Where `detail` has no
+`code`, the top-level `code` is `HTTP_<status>`, for example `HTTP_409`. See
+[error-codes.md](error-codes.md).
+
 **Response (pool exhausted): HTTP 409**
 ```json
 {

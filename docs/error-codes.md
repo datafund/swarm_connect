@@ -2,6 +2,13 @@
 
 Error responses from the gateway carry `code` and `message` at the top level
 of the JSON body. Branch on `code`, and show `message` to a person.
+Two server failures have no `code`:
+
+- A paid request that fails before its payment is settled returns 500
+  `{"detail": "Internal server error. You were not charged."}`. Nothing was
+  charged, so you can retry with the same payment authorization.
+- Any other unexpected server failure returns 500 with the plain text
+  `Internal Server Error`.
 
 ```json
 {
@@ -32,11 +39,12 @@ One response keeps its own shape:
 A failed payment settlement has its own codes, listed under
 [Payments and pricing](#payments-and-pricing):
 
-- `PAYMENT_SETTLEMENT_FAILED` (402): the payment was refused.
+- `PAYMENT_SETTLEMENT_FAILED` (402): the payment was refused, or, on one
+  path, its outcome is unknown (see its row).
 - `PAYMENT_SETTLEMENT_UNAVAILABLE` (502): the outcome of the payment is unknown.
 - `DELIVERY_FAILED_AFTER_PAYMENT` (500): you paid and got nothing.
 
-Do not re-pay automatically after any of them. Follow the advice in its row.
+Do not pay again without first reading the advice in its row.
 Send an `Idempotency-Key` with every paid request, so that a retry returns the
 first result instead of charging again (see below).
 
@@ -71,8 +79,8 @@ without being listed here, or listed here but no longer raised.
 | `FREE_TIER_DISABLED` | 402 | The free tier is off for this operation (chunk upload, or buy-batch-for-owner). | Pay with `X-PAYMENT`, or for chunks, top up credit. |
 | `FREE_QUOTA_EXCEEDED` | 429 | The free-tier chunk quota for this client is used up. | Wait for the daily quota to reset, or top up credit. |
 | `PAYMENT_SETTLEMENT_UNAVAILABLE` | 502 | The payment could not be settled and **nothing was delivered**: the facilitator errored, so it is unknown whether the transfer was submitted. `detail.x402_status` is `settlement_failed`. | Retry with a fresh payment authorization — a transfer that did go through spent the nonce, so a retry cannot double-charge. If a transfer appears on-chain, contact the operator with this request's authorization for a refund. |
-| `PAYMENT_SETTLEMENT_FAILED` | 402 | The facilitator refused the payment, so **nothing was delivered**. `x402_status` is `settlement_failed`. The body has one of two shapes. If the refusal came before the work started, the body is also a new x402 payment request (`accepts`), and `reason` gives the refusal; both are at the top level and under `detail`. If the refusal came after the work ran, the body has only `code`, `message` and `x402_status`, at the top level, and `message` names the refusal. | Fix what `reason` or `message` names (usually funds or an expired authorization) and retry. |
-| `DELIVERY_FAILED_AFTER_PAYMENT` | 500 | The payment **was collected** and the request then failed. The only code here that means money moved without a result. Also returned by `POST /pool/acquire` when the payment settled but the reserved batch could not be handed over. `detail.transaction` and the `X-Payment-Transaction` header carry the transfer; `x402_status` is `settled_not_delivered`. | Do not retry blindly. Contact the operator with the transaction for a refund. |
+| `PAYMENT_SETTLEMENT_FAILED` | 402 | The payment was not settled, so **nothing was delivered**. `x402_status` is `settlement_failed`. The body has one of two shapes. **Settlement before the work started:** the facilitator refused the payment. The body is also a new x402 payment request (`accepts`), and `reason` gives the refusal. Both are at the top level and under `detail`. **Settlement after the work ran:** the body has only `code`, `message` and `x402_status`, at the top level. Here the facilitator either refused the payment or failed to answer. If it failed to answer, the transfer may have gone through. | First form: fix what `reason` names (usually funds or an expired authorization) and retry. Second form: do not simply retry. Check whether your payment authorization's nonce was used (or your USDC balance) before paying again. If it was used, contact the operator with the payer address and the time of the request. |
+| `DELIVERY_FAILED_AFTER_PAYMENT` | 500 | The payment **was collected** and the request then failed. The only code here that is certain money moved without a result. Also returned by `POST /pool/acquire` when the payment settled but the reserved batch could not be handed over. `transaction` carries the transfer and `x402_status` is `settled_not_delivered`. When an endpoint raises this code (for example the pool), both fields are under `detail`. When the payment middleware answers a request that crashed after payment, both fields are at the top level. Both of these responses also set the `X-Payment-Transaction` header. | Do not retry blindly. Contact the operator with the transaction for a refund. |
 
 ## Idempotency-Key
 
