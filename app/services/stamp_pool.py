@@ -110,6 +110,11 @@ class StampPoolManager:
         # Single-flight guard for check_and_replenish. See its docstring:
         # overlapping runs each buy to cover the same shortfall.
         self._replenishing = False
+        # Batches whose top-up is running (#540). Kept AVAILABLE and counted as
+        # held, but never selected, reserved or sold: an acquire during the
+        # extend call would otherwise buy a batch the pool had just paid to
+        # extend. Changed only under self._lock; see _topup_stamp.
+        self._topup_in_flight: Set[str] = set()
         # Timestamps of recent purchases, for the hourly ceiling. See
         # _spend_budget_remaining().
         self._spend_times: List[datetime] = []
@@ -283,7 +288,8 @@ class StampPoolManager:
         """
         with self._lock:
             for batch_id, stamp in self._pool.items():
-                if stamp.depth == depth and stamp.status == PoolStampStatus.AVAILABLE:
+                if (stamp.depth == depth and stamp.status == PoolStampStatus.AVAILABLE
+                        and batch_id not in self._topup_in_flight):
                     return stamp
             return None
 
@@ -298,6 +304,7 @@ class StampPoolManager:
             available = [
                 s for s in self._pool.values()
                 if s.status == PoolStampStatus.AVAILABLE and s.depth >= min_depth
+                and s.batch_id not in self._topup_in_flight
             ]
             if not available:
                 return None
@@ -327,6 +334,8 @@ class StampPoolManager:
         with self._lock:
             stamp = self._pool.get(batch_id)
             if not stamp or stamp.status != PoolStampStatus.AVAILABLE:
+                return None
+            if batch_id in self._topup_in_flight:
                 return None
 
             stamp.status = PoolStampStatus.RELEASED
@@ -359,13 +368,18 @@ class StampPoolManager:
         or unreserve_stamp() if it has not. Statuses are not persisted, so a
         batch reserved when the process dies is simply available after restart.
 
+        A batch whose top-up is in flight is not reserved (#540): the pool has
+        just paid to extend it, so the acquire takes another batch.
+
         Returns:
             The reserved stamp, or None if not found/not available (another
-            request got it first)
+            request got it first, or it is being topped up)
         """
         with self._lock:
             stamp = self._pool.get(batch_id)
             if not stamp or stamp.status != PoolStampStatus.AVAILABLE:
+                return None
+            if batch_id in self._topup_in_flight:
                 return None
             stamp.status = PoolStampStatus.RESERVED
             stamp.released_to = reserved_for
@@ -1301,12 +1315,15 @@ class StampPoolManager:
             # before the TTL and price lookups awaited (#475). Since #439 a
             # reservation keeps the batch in the pool while its payment settles,
             # so being in the pool is not enough: a RESERVED batch is about to
-            # be sold. Nothing below awaits until the extend call. A reservation
-            # that starts while that call is in flight is not caught (#540).
+            # be sold. Nothing below awaits until the extend call. In the same
+            # locked step the batch is marked as being topped up, so no acquire
+            # can reserve or sell it while the extend call is in flight (#540).
             with self._lock:
                 held = self._pool.get(batch_id)
                 status = held.status if held is not None else None
                 depth = held.depth if held is not None else None
+                if status == PoolStampStatus.AVAILABLE:
+                    self._topup_in_flight.add(batch_id)
             if status != PoolStampStatus.AVAILABLE:
                 # A skip, not a failure: the batch was reserved or handed out
                 # after the list was built. Not recorded as an error or refusal.
@@ -1314,18 +1331,25 @@ class StampPoolManager:
                 logger.info(f"Not topping up {batch_id[:16]}...: {reason}; it is leaving the pool")
                 self._release_spend_slot(slot)
                 return None
-            cost_bzz = swarm_api.plur_to_bzz(swarm_api.calculate_stamp_total_cost(amount, depth))
-            hold = self._reserve_gateway_spend(cost_bzz, f"top up batch {batch_id[:16]}...", "pool top-up")
-            if hold is None:
-                self._release_spend_slot(slot)
-                return False
             try:
-                await swarm_api.extend_postage_stamp(batch_id, amount)
-            except BaseException as e:
-                self._release_if_unspent(slot, hold, e)
-                slot = None  # handled
-                raise
-            return True
+                cost_bzz = swarm_api.plur_to_bzz(swarm_api.calculate_stamp_total_cost(amount, depth))
+                hold = self._reserve_gateway_spend(cost_bzz, f"top up batch {batch_id[:16]}...", "pool top-up")
+                if hold is None:
+                    self._release_spend_slot(slot)
+                    slot = None  # handled
+                    return False
+                try:
+                    await swarm_api.extend_postage_stamp(batch_id, amount)
+                except BaseException as e:
+                    self._release_if_unspent(slot, hold, e)
+                    slot = None  # handled
+                    raise
+                return True
+            finally:
+                # Every exit, including a refusal, an error and a cancellation:
+                # the batch can be acquired again.
+                with self._lock:
+                    self._topup_in_flight.discard(batch_id)
 
         except BaseException as e:
             if slot is not None:
