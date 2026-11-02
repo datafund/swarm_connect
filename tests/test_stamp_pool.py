@@ -1623,6 +1623,110 @@ class TestTopUpRespectsTheSpendCeiling:
 
 
 
+class TestTopUpSkipsReservedBatches:
+    """A batch reserved for a settling acquire is not topped up (#475).
+
+    Since #439 a reservation keeps the batch in the pool while its payment
+    settles, so being in the pool no longer means the pool keeps the batch.
+    The top-up list is built from AVAILABLE batches before the TTL and price
+    lookups, which await; a reservation can start in between. Extending such a
+    batch spends BZZ on a batch that is about to be sold.
+    """
+
+    BATCH = "b" * 64
+
+    @pytest.fixture
+    def state_file(self, tmp_path):
+        return str(tmp_path / "pool_state.json")
+
+    @pytest.mark.asyncio
+    async def test_reserved_batch_is_not_topped_up(self, state_file):
+        manager = StampPoolManager(state_file=state_file)
+        manager.add_stamp_to_pool(self.BATCH, 17, 1_000_000, 3600)
+        assert manager.reserve_stamp(self.BATCH, reserved_for="buyer") is not None
+        extend = AsyncMock()
+
+        with patch('app.services.stamp_pool.swarm_api.get_chainstate',
+                   new=AsyncMock(return_value={"currentPrice": "24000"})), \
+             patch('app.services.stamp_pool.swarm_api.extend_postage_stamp', new=extend), \
+             patch.object(manager, '_reserve_gateway_spend') as gateway_hold:
+            result = await manager._topup_stamp(self.BATCH)
+
+        extend.assert_not_called()
+        gateway_hold.assert_not_called()
+        assert result is not True
+        assert manager._spend_times == [], "a skipped top-up kept its hourly slot"
+        assert manager._errors == [] and manager._refusals == [], (
+            "a skipped top-up was reported as a failure"
+        )
+
+    @pytest.mark.asyncio
+    async def test_batch_reserved_during_price_lookup_is_not_topped_up(self, state_file):
+        """The check has to come after the last await before the spend."""
+        manager = StampPoolManager(state_file=state_file)
+        manager.add_stamp_to_pool(self.BATCH, 17, 1_000_000, 3600)
+        extend = AsyncMock()
+
+        async def chainstate_then_reserve():
+            manager.reserve_stamp(self.BATCH, reserved_for="buyer")
+            return {"currentPrice": "24000"}
+
+        with patch('app.services.stamp_pool.swarm_api.get_chainstate',
+                   side_effect=chainstate_then_reserve), \
+             patch('app.services.stamp_pool.swarm_api.extend_postage_stamp', new=extend):
+            result = await manager._topup_stamp(self.BATCH)
+
+        extend.assert_not_called()
+        assert result is not True
+        assert manager._spend_times == []
+        assert manager._errors == [] and manager._refusals == []
+
+    @pytest.mark.asyncio
+    async def test_batch_reserved_after_list_is_built_is_skipped_in_check(self, state_file):
+        manager = StampPoolManager(state_file=state_file)
+        manager.add_stamp_to_pool(self.BATCH, 17, 1_000_000, 3600)
+        extend = AsyncMock()
+
+        async def ttl_then_reserve(batch_id):
+            # Runs after stamps_to_topup was built: the batch was AVAILABLE then.
+            manager.reserve_stamp(batch_id, reserved_for="buyer")
+            return 60
+
+        manager._last_sync_ok = True
+        with patch('app.services.stamp_pool.settings.STAMP_POOL_ENABLED', True), \
+             patch.object(manager, 'get_reserve_config', return_value={17: 1}), \
+             patch.object(manager, 'sync_from_bee_node', return_value=1), \
+             patch.object(manager, '_get_stamp_ttl', side_effect=ttl_then_reserve), \
+             patch.object(manager, '_purchase_stamp', return_value=None), \
+             patch('app.services.stamp_pool.swarm_api.get_chainstate',
+                   new=AsyncMock(return_value={"currentPrice": "24000"})), \
+             patch('app.services.stamp_pool.swarm_api.extend_postage_stamp', new=extend):
+            results = await manager.check_and_replenish()
+
+        extend.assert_not_called()
+        assert results["stamps_topped_up"] == 0
+        assert results["errors"] == [], results["errors"]
+        [debug] = [d for d in results["topup_debug"] if d["stamp"] == self.BATCH[:16]]
+        assert debug["result"].startswith("skipped"), debug
+        assert "ceiling" not in debug["result"], debug
+
+    @pytest.mark.asyncio
+    async def test_available_batch_is_still_topped_up(self, state_file):
+        manager = StampPoolManager(state_file=state_file)
+        manager.add_stamp_to_pool(self.BATCH, 17, 1_000_000, 3600)
+        extend = AsyncMock()
+
+        with patch('app.services.stamp_pool.swarm_api.get_chainstate',
+                   new=AsyncMock(return_value={"currentPrice": "24000"})), \
+             patch('app.services.stamp_pool.swarm_api.extend_postage_stamp', new=extend):
+            result = await manager._topup_stamp(self.BATCH)
+
+        assert result is True
+        extend.assert_called_once()
+        assert extend.call_args.args[0] == self.BATCH
+        assert len(manager._spend_times) == 1
+
+
 class TestSpendReservation:
     """The hourly slot and the gateway ceiling are taken before the Bee call (#363)."""
 

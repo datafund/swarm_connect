@@ -903,9 +903,12 @@ class StampPoolManager:
                 }
                 if current_ttl is not None and current_ttl < min_ttl_seconds:
                     try:
-                        if await self._topup_stamp(stamp.batch_id):
+                        outcome = await self._topup_stamp(stamp.batch_id)
+                        if outcome is True:
                             results["stamps_topped_up"] += 1
                             debug["result"] = "topped_up"
+                        elif outcome is None:
+                            debug["result"] = "skipped: batch reserved or no longer in the pool"
                         else:
                             debug["result"] = "refused by a spending ceiling"
                     except Exception as e:
@@ -1251,8 +1254,12 @@ class StampPoolManager:
         except Exception as e:
             logger.warning(f"Error updating stamp TTLs: {e}")
 
-    async def _topup_stamp(self, batch_id: str) -> bool:
+    async def _topup_stamp(self, batch_id: str) -> Optional[bool]:
         """Top up a stamp with additional TTL.
+
+        Returns True when topped up, False when a spending ceiling refused it,
+        and None when it was skipped because the batch is no longer an
+        AVAILABLE pool batch (reserved for an acquire, or gone; #475).
 
         Subject to the same hourly ceiling as buying a batch (#334). Extending
         spends BZZ, so leaving it uncounted made this the only spending path in
@@ -1289,13 +1296,24 @@ class StampPoolManager:
 
             logger.info(f"Topping up stamp {batch_id[:16]}... with {topup_hours}h ({amount} PLUR)")
 
-            if batch_id not in self._pool:
-                # Only pool inventory is topped up here; without its depth the
-                # cost cannot be charged correctly against the ceiling.
-                logger.error(f"Not topping up {batch_id[:16]}...: not in the pool")
+            # Checked here, under the lock and after the last await before the
+            # spend, because the top-up list was built from AVAILABLE batches
+            # before the TTL and price lookups awaited (#475). Since #439 a
+            # reservation keeps the batch in the pool while its payment settles,
+            # so being in the pool is not enough: a RESERVED batch is about to
+            # be sold. Nothing below awaits until the extend call. A reservation
+            # that starts while that call is in flight is not caught (#540).
+            with self._lock:
+                held = self._pool.get(batch_id)
+                status = held.status if held is not None else None
+                depth = held.depth if held is not None else None
+            if status != PoolStampStatus.AVAILABLE:
+                # A skip, not a failure: the batch was reserved or handed out
+                # after the list was built. Not recorded as an error or refusal.
+                reason = "not in the pool" if status is None else f"status is {status.value}"
+                logger.info(f"Not topping up {batch_id[:16]}...: {reason}; it is leaving the pool")
                 self._release_spend_slot(slot)
-                return False
-            depth = self._pool[batch_id].depth
+                return None
             cost_bzz = swarm_api.plur_to_bzz(swarm_api.calculate_stamp_total_cost(amount, depth))
             hold = self._reserve_gateway_spend(cost_bzz, f"top up batch {batch_id[:16]}...", "pool top-up")
             if hold is None:
