@@ -850,7 +850,7 @@
   {
     "annotations": {
       "summary": "{{ $labels.environment }}: x402 settlement {{ $labels.result }} ({{ printf \"%.0f\" $values.B.Value }} in 15 min)",
-      "description": "Payments were refused by the facilitator, errored with an unknown outcome, or were settled without the request being delivered (refund needed). See docs/mainnet-runbook.md section 3: search data/x402_audit.jsonl for payment_settled with success=false, payment_failed stage=settle, and stage=delivery_after_settlement. On a test network, refusals are expected noise."
+      "description": "Payments were refused by the facilitator, errored with an unknown outcome, were settled without the request being delivered (refund needed), or a retry of a payment with an unknown outcome was refused (refused_after_unknown: the earlier transfer probably went through; match on the nonce). See docs/mainnet-runbook.md section 3: search data/x402_audit.jsonl for payment_settled with success=false, payment_failed stage=settle, stage=outcome_unknown_retry, and stage=delivery_after_settlement. On a test network, refusals are expected noise."
     },
     "condition": "C",
     "data": [
