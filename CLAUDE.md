@@ -309,6 +309,8 @@ Paid POSTs accept an `Idempotency-Key` header (`app/x402/idempotency.py`). Scope
 
 State: `X402_IDEMPOTENCY_STATE_FILE` (`data/x402_idempotency.json`), 24 h TTL, at most `X402_IDEMPOTENCY_MAX_ENTRIES` (10000; completed entries evicted before settled-pending ones), bodies over 64 KB not stored (logged). The whole file is rewritten atomically on each change. An unreadable file is copied to `.corrupt-<ts>`, never overwritten, and keyed paid requests get `503 IDEMPOTENCY_UNAVAILABLE` until it is repaired (unkeyed requests work). In-flight markers are in memory: this assumes a **single gateway process** (no `--workers`).
 
+Unknown settlement outcomes (#553): `X402_SETTLEMENT_UNKNOWN_STATE_FILE` (`data/x402_settlement_unknown.json`, `app/x402/settlement.py` `outcome_unknown`). An authorization whose settlement raised is recorded for 24 h (hashed key, wall-clock expiry, pruned on load, cap 10000 evicting `before_work` before `after_work`), written atomically on each add and discard. `before_work` (settle_payment, nothing ran): the same-X-PAYMENT retry is let through; a facilitator refusal of it (verify or settle) is `409 PAYMENT_AUTHORIZATION_OUTCOME_UNKNOWN`, never a 402 with accepts. `after_work` (middleware fallback, the work ran): refused with that 409 in the dependency, before the replay guard and any work. A later successful settlement removes the entry. Unreadable file: copied to `.corrupt-<ts>` (`atomic_io.unreadable_state`), never overwritten, and every X-PAYMENT request gets `503 PAYMENT_STATE_UNAVAILABLE` until it is repaired.
+
 ### Free Tier Behavior
 
 When `X402_FREE_TIER_ENABLED=true` (default):

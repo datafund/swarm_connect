@@ -641,7 +641,13 @@ The gateway settles your payment just before it does the work. If settlement doe
 
 Checking a nonce: look up the USDC contract's `authorizationState(payer, nonce)` (or the payer's USDC transfers). If the nonce was used, the earlier payment was collected: contact the operator with the nonce for the result or a refund, and do not pay again. If it was not used, the facilitator may still submit that authorization, so before signing a new payment either wait until its `validBefore` has passed or cancel it on-chain with EIP-3009 `cancelAuthorization`. With an `Idempotency-Key`, the old key stays taken for 24 hours (`409 IDEMPOTENCY_KEY_SETTLEMENT_UNKNOWN`), so pay again with a new one.
 
-None of the three "maybe" answers is a `402` or carries `accepts`, so an x402 client that pays automatically on `402` does not pay again from them. Keep it that way in your own client: never sign a new payment from a response with `x402_status: settlement_unknown` or the code `PAYMENT_SETTLEMENT_UNAVAILABLE`. **Branch on `code`, not on `x402_status`:** `PAYMENT_SETTLEMENT_UNAVAILABLE` carries `x402_status: settlement_failed`, the value a refusal has, for compatibility.
+None of the three "maybe" answers is a `402` or carries `accepts`, so an x402 client that pays automatically on `402` does not pay again from them. Keep it that way in your own client: never sign a new payment from a response with `x402_status: settlement_unknown` or the code `PAYMENT_SETTLEMENT_UNAVAILABLE`. **Branch on `code`, not on `x402_status`:** `PAYMENT_SETTLEMENT_UNAVAILABLE` carries `x402_status: settlement_failed`, the value a refusal has, for compatibility. Its headers do say it: `X-Payment-Mode: failed` and `X-Payment-Status: settlement_unknown`, as on the other two "maybe" answers.
+
+The gateway keeps these authorizations on disk for 24 hours, across restarts. After that, a refusal of the same authorization is an ordinary `402` with `accepts` again. So after a `PAYMENT_SETTLEMENT_UNAVAILABLE` or `PAYMENT_SETTLEMENT_UNKNOWN`, do not let your client pay automatically from a later `402` for the same authorization until you have checked its nonce.
+
+**Never send the same `X-PAYMENT` in parallel.** One authorization buys one delivery: of concurrent requests carrying it, at most one is settled, and the others get `402` "This payment authorization has already been used. Sign a new payment." with `accepts`. Treat that answer as "this authorization may already have been settled": check its nonce before signing a new payment, rather than paying from it automatically.
+
+If the gateway cannot read its record of these authorizations, every paid request gets `503 PAYMENT_STATE_UNAVAILABLE`, uncharged; retry later with the same `X-PAYMENT`.
 
 ## Error Handling
 
