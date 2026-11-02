@@ -100,13 +100,14 @@
       },
       {
         "id": 21, "title": "Stamp Purchases & Pool Acquires", "type": "timeseries",
-        "description": "Rate of stamp purchases (POST /stamps/) and pool acquisitions (POST /pool/acquire). Pool acquires are instant (<5s) while direct purchases take >1 minute. Errors indicate insufficient funds or Bee node issues.",
+        "description": "Rate of stamp purchases (POST /stamps/) and pool acquisitions (POST /pool/acquire). Pool acquires are instant (<5s) while direct purchases take >1 minute. Purchase errors indicate insufficient funds or Bee node issues; pool acquire errors are an exhausted pool or a reservation lost to another request (409). Pool paid, not delivered is an x402-paid acquire whose batch could not be handed over after settlement: the payer must be refunded, and it is also counted in gateway_x402_settlements_total{result=\"settled_not_delivered\"}.",
         "gridPos": { "h": 8, "w": 12, "x": 12, "y": 12 },
         "targets": [
           { "expr": "sum(rate(gateway_stamp_purchases_total{environment=~\"$environment\",status=\"success\"}[5m]))", "legendFormat": "purchases (ok)" },
           { "expr": "sum(rate(gateway_stamp_purchases_total{environment=~\"$environment\",status=\"error\"}[5m]))", "legendFormat": "purchases (error)" },
           { "expr": "sum(rate(gateway_pool_acquires_total{environment=~\"$environment\",status=\"success\"}[5m]))", "legendFormat": "pool acquires (ok)" },
-          { "expr": "sum(rate(gateway_pool_acquires_total{environment=~\"$environment\",status=\"error\"}[5m]))", "legendFormat": "pool acquires (error)" }
+          { "expr": "sum(rate(gateway_pool_acquires_total{environment=~\"$environment\",status=\"error\"}[5m]))", "legendFormat": "pool acquires (error)" },
+          { "expr": "sum(rate(gateway_pool_acquires_total{environment=~\"$environment\",status=\"settled_not_delivered\"}[5m]))", "legendFormat": "pool paid, not delivered" }
         ],
         "fieldConfig": { "defaults": { "unit": "reqps", "custom": { "drawStyle": "line", "lineInterpolation": "smooth", "fillOpacity": 10 } } }
       },
@@ -203,11 +204,12 @@
       },
       {
         "id": 62, "title": "Stamp Provision Failures (cumulative)", "type": "stat",
-        "description": "Failed stamp provisioning attempts. Direct failures = insufficient funds or Bee node errors. Pool failures = pool exhausted (409).",
+        "description": "Failed stamp provisioning attempts. Direct failures = insufficient funds or Bee node errors. Pool failures = no stamp available (pool exhausted) or the reserved stamp lost to another request, both answered 409. Pool paid, not delivered = an x402-paid acquire whose batch could not be handed over after settlement; each one needs a refund, and it is also counted in gateway_x402_settlements_total{result=\"settled_not_delivered\"}.",
         "gridPos": { "h": 4, "w": 8, "x": 16, "y": 44 },
         "targets": [
           { "expr": "sum(gateway_stamp_purchases_total{environment=~\"$environment\",status=\"error\"}) or vector(0)", "legendFormat": "direct failures" },
-          { "expr": "sum(gateway_pool_acquires_total{environment=~\"$environment\",status=\"error\"}) or vector(0)", "legendFormat": "pool failures" }
+          { "expr": "sum(gateway_pool_acquires_total{environment=~\"$environment\",status=\"error\"}) or vector(0)", "legendFormat": "pool failures" },
+          { "expr": "sum(gateway_pool_acquires_total{environment=~\"$environment\",status=\"settled_not_delivered\"}) or vector(0)", "legendFormat": "pool paid, not delivered (refund)" }
         ],
         "fieldConfig": { "defaults": { "thresholds": { "mode": "absolute", "steps": [{ "value": null, "color": "green" }, { "value": 1, "color": "red" }] } } },
         "options": { "graphMode": "none", "textMode": "value_and_name" }
