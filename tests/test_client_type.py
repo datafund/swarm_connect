@@ -243,3 +243,54 @@ class TestDistinctCallersExportsOnlyACount:
         for line in body.splitlines():
             if line.startswith(("gateway_requests_by_client_total", "gateway_distinct_callers")):
                 assert "203.0" not in line, line
+
+
+def _scraped_distinct_callers():
+    """The gauge value as it appears in the real /metrics exposition."""
+    body = TestClient(app).get("/metrics").text
+    for line in body.splitlines():
+        if line.startswith("gateway_distinct_callers "):
+            return float(line.split()[1])
+    raise AssertionError("gateway_distinct_callers missing from /metrics")
+
+
+class TestDistinctCallersResetAtScrapeTime:
+    """#521: the day rolled over only when a request arrived, so until the first
+    request after midnight UTC the gauge kept showing yesterday's final count,
+    and the per-day panel showed that as the quiet day's total."""
+
+    def test_count_is_zero_after_midnight_without_a_request(self, monkeypatch):
+        from app.middleware import client_metrics
+        c = client_metrics._DistinctCallerCounter()
+        c.observe("1.2.3.4")
+        c.observe("5.6.7.8")
+        assert c.count() == 2
+
+        monkeypatch.setattr(c, "_today", staticmethod(lambda: "2099-01-01"))
+        assert c.count() == 0
+        assert not c._seen, "yesterday's hashes kept until the next request"
+
+    def test_scrape_reports_zero_after_the_day_changes(self, monkeypatch):
+        c = distinct_caller_counter
+        saved_day, saved_seen = c._day, c._seen
+        try:
+            c._seen = set()
+            c.observe("198.51.100.7")
+            assert _scraped_distinct_callers() == 1.0
+
+            monkeypatch.setattr(c, "_today", staticmethod(lambda: "2099-01-01"))
+            assert _scraped_distinct_callers() == 0.0, \
+                "the gauge still shows yesterday's count before any request today"
+        finally:
+            c._day, c._seen = saved_day, saved_seen
+
+    def test_scrape_reflects_count_within_the_day(self):
+        c = distinct_caller_counter
+        saved_day, saved_seen = c._day, c._seen
+        try:
+            c._seen = set()
+            for caller in ("198.51.100.1", "198.51.100.2", "198.51.100.3", "198.51.100.1"):
+                c.observe(caller)
+            assert _scraped_distinct_callers() == 3.0
+        finally:
+            c._day, c._seen = saved_day, saved_seen

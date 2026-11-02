@@ -55,16 +55,34 @@ class _DistinctCallerCounter:
         # and it keeps the set small for a long-running process.
         digest = hashlib.blake2b(caller.encode(), key=self._salt, digest_size=8).digest()
         with self._lock:
-            today = self._today()
-            if today != self._day:
-                self._day = today
-                self._seen = set()
+            self._roll_over_locked()
             self._seen.add(digest)
-            count = len(self._seen)
-        distinct_callers.set(count)
+
+    def count(self) -> int:
+        """Distinct callers so far today, checked against the clock at read time.
+
+        Called on every /metrics scrape. If the UTC day has changed since the last
+        request, this resets the count to 0 and drops yesterday's hashes. Without
+        it, the gauge kept showing yesterday's final count until the first
+        request of the new day (#521).
+        """
+        with self._lock:
+            self._roll_over_locked()
+            return len(self._seen)
+
+    def _roll_over_locked(self) -> None:
+        today = self._today()
+        if today != self._day:
+            self._day = today
+            self._seen = set()
 
 
 distinct_caller_counter = _DistinctCallerCounter()
+# The gauge is computed at scrape time from the counter, not pushed on each
+# request, so it drops to 0 at midnight UTC even when no request arrives. This
+# is per process: it assumes one gateway process (no --workers, no prometheus
+# multiprocess mode), as the count itself already does.
+distinct_callers.set_function(distinct_caller_counter.count)
 
 
 class ClientMetricsMiddleware:
