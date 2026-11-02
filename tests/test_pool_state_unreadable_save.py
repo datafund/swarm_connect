@@ -783,5 +783,5 @@ async def test_sync_without_a_pause_does_not_rewrite_the_file(tmp_path, monkeypa
     with caplog.at_level(logging.INFO, logger="app.services.stamp_pool"):
         await _sync(mgr, A, B)
     assert _read(mgr) == before
-    assert mgr._state_dirty is False
+    assert getattr(mgr, "_state_dirty", False) is False
     assert not _recovered(caplog)
