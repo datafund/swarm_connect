@@ -387,6 +387,19 @@ async def read_root():
         warnings.extend(gnosis.get("warnings", []))
         errors.extend(gnosis.get("errors", []))
 
+        # Payment state the gateway could not read or write (#553): paid
+        # requests are refused, unpaid, until an operator repairs it.
+        from app.x402.settlement import outcome_unknown
+        from app.x402.idempotency import idempotency_store
+        payment_state_down = False
+        if outcome_unknown.unavailable:
+            payment_state_down = True
+            warnings.append("PAYMENT_STATE_UNAVAILABLE: every paid request gets 503 until "
+                            f"the settlement-unknown state is repaired. {outcome_unknown.unavailable}")
+        if idempotency_store.unavailable:
+            warnings.append("IDEMPOTENCY_UNAVAILABLE: paid requests with an Idempotency-Key get "
+                            f"503 until the idempotency state is repaired. {idempotency_store.unavailable}")
+
         # Determine overall status
         # Never return 503 — the gateway should always be reachable so
         # operators can see what's wrong. Docker healthcheck and reverse
@@ -394,7 +407,7 @@ async def read_root():
         # where the container is marked unhealthy and users see nothing.
         if len(errors) > 0:
             response_data["status"] = "critical"
-        elif not gnosis["can_accept"]:
+        elif not gnosis["can_accept"] or payment_state_down:
             response_data["status"] = "degraded"
 
         # Add x402 details

@@ -122,38 +122,67 @@ class OutcomeUnknownRegistry:
         self._state_file = state_file
         # key id -> {"expires": wall-clock seconds, "kind": BEFORE_WORK | AFTER_WORK}
         self._entries: Dict[str, dict] = {}
-        self.unavailable: Optional[str] = None
+        # Why the file could not be read (never written then), or why the last
+        # write failed (retried on the next check of `unavailable`).
+        self._unreadable: Optional[str] = None
+        self._write_error: Optional[str] = None
         self._load()
+
+    @property
+    def unavailable(self) -> Optional[str]:
+        """Why paid requests must be refused, or None.
+
+        Unreadable file: until it is repaired and the gateway restarted. Failed
+        write: an entry held only in memory is lost at a restart, so until a
+        later write succeeds; each check tries again.
+        """
+        if self._unreadable:
+            return self._unreadable
+        if self._write_error:
+            with self._lock:
+                self._save()
+        return self._write_error
 
     def _path(self) -> str:
         return self._state_file or settings.X402_SETTLEMENT_UNKNOWN_STATE_FILE
 
     def _load(self) -> None:
         path = self._path()
+        consequence = ("The gateway runs, but answers every paid (X-PAYMENT) request with 503 "
+                       "PAYMENT_STATE_UNAVAILABLE, unpaid, until the file is repaired or restored "
+                       "(or moved away deliberately to start empty) and the gateway restarted.")
         try:
-            data = load_json_state(path)
+            data = load_json_state(path, consequence)
             if data is None:
                 return
             entries = data.get("entries")
             if not isinstance(entries, dict) or not all(
                     isinstance(v, dict) and v.get("kind") in (BEFORE_WORK, AFTER_WORK)
                     and isinstance(v.get("expires"), (int, float)) for v in entries.values()):
-                raise unreadable_state(path, "expected {\"entries\": {id: {kind, expires}}}")
+                raise unreadable_state(path, "expected {\"entries\": {id: {kind, expires}}}", consequence)
         except StateLoadError as e:
-            self.unavailable = str(e)
-            logger.error("x402: settlement-unknown state is unreadable: %s Paid requests are "
-                         "refused, unpaid, until it is repaired.", e)
+            self._unreadable = str(e)
+            logger.error("x402: settlement-unknown state is unreadable: %s", e)
             return
         now = time.time()
         self._entries = {k: v for k, v in entries.items() if v["expires"] > now}
 
     def _save(self) -> None:
-        if self.unavailable:
-            return
+        """Write the entries. Call with the lock held."""
+        if self._unreadable:
+            return    # never overwrite the only copy
         try:
             atomic_write_json(self._path(), {"entries": self._entries})
         except Exception as e:
-            logger.error("x402: could not persist settlement-unknown state: %s", e)
+            if not self._write_error:
+                logger.error("x402: could not persist settlement-unknown state (%s); paid requests "
+                             "get 503 PAYMENT_STATE_UNAVAILABLE until a write succeeds", e)
+            self._write_error = (f"State file {self._path()} could not be written ({e}). Paid "
+                                 f"requests get 503 PAYMENT_STATE_UNAVAILABLE until a write succeeds.")
+            return
+        if self._write_error:
+            logger.warning("x402: settlement-unknown state written again; paid requests resume")
+        self._write_error = None
 
     def _prune(self, now: float) -> bool:
         expired = [k for k, v in self._entries.items() if v["expires"] <= now]
@@ -208,7 +237,8 @@ class OutcomeUnknownRegistry:
         """For tests: empty, readable, and nothing on disk."""
         with self._lock:
             self._entries.clear()
-            self.unavailable = None
+            self._unreadable = None
+            self._write_error = None
             self._save()
 
 
@@ -231,12 +261,23 @@ def request_nonce(request) -> Optional[str]:
     return key[1] if key else None
 
 
-def outcome_unknown_refusal(auth_key: Tuple[str, str], reason: Optional[str] = None) -> HTTPException:
+def outcome_unknown_refusal(auth_key: Tuple[str, str], reason: Optional[str] = None, *,
+                            where: str, request: Optional[Request] = None) -> HTTPException:
     """The answer to a later attempt with an authorization whose settlement outcome is unknown.
 
     409, not 402, and no `accepts`. Whatever refused it, this request did
-    nothing and was not charged; the earlier attempt may have been.
+    nothing and was not charged; the earlier attempt may have been. Audited as
+    payment_failed, stage outcome_unknown_retry, with the nonce and `where`
+    (verify, in_use, after_work, settle), so the operator sees every retry.
     """
+    try:
+        log_payment_failed(
+            client_ip=get_client_ip(request) if request is not None else None,
+            reason=f"409 PAYMENT_AUTHORIZATION_OUTCOME_UNKNOWN at {where}"
+                   + (f" ({reason})" if reason else ""),
+            stage="outcome_unknown_retry", wallet_address=auth_key[0], nonce=auth_key[1])
+    except Exception as e:
+        logger.error(f"x402: could not audit an outcome-unknown retry: {e}")
     detail = {
         "code": "PAYMENT_AUTHORIZATION_OUTCOME_UNKNOWN",
         "message": ("An earlier request with this payment authorization was sent for settlement "
@@ -342,7 +383,7 @@ async def settle_payment(request: Request) -> None:
                                 network=settings.X402_NETWORK, success=False, error_reason=reason,
                                 nonce=request_nonce(request))
             x402_settlements_total.labels(result="refused").inc()
-            raise outcome_unknown_refusal(auth_key, reason)
+            raise outcome_unknown_refusal(auth_key, reason, where="settle", request=request)
         logger.warning(f"x402: settlement refused before delivery: {reason}")
         log_payment_settled(client_ip=client_ip, payer=payer, transaction_hash=None,
                             network=settings.X402_NETWORK, success=False, error_reason=reason,

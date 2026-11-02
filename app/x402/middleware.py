@@ -516,7 +516,8 @@ class X402Middleware(BaseHTTPMiddleware):
                     auth_key = getattr(request.state, "x402_auth_key", None)
                     if outcome_unknown.contains(auth_key):
                         # An earlier attempt may have spent the nonce: no 402 (#553).
-                        refusal = outcome_unknown_refusal(auth_key, failure)
+                        refusal = outcome_unknown_refusal(auth_key, failure, where="settle",
+                                                          request=request)
                         return JSONResponse(status_code=refusal.status_code,
                                             content={"detail": refusal.detail},
                                             headers=refusal.headers)

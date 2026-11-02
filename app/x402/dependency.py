@@ -676,7 +676,7 @@ async def require_x402_payment(request: Request) -> None:
         from app.x402.settlement import authorization_key, outcome_unknown, outcome_unknown_refusal
         unknown_key = authorization_key(payment_payload)
         if outcome_unknown.contains(unknown_key):
-            raise outcome_unknown_refusal(unknown_key, invalid_reason)
+            raise outcome_unknown_refusal(unknown_key, invalid_reason, where="verify", request=request)
         response_body = {
             "x402Version": X402_VERSION,
             "error": f"Payment verification failed: {invalid_reason}",
@@ -738,14 +738,14 @@ async def require_x402_payment(request: Request) -> None:
     if outcome_unknown.kind(auth_key) == AFTER_WORK:
         logger.warning(f"x402: retry of an authorization whose settlement outcome is unknown "
                        f"after its work ran, from {client_ip}")
-        raise outcome_unknown_refusal(auth_key)
+        raise outcome_unknown_refusal(auth_key, where="after_work", request=request)
 
     if not replay_guard.reserve(auth_key):
         logger.warning(f"x402: Payment authorization reused by {client_ip}")
         if outcome_unknown.contains(auth_key):
             # In use by a concurrent retry of an authorization whose
             # settlement outcome is unknown: not "sign a new payment" (#553).
-            raise outcome_unknown_refusal(auth_key)
+            raise outcome_unknown_refusal(auth_key, where="in_use", request=request)
         # The same authorization under an Idempotency-Key whose first request's
         # settlement got no answer: that key's 409, as documented, even when
         # the authorization has since settled under another key (#553).
