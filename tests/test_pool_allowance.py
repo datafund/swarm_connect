@@ -22,6 +22,18 @@ from app.services.pool_allowance import PoolAllowanceTracker, UNLIMITED
 APP = "https://dataprovenance.app"
 
 
+def _enable_mainnet_x402(monkeypatch):
+    """x402 on, on a mainnet network, with a fixed price: where paying bypasses
+    the allowance, so the refusal offers the paid route (as a 402)."""
+    from unittest.mock import AsyncMock
+    monkeypatch.setattr(settings, "X402_ENABLED", True)
+    monkeypatch.setattr(settings, "X402_NETWORK", "base")
+    monkeypatch.setattr(settings, "X402_PAY_TO_ADDRESS", "0xc87688A40CE2ff1765BA54497c7471c892755488")
+    from app.x402 import dependency as dep
+    monkeypatch.setattr(dep, "_calculate_price_for_request",
+                        AsyncMock(return_value={"price_usd": 0.05, "description": "Pooled stamp"}))
+
+
 @pytest.fixture
 def tracker(tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "POOL_DAILY_ALLOWANCES", f"{APP}=3")
@@ -153,9 +165,11 @@ class TestEndpointBehaviour:
     def test_exhausted_allowance_returns_a_message_a_person_can_read(self, monkeypatch, tmp_path):
         """The caller is a browser app whose user has never heard of a postage batch."""
         monkeypatch.setattr(settings, "STAMP_POOL_ENABLED", True)
-        # A mainnet network, because this test asserts the x402 route is offered
-        # and that offer is withheld where a payment would not buy a bypass.
-        monkeypatch.setattr(settings, "X402_NETWORK", "base")
+        # x402 on, on a mainnet network, because this test asserts the x402
+        # route is offered and that offer is withheld where a payment would not
+        # buy a bypass (testnet, or x402 off: #480). There the refusal is a 402
+        # whose body carries the same fields as the 429.
+        _enable_mainnet_x402(monkeypatch)
         monkeypatch.setattr(settings, "POOL_DAILY_ALLOWANCES", f"{APP}=0")
         monkeypatch.setattr(settings, "POOL_DEFAULT_DAILY_ALLOWANCE", 0)
 
@@ -171,7 +185,7 @@ class TestEndpointBehaviour:
 
         resp = TestClient(app).post("/api/v1/pool/acquire", json={"size": "small"},
                                     headers={"Origin": APP})
-        assert resp.status_code == 429, resp.text
+        assert resp.status_code == 402, resp.text
         d = resp.json()["detail"]
         assert d["code"] == "DAILY_STAMP_ALLOWANCE_EXHAUSTED"
         assert "resets" in d["message"].lower()
@@ -338,8 +352,8 @@ class TestPaidAcquireBypassesTheAllowance:
         before = tracker.check(APP, "small")[1]["used"]
         assert before == 1
 
-    def _exhausted(self, monkeypatch, tmp_path):
-        """Drive an acquire into the 429 and hand back its detail block."""
+    def _exhausted(self, monkeypatch, tmp_path, expected_status=429):
+        """Drive an acquire into the refusal and hand back its detail block."""
         monkeypatch.setattr(settings, "STAMP_POOL_ENABLED", True)
         monkeypatch.setattr(settings, "POOL_DAILY_ALLOWANCES", f"{APP}=0")
         monkeypatch.setattr(settings, "POOL_DEFAULT_DAILY_ALLOWANCE", 0)
@@ -351,13 +365,13 @@ class TestPaidAcquireBypassesTheAllowance:
 
         resp = TestClient(app).post("/api/v1/pool/acquire", json={"size": "small"},
                                     headers={"Origin": APP})
-        assert resp.status_code == 429
+        assert resp.status_code == expected_status, resp.text
         return resp.json()["detail"]
 
     def test_the_exhausted_message_offers_the_paid_route_on_this_endpoint(self, monkeypatch, tmp_path):
         """Not a different endpoint with different latency — this one, paid."""
-        monkeypatch.setattr(settings, "X402_NETWORK", "base")
-        d = self._exhausted(monkeypatch, tmp_path)
+        _enable_mainnet_x402(monkeypatch)
+        d = self._exhausted(monkeypatch, tmp_path, expected_status=402)
         assert d["alternative"]["endpoint"] == "POST /api/v1/pool/acquire"
         assert d["alternative"]["header"] == "X-PAYMENT"
         assert "immediately" in d["message"] or "immediate" in d["alternative"]["note"]

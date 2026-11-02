@@ -276,3 +276,53 @@ def test_per_client_limit_groups_an_ipv6_client_by_its_64(pool, monkeypatch):
     other = client.post("/api/v1/pool/acquire", json={"size": "small"},
                         headers={"X-Forwarded-For": "2001:db8:1:3::a"})
     assert (first.status_code, second.status_code, other.status_code) == (200, 429, 200)
+
+
+def _exhaust(pool, monkeypatch, kind):
+    """Drive one acquire into the refusal of the given kind and return the response."""
+    pool.inventory["available"] = [17]
+    client = TestClient(app)
+    if kind == "per_origin":
+        pool.tracker.consume(None, "small")                   # allowance (1) already used
+    else:
+        monkeypatch.setattr(settings, "POOL_DEFAULT_DAILY_ALLOWANCE", 10)
+        monkeypatch.setattr(settings, "POOL_ALLOWANCE_PER_IP", 1)
+        assert client.post("/api/v1/pool/acquire", json={"size": "small"}).status_code == 200
+    # Pricing fails, so an x402-enabled gateway also stays on the 429 path and
+    # the only difference between the cases below is X402_ENABLED.
+    with patch("app.x402.dependency._calculate_price_for_request",
+               new=AsyncMock(side_effect=RuntimeError("price feed down"))):
+        return client.post("/api/v1/pool/acquire", json={"size": "small"})
+
+
+_CODES = {"per_origin": "DAILY_STAMP_ALLOWANCE_EXHAUSTED",
+          "per_client": "DAILY_STAMP_ALLOWANCE_PER_CLIENT_EXHAUSTED"}
+
+
+@pytest.mark.parametrize("kind", ["per_origin", "per_client"])
+def test_exhausted_allowance_does_not_offer_payment_when_x402_is_off(pool, monkeypatch, kind):
+    """#480: with x402 off the middleware passes X-PAYMENT through unchanged, so
+    a caller who pays as told gets the same refusal again. Point at direct
+    purchase instead, even on a mainnet network."""
+    _mainnet_x402(monkeypatch)
+    monkeypatch.setattr(settings, "X402_ENABLED", False)
+    r = _exhaust(pool, monkeypatch, kind)
+    assert r.status_code == 429, r.text
+    d = r.json()["detail"]
+    assert d["code"] == _CODES[kind]
+    assert d["alternative"]["endpoint"] == "POST /api/v1/stamps/"
+    assert "header" not in d["alternative"] and "payment" not in d["alternative"]
+    assert "X-PAYMENT" not in d["message"] and "x402" not in d["message"]
+
+
+@pytest.mark.parametrize("kind", ["per_origin", "per_client"])
+def test_exhausted_allowance_offers_payment_when_x402_is_on(pool, monkeypatch, kind):
+    """Control for #480: same setup with x402 on, and the paid route is offered."""
+    _mainnet_x402(monkeypatch)
+    r = _exhaust(pool, monkeypatch, kind)
+    assert r.status_code == 429, r.text
+    d = r.json()["detail"]
+    assert d["code"] == _CODES[kind]
+    assert d["alternative"]["endpoint"] == "POST /api/v1/pool/acquire"
+    assert d["alternative"]["header"] == "X-PAYMENT"
+    assert "X-PAYMENT" in d["message"]
