@@ -160,6 +160,30 @@ class TestStampsAPI:
         assert "not found" in response.json()["detail"].lower()
 
     @patch('app.services.swarm_api.get_all_stamps_processed')
+    def test_get_stamp_by_id_accepts_uppercase_id(self, mock_get_stamps):
+        """The path allows A-F, and Bee lists batch IDs in lowercase (#542)."""
+        mock_get_stamps.return_value = [
+            {
+                "batchID": VALID_STAMP_ID,
+                "amount": "1000000000",
+                "blockNumber": 12345,
+                "owner": "0x1234567890abcdef",
+                "immutableFlag": False,
+                "depth": 18,
+                "bucketDepth": 16,
+                "batchTTL": 3600,
+                "usable": True,
+                "expectedExpiration": "2024-12-01-15-30",
+                "local": True
+            }
+        ]
+
+        response = client.get(f"/api/v1/stamps/{VALID_STAMP_ID.upper()}")
+
+        assert response.status_code == 200, response.text
+        assert response.json()["batchID"] == VALID_STAMP_ID
+
+    @patch('app.services.swarm_api.get_all_stamps_processed')
     def test_list_stamps_api_error(self, mock_get_stamps):
         """Test stamps list endpoint when API call fails."""
         mock_get_stamps.side_effect = httpx.HTTPError("Network error")
