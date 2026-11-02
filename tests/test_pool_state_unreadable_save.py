@@ -717,3 +717,71 @@ async def test_bee_skip_while_unreconciled_says_saves_are_held(tmp_path, monkeyp
     assert held, results["errors"]
     assert all(str(tmp_path) not in e for e in results["errors"])
     assert mgr._errors == results["errors"]
+
+
+# Every recovery from a state-file pause writes the reconciled pool, even
+# when nothing was saved (and refused) during the pause.
+
+async def _paused_pool_no_saves(tmp_path, monkeypatch):
+    mgr = await _good_pool(tmp_path, monkeypatch, A, B)
+    _corrupt(mgr)
+    assert await _sync(mgr, A, B) == 0
+    _assert_paused_for_file(mgr)
+    return mgr
+
+
+def _recovered(caplog):
+    return [r.getMessage() for r in caplog.records
+            if r.levelno == logging.INFO and "pause lifted" in r.getMessage()]
+
+
+@pytest.mark.asyncio
+async def test_recovery_by_moving_file_away_writes_the_pool(tmp_path, monkeypatch, caplog):
+    mgr = await _paused_pool_no_saves(tmp_path, monkeypatch)
+    os.rename(_path(mgr), _path(mgr) + ".moved")
+    with caplog.at_level(logging.INFO, logger="app.services.stamp_pool"):
+        await _sync(mgr)
+
+    assert mgr._last_sync_ok is True
+    assert _state(mgr) == sorted(mgr._pool) == sorted([A, B])
+    assert any("wrote 2 batch ids" in m for m in _recovered(caplog))
+    # A restart now starts from the pool, not empty.
+    fresh = StampPoolManager(state_file=_path(mgr))
+    assert fresh._load_state() == {A, B}
+
+
+@pytest.mark.asyncio
+async def test_recovery_from_older_backup_writes_the_pool(tmp_path, monkeypatch, caplog):
+    mgr = await _paused_pool_no_saves(tmp_path, monkeypatch)
+    _write(mgr, [A])
+    with caplog.at_level(logging.INFO, logger="app.services.stamp_pool"):
+        await _sync(mgr, A, B)
+
+    assert mgr._last_sync_ok is True
+    assert _state(mgr) == sorted(mgr._pool) == sorted([A, B])
+    assert any("wrote 2 batch ids" in m for m in _recovered(caplog))
+
+
+@pytest.mark.asyncio
+async def test_recovery_from_empty_list_writes_the_pool(tmp_path, monkeypatch, caplog):
+    mgr = await _paused_pool_no_saves(tmp_path, monkeypatch)
+    _write(mgr, [])
+    with caplog.at_level(logging.INFO, logger="app.services.stamp_pool"):
+        await _sync(mgr)
+
+    assert mgr._last_sync_ok is True
+    assert _state(mgr) == sorted(mgr._pool) == sorted([A, B])
+    assert any("wrote 2 batch ids" in m for m in _recovered(caplog))
+
+
+@pytest.mark.asyncio
+async def test_sync_without_a_pause_does_not_rewrite_the_file(tmp_path, monkeypatch, caplog):
+    mgr = await _good_pool(tmp_path, monkeypatch, A, B)
+    with open(_path(mgr), "w") as f:
+        json.dump([A, B], f, indent=2)  # a format our own save never writes
+    before = _read(mgr)
+    with caplog.at_level(logging.INFO, logger="app.services.stamp_pool"):
+        await _sync(mgr, A, B)
+    assert _read(mgr) == before
+    assert mgr._state_dirty is False
+    assert not _recovered(caplog)

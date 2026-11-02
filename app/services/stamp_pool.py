@@ -167,8 +167,9 @@ class StampPoolManager:
         # Saves refused because the state file is unreadable (#547). While the
         # pool is paused for that, nothing may write over the file: it may hold
         # batch ids the in-memory pool does not. _state_dirty records that the
-        # in-memory pool has changes the file lacks, so the first good sync
-        # writes them. _removed_unsaved holds batches that left the pool (sold,
+        # file may not match the in-memory pool (set by a refused save and by
+        # finding the file unreadable), so the first good sync writes the
+        # reconciled pool. _removed_unsaved holds batches that left the pool (sold,
         # expired) during the pause, so a restored backup that still lists them
         # cannot put a sold batch back up for sale. _refused_logged is the last
         # batch list logged, so a long pause logs it once per change.
@@ -298,6 +299,18 @@ class StampPoolManager:
         self._last_sync_failure = "state_file"
         self._last_sync_ok = False
         self._needs_reconcile = True
+        # The file can no longer be trusted to match the pool, so recovery
+        # writes the reconciled pool whether or not a save was refused in the
+        # meantime. Without this, recovering by moving the file away, or by
+        # restoring an older backup or `[]`, left it short of the batches the
+        # pool holds, and a restart then lost them (#547).
+        self._state_dirty = True
+
+    def _log_recovered(self) -> None:
+        """Confirm in the log that a state-file pause is over (#547)."""
+        n = len(set(self._pool.keys()) | self._unreadable_ids)
+        name = os.path.basename(self._get_state_file_path())
+        logger.info(f"Pool state file ({name}) readable again; pause lifted, wrote {n} batch ids")
 
     def _sync_succeeded(self, flush: bool = True) -> None:
         """Lift any pause, and write state that was refused during it (#547).
@@ -305,13 +318,16 @@ class StampPoolManager:
         `flush` is False when the caller has just attempted that save itself,
         so a failing write is not tried and logged twice.
         """
+        recovering = self._needs_reconcile
         self._last_sync_ok = True
         self._last_sync_failure = None
         self._last_sync_error = None
         self._needs_reconcile = False
         if flush and self._state_dirty:
             with self._lock:
-                self._save_state()
+                saved = self._save_state()
+            if saved and recovering:
+                self._log_recovered()
 
     def _load_state(self, quiet: bool = False) -> Set[str]:
         """Load the pool's batch IDs from its state file.
@@ -900,11 +916,13 @@ class StampPoolManager:
             # The file and Bee have both been read and the pool reconciled with
             # them, so a state-file pause is over: clear it first, or this save
             # would be refused as during the pause (#547).
+            recovering = self._needs_reconcile
             self._last_sync_failure = None
             self._needs_reconcile = False
             self._unreadable_ids = set(unreadable_ids)
             if valid_ids != known_ids or self._state_dirty:
-                self._save_state()
+                if self._save_state() and recovering:
+                    self._log_recovered()
 
             # Adopt everything in the pool as gateway-owned.
             #
