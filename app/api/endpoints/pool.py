@@ -469,17 +469,31 @@ async def acquire_stamp(
             stamp_pool_manager.unreserve_stamp(stamp.batch_id)
             raise
         released = stamp_pool_manager.release_reserved_stamp(stamp.batch_id)
-        if not released:
+        settlement = getattr(http_request.state, "x402_settlement", None)
+        if not released and settlement is not None:
             # Cannot happen while nothing but this request moves a reserved
-            # batch. If it ever does, the caller has paid and gets a 409, which
-            # must not read as an ordinary lost race.
-            settlement = getattr(http_request.state, "x402_settlement", None)
+            # batch. If it ever does, the caller has paid for nothing, so it
+            # must not read as an ordinary lost race (#476): the documented
+            # refund response, with the transaction to cite, and its own count.
+            tx = getattr(settlement, "transaction", None) or "unknown"
             logger.error(
                 "Pool acquire: PAID NON-DELIVERY: batch %s was no longer reserved "
                 "after settlement (payer=%s, tx=%s)",
                 stamp.batch_id,
                 getattr(http_request.state, "x402_payer", None),
-                getattr(settlement, "transaction", None),
+                tx,
+            )
+            pool_acquires_total.labels(
+                size=depth_to_size_name(requested_depth), status="settled_not_delivered").inc()
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail={
+                    "code": "DELIVERY_FAILED_AFTER_PAYMENT",
+                    "message": ("The payment was collected but the stamp could not be handed over. "
+                                "Contact the operator with this transaction for a refund."),
+                    "transaction": tx,
+                    "x402_status": "settled_not_delivered",
+                },
             )
 
     if not released:

@@ -402,7 +402,7 @@ The gateway exposes a `/metrics` endpoint (Prometheus text format) when `METRICS
 - `gateway_uploads_total{status}`, `gateway_upload_bytes_total`
 - `gateway_downloads_total{status}`
 - `gateway_stamp_purchases_total{size, status}`
-- `gateway_pool_acquires_total{size, status}`
+- `gateway_pool_acquires_total{size, status}` (`status` = `success`/`error`/`settled_not_delivered`; the last is a paid acquire whose batch could not be handed over after settlement, refund needed)
 - `gateway_stamp_spend_refusals_total{operation, limit}` — purchases and extends refused by a spending limit (`limit` = `per_request` or `daily_budget`)
 - `gateway_stamp_spend_bzz_total{operation, charged}` — BZZ committed through the stamp endpoints (`charged` = `budget` or `paid`)
 - `gateway_requests_by_client_total{client_type, outcome}` — which clients are served and whether they are (`client_type` = `mcp`/`cli`/`sdk-js`/`browser`/`curl`/`http-lib`/`bot`/`other`/`none`; `outcome` = `ok`/`client_error`/`rate_limited`/`payment_required`/`server_error`)

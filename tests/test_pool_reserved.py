@@ -286,6 +286,55 @@ async def test_paid_non_delivery_is_logged_as_an_error(tmp_path, monkeypatch, ca
     monkeypatch.setattr(M, "release_reserved_stamp", lambda self, b: None)
     with caplog.at_level("ERROR", logger="app.api.endpoints.pool"):
         _, r = await _acquire_with_settle(tmp_path, monkeypatch, settled)
-    assert r.status_code == 409
+    # Paid and not delivered (#476): not the ordinary lost-race 409, but the
+    # documented refund response, carrying the transaction to cite.
+    assert r.status_code == 500
+    detail = r.json()["detail"]
+    assert detail["code"] == "DELIVERY_FAILED_AFTER_PAYMENT"
+    assert detail["transaction"] == "0xtx"
+    assert detail["x402_status"] == "settled_not_delivered"
+    assert "operator" in detail["message"] and "refund" in detail["message"]
+    assert "another request" not in detail["message"]
     err = [m for m in caplog.messages if "PAID NON-DELIVERY" in m]
     assert err and "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1" in err[0] and "0xtx" in err[0]
+
+
+def _acquire_count(status):
+    from app.services.metrics import pool_acquires_total
+    return pool_acquires_total.labels(size="small", status=status)._value.get()
+
+
+@pytest.mark.asyncio
+async def test_paid_non_delivery_counts_separately_from_a_lost_race(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    async def settled(request):
+        request.state.x402_payer = "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+        request.state.x402_settlement = SimpleNamespace(transaction="0xtx")
+
+    from app.services.stamp_pool import StampPoolManager as M
+    monkeypatch.setattr(M, "release_reserved_stamp", lambda self, b: None)
+    before_paid, before_err = _acquire_count("settled_not_delivered"), _acquire_count("error")
+    await _acquire_with_settle(tmp_path, monkeypatch, settled)
+    assert _acquire_count("settled_not_delivered") == before_paid + 1
+    assert _acquire_count("error") == before_err
+
+
+@pytest.mark.asyncio
+async def test_unpaid_release_failure_is_still_an_ordinary_lost_race(tmp_path, monkeypatch, caplog):
+    async def unpaid(request):
+        return None
+
+    from app.services.stamp_pool import StampPoolManager as M
+    monkeypatch.setattr(M, "release_reserved_stamp", lambda self, b: None)
+    before_paid, before_err = _acquire_count("settled_not_delivered"), _acquire_count("error")
+    with caplog.at_level("ERROR", logger="app.api.endpoints.pool"):
+        _, r = await _acquire_with_settle(tmp_path, monkeypatch, unpaid)
+    assert r.status_code == 409
+    detail = r.json()["detail"]
+    assert "acquired by another request" in detail["message"]
+    assert "code" not in detail
+    assert _acquire_count("error") == before_err + 1
+    assert _acquire_count("settled_not_delivered") == before_paid
+    # Nothing was paid, so nothing is logged as a paid non-delivery.
+    assert not [m for m in caplog.messages if "PAID NON-DELIVERY" in m]
