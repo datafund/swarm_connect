@@ -396,6 +396,37 @@ def test_unknown_settlement_outcome_keeps_the_key(fac):
     assert fac.settle.await_count == 1 and not bought
 
 
+def test_unknown_outcome_on_the_fallback_settlement_keeps_the_key(fac):
+    """#553: a paid route without its own settle point. The middleware settles after
+    the work; the facilitator gives no answer. A retry must not pay again."""
+    ran = []
+
+    async def no_settle_point(request: Request):
+        ran.append(1)
+        return {"reference": "r" * 64}
+
+    router = APIRouter()
+    router.add_api_route("/manifest", no_settle_point, methods=["POST"])
+    app = FastAPI()
+    app.include_router(router, prefix="/api/v1/data", dependencies=[Depends(require_x402_payment)])
+    app.add_middleware(X402Middleware, facilitator_client=fac)
+    c = TestClient(app)
+
+    fac.settle.side_effect = httpx.ReadTimeout("facilitator slow")
+    first_nonce = "0x" + "6f" * 32
+    r = c.post("/api/v1/data/manifest", json={},
+               headers={"X-PAYMENT": pay(nonce=first_nonce), "Idempotency-Key": "k553"})
+    assert r.status_code == 502
+    assert r.json()["code"] == "PAYMENT_SETTLEMENT_UNKNOWN"
+    assert r.json()["nonce"] == first_nonce
+    fac.settle.side_effect = lambda **kw: SettleResponse(success=True, transaction="0x" + "cd" * 32)
+    retry = _post(c, key="k553", body={}, path="/api/v1/data/manifest")
+    assert retry.status_code == 409
+    assert retry.json()["detail"]["code"] == "IDEMPOTENCY_KEY_SETTLEMENT_UNKNOWN"
+    assert retry.json()["detail"]["nonce"] == first_nonce
+    assert fac.settle.await_count == 1 and ran == [1]
+
+
 def test_settling_entry_survives_a_restart(tmp_path):
     """Killed or cancelled while waiting for the facilitator: still unknown after a restart."""
     path = str(tmp_path / "idem.json")

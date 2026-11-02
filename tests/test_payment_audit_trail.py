@@ -111,6 +111,8 @@ def test_an_unknown_settlement_outcome_is_an_error_not_a_refusal():
     """Middleware fallback path (route without a settle point)."""
     before_error, before_refused = _count("error"), _count("refused")
     r = _run(RuntimeError("facilitator timeout"), path="/api/v1/data/manifest")
-    assert r.status_code == 402
+    # 502 PAYMENT_SETTLEMENT_UNKNOWN since #553 (was 402, which reads as a refusal).
+    assert r.status_code == 502
+    assert r.json()["code"] == "PAYMENT_SETTLEMENT_UNKNOWN"
     assert _count("error") == before_error + 1
     assert _count("refused") == before_refused

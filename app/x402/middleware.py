@@ -477,10 +477,31 @@ class X402Middleware(BaseHTTPMiddleware):
                 logger.error(f"x402: settlement failed after delivery on {request.url.path}: {failure}")
                 if unknown_outcome:
                     # The facilitator may or may not have moved the money: not
-                    # a refusal. Same record as settlement.py uses for it.
+                    # a refusal. Same record as settlement.py uses for it. Not
+                    # a 402 either (#553): an x402 client pays again on a 402,
+                    # and the work has already run. The result stays withheld,
+                    # the idempotency entry stays "settling" and the
+                    # authorization stays reserved: its nonce may be spent.
                     log_payment_failed(client_ip=client_ip, reason=failure, stage="settle",
                                        wallet_address=payer)
                     x402_settlements_total.labels(result="error").inc()
+                    auth_key = getattr(request.state, "x402_auth_key", None)
+                    return JSONResponse(
+                        status_code=502,
+                        content={
+                            "code": "PAYMENT_SETTLEMENT_UNKNOWN",
+                            "message": (
+                                "The request was processed, but the payment facilitator did not "
+                                "answer, so it is unknown whether the payment was collected. The "
+                                "result is withheld. Before paying again, check whether this "
+                                "authorization's nonce was used on-chain; if it was, contact the "
+                                "operator with the nonce."
+                            ),
+                            "nonce": auth_key[1] if auth_key else None,
+                            "x402_status": "settlement_unknown",
+                        },
+                        headers={"X-Payment-Mode": "failed", "X-Payment-Status": "settlement_unknown"},
+                    )
                 else:
                     settlement_refused(request)
                     log_payment_settled(client_ip=client_ip, payer=payer, transaction_hash=None,

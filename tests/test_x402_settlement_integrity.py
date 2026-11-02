@@ -173,6 +173,48 @@ def test_route_without_a_settle_point_is_still_checked(env):
     assert "batchID" not in r.text
 
 
+def test_fallback_settlement_error_is_not_reported_as_a_refusal(env):
+    """#553: the work ran, then the facilitator gave no answer. Not a 402: an x402
+    client would sign and pay again, and the first transfer may have gone through."""
+    fac = _facilitator(RuntimeError("facilitator down"))
+    r = _run(fac, path="/api/v1/data/manifest")
+    assert r.status_code == 502
+    body = r.json()
+    assert body["code"] == "PAYMENT_SETTLEMENT_UNKNOWN"
+    assert body["x402_status"] == "settlement_unknown"
+    assert body["nonce"] == "0x" + "00" * 32     # the authorization to check on-chain
+    assert "ok" not in body                       # the unpaid result is withheld
+    assert "accepts" not in body                  # nothing to sign: do not pay again blindly
+    assert r.headers["X-Payment-Mode"] == "failed"
+    assert r.headers["X-Payment-Status"] == "settlement_unknown"
+    assert DELIVERED == [1]                       # the handler did run
+
+
+def test_fallback_settlement_error_is_audited_and_counted_as_error(env):
+    from app.services.metrics import x402_settlements_total
+    from app.x402.audit import read_audit_log
+
+    def count(result):
+        return x402_settlements_total.labels(result=result)._value.get()
+
+    error, refused_before = count("error"), count("refused")
+    fac = _facilitator(RuntimeError("facilitator down"))
+    assert _run(fac, path="/api/v1/data/manifest").status_code == 502
+    assert count("error") == error + 1
+    assert count("refused") == refused_before
+    assert any(e["event_type"] == "payment_failed" and e["data"].get("stage") == "settle"
+               for e in read_audit_log())
+
+
+def test_fallback_settlement_error_keeps_the_authorization_reserved(env):
+    """The work ran and the nonce may be spent: the same authorization is not taken again."""
+    fac = _facilitator(RuntimeError("facilitator down"), ok())
+    header = create_valid_payment_header()
+    assert _run(fac, path="/api/v1/data/manifest", header=header).status_code == 502
+    assert _run(fac, path="/api/v1/data/manifest", header=header).status_code == 402
+    assert fac.settle.await_count == 1 and DELIVERED == [1]
+
+
 def test_chunk_credit_is_not_granted_when_settlement_fails(env):
     """The real top-up handler settles before crediting."""
     from types import SimpleNamespace
