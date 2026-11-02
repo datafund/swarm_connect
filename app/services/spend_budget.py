@@ -45,6 +45,7 @@ from typing import Dict, Optional, Tuple
 
 from app.core.config import settings
 from app.core.atomic_io import StateLoadError, atomic_write_json, load_json_state, unreadable_state
+from app.core.day_reset import next_reset_at
 
 logger = logging.getLogger(__name__)
 
@@ -197,7 +198,7 @@ class SpendBudgetTracker:
             "spent_bzz": round(spent, 6),
             "remaining_bzz": remaining if limit == UNLIMITED else round(remaining, 6),
             "request_cost_bzz": round(cost_bzz, 6),
-            "resets_at": f"{_today()}T24:00:00Z",
+            "resets_at": next_reset_at(_today()),
         }
         if limit == UNLIMITED:
             return True, info
@@ -224,7 +225,7 @@ class SpendBudgetTracker:
                         "caller": key,
                         "daily_budget_bzz": limit,
                         "request_cost_bzz": round(cost, 6),
-                        "resets_at": f"{self._day}T24:00:00Z",
+                        "resets_at": next_reset_at(self._day),
                         "state_unreadable": True,
                     }
                 if limit != UNLIMITED and spent + cost > limit:
@@ -235,7 +236,7 @@ class SpendBudgetTracker:
                         "spent_bzz": round(spent, 6),
                         "remaining_bzz": round(remaining, 6),
                         "request_cost_bzz": round(cost, 6),
-                        "resets_at": f"{self._day}T24:00:00Z",
+                        "resets_at": next_reset_at(self._day),
                     }
             for key, cost, _ in charges:
                 self._spent[key] = self._spent.get(key, 0.0) + cost
@@ -296,7 +297,7 @@ class SpendBudgetTracker:
                 "spent_bzz": round(spent, 6),
                 "remaining_bzz": remaining if limit == UNLIMITED else round(remaining, 6),
                 "request_cost_bzz": round(cost_bzz, 6),
-                "resets_at": f"{self._day}T24:00:00Z",
+                "resets_at": next_reset_at(self._day),
             }
             if limit != UNLIMITED and spent + cost_bzz > limit:
                 return False, info

@@ -427,6 +427,31 @@ class StampPoolManager:
             stamp.released_to = None
         logger.info(f"Reservation on {batch_id[:16]}... cancelled, back in the pool")
 
+    def _immediate_replenish_paused(self, depth: int) -> bool:
+        """True when the last sync failed, so a release must not buy (#533).
+
+        The same rule as the maintenance path (see _check_and_replenish_locked):
+        after any failed sync the pool's contents are unknown. For an unreadable
+        state file, buying would also add a batch the gateway cannot reliably
+        record, and the skip message promises spending is paused until the file
+        is repaired. A Bee failure is usually transient; the next good sync
+        lifts the pause and maintenance refills the pool.
+
+        Only the last sync's result is known here: a file that breaks after
+        that sync is not noticed until the next one.
+        """
+        if self._last_sync_ok:
+            return False
+        if self._last_sync_failure == "state_file":
+            cause = "the pool state file could not be read"
+        else:
+            cause = "the last sync with the Bee node failed"
+        logger.warning(
+            f"Pool depth {depth}: not replenishing immediately because {cause}; "
+            "the pool's current contents are unknown."
+        )
+        return True
+
     def trigger_replenishment_if_needed(self, depth: int) -> bool:
         """
         Check if replenishment is needed for the given depth and trigger async purchase.
@@ -442,6 +467,9 @@ class StampPoolManager:
         """
         if not settings.STAMP_POOL_IMMEDIATE_REPLENISH:
             logger.debug(f"Immediate replenishment disabled, skipping for depth {depth}")
+            return False
+
+        if self._immediate_replenish_paused(depth):
             return False
 
         reserve_config = self.get_reserve_config()
@@ -492,6 +520,10 @@ class StampPoolManager:
         This is fire-and-forget - errors are logged but don't affect the caller.
         """
         try:
+            # Checked again here: a sync can fail between spawning this task
+            # and the task running.
+            if self._immediate_replenish_paused(depth):
+                return
             logger.info(f"Immediate replenishment: starting purchase for depth {depth}")
             batch_id = await self._purchase_stamp(depth)
             if batch_id:

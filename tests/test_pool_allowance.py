@@ -476,3 +476,82 @@ def test_an_unreadable_record_also_refuses_the_per_client_limit(monkeypatch, tmp
     assert t.check(None, "small")[0]                    # the origin bucket is unlimited
     ok, info = t.check_address(None, "small", "1.2.3.4")
     assert not ok and info["state_unreadable"]
+
+
+class TestResetsAtIsParseable:
+    """resets_at used to read "<day>T24:00:00Z", which fromisoformat rejects (#512)."""
+
+    @staticmethod
+    def _parse(value):
+        from datetime import datetime
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+    def test_check_reports_the_next_midnight_at_the_end_of_a_year(self, tmp_path, monkeypatch):
+        from app.services import pool_allowance
+        monkeypatch.setattr(settings, "POOL_DEFAULT_DAILY_ALLOWANCE", 1)
+        monkeypatch.setattr(pool_allowance, "_today", lambda: "2026-12-31")
+        t = PoolAllowanceTracker(state_file=str(tmp_path / "a.json"))
+        _, info = t.check(None, "small")
+        assert info["resets_at"] == "2027-01-01T00:00:00Z"
+        assert self._parse(info["resets_at"]).hour == 0
+
+    def test_check_address_reports_the_next_midnight_at_the_end_of_a_year(self, tmp_path, monkeypatch):
+        from app.services import pool_allowance
+        monkeypatch.setattr(settings, "POOL_ALLOWANCE_PER_IP", 1)
+        monkeypatch.setattr(pool_allowance, "_today", lambda: "2026-12-31")
+        t = PoolAllowanceTracker(state_file=str(tmp_path / "a.json"))
+        _, info = t.check_address(None, "small", "1.2.3.4")
+        assert info["resets_at"] == "2027-01-01T00:00:00Z"
+        assert self._parse(info["resets_at"]).hour == 0
+
+    def test_the_exhausted_response_carries_a_parseable_reset(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(settings, "STAMP_POOL_ENABLED", True)
+        monkeypatch.setattr(settings, "POOL_DAILY_ALLOWANCES", f"{APP}=0")
+        monkeypatch.setattr(settings, "POOL_DEFAULT_DAILY_ALLOWANCE", 0)
+
+        from app.services import pool_allowance
+        monkeypatch.setattr(pool_allowance, "_today", lambda: "2026-10-22")
+        monkeypatch.setattr(pool_allowance, "pool_allowance_tracker",
+                            PoolAllowanceTracker(state_file=str(tmp_path / "a.json")))
+        import app.api.endpoints.pool as pool_ep
+        monkeypatch.setattr(pool_ep, "pool_allowance_tracker",
+                            pool_allowance.pool_allowance_tracker)
+        monkeypatch.setattr(pool_ep.stamp_pool_manager, "get_available_stamp",
+                            lambda d: type("S", (), {"depth": 17})())
+
+        resp = TestClient(app).post("/api/v1/pool/acquire", json={"size": "small"},
+                                    headers={"Origin": APP})
+        assert resp.status_code in (402, 429), resp.text
+        d = resp.json()["detail"]
+        assert d["code"] == "DAILY_STAMP_ALLOWANCE_EXHAUSTED"
+        assert d["resets_at"] == "2026-10-23T00:00:00Z"
+        assert self._parse(d["resets_at"]).hour == 0
+        assert d["resets_at"] in d["message"]
+        assert "T24" not in d["message"]
+
+    def test_the_per_client_exhausted_response_carries_a_parseable_reset(self, monkeypatch, tmp_path):
+        """The per-client refusal builds its own message, so it is checked
+        through the HTTP response as well (#531)."""
+        monkeypatch.setattr(settings, "STAMP_POOL_ENABLED", True)
+        monkeypatch.setattr(settings, "POOL_DAILY_ALLOWANCES", "")
+        monkeypatch.setattr(settings, "POOL_DEFAULT_DAILY_ALLOWANCE", 10)
+        monkeypatch.setattr(settings, "POOL_ALLOWANCE_PER_IP", 0)
+
+        from app.services import pool_allowance
+        monkeypatch.setattr(pool_allowance, "_today", lambda: "2026-12-31")
+        monkeypatch.setattr(pool_allowance, "pool_allowance_tracker",
+                            PoolAllowanceTracker(state_file=str(tmp_path / "a.json")))
+        import app.api.endpoints.pool as pool_ep
+        monkeypatch.setattr(pool_ep, "pool_allowance_tracker",
+                            pool_allowance.pool_allowance_tracker)
+        monkeypatch.setattr(pool_ep.stamp_pool_manager, "get_available_stamp",
+                            lambda d: type("S", (), {"depth": 17})())
+
+        resp = TestClient(app).post("/api/v1/pool/acquire", json={"size": "small"})
+        assert resp.status_code in (402, 429), resp.text
+        d = resp.json()["detail"]
+        assert d["code"] == "DAILY_STAMP_ALLOWANCE_PER_CLIENT_EXHAUSTED"
+        assert d["resets_at"] == "2027-01-01T00:00:00Z"
+        assert self._parse(d["resets_at"]).hour == 0
+        assert d["resets_at"] in d["message"]
+        assert "T24" not in d["message"]
