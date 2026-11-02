@@ -217,13 +217,10 @@ class StampPoolManager:
         """Get the state file path, using override or settings."""
         return self._state_file or settings.STAMP_POOL_STATE_FILE
 
-    def _save_state(self, extra_ids: Optional[Set[str]] = None, removed: Optional[Set[str]] = None):
+    def _save_state(self, removed: Optional[Set[str]] = None) -> bool:
         """Persist current pool batch IDs to state file.
 
-        `extra_ids` are batch IDs to keep in state that are not in the pool —
-        records whose data could not be read this cycle. They are still ours and
-        may parse fine next time, so writing only the pool would silently drop
-        them.
+        Returns True when the file was written.
 
         `removed` names batches that have just left the pool. If the save is
         refused they are remembered, so a sync after recovery does not re-import
@@ -237,13 +234,11 @@ class StampPoolManager:
         writes the refused changes. A missing file is written as usual.
 
         Ids the last sync kept without importing (_unreadable_ids) are always
-        written, as are `extra_ids`.
+        written: records whose data could not be read. They are still ours and
+        may parse fine next time, so writing only the pool would drop them.
         """
         state_file = self._get_state_file_path()
-        batch_ids = set(self._pool.keys()) | self._unreadable_ids
-        if extra_ids:
-            batch_ids |= set(extra_ids)
-        batch_ids = sorted(batch_ids)
+        batch_ids = sorted(set(self._pool.keys()) | self._unreadable_ids)
 
         refused = self._needs_reconcile
         if not refused:
@@ -270,17 +265,18 @@ class StampPoolManager:
                     + (f"; released or removed since the last save: {json.dumps(sorted(self._removed_unsaved))}"
                        if self._removed_unsaved else "")
                 )
-            return
+            return False
 
         try:
             atomic_write_json(state_file, batch_ids)
             logger.debug(f"Saved pool state: {len(batch_ids)} stamps to {state_file}")
         except Exception as e:
             logger.error(f"Failed to save pool state to {state_file}: {e}")
-            return
+            return False
         self._state_dirty = False
         self._removed_unsaved.clear()
         self._refused_logged = None
+        return True
 
     def _mark_state_file_unreadable(self) -> None:
         """Pause pool spending because the state file cannot be read.
@@ -298,13 +294,17 @@ class StampPoolManager:
         self._last_sync_ok = False
         self._needs_reconcile = True
 
-    def _sync_succeeded(self) -> None:
-        """Lift any pause, and write state that was refused during it (#547)."""
+    def _sync_succeeded(self, flush: bool = True) -> None:
+        """Lift any pause, and write state that was refused during it (#547).
+
+        `flush` is False when the caller has just attempted that save itself,
+        so a failing write is not tried and logged twice.
+        """
         self._last_sync_ok = True
         self._last_sync_failure = None
         self._last_sync_error = None
         self._needs_reconcile = False
-        if self._state_dirty:
+        if flush and self._state_dirty:
             with self._lock:
                 self._save_state()
 
@@ -332,7 +332,8 @@ class StampPoolManager:
             with open(state_file, 'r') as f:
                 batch_ids = json.load(f)
         except FileNotFoundError:
-            logger.info(f"No pool state file at {state_file}, treating as first run")
+            if not quiet:
+                logger.info(f"No pool state file at {state_file}, treating as first run")
             return set()
         except Exception as e:
             # Unparseable JSON, a permission or I/O error, anything else. Not a
@@ -546,8 +547,10 @@ class StampPoolManager:
         is repaired. A Bee failure is usually transient; the next good sync
         lifts the pause and maintenance refills the pool.
 
-        Only the last sync's result is known here: a file that breaks after
-        that sync is not noticed until the next one.
+        A file that breaks after that sync is noticed by the next save (a
+        release, purchase or expiry removal), which pauses the pool the same
+        way (#547). _purchase_stamp and _topup_stamp check that pause again
+        right before Bee is asked to spend.
         """
         if self._last_sync_ok:
             return False
@@ -905,7 +908,8 @@ class StampPoolManager:
             # registers its caller only once it has been released.
             self._register_pool_ownership(valid_ids)
 
-            self._sync_succeeded()
+            # Held changes were written (or attempted) by the save above.
+            self._sync_succeeded(flush=False)
             return synced_count
 
         except StateLoadError as e:
@@ -973,6 +977,17 @@ class StampPoolManager:
             return await self._check_and_replenish_locked(results)
         finally:
             self._replenishing = False
+
+    def _spending_paused_for_state_file(self, what: str) -> bool:
+        """True while the state file has not been read back since it was found
+        unreadable (#547). Checked right before Bee is asked to spend, after the
+        last await, because a save during a price lookup or a 429 wait can set
+        the pause after the caller last looked."""
+        if not self._needs_reconcile:
+            return False
+        logger.warning(f"Not going ahead to {what}: the pool state file could not be read, "
+                       "so pool spending is paused until it is repaired or restored.")
+        return True
 
     def _skip_replenishment(self, results: Dict[str, any]) -> Dict[str, any]:
         """End a maintenance run without spending: the pool's contents are unknown.
@@ -1307,6 +1322,10 @@ class StampPoolManager:
         than in the replenish loop so that every path is covered — the scheduled
         check, the immediate replenishment after an acquire, and anything added
         later that forgets to ask.
+
+        Returns None without spending if pool spending is paused for an
+        unreadable state file when Bee would be asked to buy (#547), checked
+        before every attempt including 429 retries.
         """
         slot = self._reserve_spend_slot()
         if slot is None:
@@ -1349,6 +1368,13 @@ class StampPoolManager:
             # accepts it, before waiting for it to become usable, because the
             # money is spent at that point.
             for attempt in range(max_retries):
+                if self._spending_paused_for_state_file(f"buy a depth-{depth} pool batch"):
+                    # Nothing spent: give back the slot and the hold, and answer
+                    # as the other refusals here do.
+                    from app.services.spend_budget import spend_budget_tracker
+                    self._release_spend_slot(slot)
+                    spend_budget_tracker.release_hold(hold)
+                    return None
                 try:
                     batch_id = await swarm_api.purchase_postage_stamp(amount, depth, label)
                     break
@@ -1493,7 +1519,8 @@ class StampPoolManager:
 
         Returns True when topped up, False when a spending ceiling refused it,
         and None when it was skipped because the batch is no longer an
-        AVAILABLE pool batch (reserved for an acquire, or gone; #475).
+        AVAILABLE pool batch (reserved for an acquire, or gone; #475) or
+        because pool spending is paused for an unreadable state file (#547).
 
         Subject to the same hourly ceiling as buying a batch (#334). Extending
         spends BZZ, so leaving it uncounted made this the only spending path in
@@ -1542,8 +1569,14 @@ class StampPoolManager:
                 held = self._pool.get(batch_id)
                 status = held.status if held is not None else None
                 depth = held.depth if held is not None else None
-                if status == PoolStampStatus.AVAILABLE:
+                # A save during the price lookup may have paused the pool (#547).
+                paused = self._spending_paused_for_state_file(f"top up batch {batch_id[:16]}...")
+                if status == PoolStampStatus.AVAILABLE and not paused:
                     self._topup_in_flight.add(batch_id)
+            if paused:
+                # A skip, as below: nothing spent, slot given back.
+                self._release_spend_slot(slot)
+                return None
             if status != PoolStampStatus.AVAILABLE:
                 # A skip, not a failure: the batch was reserved or handed out
                 # after the list was built. Not recorded as an error or refusal.

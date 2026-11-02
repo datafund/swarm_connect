@@ -406,3 +406,140 @@ async def test_unreadable_id_gone_from_bee_is_dropped(tmp_path, monkeypatch):
     assert _state(mgr) == [A]
     mgr._save_state()
     assert _state(mgr) == [A]
+
+
+# The pause is checked again right before Bee is asked to spend, after the
+# awaits inside _purchase_stamp and _topup_stamp.
+
+class _RateLimited(Exception):
+    def __init__(self):
+        super().__init__("429 Too Many Requests")
+        self.response = type("R", (), {"status_code": 429})()
+
+
+def _break_file_and_release(mgr, batch_id):
+    """The file breaks; a release during the await notices and pauses the pool."""
+    _corrupt(mgr)
+    assert mgr.release_stamp(batch_id) is not None
+    _assert_paused_for_file(mgr)
+
+
+def _spend_mocks(mgr, monkeypatch):
+    # Without the fix the purchase goes ahead; keep that path off the network.
+    monkeypatch.setattr(mgr, "_wait_for_stamp_usable", AsyncMock(return_value=True))
+    monkeypatch.setattr("app.services.stamp_pool.swarm_api.get_all_stamps_processed",
+                        AsyncMock(return_value=_bee(C)))
+    monkeypatch.setattr(stamp_ownership_manager, "register_stamp", lambda **kw: None)
+    hold = object()
+    released = []
+    monkeypatch.setattr(mgr, "_reserve_gateway_spend", lambda *a, **kw: hold)
+    monkeypatch.setattr("app.services.spend_budget.spend_budget_tracker.release_hold",
+                        lambda h: released.append(h))
+    return hold, released
+
+
+@pytest.mark.asyncio
+async def test_purchase_does_not_spend_when_paused_during_price_lookup(tmp_path, monkeypatch):
+    mgr = await _good_pool(tmp_path, monkeypatch, A, B)
+    hold, released = _spend_mocks(mgr, monkeypatch)
+    budget = mgr._spend_budget_remaining()
+
+    async def chainstate():
+        _break_file_and_release(mgr, A)
+        return {"currentPrice": "24000"}
+
+    buy = AsyncMock(return_value=C)
+    with patch("app.services.stamp_pool.swarm_api.get_chainstate", new=chainstate), \
+         patch("app.services.stamp_pool.swarm_api.purchase_postage_stamp", new=buy):
+        assert await mgr._purchase_stamp(17) is None
+
+    buy.assert_not_called()
+    assert released == [hold]
+    assert mgr._spend_budget_remaining() == budget
+    assert _read(mgr) == CORRUPT
+
+
+@pytest.mark.asyncio
+async def test_purchase_retry_does_not_spend_when_paused_during_429_wait(tmp_path, monkeypatch):
+    mgr = await _good_pool(tmp_path, monkeypatch, A, B)
+    hold, released = _spend_mocks(mgr, monkeypatch)
+    budget = mgr._spend_budget_remaining()
+
+    async def wait(seconds):
+        _break_file_and_release(mgr, A)
+
+    monkeypatch.setattr("app.services.stamp_pool.asyncio.sleep", wait)
+    buy = AsyncMock(side_effect=[_RateLimited(), C])
+    with patch("app.services.stamp_pool.swarm_api.get_chainstate",
+               new=AsyncMock(return_value={"currentPrice": "24000"})), \
+         patch("app.services.stamp_pool.swarm_api.purchase_postage_stamp", new=buy):
+        assert await mgr._purchase_stamp(17) is None
+
+    assert buy.call_count == 1
+    assert released == [hold]
+    assert mgr._spend_budget_remaining() == budget
+
+
+@pytest.mark.asyncio
+async def test_immediate_replenishment_does_not_spend_when_paused_during_price_lookup(tmp_path, monkeypatch):
+    mgr = await _good_pool(tmp_path, monkeypatch, A, B)
+    _spend_mocks(mgr, monkeypatch)
+
+    async def chainstate():
+        _break_file_and_release(mgr, A)
+        return {"currentPrice": "24000"}
+
+    buy = AsyncMock(return_value=C)
+    with patch("app.services.stamp_pool.swarm_api.get_chainstate", new=chainstate), \
+         patch("app.services.stamp_pool.swarm_api.purchase_postage_stamp", new=buy):
+        await mgr._async_replenish_one(17)
+
+    buy.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_topup_does_not_spend_when_paused_during_price_lookup(tmp_path, monkeypatch):
+    mgr = await _good_pool(tmp_path, monkeypatch, A, B)
+    _spend_mocks(mgr, monkeypatch)
+    budget = mgr._spend_budget_remaining()
+
+    async def chainstate():
+        _break_file_and_release(mgr, B)
+        return {"currentPrice": "24000"}
+
+    extend = AsyncMock()
+    with patch("app.services.stamp_pool.swarm_api.get_chainstate", new=chainstate), \
+         patch("app.services.stamp_pool.swarm_api.extend_postage_stamp", new=extend):
+        assert await mgr._topup_stamp(A) is None
+
+    extend.assert_not_called()
+    assert mgr._spend_budget_remaining() == budget
+    assert A not in mgr._topup_in_flight
+
+
+# Log hygiene.
+
+def test_save_with_missing_file_does_not_log_first_run(tmp_path, caplog):
+    mgr = StampPoolManager(state_file=str(tmp_path / "pool_state.json"))
+    mgr._pool[A] = PoolStamp(batch_id=A, depth=17, amount=1,
+                             created_at=datetime.now(timezone.utc), ttl_at_creation=3600)
+    with caplog.at_level(logging.INFO, logger="app.services.stamp_pool"):
+        mgr._save_state()
+    assert not any("first run" in r.getMessage() for r in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_failed_write_on_recovery_sync_is_logged_once(tmp_path, monkeypatch, caplog):
+    mgr = await _good_pool(tmp_path, monkeypatch, A, B)
+    _corrupt(mgr)
+    assert await _sync(mgr, A, B) == 0
+    assert mgr.release_stamp(A) is not None
+    _write(mgr, [A, B])
+
+    with caplog.at_level(logging.ERROR, logger="app.services.stamp_pool"), \
+         patch("app.services.stamp_pool.atomic_write_json", side_effect=OSError("disk full")):
+        await _sync(mgr, A, B)
+
+    failures = [r for r in caplog.records if "Failed to save pool state" in r.getMessage()]
+    assert len(failures) == 1
+    assert mgr._state_dirty is True
