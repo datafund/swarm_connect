@@ -936,3 +936,61 @@ class TestUnreadableRecordWithReservations:
         assert r.status_code == 503
         assert r.json()["detail"]["code"] == "SPEND_BUDGET_UNAVAILABLE"
         buy.assert_not_called()
+
+
+class TestFreeCeilingRefusalOffersPaymentOnlyWherePayingHelps:
+    """#535: the free-portion refusal used to say that paid requests still
+    work. That is false with x402 off (no request is ever paid) and on a
+    testnet without X402_ALLOW_TESTNET_PAID_BYPASS (a paid request is charged
+    to the free portion too). The paid-route clause follows the same condition
+    as the pool allowance refusal: X402_ENABLED and paid_bypass_is_honoured()."""
+
+    PAID_CLAUSE = "paid requests still work"
+
+    def _free_ceiling_refusal(self, tracker, monkeypatch, *, x402_enabled, network, override=False):
+        from types import SimpleNamespace
+        from fastapi import HTTPException
+        import app.api.endpoints.stamps as stamps_ep
+
+        monkeypatch.setattr(settings, "X402_ENABLED", x402_enabled)
+        monkeypatch.setattr(settings, "X402_NETWORK", network)
+        monkeypatch.setattr(settings, "X402_ALLOW_TESTNET_PAID_BYPASS", override)
+        monkeypatch.setattr(settings, "X402_MAX_STAMP_BZZ", 0.0)
+        monkeypatch.setattr(settings, "STAMP_DAILY_BZZ_PER_CALLER", UNLIMITED)
+        monkeypatch.setattr(settings, "GATEWAY_DAILY_BZZ_CEILING", 100.0)
+        monkeypatch.setattr(settings, "GATEWAY_DAILY_BZZ_FREE_CEILING", 0.01)
+
+        class _Req:
+            def __init__(self):
+                self.state = SimpleNamespace(x402_mode=None)
+                self.headers = {}
+                self.client = None
+
+        with pytest.raises(HTTPException) as exc:
+            stamps_ep._enforce_spend_limits(_Req(), 0.1, "stamp purchase")
+        assert exc.value.status_code == 503
+        d = exc.value.detail
+        assert d["code"] == "GATEWAY_DAILY_SPEND_CEILING"
+        assert d["resets_at"]
+        assert "free spending" in d["message"]
+        assert f"resets at {d['resets_at']}" in d["message"]
+        return d["message"]
+
+    def test_no_paid_route_when_x402_is_off(self, tracker, monkeypatch):
+        msg = self._free_ceiling_refusal(tracker, monkeypatch, x402_enabled=False, network="base")
+        assert "paid" not in msg.lower(), msg
+
+    def test_no_paid_route_on_a_testnet_without_the_override(self, tracker, monkeypatch):
+        msg = self._free_ceiling_refusal(tracker, monkeypatch, x402_enabled=True,
+                                         network="base-sepolia", override=False)
+        assert "paid" not in msg.lower(), msg
+
+    def test_paid_route_offered_with_x402_on_a_mainnet(self, tracker, monkeypatch):
+        """Control: where paying does bypass the free portion, say so."""
+        msg = self._free_ceiling_refusal(tracker, monkeypatch, x402_enabled=True, network="base")
+        assert self.PAID_CLAUSE in msg, msg
+
+    def test_paid_route_offered_on_a_testnet_with_the_override(self, tracker, monkeypatch):
+        msg = self._free_ceiling_refusal(tracker, monkeypatch, x402_enabled=True,
+                                         network="base-sepolia", override=True)
+        assert self.PAID_CLAUSE in msg, msg

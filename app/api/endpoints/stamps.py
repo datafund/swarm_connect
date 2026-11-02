@@ -153,15 +153,21 @@ def _enforce_spend_limits(request: Request, cost_bzz: float, operation: str) -> 
             info["daily_budget_bzz"], operation, cost_bzz,
         )
         stamp_spend_refusals_total.labels(operation=operation, limit=which).inc()
+        if refused == GLOBAL_KEY:
+            reason = "The gateway has reached its daily spending limit"
+        else:
+            reason = "Today's free spending on this gateway is used up"
+            # Only where a payment actually bypasses the free portion (#535):
+            # with x402 off no request is paid, and on a testnet without the
+            # override a paid request is charged to the free portion too. Same
+            # condition as the pool allowance refusal.
+            if settings.X402_ENABLED and settings.paid_bypass_is_honoured():
+                reason += "; paid requests still work"
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail={
                 "code": "GATEWAY_DAILY_SPEND_CEILING",
-                "message": (
-                    ("The gateway has reached its daily spending limit" if refused == GLOBAL_KEY
-                     else "Today's free spending on this gateway is used up; paid requests still work")
-                    + f". It resets at {info['resets_at']}."
-                ),
+                "message": f"{reason}. It resets at {info['resets_at']}.",
                 "resets_at": info["resets_at"],
             },
         )
