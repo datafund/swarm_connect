@@ -24,7 +24,7 @@ from enum import Enum
 from typing import Dict, List, Optional, Set
 from threading import Lock
 
-from app.core.atomic_io import atomic_write_json, unreadable_state
+from app.core.atomic_io import StateLoadError, atomic_write_json, unreadable_state
 from app.core.config import settings
 from app.services import swarm_api
 from app.services.swarm_api import coerce_int
@@ -126,6 +126,11 @@ class StampPoolManager:
         # False until a sync has actually read the node. Starts False so the very
         # first check cannot purchase against an unverified (empty) pool.
         self._last_sync_ok: bool = False
+        # Why the last sync failed: "state_file" when the pool's own state file
+        # could not be read, "bee" for anything else. The skip message names
+        # the cause, so operators do not go looking at Bee for a file problem.
+        self._last_sync_failure: Optional[str] = None
+        self._last_sync_error: Optional[str] = None
         # Per-depth backoff after a failed purchase. A failure is usually
         # persistent — out of funds, an amount below Bee's minimum validity —
         # and retrying it every cycle achieves nothing while blocking a request
@@ -587,6 +592,8 @@ class StampPoolManager:
                 logger.info("No known stamps in state file, pool will be filled by purchase logic")
                 # A genuinely empty state is a reliable answer, not a failure.
                 self._last_sync_ok = True
+                self._last_sync_failure = None
+                self._last_sync_error = None
                 return 0
 
             all_stamps = await swarm_api.get_all_stamps_processed()
@@ -722,11 +729,15 @@ class StampPoolManager:
             self._register_pool_ownership(valid_ids)
 
             self._last_sync_ok = True
+            self._last_sync_failure = None
+            self._last_sync_error = None
             return synced_count
 
         except Exception as e:
             logger.error(f"Error syncing stamps from Bee node: {e}")
-            self._errors.append(f"Sync error: {str(e)}")
+            self._last_sync_error = f"Sync error: {str(e)}"
+            self._errors.append(self._last_sync_error)
+            self._last_sync_failure = "state_file" if isinstance(e, StateLoadError) else "bee"
             # The pool's contents are now UNKNOWN, not known-to-be-empty. Record
             # that so replenishment does not read the empty pool as a real deficit.
             self._last_sync_ok = False
@@ -795,11 +806,29 @@ class StampPoolManager:
             # has finished syncing), which is precisely when the gateway restarts
             # alongside it, so the race is the normal case rather than a rare one.
             if not self._last_sync_ok:
-                msg = ("Skipping replenishment: could not read stamp state from the "
-                       "Bee node, so the pool's current contents are unknown. "
-                       "Will retry on the next check.")
+                if self._last_sync_failure == "state_file":
+                    # Base name and setting only: /pool/status is reachable by
+                    # callers, and the full path is already in the log line.
+                    name = os.path.basename(self._get_state_file_path())
+                    msg = (f"Skipping replenishment: the pool state file ({name}, set by "
+                           "STAMP_POOL_STATE_FILE) could not be read, so the pool's "
+                           "current contents are unknown. Pool spending is paused until "
+                           "the file is repaired or restored.")
+                else:
+                    msg = ("Skipping replenishment: could not read stamp state from the "
+                           "Bee node, so the pool's current contents are unknown. "
+                           "Will retry on the next check.")
                 logger.warning(msg)
+                # Replace _errors with this run's entries, as the normal path
+                # does. Returning without it let sync append one "Sync error"
+                # per failed cycle, and a corrupt state file fails every cycle
+                # until repaired, so the list grew without limit (#482).
+                if self._last_sync_error:
+                    results["errors"].append(self._last_sync_error)
                 results["errors"].append(msg)
+                results["errors"].extend(self._refusals)
+                self._refusals.clear()
+                self._errors = results["errors"]
                 results["skipped"] = True
                 return results
 

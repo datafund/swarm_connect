@@ -279,6 +279,11 @@ Check the `errors` array in status response for:
 - Failed stamp purchases (insufficient BZZ balance)
 - Failed top-ups
 - Bee node connectivity issues
+- An unreadable pool state file (`pool_state.json`, set by `STAMP_POOL_STATE_FILE`):
+  pool spending stays paused until the file is repaired or restored
+
+While replenishment is skipped, each check replaces `errors` with that run's
+entries, so the list does not grow across failed cycles.
 
 ### Health and Metrics
 
