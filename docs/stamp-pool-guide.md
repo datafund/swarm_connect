@@ -322,13 +322,19 @@ Check the `errors` array in status response for:
   goes to Bee. A call already sent when the pause is set still completes. To
   recover, repair the file, restore it from backup, or move it away to start
   from the in-memory pool. The next sync then lifts the pause and writes the
-  held changes, once it has read the file and either found it empty or missing
-  or read the Bee node as well; a sync that reads the file but fails at Bee
-  keeps saves refused. Batches released during the pause are not re-imported
-  even if a restored backup still lists them. That memory does not survive a
-  restart: after a restart only the ownership registry keeps a sold batch out
-  of the pool, and a batch bought during the pause is lost from the pool
-  unless the file is rebuilt from the logged list
+  held changes, once it has read the file and either read the Bee node as well
+  or found nothing to import: the file missing, a valid empty JSON list `[]`,
+  or only batches released during the pause, which are subtracted first. A
+  zero-byte or otherwise unparseable file is still unreadable and keeps the
+  pool paused. A sync that reads the file but fails at Bee keeps saves
+  refused, and the status entry says so. Batches kept in state because their
+  record could not be read are carried through recovery, even when a restored
+  backup predates them, until a sync imports them or Bee no longer lists them.
+  Batches released during the pause are not re-imported even if a restored
+  backup still lists them. That memory does not survive a restart: after a
+  restart only the ownership registry keeps a sold batch out of the pool, and
+  a batch bought during the pause is lost from the pool unless the file is
+  rebuilt from the logged list
 
 While replenishment is skipped, each check replaces `errors` with that run's
 entries, so the list does not grow across failed cycles.

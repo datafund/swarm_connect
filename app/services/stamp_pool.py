@@ -176,15 +176,19 @@ class StampPoolManager:
         self._removed_unsaved: Set[str] = set()
         self._refused_logged: Optional[List[str]] = None
         # Set when the state file was found unreadable, cleared only by a sync
-        # that completes fully. Until then the in-memory pool has not been
+        # that completes fully: one that reads Bee as well as the file, or one
+        # that takes the first-run path (the file holds `[]`, is missing, or
+        # lists only batches released during the pause). Until then the in-memory pool has not been
         # reconciled with the file, so no save may write over it, even after
         # the file is restored: a sync that reads it and then fails at Bee has
         # not imported what the restored file lists (#547).
         self._needs_reconcile: bool = False
         # Batch ids the last successful sync kept in state without importing
         # (unreadable record or ownership lookup). Every save keeps them, or
-        # the next release dropped them from the file. Replaced by each
-        # successful sync, which drops those it imports or Bee no longer lists.
+        # the next release dropped them from the file. Each sync that reads
+        # Bee evaluates them along with the file's ids, even if the file no
+        # longer lists them, and replaces the set; the first-run path, which
+        # does not read Bee, keeps it.
         self._unreadable_ids: Set[str] = set()
         # Per-depth backoff after a failed purchase. A failure is usually
         # persistent — out of funds, an amount below Bee's minimum validity —
@@ -228,7 +232,8 @@ class StampPoolManager:
 
         Never writes over an unreadable state file (#547). Once the file has
         been found unreadable, by a sync or by this check, saves are refused
-        until a sync completes fully, even if the file is restored meanwhile:
+        until a sync completes fully (reads Bee as well as the file, or takes
+        the first-run path), even if the file is restored meanwhile:
         the file may list batches the in-memory pool does not, and writing over
         it would also end the pause without anyone repairing it. That sync
         writes the refused changes. A missing file is written as usual.
@@ -640,7 +645,9 @@ class StampPoolManager:
             batch_id = await self._purchase_stamp(depth)
             if batch_id:
                 logger.info(f"Immediate replenishment: successfully purchased stamp {batch_id[:16]}... for depth {depth}")
-            else:
+            elif not self._needs_reconcile:
+                # Not when the state-file pause stopped it: that is logged
+                # already, by _spending_paused_for_state_file.
                 logger.warning(f"Immediate replenishment: purchase returned no batch_id for depth {depth}")
         except Exception as e:
             logger.error(f"Immediate replenishment failed for depth {depth}: {e}")
@@ -765,7 +772,8 @@ class StampPoolManager:
             # First run: no state file means empty pool, let purchase logic fill it
             if not known_ids:
                 logger.info("No known stamps in state file, pool will be filled by purchase logic")
-                self._unreadable_ids = set()
+                # _unreadable_ids are kept: this path does not ask Bee, so
+                # nothing says they are gone or readable now (#547).
                 # A genuinely empty state is a reliable answer, not a failure.
                 self._sync_succeeded()
                 return 0
@@ -785,6 +793,11 @@ class StampPoolManager:
                 # in the earlier read and still usable on the node; importing it
                 # would put a sold batch back up for sale.
                 known_ids &= self._load_state() - self._removed_unsaved
+                # Ids an earlier sync kept without importing are still ours even
+                # if the file no longer lists them, as after restoring an older
+                # backup (#547). Evaluate them with the rest: imported once
+                # readable, dropped once Bee no longer lists them, else kept.
+                known_ids |= self._unreadable_ids - self._removed_unsaved
                 for batch_id in known_ids:
                     # Never put a batch registered to someone else up for sale
                     # (#477). _save_state swallows write errors, so a failed
@@ -1011,6 +1024,13 @@ class StampPoolManager:
             msg = ("Skipping replenishment: could not read stamp state from the "
                    "Bee node, so the pool's current contents are unknown. "
                    "Will retry on the next check.")
+            if self._needs_reconcile:
+                # The file was unreadable earlier and has not been reconciled
+                # yet (#547). The file is not named: this cause is Bee, and the
+                # message must not send operators to a file that now reads
+                # fine (#533); the earlier entry named it.
+                msg += (" Pool state saves stay held until a sync with the Bee "
+                        "node completes, because the state file was unreadable earlier.")
         logger.warning(msg)
         # Replace _errors with this run's entries, as the normal path
         # does. Returning without it let sync append one "Sync error"

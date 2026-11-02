@@ -614,3 +614,106 @@ async def test_topup_paused_mid_run_is_reported_as_paused(tmp_path, monkeypatch)
     assert results.get("skipped") is True
     [debug] = results["topup_debug"]
     assert "paused" in debug["result"] and "state file" in debug["result"]
+
+
+# Ids kept as unreadable survive recovery while Bee still lists them.
+
+X = "e" * 64
+
+
+async def _pool_with_unreadable_x(tmp_path, monkeypatch):
+    mgr = await _good_pool(tmp_path, monkeypatch, A, B)
+    monkeypatch.setitem(stamp_ownership_manager._registry, X, {"owner": POOL_OWNER, "mode": "pool"})
+    _write(mgr, [A, B, X])
+    with patch("app.services.stamp_pool.swarm_api.get_all_stamps_processed",
+               new=AsyncMock(return_value=_bee_x_unreadable())):
+        await mgr.sync_from_bee_node()
+    assert X not in mgr._pool and _state(mgr) == sorted([A, B, X])
+    _corrupt(mgr)
+    assert await _sync(mgr, A, B) == 0
+    assert mgr.release_stamp(A) is not None
+    return mgr
+
+
+def _bee_x_unreadable(*ids):
+    bee = _bee(*(ids or (A, B)), X)
+    bee[-1]["depth"] = None
+    return bee
+
+
+@pytest.mark.asyncio
+async def test_unreadable_id_survives_restore_of_older_backup(tmp_path, monkeypatch):
+    mgr = await _pool_with_unreadable_x(tmp_path, monkeypatch)
+    _write(mgr, [A, B])  # backup from before X was bought
+    with patch("app.services.stamp_pool.swarm_api.get_all_stamps_processed",
+               new=AsyncMock(return_value=_bee_x_unreadable())):
+        await mgr.sync_from_bee_node()
+
+    assert mgr._last_sync_ok is True
+    assert _state(mgr) == sorted([B, X])
+
+
+@pytest.mark.asyncio
+async def test_unreadable_id_survives_file_moved_away(tmp_path, monkeypatch):
+    mgr = await _pool_with_unreadable_x(tmp_path, monkeypatch)
+    os.rename(_path(mgr), _path(mgr) + ".moved")
+    await _sync(mgr)  # first-run path: Bee is not asked
+
+    assert mgr._last_sync_ok is True
+    assert _state(mgr) == sorted([B, X])
+
+
+@pytest.mark.asyncio
+async def test_carried_unreadable_id_dropped_once_bee_no_longer_lists_it(tmp_path, monkeypatch):
+    mgr = await _pool_with_unreadable_x(tmp_path, monkeypatch)
+    _write(mgr, [A, B])
+    await _sync(mgr, A, B)  # X has expired
+    assert _state(mgr) == [B]
+
+
+@pytest.mark.asyncio
+async def test_carried_unreadable_id_imported_once_readable(tmp_path, monkeypatch):
+    mgr = await _pool_with_unreadable_x(tmp_path, monkeypatch)
+    _write(mgr, [A, B])
+    await _sync(mgr, A, B, X)  # X's record reads fine now
+    assert X in mgr._pool
+    assert _state(mgr) == sorted([B, X])
+
+
+# Messages.
+
+@pytest.mark.asyncio
+async def test_immediate_replenishment_paused_does_not_also_warn_no_batch(tmp_path, monkeypatch, caplog):
+    mgr = await _good_pool(tmp_path, monkeypatch, A, B)
+    _spend_mocks(mgr, monkeypatch)
+
+    async def chainstate():
+        _break_file_and_release(mgr, A)
+        return {"currentPrice": "24000"}
+
+    with caplog.at_level(logging.WARNING, logger="app.services.stamp_pool"), \
+         patch("app.services.stamp_pool.swarm_api.get_chainstate", new=chainstate), \
+         patch("app.services.stamp_pool.swarm_api.purchase_postage_stamp", new=AsyncMock(return_value=C)):
+        await mgr._async_replenish_one(17)
+
+    assert any("Not going ahead to buy" in r.getMessage() for r in caplog.records)
+    assert not any("returned no batch_id" in r.getMessage() for r in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_bee_skip_while_unreconciled_says_saves_are_held(tmp_path, monkeypatch):
+    mgr = await _good_pool(tmp_path, monkeypatch, A, B)
+    _cycle_patches(mgr, monkeypatch, target=2)
+    _corrupt(mgr)
+    assert await _sync(mgr, A, B) == 0
+    _write(mgr, [A, B])
+    with patch("app.services.stamp_pool.swarm_api.get_all_stamps_processed",
+               new=AsyncMock(side_effect=RuntimeError("bee down"))):
+        results = await mgr.check_and_replenish()
+
+    assert results.get("skipped") is True
+    held = [e for e in results["errors"]
+            if e.startswith("Skipping replenishment") and "saves stay held" in e]
+    assert held, results["errors"]
+    assert all(str(tmp_path) not in e for e in results["errors"])
+    assert mgr._errors == results["errors"]
