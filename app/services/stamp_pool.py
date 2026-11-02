@@ -733,11 +733,24 @@ class StampPoolManager:
             self._last_sync_error = None
             return synced_count
 
+        except StateLoadError as e:
+            # The full text names the absolute state-file path and its backup.
+            # It goes to the log only: /pool/status is unauthenticated, so the
+            # entry there names the file by its base name.
+            logger.error(f"Error syncing pool: cannot read the pool state file: {e}")
+            name = os.path.basename(self._get_state_file_path())
+            self._last_sync_error = (f"Sync error: the pool state file ({name}) could not "
+                                     "be read; see the gateway log for details.")
+            self._errors.append(self._last_sync_error)
+            self._last_sync_failure = "state_file"
+            self._last_sync_ok = False
+            return 0
+
         except Exception as e:
             logger.error(f"Error syncing stamps from Bee node: {e}")
             self._last_sync_error = f"Sync error: {str(e)}"
             self._errors.append(self._last_sync_error)
-            self._last_sync_failure = "state_file" if isinstance(e, StateLoadError) else "bee"
+            self._last_sync_failure = "bee"
             # The pool's contents are now UNKNOWN, not known-to-be-empty. Record
             # that so replenishment does not read the empty pool as a real deficit.
             self._last_sync_ok = False
@@ -807,8 +820,9 @@ class StampPoolManager:
             # alongside it, so the race is the normal case rather than a rare one.
             if not self._last_sync_ok:
                 if self._last_sync_failure == "state_file":
-                    # Base name and setting only: /pool/status is reachable by
-                    # callers, and the full path is already in the log line.
+                    # Base name and setting only: /pool/status is unauthenticated.
+                    # The full path and backup location are logged by
+                    # _load_state and sync_from_bee_node, never put in _errors.
                     name = os.path.basename(self._get_state_file_path())
                     msg = (f"Skipping replenishment: the pool state file ({name}, set by "
                            "STAMP_POOL_STATE_FILE) could not be read, so the pool's "

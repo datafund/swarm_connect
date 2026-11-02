@@ -1906,3 +1906,56 @@ class TestSkippedReplenishmentErrors:
 
         assert refusal in manager._errors, manager._errors
         assert manager._refusals == []
+
+    @pytest.mark.asyncio
+    async def test_status_errors_do_not_expose_the_state_file_location(self, state_file, tmp_path):
+        """/pool/status has no auth: a state-file failure must not reveal paths.
+
+        StateLoadError's text names the absolute state-file path and the
+        .corrupt-<ts> backup path. That belongs in the log, not in errors.
+        """
+        self._write_corrupt(state_file)
+        manager = StampPoolManager(state_file=state_file)
+
+        with patch("app.services.stamp_pool.logger") as log:
+            await self._run_cycles(manager, 2)
+
+        errors = manager.get_status().errors
+        assert errors, "the failure was not reported at all"
+        leaks = [e for e in errors if str(tmp_path) in e or ".corrupt-" in e]
+        assert leaks == [], f"state-file location exposed in /pool/status: {leaks}"
+        sync_errors = [e for e in errors if e.startswith("Sync error")]
+        assert len(sync_errors) == 1 and "pool_state.json" in sync_errors[0], errors
+        # The full detail is still logged, and the log names the file, not Bee.
+        logged = " ".join(str(c) for c in log.error.call_args_list)
+        assert str(tmp_path) in logged, logged
+        assert "state file" in logged and "Bee node" not in logged, logged
+
+    @pytest.mark.asyncio
+    async def test_bee_failure_is_logged_as_bee(self, state_file):
+        self._write_known(state_file)
+        manager = StampPoolManager(state_file=state_file)
+
+        with patch("app.services.stamp_pool.logger") as log:
+            await self._run_cycles(manager, 1)
+
+        logged = " ".join(str(c) for c in log.error.call_args_list)
+        assert "Bee node" in logged, logged
+
+    @pytest.mark.asyncio
+    async def test_cause_resets_after_the_file_is_repaired(self, state_file):
+        """Corrupt file, then repaired, then Bee down: the message blames Bee."""
+        self._write_corrupt(state_file)
+        manager = StampPoolManager(state_file=state_file)
+
+        results, _ = await self._run_cycles(manager, 1)
+        assert "pool_state.json" in self._skip_message(results["errors"])
+
+        self._write_known(state_file)
+        results, _ = await self._run_cycles(manager, 1)
+
+        msg = self._skip_message(results["errors"])
+        assert "could not read stamp state from the Bee node" in msg, msg
+        assert "pool_state.json" not in msg, msg
+        assert manager._last_sync_failure == "bee"
+        assert not any("pool_state.json" in e for e in manager._errors), manager._errors
