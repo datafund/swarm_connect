@@ -94,7 +94,7 @@ def test_all_results_exist_from_startup():
     from prometheus_client import REGISTRY
     names = {s.labels["result"] for m in REGISTRY.collect() if m.name == "gateway_x402_settlements"
              for s in m.samples if s.name == "gateway_x402_settlements_total"}
-    assert {"settled", "refused", "error", "settled_not_delivered"} <= names
+    assert {"settled", "refused", "error", "settled_not_delivered", "refused_after_unknown"} <= names
 
 
 def test_settled_but_not_delivered_is_counted_and_not_recorded_as_delivered():

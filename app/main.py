@@ -392,13 +392,18 @@ async def read_root():
         from app.x402.settlement import outcome_unknown
         from app.x402.idempotency import idempotency_store
         payment_state_down = False
-        if outcome_unknown.unavailable:
+        # Public: the code and a short cause only. Paths and exception text
+        # are in the gateway log.
+        cause = outcome_unknown.public_cause()
+        if cause:
             payment_state_down = True
-            warnings.append("PAYMENT_STATE_UNAVAILABLE: every paid request gets 503 until "
-                            f"the settlement-unknown state is repaired. {outcome_unknown.unavailable}")
+            warnings.append(f"PAYMENT_STATE_UNAVAILABLE: {cause}; every paid request gets 503 "
+                            "until it is repaired (details in the gateway log)")
         if idempotency_store.unavailable:
-            warnings.append("IDEMPOTENCY_UNAVAILABLE: paid requests with an Idempotency-Key get "
-                            f"503 until the idempotency state is repaired. {idempotency_store.unavailable}")
+            import os.path
+            warnings.append(f"IDEMPOTENCY_UNAVAILABLE: {os.path.basename(idempotency_store._path())} is "
+                            "unreadable; paid requests with an Idempotency-Key get 503 until it is "
+                            "repaired (details in the gateway log)")
 
         # Determine overall status
         # Never return 503 — the gateway should always be reachable so

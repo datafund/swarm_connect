@@ -108,13 +108,15 @@ notary_signatures_total = Counter(
 x402_settlements_total = Counter(
     "gateway_x402_settlements_total",
     "x402 settlement outcomes (#375): settled, refused (nothing delivered), error "
-    "(outcome unknown, nothing delivered), settled_not_delivered (refund needed)",
+    "(outcome unknown, nothing delivered), settled_not_delivered (refund needed), "
+    "refused_after_unknown (a retry of an authorization whose earlier settlement got no "
+    "answer was refused: the earlier transfer probably went through)",
     ["result"],
 )
 # Every result exists from startup. A series first seen at 1 gives increase() of
 # 0 for that event, and the process restarts on every deploy, so without this
 # the first failure of each kind after a restart would never alert.
-for _result in ("settled", "refused", "error", "settled_not_delivered"):
+for _result in ("settled", "refused", "error", "settled_not_delivered", "refused_after_unknown"):
     x402_settlements_total.labels(result=_result)
 x402_payments_total = Counter(
     "gateway_x402_payments_total", "x402 payment mode breakdown", ["mode"]

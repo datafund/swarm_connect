@@ -25,6 +25,7 @@ same one is refused before it can do any work.
 import hashlib
 import json
 import logging
+import os
 import re
 import time
 from threading import Lock
@@ -146,6 +147,12 @@ class OutcomeUnknownRegistry:
     def _path(self) -> str:
         return self._state_file or settings.X402_SETTLEMENT_UNKNOWN_STATE_FILE
 
+    def public_cause(self) -> Optional[str]:
+        """Short and safe to publish (/health): the file's base name and whether it
+        is unreadable or unwritable. Paths and error text stay in the log."""
+        cause = "unreadable" if self._unreadable else "unwritable" if self.unavailable else None
+        return f"{os.path.basename(self._path())} is {cause}" if cause else None
+
     def _load(self) -> None:
         path = self._path()
         consequence = ("The gateway runs, but answers every paid (X-PAYMENT) request with 503 "
@@ -255,6 +262,45 @@ OUTCOME_UNKNOWN_ADVICE = (
 OUTCOME_UNKNOWN_HEADERS = {"X-Payment-Mode": "failed", "X-Payment-Status": "settlement_unknown"}
 
 
+def settlement_unavailable_detail(request: Request, interrupted: bool = False) -> dict:
+    """Body of 502 PAYMENT_SETTLEMENT_UNAVAILABLE: settlement before any work got no answer."""
+    if interrupted:
+        retry = ("The request was interrupted while waiting for it. This authorization stays "
+                 "reserved for up to an hour: a retry with the same X-PAYMENT in that time is "
+                 "answered 409 and not charged. ")
+    else:
+        retry = ("Retry with the same X-PAYMENT while it is valid: if the transfer was "
+                 "collected, the retry is not charged again. ")
+    return {
+        "code": "PAYMENT_SETTLEMENT_UNAVAILABLE",
+        "message": ("The payment could not be settled, so nothing was delivered, but it is "
+                    "unknown whether the transfer was collected. " + retry + OUTCOME_UNKNOWN_ADVICE),
+        "nonce": request_nonce(request),
+        "x402_status": "settlement_failed",
+    }
+
+
+def settlement_interrupted(request: Request, kind: str, exc: BaseException) -> None:
+    """A settlement request was interrupted (CancelledError) before the facilitator answered.
+
+    The transfer may have been submitted. Recorded like a settlement error, and
+    marked on the request so the middleware neither says "not charged" nor
+    releases the authorization (#553). Never raises: the caller re-raises.
+    """
+    try:
+        request.state.x402_settlement_interrupted = kind
+        outcome_unknown.add(getattr(request.state, "x402_auth_key", None), kind)
+        logger.error(f"x402: settlement interrupted ({type(exc).__name__}) on {request.url.path}; "
+                     f"outcome unknown")
+        log_payment_failed(client_ip=get_client_ip(request),
+                           reason=f"settlement interrupted ({type(exc).__name__})", stage="settle",
+                           wallet_address=getattr(request.state, "x402_payer", None),
+                           nonce=request_nonce(request))
+        x402_settlements_total.labels(result="error").inc()
+    except Exception as e:
+        logger.error(f"x402: could not record an interrupted settlement: {e}")
+
+
 def request_nonce(request) -> Optional[str]:
     """The canonical nonce of the request's payment authorization, for audit records."""
     key = getattr(getattr(request, "state", None), "x402_auth_key", None)
@@ -354,21 +400,13 @@ async def settle_payment(request: Request) -> None:
                            stage="settle", wallet_address=payer, nonce=request_nonce(request))
         x402_settlements_total.labels(result="error").inc()
         outcome_unknown.add(getattr(request.state, "x402_auth_key", None), BEFORE_WORK)
-        raise HTTPException(
-            status_code=502,
-            detail={
-                "code": "PAYMENT_SETTLEMENT_UNAVAILABLE",
-                "message": (
-                    "The payment could not be settled, so nothing was delivered, but it is "
-                    "unknown whether the transfer was collected. Retry with the same X-PAYMENT "
-                    "while it is valid: if the transfer was collected, the retry is not charged "
-                    "again. " + OUTCOME_UNKNOWN_ADVICE
-                ),
-                "nonce": (getattr(request.state, "x402_auth_key", None) or (None, None))[1],
-                "x402_status": "settlement_failed",
-            },
-            headers=dict(OUTCOME_UNKNOWN_HEADERS),
-        )
+        raise HTTPException(status_code=502, detail=settlement_unavailable_detail(request),
+                            headers=dict(OUTCOME_UNKNOWN_HEADERS))
+    except BaseException as e:
+        # Interrupted while waiting (CancelledError: a shutdown or a client
+        # disconnect). Just as unknown: recorded, then re-raised (#553).
+        settlement_interrupted(request, BEFORE_WORK, e)
+        raise
 
     if not getattr(result, "success", False):
         settlement_refused(request)
@@ -382,7 +420,7 @@ async def settle_payment(request: Request) -> None:
             log_payment_settled(client_ip=client_ip, payer=payer, transaction_hash=None,
                                 network=settings.X402_NETWORK, success=False, error_reason=reason,
                                 nonce=request_nonce(request))
-            x402_settlements_total.labels(result="refused").inc()
+            x402_settlements_total.labels(result="refused_after_unknown").inc()
             raise outcome_unknown_refusal(auth_key, reason, where="settle", request=request)
         logger.warning(f"x402: settlement refused before delivery: {reason}")
         log_payment_settled(client_ip=client_ip, payer=payer, transaction_hash=None,

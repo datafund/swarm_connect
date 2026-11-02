@@ -477,6 +477,12 @@ class X402Middleware(BaseHTTPMiddleware):
                 logger.error(f"x402: Payment settlement failed: {type(e).__name__}: {e}", exc_info=True)
                 failure = f"{type(e).__name__}"
                 unknown_outcome = True
+            except BaseException as e:
+                # Interrupted (CancelledError) after the work ran: recorded as
+                # AFTER_WORK, then re-raised; no response can be sent (#553).
+                from app.x402.settlement import settlement_interrupted
+                settlement_interrupted(request, AFTER_WORK, e)
+                raise
             if failure is not None:
                 logger.error(f"x402: settlement failed after delivery on {request.url.path}: {failure}")
                 if unknown_outcome:
@@ -512,10 +518,14 @@ class X402Middleware(BaseHTTPMiddleware):
                     log_payment_settled(client_ip=client_ip, payer=payer, transaction_hash=None,
                                         network=settings.X402_NETWORK, success=False, error_reason=failure,
                                         nonce=request_nonce(request))
-                    x402_settlements_total.labels(result="refused").inc()
                     auth_key = getattr(request.state, "x402_auth_key", None)
-                    if outcome_unknown.contains(auth_key):
+                    remembered = outcome_unknown.contains(auth_key)
+                    x402_settlements_total.labels(
+                        result="refused_after_unknown" if remembered else "refused").inc()
+                    if remembered:
                         # An earlier attempt may have spent the nonce: no 402 (#553).
+                        # This route's work has now run: never run it again.
+                        outcome_unknown.add(auth_key, AFTER_WORK)
                         refusal = outcome_unknown_refusal(auth_key, failure, where="settle",
                                                           request=request)
                         return JSONResponse(status_code=refusal.status_code,
@@ -581,6 +591,15 @@ class X402Middleware(BaseHTTPMiddleware):
         from app.x402.audit import log_payment_failed
 
         settlement = getattr(request.state, "x402_settlement", None)
+        if settlement is None and getattr(request.state, "x402_settlement_interrupted", None):
+            # Settlement was in flight when the request was interrupted: the
+            # transfer may have gone through. Not "not charged", and the
+            # authorization stays reserved; it is in the unknown-outcome
+            # registry (settlement.settlement_interrupted) (#553).
+            from app.x402.settlement import OUTCOME_UNKNOWN_HEADERS, settlement_unavailable_detail
+            detail = settlement_unavailable_detail(request, interrupted=True)
+            return JSONResponse(status_code=502, content={"detail": detail, **detail},
+                                headers=dict(OUTCOME_UNKNOWN_HEADERS))
         if settlement is None:
             replay_guard.release(getattr(request.state, "x402_auth_key", None))
             logger.error(f"x402: paid request to {request.url.path} failed before settlement", exc_info=True)

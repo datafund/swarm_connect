@@ -240,3 +240,94 @@ def test_health_warns_while_the_idempotency_store_is_unavailable(monkeypatch):
         response = asyncio.run(read_root())
     assert response["status"] == "ok"    # only keyed paid requests are refused
     assert any("IDEMPOTENCY_UNAVAILABLE" in w for w in response["x402"]["warnings"])
+
+
+# --- #553 review 5 ---------------------------------------------------------
+
+def test_cancelled_settlement_before_work_is_remembered(env, state, monkeypatch):
+    """settle_payment interrupted (CancelledError: a shutdown or disconnect while waiting
+    for the facilitator): the outcome is unknown, not "You were not charged"."""
+    import asyncio
+    fac = _facilitator(asyncio.CancelledError(), refused("nonce_used"), refused("nonce_used"))
+    header = create_valid_payment_header()
+    first = _run(fac, header=header)
+    assert first.status_code != 402 and "You were not charged" not in first.text
+    assert "accepts" not in first.text
+    if first.status_code == 502:
+        body = first.json()
+        assert body["detail"]["code"] == "PAYMENT_SETTLEMENT_UNAVAILABLE"
+        assert first.headers["X-Payment-Status"] == "settlement_unknown"
+    assert st.outcome_unknown.kind(KEY) == st.BEFORE_WORK
+    # Kept reserved: the same X-PAYMENT now is the in-use 409, not a 402.
+    _assert_outcome_unknown(_run(fac, header=header))
+    # After the replay window, refused at settle: 409, not a 402 with accepts.
+    st.replay_guard.reset()
+    _assert_outcome_unknown(_run(fac, header=header))
+    # And after a restart.
+    _restart(monkeypatch, state)
+    _assert_outcome_unknown(_run(fac, header=header))
+    assert DELIVERED == []
+
+
+def test_cancelled_settlement_after_work_is_remembered(env, state, monkeypatch):
+    import asyncio
+    fac = _facilitator(asyncio.CancelledError(), ok())
+    header = create_valid_payment_header()
+    first = _run(fac, path="/api/v1/data/manifest", header=header)
+    assert first.status_code != 402 and "accepts" not in first.text and "You were not charged" not in first.text
+    assert st.outcome_unknown.kind(KEY) == st.AFTER_WORK
+    _restart(monkeypatch, state)
+    _assert_outcome_unknown(_run(fac, path="/api/v1/data/manifest", header=header))
+    assert DELIVERED == [1] and fac.settle.await_count == 1
+
+
+def test_refused_retry_on_a_fallback_route_upgrades_to_after_work(env, state):
+    """A before-work authorization retried on a route that settles after its work: the
+    work ran, so from then on it must not run again."""
+    fac = _facilitator(RuntimeError("down"), refused("nonce_used"), refused("nonce_used"))
+    header = create_valid_payment_header()
+    assert _run(fac, header=header).status_code == 502
+    _assert_outcome_unknown(_run(fac, path="/api/v1/data/manifest", header=header))
+    assert st.outcome_unknown.kind(KEY) == st.AFTER_WORK
+    st.replay_guard.reset()
+    _assert_outcome_unknown(_run(fac, path="/api/v1/data/manifest", header=header))
+    assert DELIVERED == [1]
+
+
+def test_health_warning_does_not_expose_paths_or_exception_text(tmp_path, monkeypatch):
+    import asyncio
+    from unittest.mock import patch
+    path = str(tmp_path / "x402_settlement_unknown.json")
+    with open(path, "w") as f:
+        f.write("{not json")
+    monkeypatch.setattr(st, "outcome_unknown", st.OutcomeUnknownRegistry(state_file=path))
+    from app.main import read_root
+    with patch("app.main.settings") as s, \
+         patch("app.x402.base_balance.check_base_eth_balance", new=AsyncMock(return_value={
+             "ok": True, "is_critical": False, "balance_eth": 1.0, "threshold_eth": 0.005,
+             "critical_eth": 0.001, "address": "0xT", "warning": None})), \
+         patch("app.x402.preflight.check_preflight_balances", new=AsyncMock(return_value={
+             "can_accept": True, "warnings": [], "errors": [], "balances": {}})), \
+         patch("app.services.swarm_api.get_node_status_summary",
+               new=AsyncMock(return_value={"healthy": True, "network_availability": "Available", "warnings": []})):
+        s.X402_ENABLED = True
+        s.PROJECT_NAME = "t"
+        response = asyncio.run(read_root())
+    warning = next(w for w in response["x402"]["warnings"] if "PAYMENT_STATE_UNAVAILABLE" in w)
+    assert str(tmp_path) not in warning and "corrupt" not in warning and "Expecting" not in warning
+    assert "unreadable" in warning and "x402_settlement_unknown.json" in warning
+
+
+def test_refusal_of_a_remembered_authorization_has_its_own_metric(env):
+    from app.services.metrics import x402_settlements_total
+
+    def count(result):
+        return x402_settlements_total.labels(result=result)._value.get()
+
+    refused_before, after_before = count("refused"), count("refused_after_unknown")
+    fac = _facilitator(RuntimeError("down"), refused("nonce_used"))
+    header = create_valid_payment_header()
+    assert _run(fac, header=header).status_code == 502
+    assert _run(fac, header=header).status_code == 409
+    assert count("refused_after_unknown") == after_before + 1
+    assert count("refused") == refused_before
