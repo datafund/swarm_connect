@@ -164,8 +164,9 @@ Another request taking the same stamp at the same moment also returns 409
   }
 }
 ```
-`alternative` points to paying for the acquire with x402 instead where a payment
-is allowed to bypass the allowance (see below), otherwise to a direct purchase.
+`alternative` points to paying for the acquire with x402 instead where x402 is
+enabled and a payment is allowed to bypass the allowance (see below), otherwise
+to a direct purchase.
 
 **Response (fallback to larger)**, for free acquires only. The daily allowance is charged for the size actually handed out. If that larger size's allowance is used up, the response is 409 `REQUESTED_SIZE_UNAVAILABLE`. A paid acquire always gets exactly the size it paid for, or a 409 without being charged.
 ```json

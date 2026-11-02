@@ -191,10 +191,13 @@ async def _refuse_allowance(http_request: Request, message: str, detail: dict) -
     The offer to pay is conditional. Where a settled payment does not buy a
     bypass — a testnet, without the explicit override — telling the caller to
     pay would send them to a path that takes their payment and still refuses
-    them, which is worse than not offering it at all.
+    them, which is worse than not offering it at all. The same holds with x402
+    switched off: an X-PAYMENT header then passes through unread and the
+    caller is refused again (#480).
     """
     detail = dict(detail)
-    if settings.paid_bypass_is_honoured():
+    offer_payment = settings.X402_ENABLED and settings.paid_bypass_is_honoured()
+    if offer_payment:
         message += (
             "To continue now, pay with x402: send an X-PAYMENT header with "
             "this same request and you get a pooled stamp immediately, "
@@ -218,7 +221,7 @@ async def _refuse_allowance(http_request: Request, message: str, detail: dict) -
         }
     detail["message"] = message
 
-    if settings.X402_ENABLED and settings.paid_bypass_is_honoured():
+    if offer_payment:
         # Paying bypasses the allowance here, so answer the way x402 clients
         # understand: 402 with the price, not a 429 they can only report as a
         # rate limit (#374). If the price cannot be worked out right now, the
@@ -266,8 +269,8 @@ async def acquire_stamp(
     When the allowance is spent the response is **429** with
     `DAILY_STAMP_ALLOWANCE_EXHAUSTED` and what to do instead.
 
-    **Paid (optional, x402).** An `X-PAYMENT` header is settled and, on a
-    mainnet network, bypasses the allowance. See `docs/stamp-pool-guide.md`.
+    **Paid (optional, x402).** When x402 is enabled, an `X-PAYMENT` header is
+    settled and, on a mainnet network, bypasses the allowance. See `docs/stamp-pool-guide.md`.
 
     **Quick start**:
     ```bash
