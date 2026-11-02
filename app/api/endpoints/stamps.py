@@ -429,6 +429,8 @@ async def get_stamp_details(
     calculates the expected expiration time based on the current time and the batchTTL,
     and returns the relevant information.
     """
+    # The path allows A-F, but Bee lists batch IDs in lowercase (#542).
+    stamp_id = stamp_id.lower()
     try:
         all_stamps = await swarm_api.get_all_stamps_processed()
     except httpx.HTTPError as e:
@@ -1009,6 +1011,12 @@ async def extend_stamp(
     Raises:
         HTTPException: 400 if insufficient funds, 404 if stamp not found, 502 if Swarm API unreachable
     """
+    # One form for everything below: the Bee lookup, the ownership registry
+    # key, the top-up call and the response. The path allows A-F, but Bee lists
+    # batch IDs in lowercase and the registry keys are lowercase (#542). The
+    # x402 price quote matches the batch the same way, so the quote and the
+    # top-up use the same depth.
+    stamp_id = stamp_id.lower()
     try:
         # First, get the stamp to verify it exists and get its depth
         all_stamps = await swarm_api.get_all_stamps_processed()
