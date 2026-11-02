@@ -614,12 +614,19 @@ class TestStampIdCaseOnUpload:
             assert coll_up.await_args.args[1] == STAMP
 
     @pytest.mark.parametrize("route", ["data", "manifest"])
-    def test_proof_signed_over_uppercase_id_is_accepted(self, bee, route):
-        # The proof message lowercases the batch, so the signer's spelling of
-        # the id does not matter either.
-        client, _, _ = bee
-        r = self._post(client, route, STAMP.upper(), self._headers(OWNER, batch_id=STAMP.upper()))
-        assert r.status_code == 200, r.text
+    def test_proof_signed_over_uppercase_text_is_refused(self, bee, route):
+        # The documented signed text uses the lowercase id. A signature over the
+        # raw uppercase text recovers some other address, so it does not prove
+        # ownership; lowercasing the query must not change that.
+        client, data_up, coll_up = bee
+        ts = int(time.time())
+        sig = _sign(OWNER, f"swarm-connect-owner-upload:{STAMP.upper()}:{ts}")
+        headers = {"X-Owner-Timestamp": str(ts), "X-Owner-Signature": sig}
+        r = self._post(client, route, STAMP.upper(), headers)
+        assert r.status_code == 403, r.text
+        assert r.json()["detail"]["code"] == "STAMP_OWNERSHIP_DENIED"
+        data_up.assert_not_called()
+        coll_up.assert_not_called()
 
     @pytest.mark.parametrize("route", ["data", "manifest"])
     @pytest.mark.parametrize("spelling", [UNREGISTERED, UNREGISTERED.upper()], ids=["lower", "upper"])
