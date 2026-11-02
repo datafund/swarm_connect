@@ -460,7 +460,7 @@
       },
       {
         "id": 111, "title": "Records Stored (7 days)", "type": "stat",
-        "description": "Primary KPI (dataprovenance-app#34): successful uploads in the last 7 days. Production only — this row ignores the Environment dropdown, so dev and test traffic never inflates a product number. Counts every client: app, CLI, MCP and SDK. A manifest (collection) upload counts as one record, however many files it holds.",
+        "description": "Primary KPI (dataprovenance-app#34): successful uploads in the last 7 days. Production only — this row ignores the Environment dropdown, so dev and test traffic never inflates a product number. Counts every client that calls the production gateway (CLI, MCP, SDK). Only app builds from its main branch call the production gateway. Development builds call the dev gateway and are not counted here. A manifest (collection) upload counts as one record, however many files it holds.",
         "gridPos": { "h": 4, "w": 4, "x": 0, "y": 152 },
         "targets": [{ "expr": "sum(increase(gateway_uploads_total{environment=\"main\",status=\"success\"}[7d])) or vector(0)", "legendFormat": "uploads" }],
         "fieldConfig": { "defaults": { "unit": "short", "decimals": 0, "thresholds": { "mode": "absolute", "steps": [{ "value": null, "color": "purple" }] } } }
@@ -488,7 +488,7 @@
       },
       {
         "id": 115, "title": "Pool Stamp Acquires (7 days)", "type": "stat",
-        "description": "Successful pool stamp acquisitions in the last 7 days, production. How many users get as far as needing their own storage.",
+        "description": "Successful pool stamp acquisitions in the last 7 days, production. Shows how often users get as far as needing their own storage. Each acquisition counts, so one user can count more than once.",
         "gridPos": { "h": 4, "w": 4, "x": 16, "y": 152 },
         "targets": [{ "expr": "sum(increase(gateway_pool_acquires_total{environment=\"main\",status=\"success\"}[7d])) or vector(0)", "legendFormat": "acquires" }],
         "fieldConfig": { "defaults": { "unit": "short", "decimals": 0, "thresholds": { "mode": "absolute", "steps": [{ "value": null, "color": "purple" }] } } }
