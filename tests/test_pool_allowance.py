@@ -528,3 +528,30 @@ class TestResetsAtIsParseable:
         assert self._parse(d["resets_at"]).hour == 0
         assert d["resets_at"] in d["message"]
         assert "T24" not in d["message"]
+
+    def test_the_per_client_exhausted_response_carries_a_parseable_reset(self, monkeypatch, tmp_path):
+        """The per-client refusal builds its own message, so it is checked
+        through the HTTP response as well (#531)."""
+        monkeypatch.setattr(settings, "STAMP_POOL_ENABLED", True)
+        monkeypatch.setattr(settings, "POOL_DAILY_ALLOWANCES", "")
+        monkeypatch.setattr(settings, "POOL_DEFAULT_DAILY_ALLOWANCE", 10)
+        monkeypatch.setattr(settings, "POOL_ALLOWANCE_PER_IP", 0)
+
+        from app.services import pool_allowance
+        monkeypatch.setattr(pool_allowance, "_today", lambda: "2026-12-31")
+        monkeypatch.setattr(pool_allowance, "pool_allowance_tracker",
+                            PoolAllowanceTracker(state_file=str(tmp_path / "a.json")))
+        import app.api.endpoints.pool as pool_ep
+        monkeypatch.setattr(pool_ep, "pool_allowance_tracker",
+                            pool_allowance.pool_allowance_tracker)
+        monkeypatch.setattr(pool_ep.stamp_pool_manager, "get_available_stamp",
+                            lambda d: type("S", (), {"depth": 17})())
+
+        resp = TestClient(app).post("/api/v1/pool/acquire", json={"size": "small"})
+        assert resp.status_code in (402, 429), resp.text
+        d = resp.json()["detail"]
+        assert d["code"] == "DAILY_STAMP_ALLOWANCE_PER_CLIENT_EXHAUSTED"
+        assert d["resets_at"] == "2027-01-01T00:00:00Z"
+        assert self._parse(d["resets_at"]).hour == 0
+        assert d["resets_at"] in d["message"]
+        assert "T24" not in d["message"]
