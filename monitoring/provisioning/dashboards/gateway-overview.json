@@ -460,14 +460,14 @@
       },
       {
         "id": 111, "title": "Records Stored (7 days)", "type": "stat",
-        "description": "Primary KPI (dataprovenance-app#34): successful uploads in the last 7 days. Production only — this row ignores the Environment dropdown, so dev and test traffic never inflates a product number. Counts every client: app, CLI, MCP and SDK.",
+        "description": "Primary KPI (dataprovenance-app#34): successful uploads in the last 7 days. Production only — this row ignores the Environment dropdown, so dev and test traffic never inflates a product number. Counts every client: app, CLI, MCP and SDK. A manifest (collection) upload counts as one record, however many files it holds.",
         "gridPos": { "h": 4, "w": 4, "x": 0, "y": 152 },
         "targets": [{ "expr": "sum(increase(gateway_uploads_total{environment=\"main\",status=\"success\"}[7d])) or vector(0)", "legendFormat": "uploads" }],
         "fieldConfig": { "defaults": { "unit": "short", "decimals": 0, "thresholds": { "mode": "absolute", "steps": [{ "value": null, "color": "purple" }] } } }
       },
       {
         "id": 112, "title": "Notarized Share (7 days)", "type": "stat",
-        "description": "Successful notary signatures divided by successful uploads, last 7 days, production. The share of stored data that got a provenance signature.",
+        "description": "Successful notary signatures divided by successful uploads, last 7 days, production. The share of stored data that got a provenance signature. The signature is counted before the Swarm upload, so a signed upload that then fails counts as notarized but not stored. The share can therefore exceed 100%.",
         "gridPos": { "h": 4, "w": 4, "x": 4, "y": 152 },
         "targets": [{ "expr": "sum(increase(gateway_notary_signatures_total{environment=\"main\",status=\"success\"}[7d])) / sum(increase(gateway_uploads_total{environment=\"main\",status=\"success\"}[7d]))", "legendFormat": "notarized" }],
         "fieldConfig": { "defaults": { "unit": "percentunit", "decimals": 0, "thresholds": { "mode": "absolute", "steps": [{ "value": null, "color": "blue" }] } } }
@@ -495,16 +495,16 @@
       },
       {
         "id": 116, "title": "Distinct Callers Today", "type": "stat",
-        "description": "Separate callers seen since midnight UTC, production. A count only, no identities. Resets daily and on every restart, so after a deploy it undercounts the day.",
+        "description": "Separate callers seen since midnight UTC, production. A count only, no identities. Resets daily and on every restart, so after a deploy it undercounts the day. The number only updates when a request arrives. After midnight UTC it keeps showing yesterday's final count until the first request of the new day.",
         "gridPos": { "h": 4, "w": 4, "x": 20, "y": 152 },
         "targets": [{ "expr": "sum(gateway_distinct_callers{environment=\"main\"}) or vector(0)", "legendFormat": "callers" }],
         "fieldConfig": { "defaults": { "unit": "short", "decimals": 0, "thresholds": { "mode": "absolute", "steps": [{ "value": null, "color": "purple" }] } } }
       },
       {
-        "id": 117, "title": "KPIs per Day (30 days)", "type": "timeseries",
-        "description": "Daily totals of the KPIs above, production, over the last 30 days regardless of the dashboard time picker. Each bar is the 24 hours ending at that point.",
+        "id": 117, "title": "KPIs per 24 h, rolling (14 days)", "type": "timeseries",
+        "description": "Totals of the KPIs above per rolling 24-hour window, production, over the last 14 days regardless of the dashboard time picker. Each bar is the 24 hours ending at that bar's time of day, not a calendar day. 14 days is the Grafana Cloud metrics retention.",
         "gridPos": { "h": 8, "w": 16, "x": 0, "y": 156 },
-        "timeFrom": "30d", "interval": "1d",
+        "timeFrom": "14d", "interval": "1d",
         "targets": [
           { "expr": "sum(increase(gateway_uploads_total{environment=\"main\",status=\"success\"}[1d]))", "legendFormat": "records stored" },
           { "expr": "sum(increase(gateway_notary_signatures_total{environment=\"main\",status=\"success\"}[1d]))", "legendFormat": "notarized" },
@@ -514,10 +514,10 @@
         "fieldConfig": { "defaults": { "unit": "short", "decimals": 0, "custom": { "drawStyle": "bars", "fillOpacity": 60, "barAlignment": -1 } } }
       },
       {
-        "id": 118, "title": "Distinct Callers per Day (30 days)", "type": "timeseries",
-        "description": "Highest distinct-caller count reached each day, production, last 30 days. Approximate: the count resets on restart, so a day with a deploy shows less than the true number.",
+        "id": 118, "title": "Distinct Callers per 24 h, rolling (14 days)", "type": "timeseries",
+        "description": "Highest distinct-caller count in each rolling 24-hour window, production, last 14 days. Each bar is the 24 hours ending at that bar's time of day, not a calendar day. The count resets at midnight UTC, so each bar mostly shows the previous UTC day's final count. Approximate: the count also resets on restart, so a window with a deploy shows less than the true number. 14 days is the Grafana Cloud metrics retention.",
         "gridPos": { "h": 8, "w": 8, "x": 16, "y": 156 },
-        "timeFrom": "30d", "interval": "1d",
+        "timeFrom": "14d", "interval": "1d",
         "targets": [{ "expr": "max_over_time(sum(gateway_distinct_callers{environment=\"main\"})[1d:5m])", "legendFormat": "callers" }],
         "fieldConfig": { "defaults": { "unit": "short", "decimals": 0, "custom": { "drawStyle": "bars", "fillOpacity": 60, "barAlignment": -1 } } }
       }
