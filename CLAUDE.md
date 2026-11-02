@@ -419,7 +419,7 @@ The gateway exposes a `/metrics` endpoint (Prometheus text format) when `METRICS
 - `gateway_stamp_min_ttl_seconds`, `gateway_uptime_seconds`
 - `gateway_bandwidth_credit_accounts`, `gateway_bandwidth_credit_bytes_total` (when `CHUNK_UPLOAD_ENABLED`)
 - `gateway_stamp_spend_callers`, `gateway_stamp_spend_bzz_today` — callers holding a spend balance today, and the BZZ charged to budgets so far. Polled rather than accumulated, because the day rolls over inside the tracker and a counter would keep climbing past midnight UTC.
-- `gateway_distinct_callers` — how many separate callers today. A count, not a list.
+- `gateway_distinct_callers` — how many separate callers today. A count, not a list. Computed at scrape time, so it drops to 0 at midnight UTC without waiting for a request (#521); it also resets on restart.
 
 **Info**: `gateway_info{version, environment, x402_enabled, pool_enabled, notary_enabled, chunk_upload_enabled}`
 

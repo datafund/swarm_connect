@@ -163,8 +163,9 @@ requests_by_client_total = Counter(
     ["client_type", "outcome"],
 )
 
-# A COUNT of callers seen today, not their identities. Reset daily by the
-# tracker that feeds it.
+# A COUNT of callers seen today, not their identities. Read from the tracker in
+# app/middleware/client_metrics.py at scrape time, so it resets at midnight UTC
+# without waiting for a request.
 distinct_callers = Gauge(
     "gateway_distinct_callers",
     "Distinct callers seen so far today",

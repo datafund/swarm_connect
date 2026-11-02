@@ -495,7 +495,7 @@
       },
       {
         "id": 116, "title": "Distinct Callers Today", "type": "stat",
-        "description": "Separate callers seen since midnight UTC, production. A count only, no identities. Resets daily and on every restart, so after a deploy it undercounts the day. The number only updates when a request arrives. After midnight UTC it keeps showing yesterday's final count until the first request of the new day.",
+        "description": "Separate callers seen since midnight UTC, production. A count only, no identities. Resets daily and on every restart, so after a deploy it undercounts the day.",
         "gridPos": { "h": 4, "w": 4, "x": 20, "y": 152 },
         "targets": [{ "expr": "sum(gateway_distinct_callers{environment=\"main\"}) or vector(0)", "legendFormat": "callers" }],
         "fieldConfig": { "defaults": { "unit": "short", "decimals": 0, "thresholds": { "mode": "absolute", "steps": [{ "value": null, "color": "purple" }] } } }
@@ -515,7 +515,7 @@
       },
       {
         "id": 118, "title": "Distinct Callers per UTC Day (13 days)", "type": "timeseries",
-        "description": "Highest distinct-caller count reached each UTC day, production, last 13 days. Each bar is one complete UTC calendar day, midnight to midnight. Today's partial day is not shown. The count resets at midnight UTC, so each bar is normally that day's highest count. But the count only updates when a request arrives, so after midnight it keeps the previous day's final count until the first request. On a quiet day that bar can therefore show the previous day's total. Approximate: the count also resets on restart, so a day with a deploy shows less than the true number. The range is 13 days because Grafana Cloud keeps 14 days of metrics, and a range of 14 days or more is cut at the retention limit, which breaks the day alignment.",
+        "description": "Highest distinct-caller count reached each UTC day, production, last 13 days. Each bar is one complete UTC calendar day, midnight to midnight. Today's partial day is not shown. The count resets at midnight UTC, so each bar is that day's highest count. Approximate: the count also resets on restart, so a day with a deploy shows less than the true number. The range is 13 days because Grafana Cloud keeps 14 days of metrics, and a range of 14 days or more is cut at the retention limit, which breaks the day alignment.",
         "gridPos": { "h": 8, "w": 8, "x": 16, "y": 156 },
         "timeFrom": "13d", "interval": "1d",
         "targets": [{ "expr": "max_over_time(sum(gateway_distinct_callers{environment=\"main\"})[1d:5m])", "legendFormat": "callers" }],
