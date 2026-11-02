@@ -207,3 +207,34 @@ def test_real_cdp_sdk_config_is_accepted(x402):
     config = facilitator.get_facilitator_client().config
     assert facilitator._host(config["url"]) == facilitator.CDP_HOST
     assert callable(config["create_headers"])
+
+
+def test_real_cdp_sdk_headers_go_through_the_async_adapter(x402):
+    # The x402 1.x client awaits create_headers; cdp-sdk's is synchronous and
+    # signs a fresh JWT per call. Run the gateway's adapter against the real
+    # package, offline, with a throwaway key made here (never a key literal).
+    pytest.importorskip("cdp.x402")
+    import base64
+
+    import jwt
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric import ed25519
+
+    key = ed25519.Ed25519PrivateKey.generate()
+    raw = serialization.Encoding.Raw
+    seed = key.private_bytes(raw, serialization.PrivateFormat.Raw, serialization.NoEncryption())
+    public = key.public_key().public_bytes(raw, serialization.PublicFormat.Raw)
+    # cdp-sdk takes an Ed25519 secret as base64 of seed + public key (64 bytes).
+    x402.setattr(settings, "X402_FACILITATOR_CDP_API_KEY_ID", "test-key-id")
+    x402.setattr(settings, "X402_FACILITATOR_CDP_API_KEY_SECRET", base64.b64encode(seed + public).decode())
+    x402.setattr(settings, "X402_NETWORK", "base")
+    x402.setattr(settings, "X402_FACILITATOR_URL", "")
+    facilitator.validate_x402_config()
+
+    headers = asyncio.run(facilitator.get_facilitator_client().config["create_headers"]())
+    for route in ("verify", "settle", "supported"):
+        auth = headers[route]["Authorization"]
+        assert auth.startswith("Bearer ")
+        claims = jwt.decode(auth[len("Bearer "):], key.public_key(), algorithms=["EdDSA"],
+                            options={"verify_aud": False})
+        assert claims["sub"] == "test-key-id"
