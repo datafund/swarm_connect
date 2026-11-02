@@ -128,6 +128,27 @@ for _size in SIZE_PRESETS:
     for _status in ("success", "error", "settled_not_delivered"):
         pool_acquires_total.labels(size=_size, status=_status)
 
+# Free pool acquires refused because a daily allowance is spent (#554). Not a
+# status of gateway_pool_acquires_total: that counter's "error" is an empty pool
+# or a lost reservation race (409), and a dashboard panel read it as allowance
+# refusals for months. Every label is from a fixed set, never from the caller:
+# size is the preset charged, scope says WHICH allowance ran out ("origin" = the
+# per-application budget, "client" = the per-client cap), and response is the
+# answer given ("402" when paying would bypass the allowance, otherwise "429").
+# No origin, IP or wallet is a label. 3 x 2 x 2 = 12 series, all created at 0
+# so the first refusal after a deploy is counted by increase().
+pool_allowance_refusals_total = Counter(
+    "gateway_pool_allowance_refusals_total",
+    "Free pool acquires refused because a daily allowance was used up",
+    ["size", "scope", "response"],
+)
+POOL_ALLOWANCE_SCOPES = ("origin", "client")
+POOL_ALLOWANCE_RESPONSES = ("402", "429")
+for _size in SIZE_PRESETS:
+    for _scope in POOL_ALLOWANCE_SCOPES:
+        for _response in POOL_ALLOWANCE_RESPONSES:
+            pool_allowance_refusals_total.labels(size=_size, scope=_scope, response=_response)
+
 x402_settlements_total = Counter(
     "gateway_x402_settlements_total",
     "x402 settlement outcomes (#375): settled, refused (nothing delivered), error "

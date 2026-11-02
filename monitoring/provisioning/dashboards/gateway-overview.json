@@ -394,7 +394,7 @@
       {
         "id": 96, "title": "Daily Spend Budgets in Use", "type": "timeseries",
         "description": "Callers holding a spend balance today, and the total BZZ charged to daily budgets so far. Both reset at midnight UTC. A single caller consuming most of the total is the case worth looking at — either an integration that needs its own allowance, or one caller absorbing the budget everyone else shares.",
-        "gridPos": { "h": 8, "w": 12, "x": 0, "y": 108 },
+        "gridPos": { "h": 8, "w": 8, "x": 0, "y": 108 },
         "targets": [
           { "expr": "sum(gateway_stamp_spend_bzz_today{environment=~\"$environment\"})", "legendFormat": "BZZ charged today" },
           { "expr": "sum(gateway_stamp_spend_callers{environment=~\"$environment\"})", "legendFormat": "callers" }
@@ -402,10 +402,17 @@
         "fieldConfig": { "defaults": { "custom": { "drawStyle": "line", "lineInterpolation": "smooth", "fillOpacity": 5 } } }
       },
       {
-        "id": 97, "title": "Pool Daily Allowance Refusals", "type": "timeseries",
-        "description": "Pooled batch requests refused because the caller's daily allowance was spent, by size. The main consumer is a browser app, so a refusal here is a user being told to come back tomorrow — worth acting on rather than watching.",
-        "gridPos": { "h": 8, "w": 12, "x": 12, "y": 108 },
+        "id": 97, "title": "Pool Acquires Refused: Empty Pool or Lost Race", "type": "timeseries",
+        "description": "Pool acquires answered 409 because no stamp of the size was in stock, or because another request took the reserved stamp first, by size, per hour. This is gateway_pool_acquires_total with status=\"error\". It does not include daily-allowance refusals; those are in the 'Pool Daily Allowance Refusals' panel. A steady line here means the pool is not refilled fast enough for the demand on that size.",
+        "gridPos": { "h": 8, "w": 8, "x": 8, "y": 108 },
         "targets": [{ "expr": "sum by (size) (rate(gateway_pool_acquires_total{environment=~\"$environment\",status=\"error\"}[30m]) * 3600)", "legendFormat": "{{size}}" }],
+        "fieldConfig": { "defaults": { "unit": "short", "custom": { "drawStyle": "line", "lineInterpolation": "smooth", "fillOpacity": 10 } } }
+      },
+      {
+        "id": 104, "title": "Pool Daily Allowance Refusals", "type": "timeseries",
+        "description": "Free pool acquires refused because a daily allowance was used up, per hour, by size, by which allowance ran out and by the answer given. scope 'origin' is the per-application budget (POOL_DAILY_ALLOWANCES / POOL_DEFAULT_DAILY_ALLOWANCE); scope 'client' is the per-client cap (POOL_ALLOWANCE_PER_IP). The answer is 402 when paying with x402 would bypass the allowance, otherwise 429. The main consumer is a browser app, so a refusal here is a user being told to pay or come back tomorrow. The data starts at the deploy that added gateway_pool_allowance_refusals_total; before it these refusals were not counted anywhere, and the old version of this panel showed empty-pool errors instead.",
+        "gridPos": { "h": 8, "w": 8, "x": 16, "y": 108 },
+        "targets": [{ "expr": "sum by (size, scope, response) (rate(gateway_pool_allowance_refusals_total{environment=~\"$environment\"}[30m]) * 3600)", "legendFormat": "{{size}} / {{scope}} / {{response}}" }],
         "fieldConfig": { "defaults": { "unit": "short", "custom": { "drawStyle": "line", "lineInterpolation": "smooth", "fillOpacity": 10 } } }
       },
       {
