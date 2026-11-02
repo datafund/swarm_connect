@@ -994,3 +994,26 @@ class TestFreeCeilingRefusalOffersPaymentOnlyWherePayingHelps:
         msg = self._free_ceiling_refusal(tracker, monkeypatch, x402_enabled=True,
                                          network="base-sepolia", override=True)
         assert self.PAID_CLAUSE in msg, msg
+
+    def test_overall_ceiling_refusal_never_offers_the_paid_route(self, tracker, monkeypatch):
+        """Control: the overall ceiling bounds paid spending too, so even where
+        paying bypasses the free portion, this refusal must not offer it."""
+        from types import SimpleNamespace
+        from fastapi import HTTPException
+        import app.api.endpoints.stamps as stamps_ep
+
+        monkeypatch.setattr(settings, "X402_ENABLED", True)
+        monkeypatch.setattr(settings, "X402_NETWORK", "base")
+        monkeypatch.setattr(settings, "X402_MAX_STAMP_BZZ", 0.0)
+        monkeypatch.setattr(settings, "STAMP_DAILY_BZZ_PER_CALLER", UNLIMITED)
+        monkeypatch.setattr(settings, "GATEWAY_DAILY_BZZ_CEILING", 0.01)
+        monkeypatch.setattr(settings, "GATEWAY_DAILY_BZZ_FREE_CEILING", 100.0)
+
+        req = SimpleNamespace(state=SimpleNamespace(x402_mode=None), headers={}, client=None)
+        with pytest.raises(HTTPException) as exc:
+            stamps_ep._enforce_spend_limits(req, 0.1, "stamp purchase")
+        assert exc.value.status_code == 503
+        d = exc.value.detail
+        assert d["code"] == "GATEWAY_DAILY_SPEND_CEILING"
+        assert d["message"] == f"The gateway has reached its daily spending limit. It resets at {d['resets_at']}."
+        assert "paid" not in d["message"].lower()
