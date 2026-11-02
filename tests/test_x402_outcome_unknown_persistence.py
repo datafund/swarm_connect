@@ -331,3 +331,154 @@ def test_refusal_of_a_remembered_authorization_has_its_own_metric(env):
     assert _run(fac, header=header).status_code == 409
     assert count("refused_after_unknown") == after_before + 1
     assert count("refused") == refused_before
+
+
+# --- #553 review 6 ---------------------------------------------------------
+
+def _broken_writes(monkeypatch):
+    def broken(path, data):
+        raise OSError("read-only file system")
+    monkeypatch.setattr(st, "atomic_write_json", broken)
+
+
+def test_a_registry_that_cannot_write_its_file_at_startup_fails_closed(env, tmp_path, monkeypatch):
+    """Unwritable state file plus a restart: the new instance must not report available."""
+    path = str(tmp_path / "s.json")
+    st.OutcomeUnknownRegistry(state_file=path).add(KEY, st.BEFORE_WORK)
+    _broken_writes(monkeypatch)
+    reg = st.OutcomeUnknownRegistry(state_file=path)
+    assert reg.unavailable
+    monkeypatch.setattr(st, "outcome_unknown", reg)
+    fac = _facilitator(refused("nonce_used"))
+    r = _run(fac)
+    assert r.status_code == 503 and r.json()["detail"]["code"] == "PAYMENT_STATE_UNAVAILABLE"
+    assert fac.settle.await_count == 0
+
+
+def test_restart_with_an_unwritable_file_does_not_lose_a_memory_only_entry(env, tmp_path, monkeypatch):
+    """The measured case: entry kept only in memory (write failed), then a restart."""
+    path = str(tmp_path / "s.json")
+    _broken_writes(monkeypatch)
+    first = st.OutcomeUnknownRegistry(state_file=path)
+    first.add(KEY, st.BEFORE_WORK)
+    monkeypatch.setattr(st, "outcome_unknown", st.OutcomeUnknownRegistry(state_file=path))
+    st.replay_guard.reset()
+    r = _run(_facilitator(refused("nonce_used")))
+    assert r.status_code == 503
+    assert "accepts" not in r.text
+
+
+def test_write_ahead_entry_exists_while_the_facilitator_is_asked(env, state, monkeypatch):
+    """SIGKILL during settle: the entry is on disk before the facilitator is called, so
+    after a restart the retry is answered 409, not a payable 402."""
+    snapshot = {}
+
+    async def settle(**kw):
+        snapshot["file"] = open(state).read()     # what a crash right now would leave
+        return refused("nonce_used")
+
+    fac = _facilitator()
+    fac.settle = AsyncMock(side_effect=settle)
+    header = create_valid_payment_header()
+    r = _run(fac, header=header)
+    assert r.status_code == 402                   # a definite refusal, no earlier unknown
+    assert not st.outcome_unknown.contains(KEY)
+    with open(state, "w") as f:                   # the crash: the file as it was mid-settle
+        f.write(snapshot["file"])
+    _restart(monkeypatch, state)
+    _assert_outcome_unknown(_run(_facilitator(refused("nonce_used")), header=header))
+
+
+def test_write_ahead_on_the_fallback_is_after_work(env, state, monkeypatch):
+    snapshot = {}
+
+    async def settle(**kw):
+        snapshot["file"] = open(state).read()
+        return ok()
+
+    fac = _facilitator()
+    fac.settle = AsyncMock(side_effect=settle)
+    header = create_valid_payment_header()
+    assert _run(fac, path="/api/v1/data/manifest", header=header).status_code == 200
+    assert not st.outcome_unknown.contains(KEY)
+    with open(state, "w") as f:
+        f.write(snapshot["file"])
+    _restart(monkeypatch, state)
+    assert st.outcome_unknown.kind(KEY) == st.AFTER_WORK
+
+
+def test_a_normal_success_leaves_no_entry(env, state, monkeypatch):
+    fac = _facilitator(ok())
+    assert _run(fac).status_code == 200
+    assert not st.outcome_unknown.contains(KEY)
+    st.outcome_unknown.add(("0xb", "0x9"), st.BEFORE_WORK)    # the next write
+    _restart(monkeypatch, state)
+    assert not st.outcome_unknown.contains(KEY)
+
+
+def test_a_failed_write_ahead_refuses_before_the_facilitator(env, state, monkeypatch):
+    _broken_writes(monkeypatch)
+    fac = _facilitator(ok())
+    r = _run(fac)
+    assert r.status_code == 503 and r.json()["detail"]["code"] == "PAYMENT_STATE_UNAVAILABLE"
+    assert fac.settle.await_count == 0 and DELIVERED == []
+
+
+def test_a_failed_write_ahead_on_the_fallback_withholds_the_result_unpaid(env, state, monkeypatch):
+    header = create_valid_payment_header()
+    fac = _facilitator(ok(), ok())
+    _broken_writes(monkeypatch)
+    r = _run(fac, path="/api/v1/data/manifest", header=header)
+    assert r.status_code == 503 and r.json()["code"] == "PAYMENT_STATE_UNAVAILABLE"
+    assert "ok" not in r.json()
+    assert fac.settle.await_count == 0
+    # Nothing was charged, so once the disk recovers the same authorization can pay.
+    monkeypatch.undo()
+    monkeypatch.setattr(st, "outcome_unknown", st.OutcomeUnknownRegistry(state_file=state))
+    assert _run(fac, path="/api/v1/data/manifest", header=header).status_code == 200
+
+
+def test_inner_cancel_on_the_fallback_is_a_structured_502(env, state):
+    import asyncio
+    fac = _facilitator(asyncio.CancelledError())
+    r = _run(fac, path="/api/v1/data/manifest")
+    assert r.status_code == 502
+    body = r.json()
+    assert body["code"] == "PAYMENT_SETTLEMENT_UNKNOWN" and body["detail"]["code"] == "PAYMENT_SETTLEMENT_UNKNOWN"
+    assert body["nonce"] == KEY[1]
+    assert r.headers["X-Payment-Status"] == "settlement_unknown"
+    assert "not charged" not in r.text and "ok" not in body
+
+
+def test_outcome_unknown_message_says_whether_the_work_ran(env, state):
+    fac = _facilitator(RuntimeError("down"), refused("nonce_used"))
+    header = create_valid_payment_header()
+    assert _run(fac, header=header).status_code == 502
+    after = _run(fac, path="/api/v1/data/manifest", header=header)
+    message = after.json()["detail"]["message"]
+    assert "did nothing" not in message and "withheld" in message
+    st.replay_guard.reset()
+    before = _run(_facilitator(refused("x")), header=create_valid_payment_header(payer="0x" + "be" * 20))
+    assert before.status_code == 402   # unrelated authorization: ordinary refusal
+    fac = _facilitator(RuntimeError("down"), refused("nonce_used"))
+    h2 = create_valid_payment_header(payer="0x" + "cf" * 20)
+    assert _run(fac, header=h2).status_code == 502
+    assert "did nothing" in _run(fac, header=h2).json()["detail"]["message"]
+
+
+def test_middleware_built_bodies_have_detail_and_top_level_code(env, state):
+    fac = _facilitator(RuntimeError("down"))
+    r = _run(fac, path="/api/v1/data/manifest")
+    assert r.json()["detail"]["code"] == r.json()["code"] == "PAYMENT_SETTLEMENT_UNKNOWN"
+    fac = _facilitator(RuntimeError("down"), refused("nonce_used"))
+    h = create_valid_payment_header(payer="0x" + "dd" * 20)
+    assert _run(fac, header=h).status_code == 502
+    r = _run(fac, path="/api/v1/data/manifest", header=h)
+    assert r.json()["detail"]["code"] == r.json()["code"] == "PAYMENT_AUTHORIZATION_OUTCOME_UNKNOWN"
+    assert r.json()["message"] == r.json()["detail"]["message"]
+
+
+def test_settlement_failed_form_2_has_detail_too(env, state):
+    r = _run(_facilitator(refused("insufficient_funds")), path="/api/v1/data/manifest")
+    assert r.status_code == 402
+    assert r.json()["code"] == r.json()["detail"]["code"] == "PAYMENT_SETTLEMENT_FAILED"

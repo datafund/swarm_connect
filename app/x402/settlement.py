@@ -161,6 +161,7 @@ class OutcomeUnknownRegistry:
         try:
             data = load_json_state(path, consequence)
             if data is None:
+                self._probe_write()
                 return
             entries = data.get("entries")
             if not isinstance(entries, dict) or not all(
@@ -173,7 +174,14 @@ class OutcomeUnknownRegistry:
             return
         now = time.time()
         self._entries = {k: v for k, v in entries.items() if v["expires"] > now}
+        self._probe_write()
 
+    def _probe_write(self) -> None:
+        # A file that loads but cannot be written would keep new entries only in
+        # memory and lose them at the next restart: find out now, not at the
+        # first unknown outcome (#553). Rewrites the (pruned) entries.
+        with self._lock:
+            self._save()
     def _save(self) -> None:
         """Write the entries. Call with the lock held."""
         if self._unreadable:
@@ -197,9 +205,10 @@ class OutcomeUnknownRegistry:
             del self._entries[k]
         return bool(expired)
 
-    def add(self, key: Optional[Tuple[str, str]], kind: str) -> None:
+    def add(self, key: Optional[Tuple[str, str]], kind: str) -> bool:
+        """Remember `key`; True if that is on disk (False: unavailable now)."""
         if key is None:
-            return
+            return True
         kid = _key_id(key)
         now = time.time()
         with self._lock:
@@ -218,6 +227,39 @@ class OutcomeUnknownRegistry:
                     del self._entries[k]
                 logger.warning("x402: settlement-unknown registry over its cap; evicted %d", excess)
             self._save()
+            return not (self._unreadable or self._write_error)
+
+    def begin_settlement(self, key: Optional[Tuple[str, str]], kind: str) -> Tuple[Optional[str], bool]:
+        """Write-ahead before the facilitator is asked to settle (#553).
+
+        Records `key` as unknown (BEFORE_WORK or AFTER_WORK) so that a crash
+        or kill while waiting leaves the record a restart needs. Returns the
+        kind remembered BEFORE this attempt (None: no earlier unknown outcome,
+        so a definite refusal is an ordinary one) and whether the write
+        succeeded; on False the caller must not settle.
+        """
+        prior = self.kind(key)
+        return prior, self.add(key, kind)
+
+    def settled(self, key: Optional[Tuple[str, str]], prior: Optional[str]) -> None:
+        """This attempt settled, so no earlier attempt spent the authorization.
+
+        After an earlier unknown outcome (rare) the removal is written at once;
+        a plain write-ahead entry is dropped as in end_settlement."""
+        if prior is not None:
+            self.discard(key)
+        else:
+            self.end_settlement(key, None)
+
+    def end_settlement(self, key: Optional[Tuple[str, str]], prior: Optional[str]) -> None:
+        """A definite answer: drop the write-ahead entry unless an earlier attempt's
+        outcome is still unknown (`prior`). Not written now, to keep one write per
+        paid request: a crash before the next write leaves a stale entry, which
+        only turns a later refusal of this spent authorization into a 409."""
+        if key is None or prior is not None:
+            return
+        with self._lock:
+            self._entries.pop(_key_id(key), None)
 
     def kind(self, key: Optional[Tuple[str, str]]) -> Optional[str]:
         """BEFORE_WORK or AFTER_WORK for a remembered authorization, else None."""
@@ -260,6 +302,14 @@ OUTCOME_UNKNOWN_ADVICE = (
 
 
 OUTCOME_UNKNOWN_HEADERS = {"X-Payment-Mode": "failed", "X-Payment-Status": "settlement_unknown"}
+
+
+def payment_state_unavailable_detail() -> dict:
+    return {
+        "code": "PAYMENT_STATE_UNAVAILABLE",
+        "message": ("Paid requests cannot be processed right now; this payment was not "
+                    "charged. Retry later with the same X-PAYMENT."),
+    }
 
 
 def settlement_unavailable_detail(request: Request, interrupted: bool = False) -> dict:
@@ -308,7 +358,8 @@ def request_nonce(request) -> Optional[str]:
 
 
 def outcome_unknown_refusal(auth_key: Tuple[str, str], reason: Optional[str] = None, *,
-                            where: str, request: Optional[Request] = None) -> HTTPException:
+                            where: str, request: Optional[Request] = None,
+                            work_ran: bool = False) -> HTTPException:
     """The answer to a later attempt with an authorization whose settlement outcome is unknown.
 
     409, not 402, and no `accepts`. Whatever refused it, this request did
@@ -328,7 +379,9 @@ def outcome_unknown_refusal(auth_key: Tuple[str, str], reason: Optional[str] = N
         "code": "PAYMENT_AUTHORIZATION_OUTCOME_UNKNOWN",
         "message": ("An earlier request with this payment authorization was sent for settlement "
                     "and no answer came back, so that transfer may already have been collected. "
-                    "This request did nothing and was not charged. " + OUTCOME_UNKNOWN_ADVICE),
+                    + ("This request's work ran, but its result is withheld and it was not charged. "
+                       if work_ran else "This request did nothing and was not charged. ")
+                    + OUTCOME_UNKNOWN_ADVICE),
         "nonce": auth_key[1],
         "x402_status": "settlement_unknown",
     }
@@ -386,6 +439,13 @@ async def settle_payment(request: Request) -> None:
     # outcome is unknown, and a retry must not be charged on the assumption
     # that nothing happened (idempotency.py).
     from app.x402.idempotency import record_settlement, record_settling, settlement_refused
+    auth_key = getattr(request.state, "x402_auth_key", None)
+    # Write-ahead: on disk before the facilitator is asked, so a kill while
+    # waiting leaves an unknown outcome behind, not nothing (#553).
+    prior, recorded = outcome_unknown.begin_settlement(auth_key, BEFORE_WORK)
+    if not recorded:
+        raise HTTPException(status_code=503, headers={"Retry-After": "60"},
+                            detail=payment_state_unavailable_detail())
     record_settling(request)
     try:
         result = await _facilitator().settle(payment=payment, payment_requirements=requirements)
@@ -411,8 +471,7 @@ async def settle_payment(request: Request) -> None:
     if not getattr(result, "success", False):
         settlement_refused(request)
         reason = getattr(result, "error_reason", None) or "unknown"
-        auth_key = getattr(request.state, "x402_auth_key", None)
-        if outcome_unknown.contains(auth_key):
+        if prior is not None:
             # Probably refused because the earlier attempt spent the nonce, but
             # the reason does not say so reliably: no 402, no `accepts`.
             logger.warning(f"x402: settlement refused ({reason}) for an authorization whose "
@@ -422,6 +481,7 @@ async def settle_payment(request: Request) -> None:
                                 nonce=request_nonce(request))
             x402_settlements_total.labels(result="refused_after_unknown").inc()
             raise outcome_unknown_refusal(auth_key, reason, where="settle", request=request)
+        outcome_unknown.end_settlement(auth_key, None)
         logger.warning(f"x402: settlement refused before delivery: {reason}")
         log_payment_settled(client_ip=client_ip, payer=payer, transaction_hash=None,
                             network=settings.X402_NETWORK, success=False, error_reason=reason,
@@ -445,7 +505,8 @@ async def settle_payment(request: Request) -> None:
         raise HTTPException(status_code=402, detail=detail)
 
     request.state.x402_settlement = result
-    outcome_unknown.discard(getattr(request.state, "x402_auth_key", None))
+    # Settled now: the transfer happened once, by this attempt.
+    outcome_unknown.settled(auth_key, prior)
     # From here on a retry with the same Idempotency-Key must not pay again,
     # whatever happens to this request (#359).
     record_settlement(request, result)

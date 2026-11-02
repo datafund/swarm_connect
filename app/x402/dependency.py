@@ -642,11 +642,9 @@ async def require_x402_payment(request: Request) -> None:
     # or run work again: refuse paid requests, unpaid, until it is repaired.
     from app.x402.settlement import outcome_unknown as _outcome_unknown
     if _outcome_unknown.unavailable:
-        raise HTTPException(status_code=503, headers={"Retry-After": "60"}, detail={
-            "code": "PAYMENT_STATE_UNAVAILABLE",
-            "message": ("Paid requests cannot be processed right now; this payment was not "
-                        "charged. Retry later with the same X-PAYMENT."),
-        })
+        from app.x402.settlement import payment_state_unavailable_detail
+        raise HTTPException(status_code=503, headers={"Retry-After": "60"},
+                            detail=payment_state_unavailable_detail())
 
     # Verify payment with facilitator
     try:
