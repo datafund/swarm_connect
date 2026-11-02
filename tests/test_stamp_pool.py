@@ -1959,3 +1959,152 @@ class TestSkippedReplenishmentErrors:
         assert "pool_state.json" not in msg, msg
         assert manager._last_sync_failure == "bee"
         assert not any("pool_state.json" in e for e in manager._errors), manager._errors
+
+
+class TestPoolStatusHidesBeeAddress:
+    """/pool/status must not reveal the internal Bee API address (#534).
+
+    /pool/status has no authentication. httpx's HTTPStatusError text names the
+    request URL ("Server error '503 Service Unavailable' for url '...'"), so
+    copying str(e) into errors published the Bee node's address. The entry
+    there carries the HTTP status or the exception class; the full text goes
+    to the log only, as #482 did for the state-file path.
+    """
+
+    BEE = "http://bee.internal.example:1633"
+    HOST = "bee.internal.example"
+
+    @pytest.fixture
+    def state_file(self, tmp_path):
+        return str(tmp_path / "pool_state.json")
+
+    @staticmethod
+    def _write_known(state_file):
+        # Sync asks Bee only when the state file lists batches.
+        with open(state_file, "w") as f:
+            json.dump(["batch_aaa"], f)
+
+    def _status_error(self, path, status=503, body=None):
+        import httpx
+        request = httpx.Request("GET", f"{self.BEE}/{path}")
+        response = httpx.Response(status, json=body or {}, request=request)
+        try:
+            response.raise_for_status()
+        except httpx.HTTPStatusError as e:
+            return e
+        raise AssertionError("raise_for_status did not raise")
+
+    def _assert_no_address(self, errors):
+        leaks = [e for e in errors if self.HOST in e or self.BEE in e]
+        assert leaks == [], f"Bee address exposed in /pool/status: {leaks}"
+
+    @pytest.mark.asyncio
+    async def test_bee_sync_error_hides_bee_url(self, state_file):
+        exc = self._status_error("batches")
+        assert self.BEE in str(exc)  # the premise: httpx names the URL
+        self._write_known(state_file)
+        manager = StampPoolManager(state_file=state_file)
+
+        with patch("app.services.stamp_pool.settings.STAMP_POOL_ENABLED", True), \
+             patch("app.services.swarm_api.get_all_stamps_processed",
+                   new=AsyncMock(side_effect=exc)), \
+             patch("app.services.stamp_pool.logger") as log:
+            await manager.check_and_replenish()
+
+        errors = manager.get_status().errors
+        self._assert_no_address(errors)
+        sync_errors = [e for e in errors if e.startswith("Sync error")]
+        assert len(sync_errors) == 1, errors
+        assert "HTTP 503" in sync_errors[0], sync_errors
+        # The full text, URL included, is still in the log for the operator.
+        logged = " ".join(str(c) for c in log.error.call_args_list)
+        assert self.BEE in logged, logged
+
+    @pytest.mark.asyncio
+    async def test_bee_sync_connect_error_names_the_class(self, state_file):
+        import httpx
+        request = httpx.Request("GET", f"{self.BEE}/batches")
+        exc = httpx.ConnectError(f"cannot connect to {self.BEE}", request=request)
+        self._write_known(state_file)
+        manager = StampPoolManager(state_file=state_file)
+
+        with patch("app.services.stamp_pool.settings.STAMP_POOL_ENABLED", True), \
+             patch("app.services.swarm_api.get_all_stamps_processed",
+                   new=AsyncMock(side_effect=exc)):
+            await manager.check_and_replenish()
+
+        errors = manager.get_status().errors
+        self._assert_no_address(errors)
+        sync_errors = [e for e in errors if e.startswith("Sync error")]
+        assert len(sync_errors) == 1 and "ConnectError" in sync_errors[0], errors
+
+    @pytest.mark.asyncio
+    async def test_purchase_error_hides_bee_url_keeps_bee_message(self, state_file):
+        exc = self._status_error("stamps/1000/17", status=400,
+                                 body={"code": 400, "message": "out of funds"})
+        manager = StampPoolManager(state_file=state_file)
+        with open(state_file, "w") as f:
+            json.dump([], f)
+
+        with patch("app.services.stamp_pool.settings.STAMP_POOL_ENABLED", True), \
+             patch("app.services.swarm_api.get_all_stamps_processed",
+                   new=AsyncMock(return_value=[])), \
+             patch.object(manager, "_update_stamp_ttls", new=AsyncMock()), \
+             patch.object(manager, "_purchase_stamp", new=AsyncMock(side_effect=exc)):
+            await manager.check_and_replenish()
+
+        errors = manager.get_status().errors
+        self._assert_no_address(errors)
+        failed = [e for e in errors if e.startswith("Failed to purchase")]
+        assert failed, errors
+        assert all("HTTP 400" in e and "out of funds" in e for e in failed), failed
+
+    @pytest.mark.asyncio
+    async def test_immediate_replenishment_error_hides_bee_url(self, state_file):
+        exc = self._status_error("stamps/1000/17", status=500)
+        manager = StampPoolManager(state_file=state_file)
+
+        with patch.object(manager, "_purchase_stamp", new=AsyncMock(side_effect=exc)):
+            await manager._async_replenish_one(17)
+
+        errors = manager.get_status().errors
+        self._assert_no_address(errors)
+        assert any(e.startswith("Immediate replenishment failed") and "HTTP 500" in e
+                   for e in errors), errors
+
+    @pytest.mark.asyncio
+    async def test_topup_error_hides_bee_url(self, state_file):
+        exc = self._status_error("stamps/topup/x/1000", status=502)
+        manager = StampPoolManager(state_file=state_file)
+        depth = next(iter(manager.get_reserve_config()))
+        manager.add_stamp_to_pool("a" * 64, depth, 1_000_000, 60)
+        manager._last_sync_ok = True
+
+        with patch("app.services.stamp_pool.settings.STAMP_POOL_ENABLED", True), \
+             patch.object(manager, "sync_from_bee_node", new=AsyncMock(return_value=0)), \
+             patch.object(manager, "_update_stamp_ttls", new=AsyncMock()), \
+             patch.object(manager, "_purchase_stamp", new=AsyncMock(return_value=None)), \
+             patch.object(manager, "_get_stamp_ttl", new=AsyncMock(return_value=60)), \
+             patch.object(manager, "_topup_stamp", new=AsyncMock(side_effect=exc)):
+            await manager.check_and_replenish()
+
+        errors = manager.get_status().errors
+        self._assert_no_address(errors)
+        assert any(e.startswith("Failed to top up") and "HTTP 502" in e
+                   for e in errors), errors
+
+    @pytest.mark.asyncio
+    async def test_pool_check_failure_hides_bee_url(self, state_file):
+        exc = self._status_error("stamps", status=503)
+        manager = StampPoolManager(state_file=state_file)
+        manager._last_sync_ok = True
+
+        with patch("app.services.stamp_pool.settings.STAMP_POOL_ENABLED", True), \
+             patch.object(manager, "sync_from_bee_node", new=AsyncMock(return_value=0)), \
+             patch.object(manager, "_update_stamp_ttls", new=AsyncMock(side_effect=exc)):
+            await manager.check_and_replenish()
+
+        errors = manager.get_status().errors
+        self._assert_no_address(errors)
+        assert any(e.startswith("Pool check failed") and "HTTP 503" in e
+                   for e in errors), errors

@@ -54,6 +54,20 @@ def _bee_error_message(exc) -> Optional[str]:
     return text[:200] or None
 
 
+def _error_cause(exc) -> str:
+    """Name a failure for /pool/status without quoting its text (#534).
+
+    /pool/status is unauthenticated, and httpx's HTTPStatusError text names
+    the request URL, which is the internal Bee API address. The entry there
+    gets the HTTP status, or the exception class when there is no response;
+    the caller logs the full text.
+    """
+    status = getattr(getattr(exc, "response", None), "status_code", None)
+    if status is not None:
+        return f"HTTP {status}"
+    return type(exc).__name__
+
+
 
 class PoolStampStatus(str, Enum):
     """Status of a stamp in the pool."""
@@ -472,7 +486,8 @@ class StampPoolManager:
                 logger.warning(f"Immediate replenishment: purchase returned no batch_id for depth {depth}")
         except Exception as e:
             logger.error(f"Immediate replenishment failed for depth {depth}: {e}")
-            self._errors.append(f"Immediate replenishment failed (depth {depth}): {str(e)}")
+            self._errors.append(f"Immediate replenishment failed (depth {depth}): "
+                                f"{_error_cause(e)}; see the gateway log for details.")
         finally:
             # Remove from pending count
             with self._lock:
@@ -747,8 +762,11 @@ class StampPoolManager:
             return 0
 
         except Exception as e:
+            # The full text can name the Bee API address (httpx puts the URL
+            # in HTTPStatusError). It goes to the log only (#534).
             logger.error(f"Error syncing stamps from Bee node: {e}")
-            self._last_sync_error = f"Sync error: {str(e)}"
+            self._last_sync_error = (f"Sync error: could not read stamps from the Bee node "
+                                     f"({_error_cause(e)}); see the gateway log for details.")
             self._errors.append(self._last_sync_error)
             self._last_sync_failure = "bee"
             # The pool's contents are now UNKNOWN, not known-to-be-empty. Record
@@ -882,11 +900,11 @@ class StampPoolManager:
                                 self._backoff_count.pop(depth, None)
                         except Exception as e:
                             detail = _bee_error_message(e)
-                            error_msg = f"Failed to purchase depth-{depth} stamp: {e}"
-                            if detail:
-                                error_msg += f" — Bee said: {detail}"
-                            logger.error(error_msg)
-                            results["errors"].append(error_msg)
+                            said = f" — Bee said: {detail}" if detail else ""
+                            logger.error(f"Failed to purchase depth-{depth} stamp: {e}{said}")
+                            # Bee's own message, not str(e): that names the Bee URL (#534).
+                            results["errors"].append(
+                                f"Failed to purchase depth-{depth} stamp: {_error_cause(e)}{said}")
                             # Back off this depth. Without this the next check
                             # tries again immediately and keeps failing: an
                             # underfunded pool retried an unaffordable purchase
@@ -952,9 +970,10 @@ class StampPoolManager:
                         else:
                             debug["result"] = "refused by a spending ceiling"
                     except Exception as e:
-                        error_msg = f"Failed to top up stamp {stamp.batch_id[:16]}...: {e}"
-                        logger.error(error_msg)
-                        results["errors"].append(error_msg)
+                        logger.error(f"Failed to top up stamp {stamp.batch_id[:16]}...: {e}")
+                        results["errors"].append(
+                            f"Failed to top up stamp {stamp.batch_id[:16]}...: "
+                            f"{_error_cause(e)}; see the gateway log for details.")
                         debug["result"] = f"error: {e}"
                 elif current_ttl is None:
                     debug["result"] = "skipped: ttl_lookup_returned_none"
@@ -967,8 +986,8 @@ class StampPoolManager:
             self._errors = results["errors"]
 
         except Exception as e:
-            error_msg = f"Pool check failed: {e}"
-            logger.error(error_msg)
+            logger.error(f"Pool check failed: {e}")
+            error_msg = f"Pool check failed: {_error_cause(e)}; see the gateway log for details."
             results["errors"].append(error_msg)
             self._errors = [error_msg]
 
