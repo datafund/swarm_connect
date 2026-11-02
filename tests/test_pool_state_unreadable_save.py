@@ -249,3 +249,160 @@ def test_missing_file_is_still_written(tmp_path):
     mgr._save_state()
     assert _state(mgr) == [A]
     assert mgr._last_sync_failure is None
+
+
+# A pause set mid-cycle by a refused save stops the rest of that cycle.
+
+def _cycle_patches(mgr, monkeypatch, target):
+    monkeypatch.setattr("app.services.stamp_pool.settings.STAMP_POOL_ENABLED", True)
+    monkeypatch.setattr(mgr, "get_reserve_config", lambda: {17: target})
+    monkeypatch.setattr(mgr, "_update_stamp_ttls", AsyncMock())
+    monkeypatch.setattr("app.services.stamp_pool.asyncio.sleep", AsyncMock())
+    monkeypatch.setattr(stamp_ownership_manager, "register_stamp", lambda **kw: None)
+
+
+@pytest.mark.asyncio
+async def test_purchases_stop_when_a_save_pauses_the_pool_mid_cycle(tmp_path, monkeypatch):
+    mgr = await _good_pool(tmp_path, monkeypatch, A)
+    _cycle_patches(mgr, monkeypatch, target=4)
+    bought = []
+
+    async def purchase(depth, max_retries=3):
+        batch_id = format(len(bought) + 1, "064x")
+        if not bought:
+            _corrupt(mgr)  # breaks while the first purchase is in flight
+        bought.append(batch_id)
+        mgr.add_stamp_to_pool(batch_id, depth=depth, amount=1, ttl=3600)
+        return batch_id
+
+    monkeypatch.setattr(mgr, "_purchase_stamp", purchase)
+    topup = AsyncMock(return_value=True)
+    monkeypatch.setattr(mgr, "_topup_stamp", topup)
+    monkeypatch.setattr(mgr, "_get_stamp_ttl", AsyncMock(return_value=1))
+
+    with patch("app.services.stamp_pool.swarm_api.get_all_stamps_processed",
+               new=AsyncMock(return_value=_bee(A))):
+        results = await mgr.check_and_replenish()
+
+    assert len(bought) == 1
+    topup.assert_not_called()
+    _assert_paused_for_file(mgr)
+    assert _read(mgr) == CORRUPT
+    assert results.get("skipped") is True
+    assert any("Skipping replenishment" in e and "pool state file" in e for e in results["errors"])
+    assert any("Skipping replenishment" in e for e in mgr._errors)
+
+
+@pytest.mark.asyncio
+async def test_topups_stop_when_a_save_pauses_the_pool_mid_cycle(tmp_path, monkeypatch):
+    mgr = await _good_pool(tmp_path, monkeypatch, A, B, C)
+    _cycle_patches(mgr, monkeypatch, target=3)
+    monkeypatch.setattr(mgr, "_purchase_stamp", AsyncMock(side_effect=AssertionError("no purchase")))
+    monkeypatch.setattr(mgr, "_get_stamp_ttl", AsyncMock(return_value=1))
+    calls = []
+
+    async def topup(batch_id):
+        calls.append(batch_id)
+        if len(calls) == 1:
+            # The file breaks, and a release during this top-up notices it.
+            _corrupt(mgr)
+            other = next(b for b in (A, B, C) if b != batch_id)
+            assert mgr.release_stamp(other) is not None
+        return True
+
+    monkeypatch.setattr(mgr, "_topup_stamp", topup)
+    with patch("app.services.stamp_pool.swarm_api.get_all_stamps_processed",
+               new=AsyncMock(return_value=_bee(A, B, C))):
+        results = await mgr.check_and_replenish()
+
+    assert len(calls) == 1
+    _assert_paused_for_file(mgr)
+    assert results.get("skipped") is True
+
+
+# A restored file is not written over until a sync completes fully.
+
+@pytest.mark.asyncio
+async def test_restore_then_bee_failing_sync_still_refuses_saves(tmp_path, monkeypatch):
+    D = "d" * 64
+    mgr = await _good_pool(tmp_path, monkeypatch, A, B)
+    monkeypatch.setitem(stamp_ownership_manager._registry, D, {"owner": POOL_OWNER, "mode": "pool"})
+    _corrupt(mgr)
+    assert await _sync(mgr, A, B) == 0
+
+    _write(mgr, [A, B, D])  # operator restores a backup that also lists D
+    with patch("app.services.stamp_pool.swarm_api.get_all_stamps_processed",
+               new=AsyncMock(side_effect=RuntimeError("bee down"))):
+        assert await mgr.sync_from_bee_node() == 0
+    assert mgr._last_sync_ok is False
+
+    assert mgr.release_stamp(A) is not None
+    assert _state(mgr) == [A, B, D]
+    assert mgr._state_dirty is True
+    assert A in mgr._removed_unsaved
+
+    # A full sync reconciles: D imported, A not re-imported, file rewritten.
+    await _sync(mgr, A, B, D)
+    assert mgr._last_sync_ok is True
+    assert _state(mgr) == sorted([B, D])
+    assert A not in mgr._pool
+
+
+@pytest.mark.asyncio
+async def test_restore_without_refused_save_then_bee_failing_sync_keeps_file(tmp_path, monkeypatch):
+    """Nothing was released during the pause, so nothing is dirty yet; the
+    restored file still must not be overwritten before a full sync."""
+    D = "d" * 64
+    mgr = await _good_pool(tmp_path, monkeypatch, A, B)
+    _corrupt(mgr)
+    assert await _sync(mgr, A, B) == 0
+    _write(mgr, [A, B, D])
+    with patch("app.services.stamp_pool.swarm_api.get_all_stamps_processed",
+               new=AsyncMock(side_effect=RuntimeError("bee down"))):
+        await mgr.sync_from_bee_node()
+
+    assert mgr.release_stamp(A) is not None
+    assert _state(mgr) == [A, B, D]
+
+
+# Ids kept as unreadable by a sync survive later saves.
+
+@pytest.mark.asyncio
+async def test_unreadable_ids_survive_a_release(tmp_path, monkeypatch):
+    mgr = await _good_pool(tmp_path, monkeypatch, A, B)
+    monkeypatch.setitem(stamp_ownership_manager._registry, C, {"owner": POOL_OWNER, "mode": "pool"})
+    _write(mgr, [A, B, C])
+    bee = _bee(A, B, C)
+    bee[2]["depth"] = None
+    with patch("app.services.stamp_pool.swarm_api.get_all_stamps_processed",
+               new=AsyncMock(return_value=bee)):
+        await mgr.sync_from_bee_node()
+    assert C not in mgr._pool
+    assert _state(mgr) == [A, B, C]
+
+    assert mgr.release_stamp(A) is not None
+    assert _state(mgr) == [B, C]
+
+    # C reads fine next time: imported, and no longer carried separately.
+    await _sync(mgr, B, C)
+    assert C in mgr._pool
+    assert mgr.release_stamp(C) is not None
+    assert _state(mgr) == [B]
+
+
+@pytest.mark.asyncio
+async def test_unreadable_id_gone_from_bee_is_dropped(tmp_path, monkeypatch):
+    mgr = await _good_pool(tmp_path, monkeypatch, A)
+    monkeypatch.setitem(stamp_ownership_manager._registry, C, {"owner": POOL_OWNER, "mode": "pool"})
+    _write(mgr, [A, C])
+    bee = _bee(A, C)
+    bee[1]["depth"] = None
+    with patch("app.services.stamp_pool.swarm_api.get_all_stamps_processed",
+               new=AsyncMock(return_value=bee)):
+        await mgr.sync_from_bee_node()
+    assert _state(mgr) == [A, C]
+
+    await _sync(mgr, A)  # C expired
+    assert _state(mgr) == [A]
+    mgr._save_state()
+    assert _state(mgr) == [A]

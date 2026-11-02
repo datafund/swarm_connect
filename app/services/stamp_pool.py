@@ -175,6 +175,17 @@ class StampPoolManager:
         self._state_dirty: bool = False
         self._removed_unsaved: Set[str] = set()
         self._refused_logged: Optional[List[str]] = None
+        # Set when the state file was found unreadable, cleared only by a sync
+        # that completes fully. Until then the in-memory pool has not been
+        # reconciled with the file, so no save may write over it, even after
+        # the file is restored: a sync that reads it and then fails at Bee has
+        # not imported what the restored file lists (#547).
+        self._needs_reconcile: bool = False
+        # Batch ids the last successful sync kept in state without importing
+        # (unreadable record or ownership lookup). Every save keeps them, or
+        # the next release dropped them from the file. Replaced by each
+        # successful sync, which drops those it imports or Bee no longer lists.
+        self._unreadable_ids: Set[str] = set()
         # Per-depth backoff after a failed purchase. A failure is usually
         # persistent — out of funds, an amount below Bee's minimum validity —
         # and retrying it every cycle achieves nothing while blocking a request
@@ -218,20 +229,23 @@ class StampPoolManager:
         refused they are remembered, so a sync after recovery does not re-import
         them from a restored file.
 
-        Never writes over an unreadable state file (#547). While the pool is
-        paused for one, or when the file on disk has become unreadable since the
-        last sync, the save is refused: the file may list batches the in-memory
-        pool does not, and writing over it would also end the pause without
-        anyone repairing it. A refused save is written by the first sync that
-        reads the file successfully. A missing file is written as usual.
+        Never writes over an unreadable state file (#547). Once the file has
+        been found unreadable, by a sync or by this check, saves are refused
+        until a sync completes fully, even if the file is restored meanwhile:
+        the file may list batches the in-memory pool does not, and writing over
+        it would also end the pause without anyone repairing it. That sync
+        writes the refused changes. A missing file is written as usual.
+
+        Ids the last sync kept without importing (_unreadable_ids) are always
+        written, as are `extra_ids`.
         """
         state_file = self._get_state_file_path()
-        batch_ids = set(self._pool.keys())
+        batch_ids = set(self._pool.keys()) | self._unreadable_ids
         if extra_ids:
             batch_ids |= set(extra_ids)
         batch_ids = sorted(batch_ids)
 
-        refused = self._last_sync_failure == "state_file"
+        refused = self._needs_reconcile
         if not refused:
             try:
                 # Logs, keeps the #440 copy, and raises when the file exists but
@@ -249,8 +263,9 @@ class StampPoolManager:
                 # Full ids, so the operator can rebuild the file if the process
                 # restarts before recovery. Batch ids are public on-chain.
                 logger.error(
-                    f"Pool state file {state_file} is unreadable; not saving pool state "
-                    f"over it. The pool currently holds {len(batch_ids)} batch(es): "
+                    f"Pool state file {state_file} was unreadable and no sync has read it "
+                    f"back since; not saving pool state over it. The pool currently "
+                    f"holds {len(batch_ids)} batch(es): "
                     f"{json.dumps(batch_ids)}"
                     + (f"; released or removed since the last save: {json.dumps(sorted(self._removed_unsaved))}"
                        if self._removed_unsaved else "")
@@ -281,12 +296,14 @@ class StampPoolManager:
             self._errors.append(self._last_sync_error)
         self._last_sync_failure = "state_file"
         self._last_sync_ok = False
+        self._needs_reconcile = True
 
     def _sync_succeeded(self) -> None:
         """Lift any pause, and write state that was refused during it (#547)."""
         self._last_sync_ok = True
         self._last_sync_failure = None
         self._last_sync_error = None
+        self._needs_reconcile = False
         if self._state_dirty:
             with self._lock:
                 self._save_state()
@@ -745,6 +762,7 @@ class StampPoolManager:
             # First run: no state file means empty pool, let purchase logic fill it
             if not known_ids:
                 logger.info("No known stamps in state file, pool will be filled by purchase logic")
+                self._unreadable_ids = set()
                 # A genuinely empty state is a reliable answer, not a failure.
                 self._sync_succeeded()
                 return 0
@@ -863,11 +881,14 @@ class StampPoolManager:
 
             # Save cleaned state (stamps still valid, plus any we could not read
             # this cycle — those are not in the pool but must not be forgotten).
-            # The file was just read, so a state-file pause is over: clear it
-            # first, or this save would be refused as during the pause (#547).
+            # The file and Bee have both been read and the pool reconciled with
+            # them, so a state-file pause is over: clear it first, or this save
+            # would be refused as during the pause (#547).
             self._last_sync_failure = None
+            self._needs_reconcile = False
+            self._unreadable_ids = set(unreadable_ids)
             if valid_ids != known_ids or self._state_dirty:
-                self._save_state(extra_ids=unreadable_ids)
+                self._save_state()
 
             # Adopt everything in the pool as gateway-owned.
             #
@@ -953,6 +974,39 @@ class StampPoolManager:
         finally:
             self._replenishing = False
 
+    def _skip_replenishment(self, results: Dict[str, any]) -> Dict[str, any]:
+        """End a maintenance run without spending: the pool's contents are unknown.
+
+        Used after a failed sync, and when a save pauses the pool part-way
+        through a run (#547), so the rest of that run buys and tops up nothing.
+        """
+        if self._last_sync_failure == "state_file":
+            # Base name and setting only: /pool/status is unauthenticated.
+            # The full path and backup location are logged by
+            # _load_state and sync_from_bee_node, never put in _errors.
+            name = os.path.basename(self._get_state_file_path())
+            msg = (f"Skipping replenishment: the pool state file ({name}, set by "
+                   "STAMP_POOL_STATE_FILE) could not be read, so the pool's "
+                   "current contents are unknown. Pool spending is paused until "
+                   "the file is repaired or restored.")
+        else:
+            msg = ("Skipping replenishment: could not read stamp state from the "
+                   "Bee node, so the pool's current contents are unknown. "
+                   "Will retry on the next check.")
+        logger.warning(msg)
+        # Replace _errors with this run's entries, as the normal path
+        # does. Returning without it let sync append one "Sync error"
+        # per failed cycle, and a corrupt state file fails every cycle
+        # until repaired, so the list grew without limit (#482).
+        if self._last_sync_error:
+            results["errors"].append(self._last_sync_error)
+        results["errors"].append(msg)
+        results["errors"].extend(self._refusals)
+        self._refusals.clear()
+        self._errors = results["errors"]
+        results["skipped"] = True
+        return results
+
     async def _check_and_replenish_locked(self, results: Dict[str, any]) -> Dict[str, any]:
         """The body of check_and_replenish, with the single-flight guard held."""
         try:
@@ -971,32 +1025,7 @@ class StampPoolManager:
             # has finished syncing), which is precisely when the gateway restarts
             # alongside it, so the race is the normal case rather than a rare one.
             if not self._last_sync_ok:
-                if self._last_sync_failure == "state_file":
-                    # Base name and setting only: /pool/status is unauthenticated.
-                    # The full path and backup location are logged by
-                    # _load_state and sync_from_bee_node, never put in _errors.
-                    name = os.path.basename(self._get_state_file_path())
-                    msg = (f"Skipping replenishment: the pool state file ({name}, set by "
-                           "STAMP_POOL_STATE_FILE) could not be read, so the pool's "
-                           "current contents are unknown. Pool spending is paused until "
-                           "the file is repaired or restored.")
-                else:
-                    msg = ("Skipping replenishment: could not read stamp state from the "
-                           "Bee node, so the pool's current contents are unknown. "
-                           "Will retry on the next check.")
-                logger.warning(msg)
-                # Replace _errors with this run's entries, as the normal path
-                # does. Returning without it let sync append one "Sync error"
-                # per failed cycle, and a corrupt state file fails every cycle
-                # until repaired, so the list grew without limit (#482).
-                if self._last_sync_error:
-                    results["errors"].append(self._last_sync_error)
-                results["errors"].append(msg)
-                results["errors"].extend(self._refusals)
-                self._refusals.clear()
-                self._errors = results["errors"]
-                results["skipped"] = True
-                return results
+                return self._skip_replenishment(results)
 
             # Update TTL information for pool stamps
             await self._update_stamp_ttls()
@@ -1026,6 +1055,10 @@ class StampPoolManager:
                             # Delay between purchases to avoid Bee node rate limiting (429)
                             if i > 0:
                                 await asyncio.sleep(15)
+                            # A save during this run may have found the state
+                            # file unreadable and paused the pool (#547).
+                            if not self._last_sync_ok:
+                                return self._skip_replenishment(results)
                             batch_id = await self._purchase_stamp(depth)
                             if batch_id:
                                 results["stamps_purchased"] += 1
@@ -1068,6 +1101,8 @@ class StampPoolManager:
             # Batches at a dropped depth are left to expire. They stay usable
             # until they do, and sync removes them once they are gone, so
             # nothing is thrown away — the pool simply stops paying for them.
+            if not self._last_sync_ok:
+                return self._skip_replenishment(results)
             min_ttl_seconds = settings.STAMP_POOL_MIN_TTL_HOURS * 3600
             wanted_depths = set(reserve_config.keys())
             with self._lock:
@@ -1098,6 +1133,8 @@ class StampPoolManager:
                     "needs_topup": current_ttl is not None and current_ttl < min_ttl_seconds,
                 }
                 if current_ttl is not None and current_ttl < min_ttl_seconds:
+                    if not self._last_sync_ok:
+                        return self._skip_replenishment(results)
                     try:
                         outcome = await self._topup_stamp(stamp.batch_id)
                         if outcome is True:

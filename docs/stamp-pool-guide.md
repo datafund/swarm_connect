@@ -316,12 +316,16 @@ Check the `errors` array in status response for:
   later one whose batch list differs, logs an ERROR with the full batch-id
   list the pool holds and the ids released or removed since the last save, so
   the file can be rebuilt from the log. A save that finds the file broken
-  between syncs pauses the pool at once. To recover, repair the file, restore
+  between syncs pauses the pool at once: a maintenance run already under way
+  makes no further purchases or top-ups. To recover, repair the file, restore
   it from backup, or move it away to start from the in-memory pool. The next
-  sync then succeeds, the pause lifts, and the held changes are written.
-  Batches released during the pause are not re-imported even if a restored
-  backup still lists them. That memory does not survive a restart, so after a
-  restart only the ownership registry keeps a sold batch out of the pool
+  sync that reads both the file and the Bee node then lifts the pause and
+  writes the held changes; one that reads the file but fails at Bee keeps
+  saves refused. Batches released during the pause are not re-imported even
+  if a restored backup still lists them. That memory does not survive a
+  restart: after a restart only the ownership registry keeps a sold batch out
+  of the pool, and a batch bought during the pause is lost from the pool
+  unless the file is rebuilt from the logged list
 
 While replenishment is skipped, each check replaces `errors` with that run's
 entries, so the list does not grow across failed cycles.
