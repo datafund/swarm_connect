@@ -498,7 +498,7 @@ class TestDayRollover:
         allowed, info = t.check("1.2.3.4", 1.0)
         assert allowed, "the budget did not reset when the day turned"
         assert info["spent_bzz"] == 0
-        assert info["resets_at"].startswith("2099-01-01")
+        assert info["resets_at"] == "2099-01-02T00:00:00Z"
 
     def test_the_reset_is_persisted_not_just_in_memory(self, tmp_path, monkeypatch):
         """Otherwise a restart just after midnight would reload yesterday's
@@ -936,3 +936,49 @@ class TestUnreadableRecordWithReservations:
         assert r.status_code == 503
         assert r.json()["detail"]["code"] == "SPEND_BUDGET_UNAVAILABLE"
         buy.assert_not_called()
+
+
+class TestResetsAtIsParseable:
+    """resets_at used to read "<day>T24:00:00Z", which fromisoformat rejects (#512)."""
+
+    END_OF_YEAR = "2026-12-31"
+    NEXT = "2027-01-01T00:00:00Z"
+
+    @staticmethod
+    def _assert_parseable(value):
+        from datetime import datetime
+        assert datetime.fromisoformat(value.replace("Z", "+00:00")).hour == 0
+
+    @pytest.fixture
+    def tracker(self, tmp_path, monkeypatch):
+        from app.services import spend_budget
+        monkeypatch.setattr(settings, "STAMP_DAILY_BZZ_PER_CALLER", 1.0)
+        monkeypatch.setattr(spend_budget, "_today", lambda: self.END_OF_YEAR)
+        return SpendBudgetTracker(state_file=str(tmp_path / "spend.json"))
+
+    def test_check(self, tracker):
+        _, info = tracker.check("1.2.3.4", 0.5)
+        assert info["resets_at"] == self.NEXT
+        self._assert_parseable(info["resets_at"])
+
+    def test_reserve(self, tracker):
+        _, info = tracker.reserve("1.2.3.4", 0.5)
+        assert info["resets_at"] == self.NEXT
+        self._assert_parseable(info["resets_at"])
+
+    def test_reserve_all_refusal(self, tracker):
+        hold, key, info = tracker.reserve_all([("1.2.3.4", 2.0, 1.0)])
+        assert hold is None and key == "1.2.3.4"
+        assert info["resets_at"] == self.NEXT
+        self._assert_parseable(info["resets_at"])
+
+    def test_reserve_all_refusal_on_an_unreadable_record(self, tmp_path, monkeypatch):
+        from app.services import spend_budget
+        monkeypatch.setattr(spend_budget, "_today", lambda: self.END_OF_YEAR)
+        path = tmp_path / "spend.json"
+        path.write_text("{not json")
+        t = SpendBudgetTracker(state_file=str(path))
+        hold, _, info = t.reserve_all([("1.2.3.4", 0.1, 1.0)])
+        assert hold is None and info["state_unreadable"]
+        assert info["resets_at"] == self.NEXT
+        self._assert_parseable(info["resets_at"])
