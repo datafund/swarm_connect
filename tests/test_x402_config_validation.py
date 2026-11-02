@@ -1,7 +1,9 @@
 """x402 configuration is checked at startup, and the facilitator can authenticate (#369, #370, #371)."""
 import asyncio
+import re
 import sys
 import types
+from pathlib import Path
 
 import pytest
 
@@ -172,3 +174,36 @@ def test_startup_runs_the_check(x402):
     with pytest.raises(RuntimeError, match="Refusing to start"):
         with TestClient(app):
             pass
+
+
+# cdp-sdk ships in the image (#513). Without it, a cutover with CDP credentials
+# is refused at startup, so it must not drop out of the lockfile unnoticed.
+ROOT = Path(__file__).resolve().parent.parent
+
+
+def _pin(text, name):
+    match = re.search(rf"^{re.escape(name)}==(\S+)", text, re.MULTILINE)
+    return match.group(1) if match else None
+
+
+def test_cdp_sdk_is_pinned_in_requirements_and_the_lock():
+    wanted = _pin((ROOT / "requirements.txt").read_text(), "cdp-sdk")
+    assert wanted, "requirements.txt must pin cdp-sdk (the CDP facilitator route needs it)"
+    lock = (ROOT / "requirements.lock").read_text()
+    assert _pin(lock, "cdp-sdk") == wanted, "requirements.lock is out of date: regenerate it"
+    entry = lock.split(f"\ncdp-sdk=={wanted}", 1)[1].split("# via", 1)[0]
+    assert "--hash=sha256:" in entry, "the Docker build installs with --require-hashes"
+
+
+def test_real_cdp_sdk_config_is_accepted(x402):
+    # Runs where cdp-sdk is installed (the image, CI); skipped otherwise. Never
+    # calls create_headers, so no token is signed and nothing goes on the network.
+    pytest.importorskip("cdp.x402")
+    x402.setattr(settings, "X402_FACILITATOR_CDP_API_KEY_ID", "id")
+    x402.setattr(settings, "X402_FACILITATOR_CDP_API_KEY_SECRET", "secret")
+    x402.setattr(settings, "X402_NETWORK", "base")
+    x402.setattr(settings, "X402_FACILITATOR_URL", "")  # production: no default URL
+    facilitator.validate_x402_config()
+    config = facilitator.get_facilitator_client().config
+    assert facilitator._host(config["url"]) == facilitator.CDP_HOST
+    assert callable(config["create_headers"])
