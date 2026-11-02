@@ -374,8 +374,13 @@ class TestImmediateReplenishment:
         With an explicit state file: several tests patch `settings` with a
         MagicMock, and a manager that resolves its path from settings then
         saves to a directory literally named after the mock (#335).
+
+        Marked as synced: production can only release a stamp after a good
+        sync, and immediate replenishment is paused until one (#533).
         """
-        return StampPoolManager(state_file=str(tmp_path / "pool_state.json"))
+        manager = StampPoolManager(state_file=str(tmp_path / "pool_state.json"))
+        manager._last_sync_ok = True
+        return manager
 
     def test_trigger_replenishment_when_below_target(self, manager):
         """Test that replenishment is triggered when pool drops below target."""
@@ -1959,3 +1964,125 @@ class TestSkippedReplenishmentErrors:
         assert "pool_state.json" not in msg, msg
         assert manager._last_sync_failure == "bee"
         assert not any("pool_state.json" in e for e in manager._errors), manager._errors
+
+
+class TestImmediateReplenishPausedOnFailedSync:
+    """Releasing a stamp must not buy while the last sync failed (#533).
+
+    The maintenance path already skips on any failed sync, and the skip
+    message and the guide say pool spending is paused until an unreadable
+    state file is repaired. Immediate replenishment, called after a release,
+    did not check, so a pool still holding stamps from an earlier good sync
+    bought a replacement against contents it could no longer read.
+    """
+
+    A, B, C = "a" * 64, "b" * 64, "c" * 64
+
+    @pytest.fixture
+    def state_file(self, tmp_path):
+        return str(tmp_path / "pool_state.json")
+
+    def _synced_manager(self, state_file):
+        """A manager holding two depth-17 stamps after a good sync."""
+        manager = StampPoolManager(state_file=state_file)
+        manager.add_stamp_to_pool(self.A, 17, 1_000_000, 604800)
+        manager.add_stamp_to_pool(self.B, 17, 1_000_000, 604800)
+        manager._last_sync_ok = True
+        return manager
+
+    async def _release_and_settle(self, manager, buy):
+        """Release one stamp, trigger replenishment, let any spawned task run."""
+        import asyncio
+        with patch.object(manager, 'get_reserve_config', return_value={17: 2}), \
+             patch.object(manager, '_get_stamp_ttl', new=AsyncMock(return_value=604800)), \
+             patch('app.services.stamp_pool.settings.STAMP_POOL_IMMEDIATE_REPLENISH', True), \
+             patch('app.services.stamp_pool.swarm_api.get_chainstate',
+                   new=AsyncMock(return_value={"currentPrice": "24000"})), \
+             patch('app.services.stamp_pool.swarm_api.purchase_postage_stamp',
+                   side_effect=buy):
+            assert manager.release_stamp(self.A) is not None
+            triggered = manager.trigger_replenishment_if_needed(17)
+            for _ in range(20):
+                await asyncio.sleep(0)
+        return triggered
+
+    @staticmethod
+    def _recorder():
+        bought = []
+
+        async def buy(amount, depth, label):
+            bought.append(depth)
+            return TestImmediateReplenishPausedOnFailedSync.C
+
+        return bought, buy
+
+    @pytest.mark.asyncio
+    async def test_release_with_unreadable_state_file_does_not_buy(self, state_file):
+        manager = self._synced_manager(state_file)
+        with open(state_file, 'w') as f:
+            f.write("{ truncated")
+        with patch('app.services.stamp_pool.swarm_api.get_all_stamps_processed',
+                   new=AsyncMock(return_value=[])):
+            await manager.sync_from_bee_node()
+        assert manager._last_sync_failure == "state_file"
+
+        bought, buy = self._recorder()
+        triggered = await self._release_and_settle(manager, buy)
+
+        assert triggered is False
+        assert bought == [], "bought a batch while the pool state file was unreadable"
+
+    @pytest.mark.asyncio
+    async def test_release_after_bee_sync_failure_does_not_buy(self, state_file):
+        manager = self._synced_manager(state_file)
+        with patch('app.services.stamp_pool.swarm_api.get_all_stamps_processed',
+                   new=AsyncMock(side_effect=RuntimeError("503 from Bee"))):
+            await manager.sync_from_bee_node()
+        assert manager._last_sync_failure == "bee"
+
+        bought, buy = self._recorder()
+        triggered = await self._release_and_settle(manager, buy)
+
+        assert triggered is False
+        assert bought == [], "bought a batch while the pool's contents were unknown"
+
+    @pytest.mark.asyncio
+    async def test_spawned_replenish_skips_if_sync_failed_meanwhile(self, state_file):
+        """A task spawned before a sync failed must not buy once it runs."""
+        manager = self._synced_manager(state_file)
+        manager._pending_replenishments[17] = 1
+        manager._last_sync_ok = False
+        manager._last_sync_failure = "state_file"
+
+        with patch.object(manager, '_purchase_stamp', new=AsyncMock(return_value=self.C)) as buy:
+            await manager._async_replenish_one(17)
+
+        buy.assert_not_called()
+        assert 17 not in manager._pending_replenishments
+
+    @pytest.mark.asyncio
+    async def test_buying_resumes_after_a_good_sync(self, state_file):
+        manager = self._synced_manager(state_file)
+        with open(state_file, 'w') as f:
+            f.write("{ truncated")
+        with patch('app.services.stamp_pool.swarm_api.get_all_stamps_processed',
+                   new=AsyncMock(return_value=[])):
+            await manager.sync_from_bee_node()
+        assert manager._last_sync_ok is False
+
+        # The operator restores the file; the next sync reads it.
+        with open(state_file, 'w') as f:
+            json.dump([self.A, self.B], f)
+        node = [{"batchID": b, "depth": 17, "amount": "1000000", "batchTTL": 604800,
+                 "usable": True, "utilization": 0, "immutableFlag": False}
+                for b in (self.A, self.B)]
+        with patch('app.services.stamp_pool.swarm_api.get_all_stamps_processed',
+                   new=AsyncMock(return_value=node)):
+            await manager.sync_from_bee_node()
+        assert manager._last_sync_ok is True
+
+        bought, buy = self._recorder()
+        triggered = await self._release_and_settle(manager, buy)
+
+        assert triggered is True
+        assert bought == [17]

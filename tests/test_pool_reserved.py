@@ -108,6 +108,9 @@ async def test_replenish_during_a_reservation_does_not_over_buy(tmp_path):
 
 def test_immediate_replenish_counts_reserved_batches(tmp_path):
     mgr = _manager(tmp_path, "a" * 64, "b" * 64)
+    # Synced, so the False below comes from counting the reserved batch and
+    # not from the failed-sync pause (#533).
+    mgr._last_sync_ok = True
     mgr.reserve_stamp("a" * 64)
     with patch.object(mgr, "get_reserve_config", return_value={17: 2}), \
          patch("app.services.stamp_pool.settings") as s, \
