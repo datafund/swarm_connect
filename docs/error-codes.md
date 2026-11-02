@@ -2,13 +2,14 @@
 
 Error responses from the gateway carry `code` and `message` at the top level
 of the JSON body. Branch on `code`, and show `message` to a person.
-Two server failures have no `code`:
+Two kinds of crash have no `code`. A crash here means the server raised an
+unexpected error, not a handled one. Handled errors, such as a 502 from the Bee
+node, keep `code` and `message` even on a paid request.
 
-- A paid request that fails before its payment is settled returns 500
+- A paid request that crashes before its payment is settled returns 500
   `{"detail": "Internal server error. You were not charged."}`. Nothing was
   charged, so you can retry with the same payment authorization.
-- Any other unexpected server failure returns 500 with the plain text
-  `Internal Server Error`.
+- Any other crash returns 500 with the plain text `Internal Server Error`.
 
 ```json
 {
