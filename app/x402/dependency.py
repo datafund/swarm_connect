@@ -637,6 +637,17 @@ async def require_x402_payment(request: Request) -> None:
         }
         raise HTTPException(status_code=402, detail=response_body)
 
+    # Without its record of payments whose settlement got no answer, the
+    # gateway could answer a retry of a collected payment with a payable 402
+    # or run work again: refuse paid requests, unpaid, until it is repaired.
+    from app.x402.settlement import outcome_unknown as _outcome_unknown
+    if _outcome_unknown.unavailable:
+        raise HTTPException(status_code=503, headers={"Retry-After": "60"}, detail={
+            "code": "PAYMENT_STATE_UNAVAILABLE",
+            "message": ("Paid requests cannot be processed right now; this payment was not "
+                        "charged. Retry later with the same X-PAYMENT."),
+        })
+
     # Verify payment with facilitator
     try:
         facilitator = _get_facilitator_client()
@@ -735,6 +746,11 @@ async def require_x402_payment(request: Request) -> None:
             # In use by a concurrent retry of an authorization whose
             # settlement outcome is unknown: not "sign a new payment" (#553).
             raise outcome_unknown_refusal(auth_key)
+        # The same authorization under an Idempotency-Key whose first request's
+        # settlement got no answer: that key's 409, as documented, even when
+        # the authorization has since settled under another key (#553).
+        from app.x402.idempotency import raise_if_key_settlement_unknown
+        await raise_if_key_settlement_unknown(request, payer=auth_key[0])
         raise HTTPException(
             status_code=402,
             detail={

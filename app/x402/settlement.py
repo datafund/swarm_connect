@@ -22,6 +22,8 @@ failed settlement stops the request with nothing delivered. The replay guard
 reserves each authorization when it is verified, so a second request with the
 same one is refused before it can do any work.
 """
+import hashlib
+import json
 import logging
 import re
 import time
@@ -30,6 +32,7 @@ from typing import Dict, Optional, Tuple
 
 from fastapi import HTTPException, Request
 
+from app.core.atomic_io import StateLoadError, atomic_write_json, load_json_state, unreadable_state
 from app.core.config import settings
 from app.core.client_ip import get_client_ip
 from app.x402.audit import log_payment_failed, log_payment_settled
@@ -91,6 +94,12 @@ BEFORE_WORK = "before_work"
 AFTER_WORK = "after_work"
 
 
+def _key_id(key: Tuple[str, str]) -> str:
+    # Hashed, as in the idempotency store, so the state file holds no raw
+    # addresses or nonces.
+    return hashlib.sha256(json.dumps([key[0].lower(), key[1].lower()]).encode()).hexdigest()
+
+
 class OutcomeUnknownRegistry:
     """Authorizations sent for settlement that got no answer from the facilitator (#553).
 
@@ -98,39 +107,91 @@ class OutcomeUnknownRegistry:
     authorization that the facilitator refuses (at verify or at settle) is then
     probably refused BECAUSE the first one spent the nonce, so it must not be
     answered with a 402 and `accepts`: an x402 client pays again from that.
-    In memory, like the replay guard: a gateway restart forgets it (a keyed
-    request is still covered by its persisted Idempotency-Key entry).
+
+    Persisted (X402_SETTLEMENT_UNKNOWN_STATE_FILE), so a restart or deploy does
+    not forget it; entries past their expiry are dropped on load. The whole file
+    is rewritten atomically on each change. An unreadable file is copied aside
+    once, never overwritten, and `unavailable` is set: the dependency then
+    refuses paid requests, unpaid, until it is repaired (fail closed, as the
+    idempotency store does), because an empty registry would answer a retry of
+    a possibly collected payment with a 402 that clients pay from.
     """
 
-    def __init__(self):
+    def __init__(self, state_file: Optional[str] = None):
         self._lock = Lock()
-        # key -> (expiry, kind)
-        self._entries: Dict[Tuple[str, str], Tuple[float, str]] = {}
+        self._state_file = state_file
+        # key id -> {"expires": wall-clock seconds, "kind": BEFORE_WORK | AFTER_WORK}
+        self._entries: Dict[str, dict] = {}
+        self.unavailable: Optional[str] = None
+        self._load()
+
+    def _path(self) -> str:
+        return self._state_file or settings.X402_SETTLEMENT_UNKNOWN_STATE_FILE
+
+    def _load(self) -> None:
+        path = self._path()
+        try:
+            data = load_json_state(path)
+            if data is None:
+                return
+            entries = data.get("entries")
+            if not isinstance(entries, dict) or not all(
+                    isinstance(v, dict) and v.get("kind") in (BEFORE_WORK, AFTER_WORK)
+                    and isinstance(v.get("expires"), (int, float)) for v in entries.values()):
+                raise unreadable_state(path, "expected {\"entries\": {id: {kind, expires}}}")
+        except StateLoadError as e:
+            self.unavailable = str(e)
+            logger.error("x402: settlement-unknown state is unreadable: %s Paid requests are "
+                         "refused, unpaid, until it is repaired.", e)
+            return
+        now = time.time()
+        self._entries = {k: v for k, v in entries.items() if v["expires"] > now}
+
+    def _save(self) -> None:
+        if self.unavailable:
+            return
+        try:
+            atomic_write_json(self._path(), {"entries": self._entries})
+        except Exception as e:
+            logger.error("x402: could not persist settlement-unknown state: %s", e)
+
+    def _prune(self, now: float) -> bool:
+        expired = [k for k, v in self._entries.items() if v["expires"] <= now]
+        for k in expired:
+            del self._entries[k]
+        return bool(expired)
 
     def add(self, key: Optional[Tuple[str, str]], kind: str) -> None:
         if key is None:
             return
-        now = time.monotonic()
+        kid = _key_id(key)
+        now = time.time()
         with self._lock:
-            for k in [k for k, (until, _) in self._entries.items() if until <= now]:
-                del self._entries[k]
-            previous = self._entries.get(key)
-            if previous is not None and previous[1] == AFTER_WORK:
+            self._prune(now)
+            previous = self._entries.get(kid)
+            if previous is not None and previous["kind"] == AFTER_WORK:
                 kind = AFTER_WORK    # once the work has run, it must not run again
-            self._entries[key] = (now + OUTCOME_UNKNOWN_SECONDS, kind)
-            while len(self._entries) > OUTCOME_UNKNOWN_MAX_ENTRIES:
-                del self._entries[min(self._entries, key=lambda k: self._entries[k][0])]
+            self._entries[kid] = {"expires": now + OUTCOME_UNKNOWN_SECONDS, "kind": kind}
+            excess = len(self._entries) - max(1, OUTCOME_UNKNOWN_MAX_ENTRIES)
+            if excess > 0:
+                # BEFORE_WORK first (a retry of one at worst meets an ordinary
+                # refusal), oldest first; AFTER_WORK guards against rerunning work.
+                order = sorted(self._entries, key=lambda k: (self._entries[k]["kind"] == AFTER_WORK,
+                                                             self._entries[k]["expires"]))
+                for k in order[:excess]:
+                    del self._entries[k]
+                logger.warning("x402: settlement-unknown registry over its cap; evicted %d", excess)
+            self._save()
 
     def kind(self, key: Optional[Tuple[str, str]]) -> Optional[str]:
         """BEFORE_WORK or AFTER_WORK for a remembered authorization, else None."""
         if key is None:
             return None
         with self._lock:
-            entry = self._entries.get(key)
-            if entry is not None and entry[0] <= time.monotonic():
-                del self._entries[key]
-                entry = None
-            return entry[1] if entry else None
+            entry = self._entries.get(_key_id(key))
+            if entry is None or entry["expires"] <= time.time():
+                return None
+            return entry["kind"]
 
     def contains(self, key: Optional[Tuple[str, str]]) -> bool:
         return self.kind(key) is not None
@@ -140,11 +201,15 @@ class OutcomeUnknownRegistry:
         if key is None:
             return
         with self._lock:
-            self._entries.pop(key, None)
+            if self._entries.pop(_key_id(key), None) is not None:
+                self._save()
 
     def reset(self) -> None:
+        """For tests: empty, readable, and nothing on disk."""
         with self._lock:
             self._entries.clear()
+            self.unavailable = None
+            self._save()
 
 
 outcome_unknown = OutcomeUnknownRegistry()
@@ -261,6 +326,7 @@ async def settle_payment(request: Request) -> None:
                 "nonce": (getattr(request.state, "x402_auth_key", None) or (None, None))[1],
                 "x402_status": "settlement_failed",
             },
+            headers=dict(OUTCOME_UNKNOWN_HEADERS),
         )
 
     if not getattr(result, "success", False):
@@ -280,7 +346,7 @@ async def settle_payment(request: Request) -> None:
         logger.warning(f"x402: settlement refused before delivery: {reason}")
         log_payment_settled(client_ip=client_ip, payer=payer, transaction_hash=None,
                             network=settings.X402_NETWORK, success=False, error_reason=reason,
-                                nonce=request_nonce(request))
+                            nonce=request_nonce(request))
         x402_settlements_total.labels(result="refused").inc()
         message = f"The payment could not be settled ({reason}). Nothing was delivered."
         detail = {

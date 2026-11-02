@@ -504,6 +504,25 @@ def test_replay_record_carries_the_retry_nonce(fac):
     assert settled["data"]["nonce"] == first_nonce
 
 
+def test_p4_settling_key_answers_409_after_the_authorization_settled_elsewhere(fac):
+    """#553 review 3: keyed UNAVAILABLE on key a; the same X-PAYMENT under key b settles;
+    the same X-PAYMENT under key a gets the key's 409, not 402 "already used"."""
+    app, bought = _app(fac)
+    c = TestClient(app)
+    nonce = "0x" + "7d" * 32
+    fac.settle.side_effect = [httpx.ReadTimeout("facilitator slow"),
+                              SettleResponse(success=True, transaction="0x" + "cd" * 32)]
+    hdr = lambda k: {"X-PAYMENT": pay(nonce=nonce), "Idempotency-Key": k}
+    assert c.post("/api/v1/stamps/", json={"depth": 17}, headers=hdr("k-a")).status_code == 502
+    assert c.post("/api/v1/stamps/", json={"depth": 17}, headers=hdr("k-b")).status_code == 201
+    again = c.post("/api/v1/stamps/", json={"depth": 17}, headers=hdr("k-a"))
+    assert again.status_code == 409
+    detail = again.json()["detail"]
+    assert detail["code"] == "IDEMPOTENCY_KEY_SETTLEMENT_UNKNOWN"
+    assert detail["nonce"] == nonce and "accepts" not in detail
+    assert fac.settle.await_count == 2 and len(bought) == 1
+
+
 def test_settling_entry_survives_a_restart(tmp_path):
     """Killed or cancelled while waiting for the facilitator: still unknown after a restart."""
     path = str(tmp_path / "idem.json")

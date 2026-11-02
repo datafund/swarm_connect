@@ -335,11 +335,12 @@ def test_middleware_refusal_of_a_remembered_authorization_is_a_409(env):
     assert "ok" not in r.text
 
 
-def test_outcome_unknown_registry_expires_and_is_capped(monkeypatch):
+def test_outcome_unknown_registry_expires_and_is_capped(monkeypatch, tmp_path):
+    # Wall-clock expiry since the registry is persisted (#553 review 3).
     import app.x402.settlement as st
-    reg = st.OutcomeUnknownRegistry()
+    reg = st.OutcomeUnknownRegistry(state_file=str(tmp_path / "s.json"))
     now = [1000.0]
-    monkeypatch.setattr(st.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(st.time, "time", lambda: now[0])
     reg.add(("0xa", "0x1"), st.BEFORE_WORK)
     assert reg.kind(("0xa", "0x1")) == st.BEFORE_WORK
     now[0] += st.OUTCOME_UNKNOWN_SECONDS + 1
