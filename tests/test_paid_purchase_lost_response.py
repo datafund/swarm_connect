@@ -155,6 +155,29 @@ def test_202_is_audited_with_what_is_needed_to_find_the_batch(env):
     assert ev["data"]["transaction_hash"] == "0x" + "ab" * 32
 
 
+def _sent_nonce(fac):
+    """The nonce of the first (settled) payment, canonical: lower-case, 0x."""
+    return "0x" + str(fac.settle.await_args_list[0].kwargs["payment"].payload.authorization.nonce)[-64:].lower()
+
+
+def test_pending_purchase_records_carry_the_nonce(env):
+    """#553 review 2: purchase_pending, the late payment_delivered and a refund record
+    all carry the authorization nonce, for matching an on-chain transfer."""
+    app, fac, buy, find = env
+    find.side_effect = [None, BATCH]
+    first, _ = _run_pending(app, None)
+    nonce = _sent_nonce(fac)
+    assert _audit("purchase_pending")[0]["data"]["nonce"] == nonce
+    assert _audit("payment_delivered")[0]["data"]["nonce"] == nonce
+
+
+def test_pending_purchase_refund_record_carries_the_nonce(env):
+    app, fac, buy, find = env
+    find.side_effect = [None, None]
+    first, _ = _run_pending(app, None, key="k-never-nonce")
+    assert _audit("payment_failed")[0]["data"]["nonce"] == _sent_nonce(fac)
+
+
 def test_never_found_records_a_refund_and_a_final_result(env):
     app, fac, buy, find = env
     find.side_effect = [None, None]

@@ -222,6 +222,7 @@ def _log_delivery(request: Request, settlement, body: bytes, client_ip: str, pay
     a "paid but got nothing" question can be answered from the audit log.
     """
     from app.x402.audit import AuditEventType, log_audit_event
+    from app.x402.settlement import request_nonce
     resource = {}
     # Paid routes answer with small JSON bodies; skip anything else rather than
     # parse a large payload just for the audit line.
@@ -242,6 +243,7 @@ def _log_delivery(request: Request, settlement, body: bytes, client_ip: str, pay
             "amount": getattr(requirements, "max_amount_required", None),
             "network": settings.X402_NETWORK,
             "resource": resource,
+            "nonce": request_nonce(request),
         },
         client_ip=client_ip,
         wallet_address=payer,
@@ -441,8 +443,9 @@ class X402Middleware(BaseHTTPMiddleware):
         of its own, and then checks the result: SettleResponse reports failure
         with success=False rather than an exception (#355).
         """
-        from app.x402.settlement import (OUTCOME_UNKNOWN_ADVICE, outcome_unknown,
-                                         outcome_unknown_refusal, replay_guard)
+        from app.x402.settlement import (AFTER_WORK, OUTCOME_UNKNOWN_ADVICE, OUTCOME_UNKNOWN_HEADERS,
+                                         outcome_unknown, outcome_unknown_refusal, replay_guard,
+                                         request_nonce)
         from app.x402.audit import log_payment_failed, log_payment_settled
 
         settlement = getattr(request.state, "x402_settlement", None)
@@ -484,10 +487,12 @@ class X402Middleware(BaseHTTPMiddleware):
                     # the idempotency entry stays "settling" and the
                     # authorization stays reserved: its nonce may be spent.
                     log_payment_failed(client_ip=client_ip, reason=failure, stage="settle",
-                                       wallet_address=payer)
+                                       wallet_address=payer, nonce=request_nonce(request))
                     x402_settlements_total.labels(result="error").inc()
                     auth_key = getattr(request.state, "x402_auth_key", None)
-                    outcome_unknown.add(auth_key)
+                    # The dependency stops any later attempt with it before the
+                    # work runs again, also once the reservation has lapsed.
+                    outcome_unknown.add(auth_key, AFTER_WORK)
                     return JSONResponse(
                         status_code=502,
                         content={
@@ -500,12 +505,13 @@ class X402Middleware(BaseHTTPMiddleware):
                             "nonce": auth_key[1] if auth_key else None,
                             "x402_status": "settlement_unknown",
                         },
-                        headers={"X-Payment-Mode": "failed", "X-Payment-Status": "settlement_unknown"},
+                        headers=dict(OUTCOME_UNKNOWN_HEADERS),
                     )
                 else:
                     settlement_refused(request)
                     log_payment_settled(client_ip=client_ip, payer=payer, transaction_hash=None,
-                                        network=settings.X402_NETWORK, success=False, error_reason=failure)
+                                        network=settings.X402_NETWORK, success=False, error_reason=failure,
+                                        nonce=request_nonce(request))
                     x402_settlements_total.labels(result="refused").inc()
                     auth_key = getattr(request.state, "x402_auth_key", None)
                     if outcome_unknown.contains(auth_key):
@@ -513,8 +519,7 @@ class X402Middleware(BaseHTTPMiddleware):
                         refusal = outcome_unknown_refusal(auth_key, failure)
                         return JSONResponse(status_code=refusal.status_code,
                                             content={"detail": refusal.detail},
-                                            headers={"X-Payment-Mode": "failed",
-                                                     "X-Payment-Status": "settlement_unknown"})
+                                            headers=refusal.headers)
                 return JSONResponse(
                     status_code=402,
                     content={
@@ -526,7 +531,7 @@ class X402Middleware(BaseHTTPMiddleware):
                 )
             log_payment_settled(client_ip=client_ip, payer=payer,
                                 transaction_hash=getattr(settlement, "transaction", None),
-                                network=settings.X402_NETWORK, success=True)
+                                network=settings.X402_NETWORK, success=True, nonce=request_nonce(request))
             from app.x402.idempotency import record_settlement
             record_settlement(request, settlement)
             outcome_unknown.discard(getattr(request.state, "x402_auth_key", None))
@@ -540,7 +545,8 @@ class X402Middleware(BaseHTTPMiddleware):
                          f"returned {response.status_code}; refund needed")
             log_payment_failed(client_ip=client_ip,
                                reason=f"HTTP {response.status_code} after settlement; tx={tx_hash}",
-                               stage="delivery_after_settlement", wallet_address=payer)
+                               stage="delivery_after_settlement", wallet_address=payer,
+                               nonce=request_nonce(request))
             x402_settlements_total.labels(result="settled_not_delivered").inc()
 
         body = b""
@@ -570,7 +576,7 @@ class X402Middleware(BaseHTTPMiddleware):
         can be retried. After settlement the payer has paid for nothing: record
         it for a refund and return the transaction to cite.
         """
-        from app.x402.settlement import replay_guard
+        from app.x402.settlement import replay_guard, request_nonce
         from app.x402.audit import log_payment_failed
 
         settlement = getattr(request.state, "x402_settlement", None)
@@ -585,7 +591,8 @@ class X402Middleware(BaseHTTPMiddleware):
         log_payment_failed(client_ip=get_client_ip(request),
                            reason=f"exception after settlement; tx={tx_hash}",
                            stage="delivery_after_settlement",
-                           wallet_address=getattr(request.state, "x402_payer", None))
+                           wallet_address=getattr(request.state, "x402_payer", None),
+                           nonce=request_nonce(request))
         return JSONResponse(
             status_code=500,
             content={

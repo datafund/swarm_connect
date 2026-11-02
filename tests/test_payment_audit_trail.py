@@ -116,3 +116,34 @@ def test_an_unknown_settlement_outcome_is_an_error_not_a_refusal():
     assert r.json()["code"] == "PAYMENT_SETTLEMENT_UNKNOWN"
     assert _count("error") == before_error + 1
     assert _count("refused") == before_refused
+
+
+NONCE = "0x" + "00" * 32   # create_valid_payment_header's
+
+
+def _events(kind):
+    # Most recent first.
+    return [e for e in read_audit_log() if e["event_type"] == kind]
+
+
+def test_payment_records_carry_the_authorization_nonce():
+    """#553 review 2: reconciliation matches a transfer to its request by the nonce."""
+    assert _run(SettleResponse(success=True, transaction=TX)).status_code == 200
+    assert _events("payment_settled")[0]["data"]["nonce"] == NONCE
+    assert _events("payment_delivered")[0]["data"]["nonce"] == NONCE
+
+
+def test_refused_and_failed_settlements_carry_the_nonce():
+    from app.x402.settlement import outcome_unknown, replay_guard
+    _run(SettleResponse(success=False, errorReason="insufficient_funds"))
+    assert _events("payment_settled")[0]["data"]["nonce"] == NONCE
+    replay_guard.reset()
+    _run(RuntimeError("facilitator timeout"))
+    assert _events("payment_failed")[0]["data"]["nonce"] == NONCE
+    replay_guard.reset(); outcome_unknown.reset()
+    _run(RuntimeError("facilitator timeout"), path="/api/v1/data/manifest")
+    assert _events("payment_failed")[0]["data"]["nonce"] == NONCE
+    replay_guard.reset(); outcome_unknown.reset()
+    _run(SettleResponse(success=True, transaction=TX), path="/api/v1/stamps/fail")
+    failed = _events("payment_failed")[0]
+    assert failed["data"]["stage"] == "delivery_after_settlement" and failed["data"]["nonce"] == NONCE

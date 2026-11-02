@@ -271,6 +271,91 @@ def test_a_refusal_without_an_earlier_unknown_outcome_is_still_a_402(env):
     assert r.json()["detail"]["code"] == "PAYMENT_SETTLEMENT_FAILED"
 
 
+def _assert_unknown_headers(r):
+    assert r.headers["X-Payment-Mode"] == "failed"
+    assert r.headers["X-Payment-Status"] == "settlement_unknown"
+
+
+def test_outcome_unknown_409_carries_the_headers_from_every_layer(env):
+    """#553 review 2: the same 409 from the dependency, settle_payment and the
+    middleware carries the same payment headers."""
+    header = create_valid_payment_header()
+    # dependency, verify rejects
+    fac = _facilitator(RuntimeError("down"))
+    good = VerifyResponse(isValid=True, payer="0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1")
+    fac.verify = AsyncMock(side_effect=[good, VerifyResponse(isValid=False, invalidReason="x", payer=None)])
+    assert _run(fac, header=header).status_code == 502
+    _assert_unknown_headers(_run(fac, header=header))
+    # settle_payment refuses
+    from app.x402.settlement import outcome_unknown
+    outcome_unknown.reset()
+    fac = _facilitator(RuntimeError("down"), refused())
+    assert _run(fac, header=header).status_code == 502
+    _assert_unknown_headers(_run(fac, header=header))
+    # dependency, fallback kind
+    outcome_unknown.reset()
+    fac = _facilitator(RuntimeError("down"))
+    assert _run(fac, path="/api/v1/data/manifest", header=header).status_code == 502
+    _assert_unknown_headers(_run(fac, path="/api/v1/data/manifest", header=header))
+
+
+def test_fallback_unknown_never_reruns_the_work_after_the_replay_window(env):
+    """#553 review 2: the reservation lapses after an hour, the registry entry does not.
+    A remembered after-the-work authorization is stopped before any work runs."""
+    from app.x402.settlement import replay_guard
+    fac = _facilitator(RuntimeError("facilitator down"), refused("nonce_used"))
+    header = create_valid_payment_header()
+    assert _run(fac, path="/api/v1/data/manifest", header=header).status_code == 502
+    replay_guard.reset()   # the replay window has passed
+    _assert_outcome_unknown(_run(fac, path="/api/v1/data/manifest", header=header))
+    assert DELIVERED == [1] and fac.settle.await_count == 1
+
+
+def test_unavailable_same_authorization_retry_is_still_allowed(env):
+    """Where the work has not run, the same-X-PAYMENT retry stays the recovery."""
+    from app.x402.settlement import replay_guard
+    fac = _facilitator(RuntimeError("facilitator down"), ok())
+    header = create_valid_payment_header()
+    assert _run(fac, header=header).status_code == 502
+    replay_guard.reset()
+    assert _run(fac, header=header).status_code == 200
+    assert DELIVERED == [1]
+
+
+def test_middleware_refusal_of_a_remembered_authorization_is_a_409(env):
+    """A before-the-work unknown outcome, then the same authorization on a route that
+    settles after its work, refused by the facilitator: the middleware's own 409."""
+    fac = _facilitator(RuntimeError("facilitator down"), refused("nonce_used"))
+    header = create_valid_payment_header()
+    assert _run(fac, header=header).status_code == 502
+    r = _run(fac, path="/api/v1/data/manifest", header=header)
+    detail = _assert_outcome_unknown(r)
+    assert detail["reason"] == "nonce_used"
+    _assert_unknown_headers(r)
+    assert "ok" not in r.text
+
+
+def test_outcome_unknown_registry_expires_and_is_capped(monkeypatch):
+    import app.x402.settlement as st
+    reg = st.OutcomeUnknownRegistry()
+    now = [1000.0]
+    monkeypatch.setattr(st.time, "monotonic", lambda: now[0])
+    reg.add(("0xa", "0x1"), st.BEFORE_WORK)
+    assert reg.kind(("0xa", "0x1")) == st.BEFORE_WORK
+    now[0] += st.OUTCOME_UNKNOWN_SECONDS + 1
+    assert not reg.contains(("0xa", "0x1"))
+    monkeypatch.setattr(st, "OUTCOME_UNKNOWN_MAX_ENTRIES", 2)
+    for i in range(3):
+        now[0] += 1
+        reg.add(("0xa", f"0x{i}"), st.BEFORE_WORK)
+    assert not reg.contains(("0xa", "0x0"))          # oldest evicted
+    assert reg.contains(("0xa", "0x1")) and reg.contains(("0xa", "0x2"))
+    # after-the-work wins over before-the-work for the same authorization
+    reg.add(("0xa", "0x2"), st.AFTER_WORK)
+    reg.add(("0xa", "0x2"), st.BEFORE_WORK)
+    assert reg.kind(("0xa", "0x2")) == st.AFTER_WORK
+
+
 def test_chunk_credit_is_not_granted_when_settlement_fails(env):
     """The real top-up handler settles before crediting."""
     from types import SimpleNamespace

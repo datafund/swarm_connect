@@ -419,14 +419,16 @@ def _replay_response(entry: dict, payer: str) -> Response:
     return Response(content=body, status_code=entry["status"], headers=headers)
 
 
-def _log_replay(request: Request, payer: str, entry: dict) -> None:
+def _log_replay(request: Request, payer: str, entry: dict, retry_nonce: Optional[str] = None) -> None:
     # A verify with no settle: reconciliation needs to see why.
     from app.core.client_ip import get_client_ip
     from app.x402.audit import AuditEventType, log_audit_event
     log_audit_event(
         event_type=AuditEventType.PAYMENT_IDEMPOTENT_REPLAY,
         data={"method": request.method, "path": request.url.path,
-              "transaction_hash": entry.get("transaction"), "network": settings.X402_NETWORK},
+              "transaction_hash": entry.get("transaction"), "network": settings.X402_NETWORK,
+              # The retry's own authorization: verified, never settled.
+              "nonce": retry_nonce},
         client_ip=get_client_ip(request),
         wallet_address=payer,
     )
@@ -459,7 +461,7 @@ async def begin_idempotent_request(request: Request, payer: str,
         return eid, token
     if state == DONE:
         logger.info(f"x402: idempotent replay for payer {payer} on {request.url.path}; new payment not settled")
-        _log_replay(request, payer, entry)
+        _log_replay(request, payer, entry, auth_key[1])
         raise IdempotentReplay(_replay_response(entry, payer))
     if state == "unavailable":
         raise HTTPException(status_code=503, detail={

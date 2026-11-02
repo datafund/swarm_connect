@@ -587,6 +587,7 @@ def _purchase_pending(request: Request, label: str, depth: int, amount: int,
     201 instead of this 202.
     """
     from app.x402.audit import AuditEventType, log_audit_event, log_payment_failed
+    from app.x402.settlement import request_nonce
     # The audit trail records the address itself; spend limits key on the
     # grouped value (get_client_key), so this is not imported module-wide.
     from app.core.client_ip import get_client_ip
@@ -599,7 +600,8 @@ def _purchase_pending(request: Request, label: str, depth: int, amount: int,
         log_audit_event(event_type=AuditEventType.PURCHASE_PENDING, client_ip=get_client_ip(request),
                         wallet_address=payer,
                         data={"transaction_hash": tx, "label": label, "depth": depth, "amount": str(amount),
-                              "start_block": start_block, "network": settings.X402_NETWORK})
+                              "start_block": start_block, "network": settings.X402_NETWORK,
+                              "nonce": request_nonce(request)})
     except Exception as e:
         logger.error(f"Could not record a pending purchase (label {label}, tx {tx}): {e}", exc_info=True)
     try:
@@ -615,7 +617,8 @@ def _purchase_pending(request: Request, label: str, depth: int, amount: int,
         log_payment_failed(client_ip=get_client_ip(request),
                            reason=f"stamp purchase pending but not followed up ({type(e).__name__}); "
                                   f"a batch may exist on-chain; label={label}; tx={tx}",
-                           stage="delivery_after_settlement", wallet_address=payer)
+                           stage="delivery_after_settlement", wallet_address=payer,
+                           nonce=request_nonce(request))
         if purchase is not None:
             purchase.add_done_callback(lambda t: t.cancelled() or t.exception())
     return JSONResponse(status_code=status.HTTP_202_ACCEPTED, content={
@@ -642,6 +645,7 @@ async def _finish_pending_purchase(request: Request, label: str, depth: int, amo
     error of its own.
     """
     from app.x402.audit import AuditEventType, log_audit_event, log_payment_failed
+    from app.x402.settlement import request_nonce
     # The audit trail records the address itself; spend limits key on the
     # grouped value (get_client_key), so this is not imported module-wide.
     from app.core.client_ip import get_client_ip
@@ -651,7 +655,8 @@ async def _finish_pending_purchase(request: Request, label: str, depth: int, amo
     def refund_needed(why: str) -> None:
         log_payment_failed(client_ip=client_ip,
                            reason=f"stamp purchase after settlement: {why}; label={label}; tx={tx}",
-                           stage="delivery_after_settlement", wallet_address=payer)
+                           stage="delivery_after_settlement", wallet_address=payer,
+                           nonce=request_nonce(request))
         # A retry with the key is told the final outcome, not "pending" for 24 h.
         resolve_idempotent_result(idem, status.HTTP_500_INTERNAL_SERVER_ERROR, json.dumps({
             "code": "DELIVERY_FAILED_AFTER_PAYMENT",
@@ -713,7 +718,7 @@ async def _finish_pending_purchase(request: Request, label: str, depth: int, amo
         log_audit_event(event_type=AuditEventType.PAYMENT_DELIVERED, client_ip=client_ip, wallet_address=payer,
                         data={"transaction_hash": tx, "method": "POST", "path": request.url.path,
                               "network": settings.X402_NETWORK, "resource": {"batchID": batch_id},
-                              "late": True})
+                              "late": True, "nonce": request_nonce(request)})
         body = StampPurchaseResponse(batchID=batch_id, message="Postage stamp purchased successfully")
         resolve_idempotent_result(idem, status.HTTP_201_CREATED, body.model_dump_json().encode())
     except Exception as e:

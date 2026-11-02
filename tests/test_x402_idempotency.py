@@ -469,6 +469,41 @@ def test_same_authorization_and_key_after_fallback_unknown_is_not_told_to_pay(fa
     assert fac.settle.await_count == 1
 
 
+def test_keyed_unavailable_then_same_authorization_under_a_new_key(fac):
+    """#553 review 2: the first key stays taken; the same authorization under another key
+    is an ordinary attempt, and a facilitator refusal of it is not a 402."""
+    app, bought = _app(fac)
+    c = TestClient(app)
+    nonce = "0x" + "7c" * 32
+    fac.settle.side_effect = [httpx.ReadTimeout("facilitator slow"),
+                              SettleResponse(success=False, errorReason="nonce_used")]
+    first = c.post("/api/v1/stamps/", json={"depth": 17},
+                   headers={"X-PAYMENT": pay(nonce=nonce), "Idempotency-Key": "k-a"})
+    assert first.status_code == 502
+    retry = c.post("/api/v1/stamps/", json={"depth": 17},
+                   headers={"X-PAYMENT": pay(nonce=nonce), "Idempotency-Key": "k-b"})
+    assert retry.status_code == 409
+    detail = retry.json()["detail"]
+    assert detail["code"] == "PAYMENT_AUTHORIZATION_OUTCOME_UNKNOWN"
+    assert detail["nonce"] == nonce and "accepts" not in detail
+    assert not bought
+
+
+def test_replay_record_carries_the_retry_nonce(fac):
+    """#553 review 2: the replay record names the retry's own (never settled) nonce."""
+    from app.x402.audit import read_audit_log
+    app, bought = _app(fac)
+    c = TestClient(app)
+    first_nonce, retry_nonce = "0x" + "8a" * 32, "0x" + "8b" * 32
+    hdr = lambda n: {"X-PAYMENT": pay(nonce=n), "Idempotency-Key": "k-replay"}
+    assert c.post("/api/v1/stamps/", json={"depth": 17}, headers=hdr(first_nonce)).status_code == 201
+    assert c.post("/api/v1/stamps/", json={"depth": 17}, headers=hdr(retry_nonce)).status_code == 201
+    replay = [e for e in read_audit_log() if e["event_type"] == "payment_idempotent_replay"][0]
+    assert replay["data"]["nonce"] == retry_nonce
+    settled = [e for e in read_audit_log() if e["event_type"] == "payment_settled"][0]
+    assert settled["data"]["nonce"] == first_nonce
+
+
 def test_settling_entry_survives_a_restart(tmp_path):
     """Killed or cancelled while waiting for the facilitator: still unknown after a restart."""
     path = str(tmp_path / "idem.json")

@@ -7,7 +7,7 @@ import httpx
 from fastapi import APIRouter, Header, HTTPException, Query, Request, status
 
 from app.core.client_ip import get_client_key
-from app.x402.settlement import settle_payment
+from app.x402.settlement import request_nonce, settle_payment
 from app.api.models.chunk import ChunkUploadResponse, CreditTopUpResponse, TokenRotationResponse
 from app.core.config import settings
 from app.services.bandwidth_credit import (
@@ -191,7 +191,8 @@ async def top_up_credit(
 
     log_audit_event(
         event_type=AuditEventType.CREDIT_TOPPED_UP,
-        data={"credited_bytes": credited_bytes, "balance_bytes": new_balance, "mb": mb},
+        data={"credited_bytes": credited_bytes, "balance_bytes": new_balance, "mb": mb,
+              "nonce": request_nonce(request)},
         wallet_address=payer,
     )
 

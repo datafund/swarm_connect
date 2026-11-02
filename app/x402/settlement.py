@@ -83,6 +83,12 @@ replay_guard = PaymentReplayGuard()
 # collected?" outlives the reservation. Same span as an Idempotency-Key entry.
 OUTCOME_UNKNOWN_SECONDS = 24 * 3600
 OUTCOME_UNKNOWN_MAX_ENTRIES = 10000
+# Which kind of unknown outcome. BEFORE_WORK: settle_payment, nothing ran; a
+# retry with the same authorization is the documented recovery (it settles at
+# most once). AFTER_WORK: the middleware fallback, the work already ran; a
+# retry with the same authorization would run it again, so it is stopped.
+BEFORE_WORK = "before_work"
+AFTER_WORK = "after_work"
 
 
 class OutcomeUnknownRegistry:
@@ -98,28 +104,36 @@ class OutcomeUnknownRegistry:
 
     def __init__(self):
         self._lock = Lock()
-        self._entries: Dict[Tuple[str, str], float] = {}
+        # key -> (expiry, kind)
+        self._entries: Dict[Tuple[str, str], Tuple[float, str]] = {}
 
-    def add(self, key: Optional[Tuple[str, str]]) -> None:
+    def add(self, key: Optional[Tuple[str, str]], kind: str) -> None:
         if key is None:
             return
         now = time.monotonic()
         with self._lock:
-            for k in [k for k, until in self._entries.items() if until <= now]:
+            for k in [k for k, (until, _) in self._entries.items() if until <= now]:
                 del self._entries[k]
-            self._entries[key] = now + OUTCOME_UNKNOWN_SECONDS
+            previous = self._entries.get(key)
+            if previous is not None and previous[1] == AFTER_WORK:
+                kind = AFTER_WORK    # once the work has run, it must not run again
+            self._entries[key] = (now + OUTCOME_UNKNOWN_SECONDS, kind)
             while len(self._entries) > OUTCOME_UNKNOWN_MAX_ENTRIES:
-                del self._entries[min(self._entries, key=self._entries.get)]
+                del self._entries[min(self._entries, key=lambda k: self._entries[k][0])]
+
+    def kind(self, key: Optional[Tuple[str, str]]) -> Optional[str]:
+        """BEFORE_WORK or AFTER_WORK for a remembered authorization, else None."""
+        if key is None:
+            return None
+        with self._lock:
+            entry = self._entries.get(key)
+            if entry is not None and entry[0] <= time.monotonic():
+                del self._entries[key]
+                entry = None
+            return entry[1] if entry else None
 
     def contains(self, key: Optional[Tuple[str, str]]) -> bool:
-        if key is None:
-            return False
-        with self._lock:
-            until = self._entries.get(key)
-            if until is not None and until <= time.monotonic():
-                del self._entries[key]
-                until = None
-            return until is not None
+        return self.kind(key) is not None
 
     def discard(self, key: Optional[Tuple[str, str]]) -> None:
         """This authorization has now settled: the earlier attempt did not spend it."""
@@ -143,6 +157,15 @@ OUTCOME_UNKNOWN_ADVICE = (
 )
 
 
+OUTCOME_UNKNOWN_HEADERS = {"X-Payment-Mode": "failed", "X-Payment-Status": "settlement_unknown"}
+
+
+def request_nonce(request) -> Optional[str]:
+    """The canonical nonce of the request's payment authorization, for audit records."""
+    key = getattr(getattr(request, "state", None), "x402_auth_key", None)
+    return key[1] if key else None
+
+
 def outcome_unknown_refusal(auth_key: Tuple[str, str], reason: Optional[str] = None) -> HTTPException:
     """The answer to a later attempt with an authorization whose settlement outcome is unknown.
 
@@ -159,7 +182,7 @@ def outcome_unknown_refusal(auth_key: Tuple[str, str], reason: Optional[str] = N
     }
     if reason:
         detail["reason"] = reason
-    return HTTPException(status_code=409, detail=detail)
+    return HTTPException(status_code=409, detail=detail, headers=dict(OUTCOME_UNKNOWN_HEADERS))
 
 
 _ADDRESS = re.compile(r"^0x[0-9a-fA-F]{40}$")
@@ -222,9 +245,9 @@ async def settle_payment(request: Request) -> None:
         # go through spent the nonce, so it cannot.
         logger.error(f"x402: settlement error before delivery: {type(e).__name__}: {e}", exc_info=True)
         log_payment_failed(client_ip=client_ip, reason=f"{type(e).__name__}: {e}",
-                           stage="settle", wallet_address=payer)
+                           stage="settle", wallet_address=payer, nonce=request_nonce(request))
         x402_settlements_total.labels(result="error").inc()
-        outcome_unknown.add(getattr(request.state, "x402_auth_key", None))
+        outcome_unknown.add(getattr(request.state, "x402_auth_key", None), BEFORE_WORK)
         raise HTTPException(
             status_code=502,
             detail={
@@ -250,12 +273,14 @@ async def settle_payment(request: Request) -> None:
             logger.warning(f"x402: settlement refused ({reason}) for an authorization whose "
                            f"earlier settlement outcome is unknown")
             log_payment_settled(client_ip=client_ip, payer=payer, transaction_hash=None,
-                                network=settings.X402_NETWORK, success=False, error_reason=reason)
+                                network=settings.X402_NETWORK, success=False, error_reason=reason,
+                                nonce=request_nonce(request))
             x402_settlements_total.labels(result="refused").inc()
             raise outcome_unknown_refusal(auth_key, reason)
         logger.warning(f"x402: settlement refused before delivery: {reason}")
         log_payment_settled(client_ip=client_ip, payer=payer, transaction_hash=None,
-                            network=settings.X402_NETWORK, success=False, error_reason=reason)
+                            network=settings.X402_NETWORK, success=False, error_reason=reason,
+                                nonce=request_nonce(request))
         x402_settlements_total.labels(result="refused").inc()
         message = f"The payment could not be settled ({reason}). Nothing was delivered."
         detail = {
@@ -282,5 +307,5 @@ async def settle_payment(request: Request) -> None:
     tx = getattr(result, "transaction", None)
     logger.info(f"x402: payment settled before delivery, tx={tx}")
     log_payment_settled(client_ip=client_ip, payer=payer, transaction_hash=tx,
-                        network=settings.X402_NETWORK, success=True)
+                        network=settings.X402_NETWORK, success=True, nonce=request_nonce(request))
     x402_settlements_total.labels(result="settled").inc()

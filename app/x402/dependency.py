@@ -719,12 +719,21 @@ async def require_x402_payment(request: Request) -> None:
             },
         )
 
+    # An authorization whose settlement got no answer AFTER its work ran (the
+    # middleware fallback) never runs the work again, also once its
+    # reservation has lapsed (#553). One whose settlement got no answer before
+    # any work (settle_payment) may be retried: it settles at most once.
+    from app.x402.settlement import AFTER_WORK, outcome_unknown, outcome_unknown_refusal
+    if outcome_unknown.kind(auth_key) == AFTER_WORK:
+        logger.warning(f"x402: retry of an authorization whose settlement outcome is unknown "
+                       f"after its work ran, from {client_ip}")
+        raise outcome_unknown_refusal(auth_key)
+
     if not replay_guard.reserve(auth_key):
         logger.warning(f"x402: Payment authorization reused by {client_ip}")
-        from app.x402.settlement import outcome_unknown, outcome_unknown_refusal
         if outcome_unknown.contains(auth_key):
-            # Still reserved because its settlement outcome is unknown (the
-            # middleware fallback keeps it): not "sign a new payment" (#553).
+            # In use by a concurrent retry of an authorization whose
+            # settlement outcome is unknown: not "sign a new payment" (#553).
             raise outcome_unknown_refusal(auth_key)
         raise HTTPException(
             status_code=402,
