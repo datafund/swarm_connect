@@ -13,6 +13,7 @@ import time
 
 from prometheus_client import Counter, Gauge, Info
 
+from app.api.models.stamp import SIZE_PRESETS
 from app.core.config import settings
 
 logger = logging.getLogger(__name__)
@@ -103,8 +104,30 @@ pool_acquires_total = Counter(
     "gateway_pool_acquires_total", "Pool stamp acquisitions", ["size", "status"]
 )
 notary_signatures_total = Counter(
-    "gateway_notary_signatures_total", "Notary signing operations", ["status"]
+    "gateway_notary_signatures_total",
+    "Notary signatures: success = a signed document stored on Swarm, "
+    "error = signing refused or failed",
+    ["status"],
 )
+
+# The KPI series exist from startup (#518). A series created on its first event
+# first appears at 1, and rate()/increase() have no earlier sample to measure
+# from, so they count that event as 0 — for a rare one such as a paid acquire
+# that could not be delivered, the rate panel would miss it entirely. A fresh
+# gateway also shows 0 instead of "No data". (A restart of a series that already
+# existed is not the problem: Prometheus counts the drop as a reset.) Only label
+# values known and bounded at startup are created here; gateway_stamp_purchases_total
+# is left alone because direct purchases take any depth, so its size can be depth-N.
+for _status in ("success", "error"):
+    uploads_total.labels(status=_status)
+    notary_signatures_total.labels(status=_status)
+for _status in ("success", "error", "too_large"):
+    downloads_total.labels(status=_status)
+# The pool serves only the preset sizes; the acquire request rejects any other depth.
+for _size in SIZE_PRESETS:
+    for _status in ("success", "error", "settled_not_delivered"):
+        pool_acquires_total.labels(size=_size, status=_status)
+
 x402_settlements_total = Counter(
     "gateway_x402_settlements_total",
     "x402 settlement outcomes (#375): settled, refused (nothing delivered), error "

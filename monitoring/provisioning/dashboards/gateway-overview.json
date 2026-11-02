@@ -277,7 +277,7 @@
       },
       {
         "id": 73, "title": "Notary Signing", "type": "timeseries",
-        "description": "Rate of notary signing operations (POST /data/?sign=notary). Shows successful signatures and failures (not enabled, bad document format). Only active when NOTARY_ENABLED=true.",
+        "description": "Rate of notary signing operations (POST /data/?sign=notary). Signed = a signed document that was then stored on Swarm; a signed upload that fails is counted as an upload error, not here. Errors = signing refused or failed (not enabled, not configured, bad document format). Only active when NOTARY_ENABLED=true.",
         "gridPos": { "h": 8, "w": 8, "x": 0, "y": 64 },
         "targets": [
           { "expr": "sum(rate(gateway_notary_signatures_total{environment=~\"$environment\",status=\"success\"}[5m]))", "legendFormat": "signed" },
@@ -469,7 +469,7 @@
       },
       {
         "id": 112, "title": "Notarized Share (7 days)", "type": "stat",
-        "description": "Successful notary signatures divided by successful uploads, last 7 days, production. The share of stored data that got a provenance signature. The signature is counted before the Swarm upload, so a signed upload that then fails counts as notarized but not stored. The share can therefore exceed 100%.",
+        "description": "Successful notary signatures divided by successful uploads, last 7 days, production. The share of stored data that got a provenance signature. A signature is counted only once the signed document is stored on Swarm, so a signed upload that then fails counts as neither, and the share cannot exceed 100%.",
         "gridPos": { "h": 4, "w": 4, "x": 4, "y": 152 },
         "targets": [{ "expr": "sum(increase(gateway_notary_signatures_total{environment=\"main\",status=\"success\"}[7d])) / sum(increase(gateway_uploads_total{environment=\"main\",status=\"success\"}[7d]))", "legendFormat": "notarized" }],
         "fieldConfig": { "defaults": { "unit": "percentunit", "decimals": 0, "thresholds": { "mode": "absolute", "steps": [{ "value": null, "color": "blue" }] } } }
