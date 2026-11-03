@@ -1004,6 +1004,10 @@ async def settle_payment(request: Request) -> None:
         raise HTTPException(status_code=402, detail=detail)
 
     request.state.x402_settlement = result
+    # The rest of this request's Bee work waits for a slot rather than being
+    # refused: refusing it now would only start a refund (#588).
+    from app.services.bee_gate import mark_committed
+    mark_committed()
     # From here on a retry with the same Idempotency-Key must not pay again,
     # whatever happens to this request (#359).
     record_settlement(request, result)

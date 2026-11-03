@@ -167,10 +167,11 @@ def _new_client() -> "tuple[httpx.AsyncClient, ObservedTransport]":
     global _generation
     _generation += 1
     transport = ObservedTransport(_limits(), _generation)
+    from app.services import bee_gate  # cap on Bee calls in flight (#588)
     client = httpx.AsyncClient(
         timeout=httpx.Timeout(10.0, connect=5.0),
         follow_redirects=True,
-        transport=transport,
+        transport=bee_gate.wrap(transport),
     )
     return client, transport
 

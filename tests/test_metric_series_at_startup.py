@@ -39,6 +39,13 @@ EXPECTED_SERIES = (
        for r in ("replaced", "replaced_unverified", "probe_failed", "not_stuck")]
     + [f'gateway_bee_http_pool_connections{{state="{s}"}}' for s in ("active", "idle", "stuck")]
     + ["gateway_bee_http_pool_requests"]
+    # Flood resilience (#588)
+    + [f'gateway_bee_calls_in_flight{{lane="{l}"}}' for l in ("user", "transfer", "committed", "background")]
+    + [f'gateway_bee_call_rejections_total{{lane="{l}"}}'
+       for l in ("user", "transfer", "committed", "background", "admission")]
+    + [f'gateway_health_snapshot_refreshes_total{{result="{r}"}}' for r in ("ok", "error", "timeout")]
+    + [f'gateway_top_caller_requests{{rank="{n}"}}' for n in range(1, 6)]
+    + ["gateway_top_callers_distinct", "gateway_top_callers_untracked_total"]
 )
 
 

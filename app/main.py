@@ -79,7 +79,13 @@ async def lifespan(app: FastAPI):
         })
         await start_metrics_background_task()
 
+    # Build the first /health snapshot now, in the background (#588).
+    from app.services import health_snapshot
+    health_snapshot.start_refresh(bool(settings.X402_ENABLED))
+
     yield
+
+    await health_snapshot.stop()
 
     # === Shutdown ===
     # Stop metrics background task
@@ -215,6 +221,15 @@ if settings.X402_ENABLED:
     app.add_middleware(X402Middleware)
     logger.info("x402 middleware enabled")
 
+# Bee call gate (#588): marks each request so its Bee calls take request slots,
+# turns a request whose own Bee call was refused into 503 BEE_BUSY with
+# Retry-After, and refuses paid routes before payment when no slot is free.
+# Added after the rate limiter and x402 so it wraps them, and before the client
+# metrics and CORS so they see its 503. Does nothing when BEE_CALL_GATE_ENABLED
+# is false (checked per request).
+from app.middleware.bee_gate import BeeGateMiddleware
+app.add_middleware(BeeGateMiddleware)
+
 # Record which client types we serve and whether we serve them (#347).
 #
 # Added AFTER the rate limiter and x402 so that it WRAPS them. Starlette runs the
@@ -226,6 +241,12 @@ if settings.METRICS_ENABLED:
     from app.middleware.client_metrics import ClientMetricsMiddleware
     app.add_middleware(ClientMetricsMiddleware)
     logger.info("Client-type metrics enabled")
+
+# Heaviest callers per window, by keyed hash tag (#588). Outside the rate
+# limiter, the blocklist and x402, so refused floods are counted too.
+if settings.TOP_CALLERS_ENABLED:
+    from app.middleware.top_callers import TopCallersMiddleware
+    app.add_middleware(TopCallersMiddleware)
 
 # Add CORS middleware for browser-based SDK usage
 # IMPORTANT: Add CORS last so it wraps all other middleware.
@@ -319,6 +340,9 @@ async def read_root():
       `reserve_size`, `reserve_size_within_radius`, `pullsync_rate`, `batch_commitment`),
       chain sync (`last_synced_block`, `chain_tip`, `chain_sync_lag_blocks`), plus a
       `healthy` flag and advisory `warnings`
+    - `snapshot`: the Bee node and wallet fields come from a snapshot refreshed at
+      most every `max_age_seconds`; `age_seconds` is how old this one is, and
+      `warnings` says when refreshes are failing (advisory, never changes `status`)
     - `state`: gateway state files, with advisory `warnings` (fixed text) that never
       change `status`: for example, ownership registry saves are refused because the
       pre-migration copy cannot be written, so changes are lost on restart
@@ -339,7 +363,26 @@ async def read_root():
     4. Upload data: `POST /api/v1/data/?stamp_id=...`
     5. Download data: `GET /api/v1/data/{reference}` (always free, no headers needed)
     """
-    logger.info("Health check endpoint accessed.")
+    logger.debug("Health check endpoint accessed.")
+
+    # The upstream reads (Bee node, Bee wallet and chequebook, Base RPC) come
+    # from a snapshot refreshed at most every HEALTH_SNAPSHOT_TTL_SECONDS, so a
+    # request costs no upstream call (#588). The rest is local and per request.
+    from app.services import health_snapshot
+    snapshot = await health_snapshot.get_snapshot(bool(settings.X402_ENABLED))
+    return build_health_response(snapshot)
+
+
+SNAPSHOT_NOT_READY = "health snapshot not ready yet: the gateway is starting or cannot reach its upstreams"
+
+
+def build_health_response(snapshot) -> dict:
+    """The /health body from a snapshot of the upstream reads and local state.
+
+    `snapshot` is an app.services.health_snapshot.HealthSnapshot, or None when
+    there is none yet. Every rule that sets `status` is here.
+    """
+    from app.services import health_snapshot
 
     response_data = {
         "status": "ok",
@@ -364,22 +407,37 @@ async def read_root():
         "uptime_seconds": round(time.monotonic() - _STARTED_MONOTONIC, 1),
     }
 
+    # How old the upstream part of this answer is (#588). Advisory warnings
+    # only; they never change `status`.
+    snapshot_warnings = []
+    if snapshot is None:
+        snapshot_warnings.append(SNAPSHOT_NOT_READY)
+    else:
+        failure = health_snapshot.last_failure()
+        if failure:
+            snapshot_warnings.append(f"the last {failure}; this answer is "
+                                     f"{round(snapshot.age())} s old")
+    response_data["snapshot"] = {
+        "age_seconds": None if snapshot is None else round(snapshot.age(), 1),
+        "max_age_seconds": settings.HEALTH_SNAPSHOT_TTL_SECONDS,
+        "warnings": snapshot_warnings,
+    }
+
     # Bee node connectivity/health — surfaces whether the node can actually reach
     # the network (networkAvailability), peer count, mode, reserve, plus node identity,
-    # build version and chain-sync position. Cheap (cached), always included. A node
+    # build version and chain-sync position. Always included. A node
     # with networkAvailability != Available accepts uploads (201) that may not
     # propagate, so flag it here.
-    try:
-        from app.services.swarm_api import get_node_status_summary
-        node = await get_node_status_summary()
+    if snapshot is None:
+        response_data["bee_node"] = {"healthy": False, "warnings": [SNAPSHOT_NOT_READY]}
+    elif snapshot.node is not None:
+        node = snapshot.node
         response_data["bee_node"] = node
         # Only downgrade on a definitive bad signal (network unreachable -> uploads
         # won't propagate). A transient inability to query the node, or warmup, is
         # surfaced via bee_node.warnings but doesn't flip the gateway to degraded.
         if node.get("network_availability") == "Unavailable" and response_data["status"] == "ok":
             response_data["status"] = "degraded"
-    except Exception as e:
-        logger.warning(f"Health: failed to summarize Bee node status: {e}")
 
     # Gateway state files. A registry that cannot save loses every ownership
     # change on restart (#558). The warning is advisory and never changes
@@ -391,11 +449,13 @@ async def read_root():
 
     # If x402 is enabled, include wallet status
     if settings.X402_ENABLED:
-        from app.x402.base_balance import check_base_eth_balance
-        from app.x402.preflight import check_preflight_balances
-
-        base_eth = await check_base_eth_balance()
-        gnosis = await check_preflight_balances()
+        if snapshot is not None and snapshot.gnosis is not None:
+            base_eth = snapshot.base_eth or {}
+            gnosis = snapshot.gnosis
+        else:
+            # Not read yet: nothing is known to be OK.
+            base_eth = {}
+            gnosis = {"can_accept": None, "warnings": [SNAPSHOT_NOT_READY], "errors": []}
 
         warnings = []
         errors = []
