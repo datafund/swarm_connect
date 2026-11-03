@@ -19,7 +19,7 @@ import tempfile
 from datetime import datetime, timezone
 from typing import Any, Optional
 
-__all__ = ["atomic_write_json", "load_json_state", "unreadable_state", "StateLoadError"]
+__all__ = ["atomic_write_json", "keep_corrupt_copy", "load_json_state", "unreadable_state", "StateLoadError"]
 
 
 class StateLoadError(RuntimeError):
@@ -112,6 +112,19 @@ def unreadable_state(path: str, reason: Any, consequence: Optional[str] = None) 
     loop. A new copy is made only when no existing backup has identical
     content, so the loop cannot fill the volume.
     """
+    kept = keep_corrupt_copy(path)
+    if consequence is None:
+        consequence = ("Refusing to start with empty state, which would overwrite it. Repair "
+                       "or restore the file, or move it away deliberately to start fresh.")
+    return StateLoadError(f"State file {path} could not be read ({reason}); {kept}. {consequence}")
+
+
+def keep_corrupt_copy(path: str) -> str:
+    """Copy an unreadable file to ``<path>.corrupt-<UTC timestamp>``, once.
+
+    No new copy is made when an existing backup has identical content. Returns
+    a phrase saying where the copy is, for the caller's log line.
+    """
     kept = None
     try:
         for existing in sorted(glob.glob(f"{glob.escape(path)}.corrupt-*")):
@@ -124,7 +137,4 @@ def unreadable_state(path: str, reason: Any, consequence: Optional[str] = None) 
             kept = f"a copy was saved to {backup}"
     except Exception as copy_error:
         kept = f"could not save a copy ({copy_error})"
-    if consequence is None:
-        consequence = ("Refusing to start with empty state, which would overwrite it. Repair "
-                       "or restore the file, or move it away deliberately to start fresh.")
-    return StateLoadError(f"State file {path} could not be read ({reason}); {kept}. {consequence}")
+    return kept

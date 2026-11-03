@@ -149,7 +149,8 @@ class TestCheckBaseEthBalance:
         assert result["is_critical"] is True
         assert result["balance_eth"] == 0.0
         assert "Failed to fetch" in result["warning"]
-        assert "Connection refused" in result["warning"]
+        # The exception class, not its text, which can name BASE_RPC_URL (#549).
+        assert "(Exception)" in result["warning"]
 
     @patch("app.x402.base_balance.settings")
     @pytest.mark.asyncio

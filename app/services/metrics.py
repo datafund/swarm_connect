@@ -13,6 +13,7 @@ import time
 
 from prometheus_client import Counter, Gauge, Info
 
+from app.api.models.stamp import SIZE_PRESETS
 from app.core.config import settings
 
 logger = logging.getLogger(__name__)
@@ -44,6 +45,10 @@ base_eth_balance = Gauge(
 )
 stamp_pool_available = Gauge(
     "gateway_stamp_pool_available", "Available stamps in pool by size", ["size"]
+)
+stamp_pool_pending = Gauge(
+    "gateway_stamp_pool_pending",
+    "Pool stamps bought but not usable yet (held, not handed out) by size", ["size"]
 )
 stamp_pool_target = Gauge(
     "gateway_stamp_pool_target", "Target reserve by size", ["size"]
@@ -103,8 +108,73 @@ pool_acquires_total = Counter(
     "gateway_pool_acquires_total", "Pool stamp acquisitions", ["size", "status"]
 )
 notary_signatures_total = Counter(
-    "gateway_notary_signatures_total", "Notary signing operations", ["status"]
+    "gateway_notary_signatures_total",
+    "Notary signatures: success = a signed document stored on Swarm, "
+    "error = signing refused or failed",
+    ["status"],
 )
+
+# The KPI series exist from startup (#518). A series created on its first event
+# first appears at 1, and rate()/increase() have no earlier sample to measure
+# from, so they count that event as 0 — for a rare one such as a paid acquire
+# that could not be delivered, the rate panel would miss it entirely. A fresh
+# gateway also shows 0 instead of "No data". (A restart of a series that already
+# existed is not the problem: Prometheus counts the drop as a reset.) Only label
+# values known and bounded at startup are created here; gateway_stamp_purchases_total
+# is left alone because direct purchases take any depth, so its size can be depth-N.
+for _status in ("success", "error"):
+    uploads_total.labels(status=_status)
+    notary_signatures_total.labels(status=_status)
+for _status in ("success", "error", "too_large"):
+    downloads_total.labels(status=_status)
+# The pool serves only the preset sizes; the acquire request rejects any other depth.
+for _size in SIZE_PRESETS:
+    for _status in ("success", "error", "settled_not_delivered"):
+        pool_acquires_total.labels(size=_size, status=_status)
+
+# Free pool acquires refused because a daily allowance is spent (#554). Not a
+# status of gateway_pool_acquires_total: that counter's "error" is an empty pool
+# or a lost reservation race (409), and a dashboard panel read it as allowance
+# refusals for months. Every label is from a fixed set, never from the caller:
+#   size     - the size whose allowance was spent: a preset name, or "other"
+#              for a batch of any other depth (see allowance_refusal_size_label);
+#   scope    - WHICH allowance ran out: "origin" = the per-application budget,
+#              "client" = the per-client cap;
+#   response - the answer given: "402" when paying would bypass the allowance,
+#              "429" otherwise, "409" when the requested size was out of stock
+#              and the allowance for the larger size that would stand in is spent.
+# No origin, IP or wallet is a label. 4 x 2 x 3 = 24 series, all created at 0
+# so the first refusal after a deploy is counted by increase().
+pool_allowance_refusals_total = Counter(
+    "gateway_pool_allowance_refusals_total",
+    "Free pool acquires refused because a daily allowance was used up",
+    ["size", "scope", "response"],
+)
+POOL_ALLOWANCE_SIZES = tuple(SIZE_PRESETS) + ("other",)
+POOL_ALLOWANCE_SCOPES = ("origin", "client")
+POOL_ALLOWANCE_RESPONSES = ("402", "429", "409")
+for _size in POOL_ALLOWANCE_SIZES:
+    for _scope in POOL_ALLOWANCE_SCOPES:
+        for _response in POOL_ALLOWANCE_RESPONSES:
+            pool_allowance_refusals_total.labels(size=_size, scope=_scope, response=_response)
+
+
+def allowance_refusal_size_label(size: str) -> str:
+    """Bound the size label to the presets plus "other".
+
+    The size charged is taken from the batch handed out, and the pool can hold
+    a batch of a non-preset depth: sync_from_bee_node adopts a known batch at
+    whatever depth Bee reports, and a free acquire may be served any larger
+    batch in stock. depth_to_size_name() then returns "depth-N", which as a
+    label would add a series for every such depth.
+    """
+    return size if size in SIZE_PRESETS else "other"
+
+
+def count_pool_allowance_refusal(size: str, scope: str, response: str) -> None:
+    pool_allowance_refusals_total.labels(
+        size=allowance_refusal_size_label(size), scope=scope, response=response).inc()
+
 x402_settlements_total = Counter(
     "gateway_x402_settlements_total",
     "x402 settlement outcomes (#375): settled, refused (nothing delivered), error "
@@ -171,6 +241,15 @@ requests_by_client_total = Counter(
 distinct_callers = Gauge(
     "gateway_distinct_callers",
     "Distinct callers seen so far today",
+)
+
+# The final count of the previous UTC day. The first scrape after midnight
+# already reads the new day, so callers seen after the last scrape before
+# midnight appear in no sample of distinct_callers. Exported through the next
+# day so the per-day panel can attribute it to the day it belongs to.
+distinct_callers_previous_day = Gauge(
+    "gateway_distinct_callers_previous_day",
+    "Distinct callers on the previous UTC day, final count",
 )
 
 # ── Spending limits (#102) ──────────────────────────────────────────────────
@@ -436,6 +515,9 @@ async def _poll_balances():
                             status.current_levels.get(int(depth), 0)
                         )
                         stamp_pool_target.labels(size=size_name).set(target)
+                        stamp_pool_pending.labels(size=size_name).set(
+                            status.pending_stamps.get(int(depth), 0)
+                        )
 
                     # Pool stamp min TTL — check TTL of all available pool stamps
                     pool_min_ttl = float("inf")

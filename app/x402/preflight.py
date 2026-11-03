@@ -16,6 +16,7 @@ from typing import Dict, Any, List
 
 from app.core.config import settings
 from app.services.swarm_api import get_wallet_info, get_chequebook_balance, get_chequebook_info
+from app.services.bee_errors import error_cause
 
 logger = logging.getLogger(__name__)
 
@@ -78,7 +79,10 @@ async def check_xbzz_balance() -> Dict[str, Any]:
             "balance_bzz": 0.0,
             "threshold_bzz": settings.X402_XBZZ_WARN_THRESHOLD,
             "wallet_address": None,
-            "warning": f"Failed to fetch xBZZ balance: {str(e)}"
+            # /health is unauthenticated and str(e) names the Bee API URL for an
+            # httpx error (#549); the full text is logged above.
+            "warning": (f"Failed to fetch xBZZ balance from the Bee node "
+                        f"({error_cause(e)}); see the gateway log for details.")
         }
 
 
@@ -131,7 +135,10 @@ async def check_xdai_balance() -> Dict[str, Any]:
             "balance_xdai": 0.0,
             "threshold_xdai": settings.X402_XDAI_WARN_THRESHOLD,
             "wallet_address": None,
-            "warning": f"Failed to fetch xDAI balance: {str(e)}"
+            # /health is unauthenticated and str(e) names the Bee API URL for an
+            # httpx error (#549); the full text is logged above.
+            "warning": (f"Failed to fetch xDAI balance from the Bee node "
+                        f"({error_cause(e)}); see the gateway log for details.")
         }
 
 
@@ -200,7 +207,10 @@ async def check_chequebook_balance() -> Dict[str, Any]:
             "total_balance_bzz": 0.0,
             "threshold_bzz": settings.X402_CHEQUEBOOK_WARN_THRESHOLD,
             "chequebook_address": None,
-            "warning": f"Failed to fetch chequebook balance: {str(e)}"
+            # /health is unauthenticated and str(e) names the Bee API URL for an
+            # httpx error (#549); the full text is logged above.
+            "warning": (f"Failed to fetch chequebook balance from the Bee node "
+                        f"({error_cause(e)}); see the gateway log for details.")
         }
 
 

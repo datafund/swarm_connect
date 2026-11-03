@@ -467,6 +467,7 @@ async def upload_data(
             )
 
         # Optional notary signing
+        notarized = False
         if sign == "notary":
             try:
                 provenance_service = get_provenance_service()
@@ -474,7 +475,10 @@ async def upload_data(
                 data_bytes = signed_doc.raw_json.encode('utf-8')
                 content_type = "application/json"  # Signed documents are always JSON
                 logger.info(f"Document signed by notary, signatures count: {len(signed_doc.signatures)}")
-                notary_signatures_total.labels(status="success").inc()
+                # Counted once the signed document is stored, below: a success
+                # counted here, before the upload, let the Notarized Share KPI
+                # exceed 100% whenever a signed upload then failed (#518).
+                notarized = True
             except NotaryNotEnabledError as e:
                 notary_signatures_total.labels(status="error").inc()
                 raise HTTPException(
@@ -505,6 +509,12 @@ async def upload_data(
                         "suggestion": "Document must be JSON with a 'data' field: {\"data\": {...}, \"signatures\": [...]}"
                     }
                 )
+            except Exception:
+                # Signing failed unexpectedly (e.g. SigningServiceError from
+                # the key). Count it as a notary error here, then let the outer
+                # handler answer and count the upload error once.
+                notary_signatures_total.labels(status="error").inc()
+                raise
         elif sign is not None:
             raise HTTPException(
                 status_code=400,
@@ -541,6 +551,8 @@ async def upload_data(
 
         uploads_total.labels(status="success").inc()
         upload_bytes_total.inc(len(data_bytes))
+        if notarized:
+            notary_signatures_total.labels(status="success").inc()
 
         response = DataUploadResponse(
             reference=reference,
