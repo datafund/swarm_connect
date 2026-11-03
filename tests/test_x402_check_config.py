@@ -219,3 +219,45 @@ def test_deploy_check_uses_the_new_containers_env_and_fails_the_job():
     other = re.search(r"\n\s*\*\)(.*?);;", after, re.S)
     assert other and "could not run" in other.group(1) and "exit 1" in other.group(1)
     assert "refused" not in other.group(1)
+
+
+# --- #527: a CDP URL off the route its tokens are signed for ----------------
+
+BARE_CDP_HOST = "https://api.cdp.coinbase.com"
+
+
+def test_bare_cdp_host_is_refused_by_the_check(x402, capsys):
+    """The x402 client calls {url}/verify; cdp-sdk signs for /platform/v2/x402/verify."""
+    import types
+    from app.x402 import check_config
+
+    fake = types.ModuleType("cdp.x402")
+    fake.create_facilitator_config = lambda key_id, secret: {
+        "url": facilitator.CDP_FACILITATOR_URL, "create_headers": lambda: {}}
+    x402.setitem(sys.modules, "cdp", types.ModuleType("cdp"))
+    x402.setitem(sys.modules, "cdp.x402", fake)
+    x402.setattr(settings, "X402_ENABLED", True)
+    x402.setattr(settings, "X402_NETWORK", "base")
+    x402.setattr(settings, "X402_PAY_TO_ADDRESS", PAY_TO)
+    x402.setattr(settings, "X402_FACILITATOR_URL", BARE_CDP_HOST)
+    x402.setattr(settings, "X402_FACILITATOR_CDP_API_KEY_ID", CDP_ID)
+    x402.setattr(settings, "X402_FACILITATOR_CDP_API_KEY_SECRET", CDP_SECRET)
+    x402.setattr(settings, "X402_FACILITATOR_BEARER_TOKEN", None)
+    assert check_config.main() == REFUSED
+    err = capsys.readouterr().err
+    assert "X402_FACILITATOR_URL" in err and facilitator.CDP_FACILITATOR_URL in err
+    for value in (PAY_TO, CDP_ID, CDP_SECRET):
+        assert value not in err
+
+
+def test_bare_cdp_host_is_refused_by_the_deploy_check_with_real_cdp_sdk(tmp_path):
+    # Runs where cdp-sdk is installed (the image, CI). A refusal never builds
+    # the client, so no token is signed and nothing goes on the network.
+    pytest.importorskip("cdp.x402")
+    code, out = run_check(tmp_path, {
+        "X402_NETWORK": "base", "X402_FACILITATOR_URL": BARE_CDP_HOST,
+        "X402_FACILITATOR_CDP_API_KEY_ID": CDP_ID, "X402_FACILITATOR_CDP_API_KEY_SECRET": CDP_SECRET})
+    assert code == REFUSED, out
+    assert "X402_FACILITATOR_URL is not CDP's x402 route" in out
+    for value in (PAY_TO, CDP_ID, CDP_SECRET):
+        assert value not in out
