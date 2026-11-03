@@ -916,7 +916,9 @@ class TestBatchIdCase:
             mgr.register_stamp("cd" * 32, owner=self.OTHER, mode="paid", source="pool_acquire")
             body = health()
         assert body["state"]["warnings"] == [SAVES_REFUSED_WARNING]
-        assert body["status"] == "degraded"
+        # Advisory only: a non-ok status could get the container restarted,
+        # and a restart loses the changes held in memory.
+        assert body["status"] == "ok"
         text = json.dumps(body["state"])
         assert state_file not in text and "secret" not in text and "No space" not in text
 
