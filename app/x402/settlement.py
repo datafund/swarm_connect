@@ -28,15 +28,14 @@ import hashlib
 import json
 import logging
 import os
-import queue
 import re
-import threading
 import time
 from threading import Lock, RLock
 from typing import Dict, Optional, Tuple
 
 from fastapi import HTTPException, Request
 
+from app.core.io_lane import IOLane
 from app.core.atomic_io import StateLoadError, atomic_write_json, load_json_state, unreadable_state
 from app.core.config import settings
 from app.core.client_ip import get_client_ip
@@ -107,108 +106,42 @@ def _key_id(key: Tuple[str, str]) -> str:
     return hashlib.sha256(json.dumps([key[0].lower(), key[1].lower()]).encode()).hexdigest()
 
 
-# Registry disk I/O runs on its own small pool, not the default executor: that
-# one is shared with long blocking calls (an on-chain createBatch holds a
-# worker for minutes), which must not be able to stall every paid settlement.
-# Daemon threads, not a ThreadPoolExecutor: concurrent.futures joins its
-# workers at interpreter exit without a timeout, so one write hung on a dead
-# disk would keep the process from exiting. A hung write never landed, so
-# nothing is lost by not waiting for it beyond the shutdown bound.
+# Registry disk I/O runs on its own lane (app/core/io_lane.py): not the default
+# executor, which long blocking calls (an on-chain createBatch holds a worker
+# for minutes) share, and not the idempotency store's lane, so a hang on one
+# state file fails closed only the requests that need it.
 _REGISTRY_IO_WORKERS = 2
 # Write-aheads are refused (503) when the oldest pending registry write has
 # waited longer than the write timeout (a hung disk), or when this many writes
 # are pending (far above any healthy burst). An ordinary burst just queues.
 MAX_PENDING_REGISTRY_IO = 64
 
-
-class _DaemonPool:
-    def __init__(self, workers: int, name: str):
-        self._queue: "queue.SimpleQueue" = queue.SimpleQueue()
-        self._threads = [threading.Thread(target=self._run, name=f"{name}-{i}", daemon=True)
-                         for i in range(workers)]
-        for t in self._threads:
-            t.start()
-
-    def _run(self) -> None:
-        while True:
-            item = self._queue.get()
-            if item is None:
-                return
-            fut, fn, args = item
-            if not fut.set_running_or_notify_cancel():
-                continue
-            try:
-                fut.set_result(fn(*args))
-            except BaseException as e:      # delivered to the waiter, never lost
-                fut.set_exception(e)
-
-    def submit(self, fn, *args) -> concurrent.futures.Future:
-        fut: concurrent.futures.Future = concurrent.futures.Future()
-        self._queue.put((fut, fn, args))
-        return fut
-
-    def shutdown(self) -> None:
-        """Workers exit after the work queued before this; never waits."""
-        for _ in self._threads:
-            self._queue.put(None)
+_registry_lane = IOLane(_REGISTRY_IO_WORKERS, "x402-settlement-state")
 
 
-_registry_io: Optional[_DaemonPool] = None
-_registry_io_pending: "Dict[concurrent.futures.Future, float]" = {}   # future -> queued at (monotonic)
-_registry_io_lock = Lock()
-
-
-def _registry_executor() -> _DaemonPool:
-    global _registry_io
-    with _registry_io_lock:
-        if _registry_io is None:
-            _registry_io = _DaemonPool(_REGISTRY_IO_WORKERS, "x402-settlement-state")
-        return _registry_io
+def _registry_executor():
+    return _registry_lane.executor()
 
 
 def _submit_registry_io(fn, *args) -> concurrent.futures.Future:
-    """Run fn(*args) on the registry pool; tracked so shutdown can wait for it."""
-    fut = _registry_executor().submit(fn, *args)
-    with _registry_io_lock:
-        _registry_io_pending[fut] = time.monotonic()
-    fut.add_done_callback(lambda f: _discard_pending(f))
-    return fut
+    """Run fn(*args) on the registry lane; tracked so shutdown can wait for it."""
+    return _registry_lane.submit(fn, *args)
 
 
 def _registry_io_backlog() -> int:
-    with _registry_io_lock:
-        return len(_registry_io_pending)
+    return _registry_lane.backlog()
 
 
 def _registry_io_oldest_age() -> float:
     """Seconds the oldest pending registry write has been queued or running."""
-    with _registry_io_lock:
-        if not _registry_io_pending:
-            return 0.0
-        return time.monotonic() - min(_registry_io_pending.values())
-
-
-def _discard_pending(fut) -> None:
-    with _registry_io_lock:
-        _registry_io_pending.pop(fut, None)
+    return _registry_lane.oldest_age()
 
 
 def shutdown_registry_io(timeout: float = 5.0) -> None:
     """At gateway shutdown: wait, at most `timeout` seconds, for pending registry
     writes (write-aheads, resolutions, background removals and retries), then
-    release the pool. Its daemon workers cannot hold up the process exit. A new
-    pool is created if used again (tests)."""
-    global _registry_io
-    with _registry_io_lock:
-        pending = set(_registry_io_pending)
-        pool, _registry_io = _registry_io, None
-    if pending:
-        done, not_done = concurrent.futures.wait(pending, timeout=timeout)
-        if not_done:
-            logger.error("x402: %d settlement-state writes still running at shutdown (hung disk?); "
-                         "exiting without them", len(not_done))
-    if pool is not None:
-        pool.shutdown()
+    release the lane. Its daemon workers cannot hold up the process exit."""
+    _registry_lane.shutdown(timeout)
 
 
 class OutcomeUnknownRegistry:
@@ -641,7 +574,7 @@ class OutcomeUnknownRegistry:
 
     async def abegin_settlement(self, key, kind):
         """begin_settlement off the event loop, on the registry pool. Returns
-        (prior, recorded, gen); on success the entry counts as asked. Refused at
+        (prior, recorded, gen); the entry is not yet "asked" (mark_asked, give_up). Refused at
         once (recorded False, so 503) while too many registry writes are pending.
         Waits at most X402_SETTLEMENT_STATE_WRITE_TIMEOUT_SECONDS: a hung disk
         then fails closed instead of hanging the request, the registry is marked
@@ -672,9 +605,17 @@ class OutcomeUnknownRegistry:
         except asyncio.CancelledError:
             self._give_up(key, gen, cfut)
             raise
-        if recorded:
-            self.mark_asked(key, got)
+        # Not yet "asked": the caller marks it (mark_asked) right before calling
+        # the facilitator, or gives it up (give_up) if it does not get that far.
         return prior, recorded, got
+
+    def give_up(self, key, gen: Optional[int]) -> None:
+        """A recorded write-ahead whose caller will not call the facilitator after
+        all (a later step failed): released now, removed in the background."""
+        if key is None or gen is None:
+            return
+        self.abandon(key, gen)
+        _submit_registry_io(self.remove_abandoned, key, None, gen)
 
     def _give_up(self, key, gen: int, cfut) -> None:
         self.abandon(key, gen)
@@ -951,7 +892,7 @@ async def settle_payment(request: Request) -> None:
     # For an Idempotency-Key: from here until the facilitator answers, the
     # outcome is unknown, and a retry must not be charged on the assumption
     # that nothing happened (idempotency.py).
-    from app.x402.idempotency import record_settlement, record_settling, settlement_refused
+    from app.x402.idempotency import arecord_settling, record_settlement, settlement_refused
     auth_key = getattr(request.state, "x402_auth_key", None)
     # Write-ahead: on disk before the facilitator is asked, so a kill while
     # waiting leaves an unknown outcome behind, not nothing (#553).
@@ -961,7 +902,18 @@ async def settle_payment(request: Request) -> None:
             raise settlement_in_progress_refusal(auth_key, request)
         raise HTTPException(status_code=503, headers={"Retry-After": "60"},
                             detail=payment_state_unavailable_detail())
-    record_settling(request)
+    # The Idempotency-Key's "settling" record, off the event loop and bounded:
+    # not on disk in time means no settlement, like a failed write-ahead.
+    try:
+        settling_recorded = await arecord_settling(request)
+    except BaseException:
+        outcome_unknown.give_up(auth_key, gen)
+        raise
+    if not settling_recorded:
+        outcome_unknown.give_up(auth_key, gen)
+        raise HTTPException(status_code=503, headers={"Retry-After": "60"},
+                            detail=payment_state_unavailable_detail())
+    outcome_unknown.mark_asked(auth_key, gen)
     try:
         result = await _facilitator().settle(payment=payment, payment_requirements=requirements)
     except Exception as e:

@@ -102,7 +102,9 @@ async def lifespan(app: FastAPI):
     # Pending settlement-state writes (#553): wait for them, bounded, so a
     # write-ahead or resolution in progress is not cut off by the exit.
     from app.x402.settlement import shutdown_registry_io
+    from app.x402.idempotency import shutdown_idempotency_io
     await asyncio.to_thread(shutdown_registry_io, 5.0)
+    await asyncio.to_thread(shutdown_idempotency_io, 5.0)
 
     # Close shared HTTP client (must be last)
     await close_client()
@@ -416,11 +418,10 @@ async def read_root():
             payment_state_down = True
             warnings.append(f"PAYMENT_STATE_UNAVAILABLE: {cause}; every paid request gets 503 "
                             "until it is repaired (details in the gateway log)")
-        if idempotency_store.unavailable:
-            import os.path
-            warnings.append(f"IDEMPOTENCY_UNAVAILABLE: {os.path.basename(idempotency_store._path())} is "
-                            "unreadable; paid requests with an Idempotency-Key get 503 until it is "
-                            "repaired (details in the gateway log)")
+        idem_cause = idempotency_store.public_cause()
+        if idem_cause:
+            warnings.append(f"IDEMPOTENCY_UNAVAILABLE: {idem_cause}; paid requests with an "
+                            "Idempotency-Key get 503 until it is repaired (details in the gateway log)")
 
         # Determine overall status
         # Never return 503 — the gateway should always be reachable so
