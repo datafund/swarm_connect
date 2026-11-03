@@ -34,13 +34,18 @@ python -m pytest tests/test_stamp_pool.py -v    # one area
 `pytest tests/` is hermetic. Nothing in it reaches a live gateway unless you say so.
 
 `tests/test_integration_gateway.py` and `tests/test_x402_live.py` both require an
-explicit opt-in, on three separate switches:
+explicit opt-in, on separate switches:
 
 | variable | effect | default |
 |---|---|---|
 | `RUN_LIVE_TESTS=1` | run the live modules at all | off |
-| `GATEWAY_URL=...` | which gateway to talk to | staging (**never** production) |
-| `ALLOW_LIVE_STAMP_PURCHASE=1` | let a fixture buy a postage batch | off |
+| `GATEWAY_URL=...` | which gateway to talk to (both modules; `TEST_GATEWAY_URL` is a legacy alias) | staging (**never** production) |
+| `ALLOW_LIVE_STAMP_PURCHASE=1` | let a test have the gateway buy a postage batch (the integration fixture's fallback, and `test_free_tier_access`) | off |
+| `TEST_WALLET_PRIVATE_KEY=0x...` | run `test_payment_with_x402_client`, which **pays** from that wallet for a batch | unset |
+
+The x402 payment and free-tier tests also read `GET /health` and skip unless the
+gateway reports x402 enabled (and the free tier, for the free-tier tests). With x402
+off, a valid stamp request is not refused with 402; it buys a batch.
 
 ```bash
 RUN_LIVE_TESTS=1 pytest tests/test_integration_gateway.py -v -s          # staging

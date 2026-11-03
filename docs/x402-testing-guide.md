@@ -189,7 +189,7 @@ Without `--paid` it uses the free tier (`X-Payment-Mode: free`), which needs
 ```bash
 # Set environment
 export TEST_WALLET_PRIVATE_KEY=0x...
-export TEST_GATEWAY_URL=http://localhost:8000
+export GATEWAY_URL=http://localhost:8000   # default: staging; TEST_GATEWAY_URL still works
 export RUN_LIVE_TESTS=1
 
 # Run live tests

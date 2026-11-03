@@ -68,7 +68,13 @@ RUN_LIVE_TESTS = _flag("RUN_LIVE_TESTS")
 # deployed yet — so matching it would test the environment you are about to
 # deploy into, not the change you are making.
 STAGING_URL = "https://provenance-gateway.dev.datafund.io"
-GATEWAY_URL = os.environ.get("GATEWAY_URL", STAGING_URL)
+#
+# GATEWAY_URL is shared with tests/test_x402_live.py, so one variable points both
+# live modules at the same gateway. TEST_GATEWAY_URL, which that module used to
+# read, is accepted as a legacy alias.
+GATEWAY_URL = (os.environ.get("GATEWAY_URL")
+               or os.environ.get("TEST_GATEWAY_URL")
+               or STAGING_URL).rstrip("/")
 
 # Spending is a separate decision from running live tests. Opting in to live
 # tests should not silently opt in to buying postage batches.
