@@ -32,6 +32,7 @@ from app.services.swarm_api import (
     REDUNDANCY_LEVELS
 )
 from app.core.config import settings
+from app.services.http_client import exc_text
 from app.services.stamp_ownership import stamp_ownership_manager
 from app.services.signed_auth import (
     OwnerProofError,
@@ -93,7 +94,7 @@ def _is_utf8_prefix(data: bytes, size: int = 64 * 1024) -> bool:
 
 def _too_large(reference: str, e: Exception) -> HTTPException:
     downloads_total.labels(status="too_large").inc()
-    logger.warning(f"Download of {reference} refused: {e}")
+    logger.warning(f"Download of {reference} refused: {exc_text(e)}")
     return HTTPException(
         status_code=413,
         detail={
@@ -581,7 +582,7 @@ async def upload_data(
         raise  # Re-raise HTTP exceptions as-is
     except httpx.HTTPError as e:
         uploads_total.labels(status="error").inc()
-        logger.error(f"Swarm API error during upload: {e}")
+        logger.error(f"Swarm API error during upload: {exc_text(e)}")
         # Check if the failure was due to stamp issues
         failure_info = await check_upload_failure_reason(stamp_id, str(e))
         if failure_info:
@@ -597,11 +598,11 @@ async def upload_data(
         raise HTTPException(status_code=502, detail="Failed to upload data to Swarm. The Bee node may be unavailable.")
     except ValueError as e:
         uploads_total.labels(status="error").inc()
-        logger.error(f"Data processing error during upload: {e}")
+        logger.error(f"Data processing error during upload: {exc_text(e)}")
         raise HTTPException(status_code=400, detail="Data upload error. Please check your request and try again.")
     except Exception as e:
         uploads_total.labels(status="error").inc()
-        logger.error(f"Unexpected error during upload: {e}")
+        logger.error(f"Unexpected error during upload: {exc_text(e)}")
         raise HTTPException(status_code=500, detail="Internal server error during upload")
     finally:
         release_owner_proof(owner_proof)
@@ -646,7 +647,7 @@ async def download_data(
 
     except FileNotFoundError as e:
         downloads_total.labels(status="error").inc()
-        logger.warning(f"Data not found for reference {reference}: {e}")
+        logger.warning(f"Data not found for reference {reference}: {exc_text(e)}")
         raise HTTPException(status_code=404, detail=f"Data not found for reference {reference}")
     except DownloadTooLargeError as e:
         raise _too_large(reference, e)
@@ -654,11 +655,11 @@ async def download_data(
         raise _download_timeout(reference)
     except httpx.HTTPError as e:
         downloads_total.labels(status="error").inc()
-        logger.error(f"Swarm API error during download: {e}")
+        logger.error(f"Swarm API error during download: {exc_text(e)}")
         raise HTTPException(status_code=502, detail="Failed to download data from Swarm. The Bee node may be unavailable.")
     except Exception as e:
         downloads_total.labels(status="error").inc()
-        logger.error(f"Unexpected error during download: {e}")
+        logger.error(f"Unexpected error during download: {exc_text(e)}")
         raise HTTPException(status_code=500, detail="Internal server error during download")
 
 
@@ -710,7 +711,7 @@ async def download_data_json(
 
     except FileNotFoundError as e:
         downloads_total.labels(status="error").inc()
-        logger.warning(f"Data not found for reference {reference}: {e}")
+        logger.warning(f"Data not found for reference {reference}: {exc_text(e)}")
         raise HTTPException(status_code=404, detail=f"Data not found for reference {reference}")
     except DownloadTooLargeError as e:
         raise _too_large(reference, e)
@@ -718,11 +719,11 @@ async def download_data_json(
         raise _download_timeout(reference)
     except httpx.HTTPError as e:
         downloads_total.labels(status="error").inc()
-        logger.error(f"Swarm API error during download: {e}")
+        logger.error(f"Swarm API error during download: {exc_text(e)}")
         raise HTTPException(status_code=502, detail="Failed to download data from Swarm. The Bee node may be unavailable.")
     except Exception as e:
         downloads_total.labels(status="error").inc()
-        logger.error(f"Unexpected error during download: {e}")
+        logger.error(f"Unexpected error during download: {exc_text(e)}")
         raise HTTPException(status_code=500, detail="Internal server error during download")
 
 
@@ -1032,7 +1033,7 @@ async def upload_manifest(
         raise
     except httpx.HTTPError as e:
         uploads_total.labels(status="error").inc()
-        logger.error(f"Swarm API error during manifest upload: {e}")
+        logger.error(f"Swarm API error during manifest upload: {exc_text(e)}")
         failure_info = await check_upload_failure_reason(stamp_id, str(e))
         if failure_info:
             detail = {
@@ -1046,11 +1047,11 @@ async def upload_manifest(
         raise HTTPException(status_code=502, detail="Failed to upload collection to Swarm. The Bee node may be unavailable.")
     except ValueError as e:
         uploads_total.labels(status="error").inc()
-        logger.error(f"Data processing error during manifest upload: {e}")
+        logger.error(f"Data processing error during manifest upload: {exc_text(e)}")
         raise HTTPException(status_code=400, detail="Manifest upload error. Please check your request and try again.")
     except Exception as e:
         uploads_total.labels(status="error").inc()
-        logger.error(f"Unexpected error during manifest upload: {e}")
+        logger.error(f"Unexpected error during manifest upload: {exc_text(e)}")
         raise HTTPException(status_code=500, detail="Internal server error during manifest upload")
     finally:
         release_owner_proof(owner_proof)

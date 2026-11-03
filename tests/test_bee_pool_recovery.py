@@ -559,3 +559,42 @@ class TestExceptionText:
             await preflight.check_xbzz_balance()
         assert any(r.getMessage() == "Failed to check xBZZ balance: PoolTimeout" for r in caplog.records), \
             [r.getMessage() for r in caplog.records]
+
+    def test_data_download_logs_the_type_of_an_empty_error(self, caplog):
+        from fastapi.testclient import TestClient
+        from app.main import app
+        with patch("app.api.endpoints.data.download_data_from_swarm",
+                   AsyncMock(side_effect=httpx.PoolTimeout(""))), \
+             caplog.at_level("ERROR", logger="app.api.endpoints.data"):
+            response = TestClient(app).get("/api/v1/data/" + "a" * 64)
+        assert response.status_code == 502
+        # The response text is unchanged; only the log names the type.
+        assert response.json()["detail"] == \
+            "Failed to download data from Swarm. The Bee node may be unavailable."
+        assert any(r.getMessage() == "Swarm API error during download: PoolTimeout"
+                   for r in caplog.records), [r.getMessage() for r in caplog.records]
+
+    def test_debug_proxy_logs_the_type_of_an_empty_error(self, caplog):
+        import time as _time
+        from eth_account import Account
+        from eth_account.messages import encode_defunct
+        from fastapi.testclient import TestClient
+        from app.main import app
+        key = "0x" + "22" * 32
+        debug_settings = MagicMock()
+        debug_settings.get_debug_allowed_addresses.return_value = [Account.from_key(key).address.lower()]
+        debug_settings.DEBUG_SIG_MAX_AGE_SECONDS = 300
+        debug_settings.SWARM_BEE_API_URL = "http://bee.test/"
+        ts = int(_time.time())
+        signed = Account.sign_message(encode_defunct(text=f"swarm-connect-debug:{ts}"), private_key=key)
+        headers = {"X-Debug-Timestamp": str(ts), "X-Debug-Signature": "0x" + bytes(signed.signature).hex()}
+        bee_client = MagicMock()
+        bee_client.get = AsyncMock(side_effect=httpx.PoolTimeout(""))
+        with patch("app.api.endpoints.debug.settings", debug_settings), \
+             patch("app.api.endpoints.debug.get_client", return_value=bee_client), \
+             caplog.at_level("WARNING", logger="app.api.endpoints.debug"):
+            response = TestClient(app).get("/api/v1/debug/bee/topology", headers=headers)
+        assert response.status_code == 502
+        assert response.json()["detail"] == "Bee node request failed"
+        assert any(r.getMessage().endswith("): PoolTimeout") for r in caplog.records), \
+            [r.getMessage() for r in caplog.records]
