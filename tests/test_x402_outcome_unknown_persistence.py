@@ -132,6 +132,7 @@ def test_a_failed_write_fails_closed_until_a_write_succeeds(env, tmp_path, monke
     the registry unavailable (paid requests 503, unpaid) until a later save succeeds."""
     reg = st.OutcomeUnknownRegistry(state_file=str(tmp_path / "s.json"))
     monkeypatch.setattr(st, "outcome_unknown", reg)
+    monkeypatch.setattr(st, "WRITE_RETRY_SECONDS", 0)   # retries are rate-limited (review 7)
 
     def broken(path, data):
         raise OSError("read-only file system")
@@ -149,6 +150,7 @@ def test_a_failed_write_fails_closed_until_a_write_succeeds(env, tmp_path, monke
     # The disk recovers: the next check writes the state and lets paid requests through.
     monkeypatch.undo()
     monkeypatch.setattr(st, "outcome_unknown", reg)
+    monkeypatch.setattr(st, "WRITE_RETRY_SECONDS", 0)
     assert not reg.unavailable
     assert st.OutcomeUnknownRegistry(state_file=str(tmp_path / "s.json")).contains(("0xa", "0x1"))
     assert _run(_facilitator(ok())).status_code == 200
@@ -408,10 +410,11 @@ def test_write_ahead_on_the_fallback_is_after_work(env, state, monkeypatch):
 
 
 def test_a_normal_success_leaves_no_entry(env, state, monkeypatch):
+    """#553 review 7: the resolution is written, so a graceful restart right after a
+    delivered payment finds no entry (before, it found the write-ahead one)."""
     fac = _facilitator(ok())
     assert _run(fac).status_code == 200
     assert not st.outcome_unknown.contains(KEY)
-    st.outcome_unknown.add(("0xb", "0x9"), st.BEFORE_WORK)    # the next write
     _restart(monkeypatch, state)
     assert not st.outcome_unknown.contains(KEY)
 
@@ -427,6 +430,7 @@ def test_a_failed_write_ahead_refuses_before_the_facilitator(env, state, monkeyp
 def test_a_failed_write_ahead_on_the_fallback_withholds_the_result_unpaid(env, state, monkeypatch):
     header = create_valid_payment_header()
     fac = _facilitator(ok(), ok())
+    reg = st.outcome_unknown        # the same registry throughout: no fresh instance
     _broken_writes(monkeypatch)
     r = _run(fac, path="/api/v1/data/manifest", header=header)
     assert r.status_code == 503 and r.json()["code"] == "PAYMENT_STATE_UNAVAILABLE"
@@ -434,7 +438,8 @@ def test_a_failed_write_ahead_on_the_fallback_withholds_the_result_unpaid(env, s
     assert fac.settle.await_count == 0
     # Nothing was charged, so once the disk recovers the same authorization can pay.
     monkeypatch.undo()
-    monkeypatch.setattr(st, "outcome_unknown", st.OutcomeUnknownRegistry(state_file=state))
+    monkeypatch.setattr(st, "outcome_unknown", reg)
+    monkeypatch.setattr(st, "WRITE_RETRY_SECONDS", 0)
     assert _run(fac, path="/api/v1/data/manifest", header=header).status_code == 200
 
 
@@ -492,3 +497,136 @@ def test_settlement_failed_form_2_has_detail_too(env, state):
     r = _run(_facilitator(refused("insufficient_funds")), path="/api/v1/data/manifest")
     assert r.status_code == 402
     assert r.json()["code"] == r.json()["detail"]["code"] == "PAYMENT_SETTLEMENT_FAILED"
+
+
+# --- #553 review 7 ---------------------------------------------------------
+
+def test_a_refusal_then_restart_then_refusal_is_still_402(env, state, monkeypatch):
+    header = create_valid_payment_header()
+    assert _run(_facilitator(refused("insufficient_funds")), header=header).status_code == 402
+    _restart(monkeypatch, state)
+    r = _run(_facilitator(refused("insufficient_funds")), header=header)
+    assert r.status_code == 402 and r.json()["detail"]["code"] == "PAYMENT_SETTLEMENT_FAILED"
+
+
+def test_fallback_success_then_restart_does_not_block_the_authorization(env, state, monkeypatch):
+    assert _run(_facilitator(ok()), path="/api/v1/data/manifest").status_code == 200
+    _restart(monkeypatch, state)
+    assert st.outcome_unknown.kind(KEY) is None
+
+
+def test_a_failed_write_ahead_is_rolled_back_in_the_same_process(env, state, monkeypatch):
+    """The 503 says retry with the same X-PAYMENT: once the disk recovers, that retry
+    must settle normally, not meet a 409 left behind by the failed write-ahead."""
+    monkeypatch.setattr(st, "WRITE_RETRY_SECONDS", 0)
+    header = create_valid_payment_header()
+    real = st.atomic_write_json
+    _broken_writes(monkeypatch)
+    assert _run(_facilitator(ok()), header=header).status_code == 503
+    assert not st.outcome_unknown.contains(KEY)
+    monkeypatch.setattr(st, "atomic_write_json", real)
+    st.replay_guard.reset()
+    assert _run(_facilitator(ok()), header=header).status_code == 200
+
+
+def test_a_failed_write_ahead_on_the_fallback_is_rolled_back_in_the_same_process(env, state, monkeypatch):
+    monkeypatch.setattr(st, "WRITE_RETRY_SECONDS", 0)
+    header = create_valid_payment_header()
+    real = st.atomic_write_json
+    _broken_writes(monkeypatch)
+    assert _run(_facilitator(ok()), path="/api/v1/data/manifest", header=header).status_code == 503
+    assert not st.outcome_unknown.contains(KEY)
+    monkeypatch.setattr(st, "atomic_write_json", real)
+    assert _run(_facilitator(ok()), path="/api/v1/data/manifest", header=header).status_code == 200
+
+
+def test_a_parallel_duplicate_during_settlement_is_told_it_is_in_progress(env, state):
+    """Not "no answer came back": the first request's settlement is still running."""
+    import asyncio
+    import httpx
+    from unittest.mock import patch
+    from app.x402.audit import read_audit_log
+
+    async def run():
+        started, release = asyncio.Event(), asyncio.Event()
+
+        async def slow_settle(**kw):
+            started.set()
+            await release.wait()
+            return ok()
+
+        fac = _facilitator()
+        fac.settle = AsyncMock(side_effect=slow_settle)
+        header = create_valid_payment_header()
+        with patch("app.x402.dependency._get_facilitator_client", return_value=fac):
+            transport = httpx.ASGITransport(app=_app(fac))
+            async with httpx.AsyncClient(transport=transport, base_url="http://t") as c:
+                first = asyncio.ensure_future(c.post("/api/v1/stamps/", headers={"X-PAYMENT": header}))
+                await started.wait()
+                dup = await c.post("/api/v1/stamps/", headers={"X-PAYMENT": header})
+                release.set()
+                return await first, dup
+
+    before = len(read_audit_log(max_entries=100000))
+    first, dup = asyncio.run(run())
+    new_events = read_audit_log(max_entries=100000)[:len(read_audit_log(max_entries=100000)) - before]
+    assert first.status_code == 200
+    assert dup.status_code == 409
+    detail = dup.json()["detail"]
+    assert detail["code"] == "PAYMENT_SETTLEMENT_IN_PROGRESS"
+    assert "accepts" not in detail and "no answer" not in detail["message"]
+    assert dup.headers["X-Payment-Status"] == "settlement_in_progress"
+    stages = [e["data"].get("stage") for e in new_events if e["event_type"] == "payment_failed"]
+    assert "duplicate_in_progress" in stages and "outcome_unknown_retry" not in stages
+    assert not st.outcome_unknown.contains(KEY)
+
+
+def test_cap_keeps_the_write_ahead_and_never_evicts_in_flight_entries(tmp_path, monkeypatch):
+    reg = st.OutcomeUnknownRegistry(state_file=str(tmp_path / "s.json"))
+    monkeypatch.setattr(st, "OUTCOME_UNKNOWN_MAX_ENTRIES", 2)
+    reg.add(("0xa", "0x1"), st.AFTER_WORK)
+    reg.add(("0xa", "0x2"), st.AFTER_WORK)
+    prior, recorded = reg.begin_settlement(("0xa", "0x3"), st.BEFORE_WORK)
+    assert recorded and reg.contains(("0xa", "0x3"))        # kept: the oldest AFTER_WORK went
+    assert not reg.contains(("0xa", "0x1"))
+    prior, recorded = reg.begin_settlement(("0xa", "0x4"), st.BEFORE_WORK)
+    assert recorded and reg.contains(("0xa", "0x3")) and reg.contains(("0xa", "0x4"))
+    # Both remaining entries are in flight: a third write-ahead cannot be kept.
+    prior, recorded = reg.begin_settlement(("0xa", "0x5"), st.BEFORE_WORK)
+    assert not recorded and not reg.contains(("0xa", "0x5"))
+    assert reg.contains(("0xa", "0x3")) and reg.contains(("0xa", "0x4"))
+
+
+def test_write_retry_while_unwritable_is_rate_limited(tmp_path, monkeypatch):
+    reg = st.OutcomeUnknownRegistry(state_file=str(tmp_path / "s.json"))
+    calls = []
+
+    def broken(path, data):
+        calls.append(1)
+        raise OSError("read-only")
+
+    monkeypatch.setattr(st, "atomic_write_json", broken)
+    reg.add(("0xa", "0x1"), st.BEFORE_WORK)
+    for _ in range(50):
+        assert reg.unavailable
+    assert len(calls) == 1      # the add's write; no retry within WRITE_RETRY_SECONDS
+
+
+def test_registry_writes_run_off_the_event_loop_thread(env, state, monkeypatch):
+    import threading
+    threads = {}
+    real = st.atomic_write_json
+
+    def recording(path, data):
+        threads.setdefault("write", set()).add(threading.get_ident())
+        real(path, data)
+
+    async def settle(**kw):
+        threads["loop"] = threading.get_ident()
+        return ok()
+
+    monkeypatch.setattr(st, "atomic_write_json", recording)
+    fac = _facilitator()
+    fac.settle = AsyncMock(side_effect=settle)
+    assert _run(fac).status_code == 200
+    assert threads["loop"] not in threads["write"]

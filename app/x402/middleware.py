@@ -515,7 +515,7 @@ class X402Middleware(BaseHTTPMiddleware):
             # Write-ahead, AFTER_WORK: the work has run (#553). If it cannot be
             # written, do not settle: the result is withheld, nothing charged,
             # and the authorization released for a retry.
-            prior, recorded = outcome_unknown.begin_settlement(auth_key, AFTER_WORK)
+            prior, recorded = await outcome_unknown.abegin_settlement(auth_key, AFTER_WORK)
             if not recorded:
                 from app.x402.settlement import payment_state_unavailable_detail
                 replay_guard.release(auth_key)
@@ -540,6 +540,8 @@ class X402Middleware(BaseHTTPMiddleware):
                 from app.x402.settlement import settlement_interrupted
                 settlement_interrupted(request, AFTER_WORK, e)
                 raise
+            finally:
+                outcome_unknown.release(auth_key)
             if failure is not None:
                 logger.error(f"x402: settlement failed after delivery on {request.url.path}: {failure}")
                 if unknown_outcome:
@@ -563,7 +565,7 @@ class X402Middleware(BaseHTTPMiddleware):
                                         nonce=request_nonce(request))
                     remembered = prior is not None
                     if not remembered:
-                        outcome_unknown.end_settlement(auth_key, None)
+                        await outcome_unknown.aresolve(auth_key, None, settled=False)
                     x402_settlements_total.labels(
                         result="refused_after_unknown" if remembered else "refused").inc()
                     if remembered:
@@ -589,7 +591,7 @@ class X402Middleware(BaseHTTPMiddleware):
                                 network=settings.X402_NETWORK, success=True, nonce=request_nonce(request))
             from app.x402.idempotency import record_settlement
             record_settlement(request, settlement)
-            outcome_unknown.settled(auth_key, prior)
+            await outcome_unknown.aresolve(auth_key, prior, settled=True)
             x402_settlements_total.labels(result="settled").inc()
 
         tx_hash = getattr(settlement, "transaction", None) or "unknown"

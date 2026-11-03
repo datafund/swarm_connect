@@ -51,6 +51,7 @@ def atomic_write_json(path: str, data: Any) -> None:
             f.flush()
             os.fsync(f.fileno())
         os.replace(tmp_path, path)
+        _fsync_directory(directory)
     except Exception:
         # Never leave a partial temp file behind on failure.
         try:
@@ -58,6 +59,21 @@ def atomic_write_json(path: str, data: Any) -> None:
         except OSError:
             pass
         raise
+
+
+def _fsync_directory(directory: str) -> None:
+    """Make the rename itself durable. Best effort: some platforms and
+    filesystems cannot open or fsync a directory (e.g. Windows)."""
+    try:
+        fd = os.open(directory, os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(fd)
+    except OSError:
+        pass
+    finally:
+        os.close(fd)
 
 
 def load_json_state(path: str, consequence: Optional[str] = None) -> Optional[dict]:

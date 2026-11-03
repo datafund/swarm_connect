@@ -671,8 +671,11 @@ async def require_x402_payment(request: Request) -> None:
         # A facilitator may reject a spent nonce at verify. If this
         # authorization's earlier settlement got no answer, that is likely
         # why: no 402 and no `accepts`, or the client pays again (#553).
-        from app.x402.settlement import authorization_key, outcome_unknown, outcome_unknown_refusal
+        from app.x402.settlement import (authorization_key, outcome_unknown, outcome_unknown_refusal,
+                                         settlement_in_progress_refusal)
         unknown_key = authorization_key(payment_payload)
+        if outcome_unknown.in_flight(unknown_key):
+            raise settlement_in_progress_refusal(unknown_key, request)
         if outcome_unknown.contains(unknown_key):
             raise outcome_unknown_refusal(unknown_key, invalid_reason, where="verify", request=request)
         response_body = {
@@ -732,7 +735,12 @@ async def require_x402_payment(request: Request) -> None:
     # middleware fallback) never runs the work again, also once its
     # reservation has lapsed (#553). One whose settlement got no answer before
     # any work (settle_payment) may be retried: it settles at most once.
-    from app.x402.settlement import AFTER_WORK, outcome_unknown, outcome_unknown_refusal
+    from app.x402.settlement import (AFTER_WORK, outcome_unknown, outcome_unknown_refusal,
+                                     settlement_in_progress_refusal)
+    # A parallel duplicate while this process waits on the facilitator for the
+    # same authorization: "in progress", not "unknown" (#553).
+    if outcome_unknown.in_flight(auth_key):
+        raise settlement_in_progress_refusal(auth_key, request)
     if outcome_unknown.kind(auth_key) == AFTER_WORK:
         logger.warning(f"x402: retry of an authorization whose settlement outcome is unknown "
                        f"after its work ran, from {client_ip}")

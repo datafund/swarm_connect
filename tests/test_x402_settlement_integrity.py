@@ -145,7 +145,15 @@ def test_concurrent_reuse_of_one_authorization_delivers_once(env):
         responses = asyncio.run(burst())
 
     assert DELIVERED == [1]
-    assert sorted(r.status_code for r in responses) == [200] + [402] * 9
+    # One delivery. A duplicate that arrives while the first is settling gets 409
+    # PAYMENT_SETTLEMENT_IN_PROGRESS (#553 review 7), one before or after it the
+    # replay guard's 402; which, depends on timing.
+    codes = sorted(r.status_code for r in responses)
+    assert codes.count(200) == 1 and set(codes) - {200} <= {402, 409} and len(codes) == 10
+    for r in responses:
+        if r.status_code == 409:
+            assert r.json()["detail"]["code"] == "PAYMENT_SETTLEMENT_IN_PROGRESS"
+            assert "accepts" not in r.json()["detail"]
     assert fac.settle.await_count == 1
 
 
