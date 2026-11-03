@@ -83,6 +83,19 @@ def _spellings(keys) -> str:
     return ", ".join(repr(k) for k in sorted(keys))
 
 
+def _count_save_failure() -> None:
+    """Count a save that left the change in memory only (#506), for the alert.
+
+    Imported here, not at module level: this module loads before the metrics
+    module is needed, and a metrics problem must never fail a save path.
+    """
+    try:
+        from app.services.metrics import count_state_save_failure
+        count_state_save_failure("ownership")
+    except Exception as e:  # pragma: no cover
+        logger.debug(f"Could not count a failed ownership save: {e}")
+
+
 def _utc_stamp() -> str:
     return datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')
 
@@ -214,6 +227,7 @@ class StampOwnershipManager:
                 logger.error(f"Not saving ownership state to {state_file}: the pre-migration file "
                              f"could not be copied aside ({e}); the change is kept in memory only")
                 self._saves_refused = True
+                _count_save_failure()
                 return
             self._migration_needs_copy = False
             self._saves_refused = False
@@ -225,6 +239,7 @@ class StampOwnershipManager:
         except Exception as e:
             self._save_failed = True
             logger.error(f"Failed to save ownership state to {state_file}: {e}")
+            _count_save_failure()
 
     def _load_state(self):
         """Load ownership registry from state file.

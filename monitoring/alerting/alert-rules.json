@@ -923,5 +923,82 @@
     "noDataState": "OK",
     "ruleGroup": "critical",
     "title": "x402 settlement problems"
+  },
+  {
+    "annotations": {
+      "summary": "{{ $labels.environment }}: {{ $labels.file }} state file not saved ({{ printf \"%.0f\" $values.B.Value }} failed saves in 15 min)",
+      "description": "The gateway could not write a state file and kept the change in memory only (file=pool: the stamp pool state; file=ownership: the ownership registry, including saves refused because the pre-migration copy could not be written). Do NOT restart or redeploy: a restart loses every change since the last good save, buyers lose access to batches they paid for, and a sold batch can be re-imported as pool stock and sold again. Read the ERROR log line (\"Failed to save pool state\", \"Failed to save ownership state\" or \"Not saving ownership state\"), fix the cause (disk full, or permissions on the data directory for uid 10001), and wait for the next save to succeed; for ownership, /health state.warnings is empty again once it has. See docs/mainnet-runbook.md section 4 and 5."
+    },
+    "condition": "C",
+    "data": [
+      {
+        "datasourceUid": "grafanacloud-prom",
+        "model": {
+          "expr": "sum by (environment, host, file) (increase(gateway_state_save_failures_total[15m]))",
+          "instant": true,
+          "intervalMs": 1000,
+          "maxDataPoints": 43200,
+          "refId": "A"
+        },
+        "queryType": "",
+        "refId": "A",
+        "relativeTimeRange": {
+          "from": 300,
+          "to": 0
+        }
+      },
+      {
+        "datasourceUid": "__expr__",
+        "model": {
+          "expression": "A",
+          "intervalMs": 1000,
+          "maxDataPoints": 43200,
+          "reducer": "last",
+          "refId": "B",
+          "type": "reduce"
+        },
+        "queryType": "",
+        "refId": "B",
+        "relativeTimeRange": {
+          "from": 0,
+          "to": 0
+        }
+      },
+      {
+        "datasourceUid": "__expr__",
+        "model": {
+          "conditions": [
+            {
+              "evaluator": {
+                "params": [
+                  0
+                ],
+                "type": "gt"
+              }
+            }
+          ],
+          "expression": "B",
+          "intervalMs": 1000,
+          "maxDataPoints": 43200,
+          "refId": "C",
+          "type": "threshold"
+        },
+        "queryType": "",
+        "refId": "C",
+        "relativeTimeRange": {
+          "from": 0,
+          "to": 0
+        }
+      }
+    ],
+    "execErrState": "Error",
+    "for": "0s",
+    "isPaused": false,
+    "labels": {
+      "severity": "critical"
+    },
+    "noDataState": "OK",
+    "ruleGroup": "critical",
+    "title": "State file save failures"
   }
 ]

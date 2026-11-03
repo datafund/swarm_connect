@@ -299,6 +299,9 @@ class StampPoolManager:
             logger.debug(f"Saved pool state: {len(batch_ids)} stamps to {state_file}")
         except Exception as e:
             logger.error(f"Failed to save pool state to {state_file}: {e}")
+            # Alerted on (#506): the file is now behind the in-memory pool.
+            from app.services.metrics import count_state_save_failure
+            count_state_save_failure("pool")
             # The file does not match the pool; the next sync (or the next
             # save) writes it again. This does not pause anything: only an
             # unreadable file does (#547).

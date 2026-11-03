@@ -175,6 +175,33 @@ def count_pool_allowance_refusal(size: str, scope: str, response: str) -> None:
     pool_allowance_refusals_total.labels(
         size=allowance_refusal_size_label(size), scope=scope, response=response).inc()
 
+# Failed saves of the pool state file and the ownership registry (#506). Both
+# saves log at ERROR and carry on: they run after payment has settled, and
+# raising there would turn a paid delivery into a 500. The change then exists
+# in memory only, and a restart loses it; if both files fall behind, a sold
+# batch is re-imported as pool inventory. `file` is "pool" or "ownership",
+# never a path. An ownership save refused because the pre-migration copy
+# failed (#558) counts too: that change is not on disk either. Both series
+# exist from startup, so the first failure after a deploy is counted.
+state_save_failures_total = Counter(
+    "gateway_state_save_failures_total",
+    "Failed saves of a gateway state file; the change is kept in memory only "
+    "(file=pool: the stamp pool state, file=ownership: the ownership registry)",
+    ["file"],
+)
+STATE_SAVE_FILES = ("pool", "ownership")
+for _file in STATE_SAVE_FILES:
+    state_save_failures_total.labels(file=_file)
+
+
+def count_state_save_failure(file: str) -> None:
+    """Count one failed save; never raises, since the callers must not fail."""
+    try:
+        state_save_failures_total.labels(file=file).inc()
+    except Exception as e:  # pragma: no cover - metrics must never break a save path
+        logger.debug(f"Metrics: could not count a failed {file} state save: {e}")
+
+
 x402_settlements_total = Counter(
     "gateway_x402_settlements_total",
     "x402 settlement outcomes (#375): settled, refused (nothing delivered), error "

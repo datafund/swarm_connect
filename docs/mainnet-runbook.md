@@ -170,6 +170,8 @@ If a money-bearing state file (ownership, credit) is unreadable, the gateway **r
 
 The error in the log line gives the cause, for example `No space left on device` or `Permission denied`. These warnings do not change `status`. `status` can still be `degraded` or `critical` for Bee node or wallet reasons, so a monitor that reads only `status` does not report a registry that is not saving. Check `state.warnings` itself.
 
+Each failed or refused save also increments `gateway_state_save_failures_total{file="ownership"}`, and a failed write of the pool state file `gateway_state_save_failures_total{file="pool"}` (#506); the **State file save failures** alert fires on either (section 5). The pool recovers the same way: fix the cause, and the next sync writes the file again.
+
 To recover:
 1. **Do not restart the gateway.** A restart loses every ownership change made since it started, and the buyers of those batches lose access. The file on disk is intact. After a refused save it is the original, and the next start migrates it again.
 2. Fix the cause from the log line: free disk space on the volume that holds the data directory, or fix permissions so the gateway user (uid 10001) can create files in that directory. Both the copy and the registry file are written as a temporary file in the same directory and then renamed.
@@ -356,6 +358,7 @@ For a nonce-0 node, every start must carry the hint. Bee 2.8.1 reads it from `BE
 | Alert | Meaning | First action |
 |---|---|---|
 | **x402 settlement problems** | `gateway_x402_settlements_total{result!="settled"}` increased: refused, error, settled_not_delivered or refused_after_unknown | Read the audit log (section 3). For `settled_not_delivered`, refund. For `refused_after_unknown` (a retry of a payment whose settlement got no answer was refused, so the earlier transfer probably went through), handle it as "Settlement error (outcome unknown)", matched on the nonce |
+| **State file save failures** | `gateway_state_save_failures_total{file}` increased: the gateway could not write the pool state (`file=pool`) or the ownership registry (`file=ownership`) and kept the change in memory only | **Do not restart.** Read the ERROR log line, free disk space or fix permissions on the data directory, and wait for the next save to succeed (section 4, "Ownership registry not saving"). A restart before then loses the changes, and a sold batch can come back as pool stock |
 | **BZZ pricing rate off market** *(requires #410)* | `X402_BZZ_USD_RATE` is more than 2× away from the market | Review and set the rate |
 | Low BZZ / xDAI / chequebook (existing) | The Bee node can't buy or upload | Fund the node wallet on Gnosis |
 | Gateway spend near its ceiling (once the spend-ceiling change is deployed) | `gateway_spend_bzz_today` approaching `gateway_spend_ceiling_bzz` | Check for abuse; raise the ceiling only deliberately |
