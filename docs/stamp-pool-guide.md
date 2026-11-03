@@ -55,6 +55,8 @@ STAMP_POOL_CHECK_INTERVAL_SECONDS=900  # Check every 15 minutes
 STAMP_POOL_MIN_TTL_HOURS=24            # Top up if TTL below 24 hours
 STAMP_POOL_TOPUP_HOURS=168             # Add 1 week when topping up
 STAMP_POOL_LOW_RESERVE_THRESHOLD=1     # Alert when reserve at this level
+STAMP_POOL_UNLISTED_GRACE_SECONDS=900  # Hold a purchase Bee has not listed yet this long
+STAMP_POOL_HELD_RECHECK_SECONDS=30     # Re-check held stamps this often
 
 # Duration for new pool stamps
 STAMP_POOL_DEFAULT_DURATION_HOURS=168  # 1 week
@@ -102,12 +104,21 @@ Get current pool status.
   "current_levels": {"17": 1, "20": 0},
   "available_stamps": {"17": ["abc123..."]},
   "total_stamps": 1,
+  "pending_stamps": {"20": 1},
   "low_reserve_warning": true,
   "last_check": "2026-01-21T10:00:00Z",
   "next_check": "2026-01-21T10:15:00Z",
   "errors": []
 }
 ```
+
+`pending_stamps` counts, by depth, stamps the pool has bought that are not
+usable yet (see [Stamps Not Becoming Usable](#stamps-not-becoming-usable)).
+They count toward the reserve target, so nothing is bought to replace them,
+but they are not in `current_levels`, `available_stamps` or `total_stamps`.
+A low reserve with a non-zero `pending_stamps` is waiting for Bee, not
+failing. The same count is exported as the `gateway_stamp_pool_pending`
+gauge, by size.
 
 ### POST /api/v1/pool/acquire
 
@@ -265,9 +276,20 @@ When the gateway starts with `STAMP_POOL_ENABLED=true`:
 The background task runs every `STAMP_POOL_CHECK_INTERVAL_SECONDS`:
 
 1. **Sync**: Find existing stamps on Bee node that match pool criteria
-2. **Update TTLs**: Remove expired/unusable stamps from pool
+2. **Update TTLs**: Remove expired/unusable stamps from pool. Stamps that
+   are not usable yet are held instead (see
+   [Stamps Not Becoming Usable](#stamps-not-becoming-usable))
 3. **Purchase**: Buy new stamps if below reserve levels
 4. **Top-up**: Extend stamps with TTL below `STAMP_POOL_MIN_TTL_HOURS`
+
+While any stamp is held (bought, not usable yet), the task also re-runs the
+TTL check every `STAMP_POOL_HELD_RECHECK_SECONDS` (default 30) between full
+checks, so a held stamp becomes available soon after Bee lists it as usable.
+While the same stamps stay held, the wait between re-checks doubles, up to
+`STAMP_POOL_CHECK_INTERVAL_SECONDS`. A newly held stamp resets the wait, so
+it is re-checked within `STAMP_POOL_HELD_RECHECK_SECONDS`. With nothing held, no extra Bee calls are
+made. A full check never skips because of a re-check: one that starts during
+a re-check waits for it, at most 60 seconds, and then runs.
 
 ### Stamp Release
 
@@ -310,7 +332,36 @@ Check the `errors` array in status response for:
 - An unreadable pool state file (`pool_state.json`, set by `STAMP_POOL_STATE_FILE`):
   pool spending stays paused until the file is repaired or restored. This
   includes the immediate replacement purchase after a stamp is released, which
-  is also skipped after any failed sync
+  is also skipped after any failed sync. The gateway never writes over an
+  unreadable file (#547): releases, purchases already in flight and expiry
+  removals change the in-memory pool only. The first refused save, and each
+  later one whose batch list differs, logs an ERROR with the full batch-id
+  list the pool holds and the ids released or removed since the last save, so
+  the file can be rebuilt from the log. A save that finds the file broken
+  between syncs pauses the pool at once: nothing more is bought or topped up,
+  by a maintenance run already under way or by an immediate replacement,
+  because the pause is checked again right before each purchase or extend call
+  goes to Bee. A call already sent when the pause is set still completes. To
+  recover, repair the file, restore it from backup, or move it away to start
+  from the in-memory pool. The next sync then lifts the pause and writes the
+  reconciled pool (what the pool holds plus anything it imported from the
+  file), even if nothing changed during the pause, and logs "pause lifted,
+  wrote N batch ids" at INFO. It does so once it has read the file and either
+  read the Bee node as well or found nothing to import: the file missing, a
+  valid empty JSON list `[]`, or only batches released during the pause, which
+  are subtracted first, with no purchase pending that Bee has not listed yet. A zero-byte or otherwise unparseable file is still
+  unreadable and keeps the pool paused. A sync that reads the file but fails
+  at Bee keeps saves refused, and the status entry says so. Batches a sync
+  keeps in state without importing are carried through recovery, even when a
+  restored backup predates them. A batch whose Bee record has unreadable data
+  is kept until a sync imports it or Bee no longer lists it. A batch whose
+  ownership record could not be looked up is kept whatever Bee says, until the
+  lookup succeeds. The first-run path does not read Bee, so it keeps both
+  kinds. Batches released during the pause are not re-imported
+  even if a restored backup still lists them. That memory does not survive a
+  restart: after a restart only the ownership registry keeps a sold batch out
+  of the pool, and a batch bought during the pause is lost from the pool
+  unless the file is rebuilt from the logged list
 
 While replenishment is skipped, each check replaces `errors` with that run's
 entries, so the list does not grow across failed cycles.
@@ -355,6 +406,42 @@ This cost should be factored into service pricing (e.g., via x402 payments or su
 ### Stamps Not Becoming Usable
 
 New stamps take 30-90 seconds to propagate on the Swarm network. The pool manager waits for this automatically.
+
+A stamp that is not usable when that wait ends, or whose purchase was
+cancelled after Bee accepted it, is still added to the pool and its state
+file. It is held: it counts toward the reserve target, so no replacement is
+bought, but it is not counted as available (see `pending_stamps` in the
+status) and is never handed out. Each TTL check that keeps a stamp held logs
+"Holding N pool batch(es) until Bee lists them usable".
+
+The sync after a restart and each TTL check hold such a stamp in two cases:
+
+- Bee lists it as not usable, with TTL left and no other reason (not expired,
+  not expiring within its minimum TTL, not full, depth valid). It is held for
+  as long as Bee lists it that way.
+- Bee does not list it at all yet. Bee lists a new batch only after its chain
+  listener has processed the purchase, some blocks behind the chain tip. The
+  purchase time, depth, amount and TTL are recorded in
+  `pool_state_pending.json`, next to the state file, so this survives a
+  restart. The stamp is held for `STAMP_POOL_UNLISTED_GRACE_SECONDS`
+  (default 900) after the purchase. If Bee still does not list it then, it
+  is removed from the pool and from the ownership registry. While the stamp
+  is held, the state file lists it too, so a later restart finds it there.
+  The pending record is cleared only after the state file has been written
+  with the stamp in it. If writing the state file fails, the next sync
+  tries again.
+  A missing pending record loses only this grace period. An unparseable one
+  is copied once to `pool_state_pending.json.corrupt-<timestamp>` and then
+  treated as empty. A purchase time with no time zone is read as UTC, and
+  one in the future is treated as now.
+
+Once Bee lists the stamp, the grace period no longer applies, and the first
+TTL check that sees it usable makes it available. A stamp held for longer
+than the grace period (one Bee keeps listing as not usable) is logged as a
+warning, at most once an hour. Expired, expiring-soon and
+full stamps are still removed, and so is any other stamp Bee no longer
+lists. A stamp added while a TTL check was waiting for Bee's listing is left
+for the next check, because that listing predates it.
 
 ### High Latency on Acquire
 
