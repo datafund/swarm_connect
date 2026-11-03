@@ -150,6 +150,53 @@ exception type, so these show as `PoolTimeout` rather than an empty message.
 look at Bee, not the gateway. A restart of the gateway container also clears
 the pool.
 
+**Floods (#588).** Three things keep a flood of cheap requests from turning
+into load on Bee:
+
+- `/health` and `/` are answered from a snapshot of the Bee node summary and
+  the wallet balances. The snapshot is rebuilt at most once every
+  `HEALTH_SNAPSHOT_TTL_SECONDS` (default 15) by a single background refresh, so
+  a request costs no Bee or RPC call. `snapshot.age_seconds` in the response,
+  and `gateway_health_snapshot_age_seconds`, say how old it is.
+  `snapshot.warnings` says when refreshes fail; it is advisory and never
+  changes `status`. `/` is the same handler with the same body, so the CLI and
+  MCP checks (any 2xx) and the SDK check (`status != "critical"`) are
+  unchanged. Docker's healthcheck (`curl -f http://localhost:8000/`) tests
+  that the process answers. It never tested Bee: `/health` answers 200 whatever
+  Bee's state. Bee reachability is watched by the external probe of
+  `bee_node.healthy`.
+- At most `BEE_MAX_CONCURRENT_CALLS` (default 64) Bee calls are in flight at
+  once, below `BEE_HTTP_MAX_CONNECTIONS` (100); the gateway refuses to start
+  otherwise. `BEE_RESERVED_BACKGROUND_CALLS` (8) of them are kept for work
+  outside requests (snapshot refresh, stamp pool, metrics poller), so a flood
+  cannot starve it. Uploads and downloads made by requests hold at most
+  `BEE_MAX_CONCURRENT_TRANSFERS` (24). A request's Bee call that gets no slot
+  within `BEE_CALL_SLOT_WAIT_SECONDS` (2) makes the request answer
+  `503 BEE_BUSY` with `Retry-After: BEE_BUSY_RETRY_AFTER_SECONDS` (5).
+  Bee work of a request whose payment has settled waits up to
+  `BEE_BACKGROUND_SLOT_WAIT_SECONDS` (30) instead. Watch
+  `gateway_bee_calls_in_flight{lane}` and
+  `gateway_bee_call_rejections_total{lane}`. A refusal is not a Bee error: it
+  is not counted in `gateway_bee_api_errors_total` or as a pool timeout. These
+  sizes are a judgement, not measured. Tune them from those two series.
+  `BEE_CALL_GATE_ENABLED=false` turns the gate off entirely.
+- The heaviest callers per `TOP_CALLERS_WINDOW_SECONDS` (60) are in
+  `gateway_top_caller_requests{rank="1".."5"}`. When the heaviest sent at least
+  `TOP_CALLERS_LOG_MIN_REQUESTS` (300) requests in a window, a WARNING log line
+  names the top callers by a 12-character hash tag, with their status mix and
+  busiest route. The tag is a keyed hash of the caller's address (IPv6 by
+  `/64`). No address appears in metrics or logs. The key is random per process,
+  so tags change on restart and differ between environments. To check a
+  suspected address, set `TOP_CALLERS_HASH_KEY` to a secret in the host env
+  file (never in the repo). Tags are then stable, and
+  `python -c "from app.services.top_callers import caller_tag; print(caller_tag('<address or /64>'))"`
+  run inside the container gives the address's tag. To block it, add it to
+  `X402_BLACKLIST_IPS`.
+
+To replay a flood against a local gateway with a stub Bee, use
+`scripts/flood_replay.py` and `python -m tests.tools.bee_stub` (usage in the
+script's docstring).
+
 **Diagnosing Bee with only gateway access.** `GET /api/v1/debug/bee/{path}` is a
 read-only, signature-gated proxy to allow-listed Bee endpoints, for when you have
 the gateway but not the node. Disabled unless `DEBUG_ALLOWED_ADDRESSES` is set.
