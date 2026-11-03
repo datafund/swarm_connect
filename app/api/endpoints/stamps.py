@@ -448,7 +448,7 @@ async def check_stamp_health(
         )
 
     except httpx.HTTPError as e:
-        logger.error(f"Failed to check stamp health from Swarm API: {e}")
+        logger.error(f"Failed to check stamp health from Swarm API: {exc_text(e)}")
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail="Could not fetch stamp data. The Bee node may be unavailable."
@@ -481,7 +481,7 @@ async def get_stamp_details(
     try:
         all_stamps = await swarm_api.get_all_stamps_processed()
     except httpx.HTTPError as e:
-        logger.error(f"Failed to retrieve data from upstream Swarm API: {e}")
+        logger.error(f"Failed to retrieve data from upstream Swarm API: {exc_text(e)}")
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail="Could not fetch data from the Bee node. The Bee node may be unavailable."
@@ -1064,7 +1064,7 @@ async def purchase_stamp(
         raise  # Re-raise HTTP exceptions as-is
     except httpx.HTTPError as e:
         stamp_purchases_total.labels(size=stamp_request.size or "custom", status="error").inc()
-        logger.error(f"Failed to purchase stamp from Swarm API: {e}")
+        logger.error(f"Failed to purchase stamp from Swarm API: {exc_text(e)}")
         # A 4xx from Bee is the caller's request being wrong (an amount below the
         # minimum validity, a bad depth), not the node being unavailable. Masking
         # it as 502 tells the caller to go and check node health for a problem
@@ -1270,7 +1270,7 @@ async def extend_stamp(
     except HTTPException:
         raise  # Re-raise HTTP exceptions as-is
     except httpx.HTTPError as e:
-        logger.error(f"Failed to extend stamp {stamp_id} from Swarm API: {e}")
+        logger.error(f"Failed to extend stamp {stamp_id} from Swarm API: {exc_text(e)}")
         # Same reasoning as the purchase path: a 4xx from Bee describes the
         # request, not the node's availability, and its message names the cause.
         bee_status_code, bee_message = _bee_error_detail(e)

@@ -17,7 +17,8 @@ TITLE = "Bee HTTP pool slots stuck"
 
 
 def _rule():
-    rules = {r["title"]: r for r in json.load(open(ALERT_RULES))}
+    with open(ALERT_RULES) as f:
+        rules = {r["title"]: r for r in json.load(f)}
     return rules[TITLE]
 
 
@@ -61,11 +62,14 @@ def test_description_tells_the_operator_what_to_do():
     for needed in ("restart the gateway container", "BEE_HTTP_POOL_STUCK_FRACTION",
                    "gateway_bee_http_client_replacements_total", "#587", "mainnet-runbook"):
         assert needed in description
+    # A restart cuts off everything in flight, not only paid purchases.
+    assert "uploads, downloads and paid stamp purchases" in description
 
 
 def test_runbook_and_claude_md_name_the_alert():
     for doc in ("docs/mainnet-runbook.md", "CLAUDE.md"):
-        assert TITLE in open(os.path.join(REPO_ROOT, doc)).read(), doc
+        with open(os.path.join(REPO_ROOT, doc)) as f:
+            assert TITLE in f.read(), doc
 
 
 def test_apply_grafana_dry_run_lists_the_rule():

@@ -150,6 +150,12 @@ exception type, so these show as `PoolTimeout` rather than an empty message.
 look at Bee, not the gateway. A restart of the gateway container also clears
 the pool.
 
+**The shared HTTP client ignores proxy environment variables.** Bee API and
+Base RPC calls go out directly even when `HTTP_PROXY`, `HTTPS_PROXY` or
+`ALL_PROXY` is set in the container: the client is built with its own
+transport (#587), and httpx applies those variables only to clients without
+one. Bee is on the compose network and must not go through a proxy.
+
 **Diagnosing Bee with only gateway access.** `GET /api/v1/debug/bee/{path}` is a
 read-only, signature-gated proxy to allow-listed Bee endpoints, for when you have
 the gateway but not the node. Disabled unless `DEBUG_ALLOWED_ADDRESSES` is set.
