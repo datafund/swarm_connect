@@ -280,6 +280,10 @@ def test_x402_off_reads_0(idem_store, registry, monkeypatch):
     idisk.failing = sdisk.failing = True
     store._persist()
     reg._persist()
+    store.mark_stalled("test")
+    reg.mark_stalled("test")
+    for file, reason in SERIES:
+        assert _gauge(file, reason) == 1          # with x402 on, all four read 1
     monkeypatch.setattr(settings, "X402_ENABLED", False)
     for file, reason in SERIES:
         assert _gauge(file, reason) == 0
@@ -300,6 +304,50 @@ def test_a_failing_flag_read_does_not_break_the_scrape(monkeypatch, x402_on):
 
 # --- background retry task ----------------------------------------------------
 
+STOP_BOUND_SECONDS = 5
+
+
+async def _stop_bounded():
+    """stop_state_write_retry_task, bounded: if it does not return in time the
+    test fails (the task is then cancelled here so nothing hangs). After it
+    returns, the task must be finished, not just asked to finish."""
+    task = state_retry._task
+
+    async def stop_then_look():
+        await state_retry.stop_state_write_retry_task()
+        # Checked with no further loop iteration: stop itself must have
+        # waited for the task to end.
+        return task is None or task.done()
+
+    stopper = asyncio.ensure_future(stop_then_look())
+    done, _ = await asyncio.wait({stopper}, timeout=STOP_BOUND_SECONDS)
+    if not done:
+        if task is not None:
+            task.cancel()
+        await asyncio.wait({stopper}, timeout=STOP_BOUND_SECONDS)
+        raise AssertionError("stop_state_write_retry_task did not return")
+    assert stopper.result(), "stop returned before the task ended"
+    assert state_retry._task is None
+    return task
+
+
+class _FakeStore:
+    def __init__(self, blocked=True, broken=False):
+        self.blocked, self.broken, self.retries = blocked, broken, 0
+
+    def write_failed(self):
+        if self.broken:
+            raise RuntimeError("boom")
+        return self.blocked
+
+    def write_stalled(self):
+        return False
+
+    @property
+    def unavailable(self):
+        self.retries += 1           # stands in for the store's own retry
+        return "blocked" if self.blocked else None
+
 def test_a_recovered_disk_clears_with_no_requests_and_no_scrapes(idem_store, registry):
     store, idisk = idem_store
     reg, sdisk = registry
@@ -316,7 +364,7 @@ def test_a_recovered_disk_clears_with_no_requests_and_no_scrapes(idem_store, reg
             while (store.write_failed() or reg.write_failed()) and time.monotonic() < end:
                 await asyncio.sleep(0.05)
         finally:
-            await state_retry.stop_state_write_retry_task()
+            await _stop_bounded()
 
     asyncio.run(run())
     assert not store.write_failed() and not reg.write_failed()
@@ -331,7 +379,7 @@ def test_the_retry_task_does_nothing_while_healthy(idem_store, registry):
     async def run():
         await state_retry.start_state_write_retry_task(interval=0.02)
         await asyncio.sleep(0.2)
-        await state_retry.stop_state_write_retry_task()
+        await _stop_bounded()
 
     asyncio.run(run())
     assert (idisk.calls, sdisk.calls) == before
@@ -351,7 +399,7 @@ def test_a_shutdown_while_the_retry_task_runs(idem_store, registry):
         task = state_retry._task
         await asyncio.sleep(0.1)                 # a retry is now held at the disk
         assert not task.done()
-        await state_retry.stop_state_write_retry_task()
+        await _stop_bounded()
         return task
 
     task = asyncio.run(run())
@@ -373,7 +421,7 @@ def test_a_pass_that_raises_does_not_end_the_task(monkeypatch, x402_on):
         task = state_retry._task
         await asyncio.sleep(0.1)                          # several failing passes
         assert not task.done()
-        await state_retry.stop_state_write_retry_task()   # does not raise
+        await _stop_bounded()                             # does not raise
         return task
 
     task = asyncio.run(run())
@@ -398,16 +446,86 @@ def test_stop_does_not_raise_when_the_task_failed(monkeypatch):
     assert state_retry._task is None
 
 
+def test_one_store_failing_its_check_does_not_skip_the_other(monkeypatch, x402_on):
+    broken, blocked = _FakeStore(broken=True), _FakeStore()
+    monkeypatch.setattr(state_retry, "_stores", lambda: (broken, blocked))
+    assert state_retry.retry_blocked_writes() == 1
+    assert blocked.retries == 1
+
+
+def test_a_pass_makes_no_retry_with_x402_off(monkeypatch, x402_on):
+    a, b = _FakeStore(), _FakeStore()
+    monkeypatch.setattr(state_retry, "_stores", lambda: (a, b))
+    assert state_retry.retry_blocked_writes() == 2      # on: both retried
+    assert (a.retries, b.retries) == (1, 1)
+    monkeypatch.setattr(settings, "X402_ENABLED", False)
+    assert state_retry.retry_blocked_writes() == 0
+    assert (a.retries, b.retries) == (1, 1)
+
+
+def test_starting_twice_leaves_one_task(monkeypatch):
+    async def run():
+        await state_retry.start_state_write_retry_task(interval=10)
+        first = state_retry._task
+        await state_retry.start_state_write_retry_task(interval=10)
+        assert state_retry._task is first
+        others = [t for t in asyncio.all_tasks()
+                  if t.get_name() == "x402-state-write-retry" and t is not first]
+        assert others == []
+        await _stop_bounded()
+        return first
+
+    assert asyncio.run(run()).cancelled()
+
+
+def _run_lifespan_bounded(app, inside):
+    """Enter and leave the app lifespan in a thread, bounded: a shutdown that
+    never returns fails the test instead of hanging it."""
+    result = {}
+
+    def body():
+        try:
+            with TestClient(app):
+                result["inside"] = inside()
+        except BaseException as e:  # reported below
+            result["error"] = e
+
+    thread = threading.Thread(target=body, daemon=True)
+    thread.start()
+    thread.join(30)
+    if thread.is_alive():
+        task = result.get("inside")
+        if isinstance(task, asyncio.Task):
+            task.get_loop().call_soon_threadsafe(task.cancel)
+        thread.join(10)
+        raise AssertionError("the lifespan shutdown did not return")
+    if "error" in result:
+        raise result["error"]
+    return result.get("inside")
+
+
 def test_the_lifespan_starts_and_stops_the_retry_task(monkeypatch):
     from app.main import app
     from app.x402 import facilitator
     monkeypatch.setattr(settings, "X402_ENABLED", True)
     monkeypatch.setattr(facilitator, "validate_x402_config", lambda: None)
-    with TestClient(app):
+
+    def inside():
         task = state_retry._task
         assert task is not None and not task.done()
+        return task
+
+    task = _run_lifespan_bounded(app, inside)
     assert state_retry._task is None
     assert task.done()
+
+
+def test_the_lifespan_starts_no_task_with_x402_off(monkeypatch):
+    from app.main import app
+    monkeypatch.setattr(settings, "X402_ENABLED", False)
+    seen = _run_lifespan_bounded(app, lambda: ("task", state_retry._task))
+    assert seen == ("task", None)
+    assert state_retry._task is None
 
 
 # --- alert, runbook, dashboard -----------------------------------------------
