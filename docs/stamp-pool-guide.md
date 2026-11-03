@@ -329,10 +329,13 @@ Check the `errors` array in status response for:
   valid empty JSON list `[]`, or only batches released during the pause, which
   are subtracted first. A zero-byte or otherwise unparseable file is still
   unreadable and keeps the pool paused. A sync that reads the file but fails
-  at Bee keeps saves refused, and the status entry says so. Batches kept in
-  state because their record could not be read are carried through recovery,
-  even when a restored backup predates them, until a sync imports them or Bee
-  no longer lists them. Batches released during the pause are not re-imported
+  at Bee keeps saves refused, and the status entry says so. Batches a sync
+  keeps in state without importing are carried through recovery, even when a
+  restored backup predates them. A batch whose Bee record has unreadable data
+  is kept until a sync imports it or Bee no longer lists it. A batch whose
+  ownership record could not be looked up is kept whatever Bee says, until the
+  lookup succeeds. The first-run path does not read Bee, so it keeps both
+  kinds. Batches released during the pause are not re-imported
   even if a restored backup still lists them. That memory does not survive a
   restart: after a restart only the ownership registry keeps a sold batch out
   of the pool, and a batch bought during the pause is lost from the pool
