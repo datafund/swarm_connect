@@ -619,6 +619,7 @@ def test_lock_is_released_when_the_run_is_killed(e):
     deadline = time.time() + 20
     while not e.calls("docker") and time.time() < deadline:
         time.sleep(0.1)
+    assert e.calls("docker"), "the run never got past the lock to docker"
     os.killpg(p.pid, signal.SIGKILL)                   # no trap runs on SIGKILL
     p.wait(timeout=30)
     held = hold_lock(e)                                # the kernel released it
@@ -849,6 +850,18 @@ def test_verify_uses_the_destination_of_the_last_upload(e):
     assert "destination" in r.stderr
 
 
+# Runs argv with SIGINT at its default action. A child inherits an ignored
+# SIGINT, and a shell without job control ignores SIGINT in every command it
+# starts with `&`, so a suite launched as `pytest ... &` ran the restore below
+# with Ctrl-C ignored by bash, the docker shim, sh and tar alike: nothing
+# reacted, and p.wait timed out after 30 s whatever the load. bash cannot undo
+# that itself (a trap on a signal ignored at entry is dropped), so this resets
+# it before exec, to the state a terminal's Ctrl-C finds.
+def with_default_sigint(argv):
+    return [sys.executable, "-c", "import os, signal, sys; signal.signal(signal.SIGINT, signal.SIG_DFL); "
+            "os.execvp(sys.argv[1], sys.argv[1:])", *argv]
+
+
 def test_interrupted_restore_leaves_no_partial_keys(e):
     # tar implementations buffer differently (GNU tar reads whole 10240-byte
     # records before extracting; busybox and bsdtar do not). The first member
@@ -860,9 +873,9 @@ def test_interrupted_restore_leaves_no_partial_keys(e):
     m = make_manifest(e.tmp / "m.sha256", files)
     data = make_tar(files)
     assert len(data) > 4 * 10240
-    p = subprocess.Popen(["bash", str(RESTORE), "restore", "vol-r", str(m)], env=e.env,
-                         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                         start_new_session=True)
+    p = subprocess.Popen(with_default_sigint(["bash", str(RESTORE), "restore", "vol-r", str(m)]),
+                         env=e.env, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                         stderr=subprocess.PIPE, start_new_session=True)
     p.stdin.write(data[:3 * 10240])
     p.stdin.flush()
     keys = e.volumes / "vol-r" / "keys"
@@ -871,8 +884,9 @@ def test_interrupted_restore_leaves_no_partial_keys(e):
         time.sleep(0.1)
     assert (keys / "big.key").exists(), "restore never started writing"
     os.killpg(p.pid, signal.SIGINT)             # Ctrl-C reaches the whole group
-    p.wait(timeout=30)
+    p.wait(timeout=30)                          # a hang guard: it exits in under a second
     assert p.returncode != 0
+    assert b"FAILED" in p.stderr.read()
     assert not keys.exists(), "partial keys/ left behind"
 
 
