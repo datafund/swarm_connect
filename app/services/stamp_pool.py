@@ -26,7 +26,7 @@ from enum import Enum
 from typing import Dict, List, Optional, Set
 from threading import Lock
 
-from app.core.atomic_io import StateLoadError, atomic_write_json, load_json_state, unreadable_state
+from app.core.atomic_io import StateLoadError, atomic_write_json, keep_corrupt_copy, unreadable_state
 from app.core.config import settings
 from app.services import swarm_api
 from app.services.swarm_api import coerce_int
@@ -177,6 +177,7 @@ class StampPoolManager:
         # Background re-check step and the held set it last saw (backoff).
         self._recheck_step: float = settings.STAMP_POOL_HELD_RECHECK_SECONDS
         self._recheck_held_ids: frozenset = frozenset()
+        self._since_recheck: float = 0.0
         # Batches whose top-up is running (#540). Kept AVAILABLE and counted as
         # held, but never selected, reserved or sold: an acquire during the
         # extend call would otherwise buy a batch the pool had just paid to
@@ -323,6 +324,10 @@ class StampPoolManager:
             logger.debug(f"Saved pool state: {len(batch_ids)} stamps to {state_file}")
         except Exception as e:
             logger.error(f"Failed to save pool state to {state_file}: {e}")
+            # The file does not match the pool; the next sync (or the next
+            # save) writes it again. This does not pause anything: only an
+            # unreadable file does (#547).
+            self._state_dirty = True
             return False
         self._state_dirty = False
         self._removed_unsaved.clear()
@@ -898,6 +903,7 @@ class StampPoolManager:
                 known_ids |= self._unreadable_ids - self._removed_unsaved
                 known_ids |= set(self._pending) - self._removed_unsaved
                 now = datetime.now(timezone.utc)
+                listed_pending: Set[str] = set()
                 for batch_id in known_ids:
                     # Never put a batch registered to someone else up for sale
                     # (#477). _save_state swallows write errors, so a failed
@@ -977,8 +983,10 @@ class StampPoolManager:
                         continue
                     if batch_id in self._pending:
                         # Bee lists it now; the usable rules below decide.
-                        self._pending.pop(batch_id, None)
-                        self._persist_pending_locked()
+                        # The entry is cleared only once the state file lists
+                        # the batch (after the save below), or a failed save
+                        # followed by a restart would strand it.
+                        listed_pending.add(batch_id)
 
                     usable = bool(stamp_data.get("usable", False))
                     ttl = coerce_int(stamp_data.get("batchTTL"), 0)
@@ -1047,9 +1055,14 @@ class StampPoolManager:
             # known_ids, which includes those, left a held pending batch out of
             # the file; once Bee listed it and the pending entry was cleared, a
             # second restart stranded it.
-            if (set(self._pool) | self._unreadable_ids) != file_ids or self._state_dirty:
-                if self._save_state() and recovering:
+            need_save = (set(self._pool) | self._unreadable_ids) != file_ids or self._state_dirty
+            saved = False
+            if need_save:
+                saved = self._save_state()
+                if saved and recovering:
                     self._log_recovered()
+            if listed_pending:
+                self._clear_listed_pending(listed_pending, file_lists_pool=saved or not need_save)
 
             # Adopt everything in the pool as gateway-owned.
             #
@@ -1461,12 +1474,19 @@ class StampPoolManager:
         """
         path = self._pending_path()
         try:
-            raw = load_json_state(path)
-        except StateLoadError as e:
-            logger.error(f"Unreadable pool pending-purchase record: {e} "
-                         "A purchase Bee has not listed yet will not be held.")
+            with open(path) as f:
+                raw = json.load(f)
+            if not isinstance(raw, dict):
+                raise ValueError(f"expected a JSON object, got {type(raw).__name__}")
+        except FileNotFoundError:
             return {}
-        if raw is None:
+        except Exception as e:
+            kept = keep_corrupt_copy(path)
+            logger.error(
+                f"Pool pending-purchase record {path} could not be read ({e}); {kept}. "
+                "Starting with an empty record, so a purchase Bee has not listed yet "
+                "will not be held."
+            )
             return {}
         now = datetime.now(timezone.utc)
         out = {}
@@ -1508,6 +1528,25 @@ class StampPoolManager:
         if batch_id not in self._pending:
             return False
         return self._pending_age(batch_id, now) < settings.STAMP_POOL_UNLISTED_GRACE_SECONDS
+
+    def _clear_listed_pending(self, batch_ids: Set[str], file_lists_pool: bool) -> None:
+        """Clear pending entries for batches Bee lists now.
+
+        A batch the pool still holds keeps its entry until the state file is
+        known to list it (`file_lists_pool`: a save just succeeded, or the
+        file already matched the pool). Otherwise a failed write followed by a
+        restart lost the batch: no longer pending, not in the file, while its
+        ownership record still said "pool". A batch no longer in the pool
+        (dropped as expired or unusable) is cleared either way.
+        """
+        with self._lock:
+            done = {b for b in batch_ids
+                    if b in self._pending and (file_lists_pool or b not in self._pool)}
+            if not done:
+                return
+            for batch_id in done:
+                self._pending.pop(batch_id, None)
+            self._persist_pending_locked()
 
     def _drop_unlisted_pending_locked(self, batch_id: str) -> None:
         """Give up on a purchase Bee never listed within the grace period."""
@@ -1552,15 +1591,16 @@ class StampPoolManager:
             return frozenset(b for b, s in self._pool.items()
                              if s.status == PoolStampStatus.AVAILABLE and not s.usable)
 
-    async def _recheck_held(self) -> None:
+    async def _recheck_held(self) -> bool:
         """Re-run the TTL check early so a held batch is offered once usable.
 
         Skipped while a full maintenance run is in progress (it runs the same
         check), and until a sync has read the node. Uses its own flag: a full
         run arriving meanwhile waits for it and then runs (check_and_replenish).
+        Returns whether the check ran.
         """
         if self._replenishing or self._rechecking or not self._last_sync_ok:
-            return
+            return False
         self._rechecking = True
         self._recheck_done = asyncio.Event()
         try:
@@ -1568,6 +1608,7 @@ class StampPoolManager:
         finally:
             self._rechecking = False
             self._recheck_done.set()
+        return True
 
     def _spend_times_path(self) -> str:
         base, _ = os.path.splitext(self._get_state_file_path())
@@ -1835,6 +1876,7 @@ class StampPoolManager:
                 held = []
                 now = datetime.now(timezone.utc)
                 pending_changed = False
+                listed_pending: Set[str] = set()
                 for batch_id, pool_stamp in self._pool.items():
                     # A reserved batch belongs to an acquire whose payment is
                     # settling; that request decides what happens to it.
@@ -1845,8 +1887,9 @@ class StampPoolManager:
                         # absence from that listing says nothing.
                         continue
                     stamp_data = stamp_map.get(batch_id)
-                    if stamp_data and self._pending.pop(batch_id, None) is not None:
-                        pending_changed = True
+                    if stamp_data and batch_id in self._pending:
+                        # Cleared below, once the state file lists the batch.
+                        listed_pending.add(batch_id)
                     if not stamp_data and self._pending_within_grace(batch_id, now):
                         pool_stamp.usable = False
                         held.append(f"{batch_id[:16]}... (not listed by Bee yet, bought "
@@ -1882,8 +1925,12 @@ class StampPoolManager:
                 if pending_changed:
                     self._persist_pending_locked()
 
-                if to_remove:
-                    self._save_state(removed=set(to_remove))
+                saved = False
+                if to_remove or listed_pending:
+                    saved = self._save_state(removed=set(to_remove) or None)
+
+            if listed_pending:
+                self._clear_listed_pending(listed_pending - set(to_remove), file_lists_pool=saved)
 
             if held:
                 logger.info(f"Holding {len(held)} pool batch(es) until Bee lists them usable: "
@@ -2022,33 +2069,45 @@ class StampPoolManager:
 
         while self._running:
             try:
-                # Sleep in short steps. While a batch is held (bought, not
-                # usable yet), each step re-runs the TTL check, so the batch is
-                # offered soon after Bee lists it usable rather than at the
-                # next full check. With nothing held a step costs nothing.
-                # While the same batches stay held, the step doubles up to the
-                # full interval, so a batch Bee keeps listing as not usable
-                # is not polled every 30 s indefinitely.
+                # Wake every STAMP_POOL_HELD_RECHECK_SECONDS. With nothing
+                # held a wake costs nothing. While a batch is held (bought,
+                # not usable yet), re-run the TTL check so the batch is offered
+                # soon after Bee lists it usable, not at the next full check.
+                # While the same batches stay held, the time between re-checks
+                # doubles up to the full interval, so a batch Bee keeps listing
+                # as not usable is not polled every 30 s indefinitely. A newly
+                # held batch resets it: it is re-checked at the next wake.
+                base = settings.STAMP_POOL_HELD_RECHECK_SECONDS
                 interval = settings.STAMP_POOL_CHECK_INTERVAL_SECONDS
                 due = time.monotonic() + interval
                 while self._running:
                     remaining = due - time.monotonic()
                     if remaining <= 0:
                         break
-                    await asyncio.sleep(min(remaining, self._recheck_step))
+                    nap = min(remaining, base)
+                    await asyncio.sleep(nap)
+                    self._since_recheck += nap
                     held = self._held_ids()
                     if not held:
-                        self._recheck_step = settings.STAMP_POOL_HELD_RECHECK_SECONDS
+                        self._recheck_step = base
                         self._recheck_held_ids = frozenset()
+                        continue
+                    grew = not held <= self._recheck_held_ids
+                    if grew:
+                        self._recheck_step = base
+                    elif self._since_recheck < self._recheck_step:
                         continue
                     if due - time.monotonic() <= 0:
                         break
-                    await self._recheck_held()
+                    if not await self._recheck_held():
+                        # Did not run (a full run is in progress): no backoff.
+                        continue
+                    self._since_recheck = 0.0
                     still_held = self._held_ids()
-                    if still_held and still_held == held == self._recheck_held_ids:
+                    if still_held and not grew and still_held == held == self._recheck_held_ids:
                         self._recheck_step = min(self._recheck_step * 2, interval)
-                    else:
-                        self._recheck_step = settings.STAMP_POOL_HELD_RECHECK_SECONDS
+                    elif still_held != held:
+                        self._recheck_step = base
                     self._recheck_held_ids = still_held
                 if not self._running:
                     break

@@ -1985,31 +1985,131 @@ class TestHeldBatchFollowUps:
         bought = datetime.fromisoformat(manager._pending[self.BATCH]["purchased_at"])
         assert bought <= datetime.now(timezone.utc), "a future purchase time extends the hold past the grace"
 
-    @pytest.mark.asyncio
-    async def test_recheck_backs_off_while_the_same_batches_stay_held(self, state_file):
-        manager = StampPoolManager(state_file=state_file)
-        manager._last_sync_ok = True
-        manager.add_stamp_to_pool(self.BATCH, 17, 1000000, 86400, usable=False)
+    async def _run_loop(self, manager, steps, on_sleep=None):
         sleeps = []
 
         async def fake_sleep(seconds):
             sleeps.append(seconds)
-            if len(sleeps) >= 8:
+            if on_sleep:
+                on_sleep(len(sleeps))
+            if len(sleeps) >= steps:
                 manager._running = False
 
         manager._running = True
         with patch('app.services.stamp_pool.settings.STAMP_POOL_CHECK_INTERVAL_SECONDS', 900), \
              patch('app.services.stamp_pool.settings.STAMP_POOL_HELD_RECHECK_SECONDS', 30), \
              patch('app.services.stamp_pool.asyncio.sleep', new=fake_sleep), \
-             patch.object(manager, 'check_and_replenish', new=AsyncMock()), \
-             self._listing(self._rec()):
-            manager._recheck_step = 30
+             patch.object(manager, 'check_and_replenish', new=AsyncMock()):
             await manager._background_loop()
+        return sleeps
 
-        # Doubles while the same batch stays held, capped at the full interval
-        # (the last steps are bounded by the time left until the full check).
-        assert sleeps[:6] == [30, 30, 60, 120, 240, 480], sleeps
-        assert all(899 < x <= 900 for x in sleeps[6:]), sleeps
+    @pytest.mark.asyncio
+    async def test_recheck_backs_off_while_the_same_batches_stay_held(self, state_file):
+        manager = StampPoolManager(state_file=state_file)
+        manager._last_sync_ok = True
+        manager.add_stamp_to_pool(self.BATCH, 17, 1000000, 86400, usable=False)
+        with self._listing(self._rec()) as listing:
+            sleeps = await self._run_loop(manager, steps=16)
+
+        # Wakes every 30 s, but re-checks after 30, 30, 60, 120 and 240 s:
+        # wakes 1, 2, 4, 8 and 16.
+        assert max(sleeps) <= 30, sleeps
+        assert listing.await_count == 5, listing.await_count
+        assert manager._recheck_step == 480
+
+    @pytest.mark.asyncio
+    async def test_a_newly_held_batch_resets_the_backoff(self, state_file):
+        """A new purchase is re-checked at the next wake, not after a long step."""
+        manager = StampPoolManager(state_file=state_file)
+        manager._last_sync_ok = True
+        manager.add_stamp_to_pool(self.BATCH, 17, 1000000, 86400, usable=False)
+        manager._recheck_held_ids = frozenset({self.BATCH})
+        manager._recheck_step = 480
+        new_batch = "cd34" * 16
+
+        def buy_during_the_wait(n):
+            manager.add_stamp_to_pool(new_batch, 17, 1000000, 86400, usable=False)
+
+        with self._listing(self._rec()) as listing:
+            sleeps = await self._run_loop(manager, steps=1, on_sleep=buy_during_the_wait)
+
+        assert sleeps == [30], f"a new purchase waited {sleeps} for its first re-check"
+        assert listing.await_count == 1, "the new purchase was not re-checked at the next wake"
+        assert manager._recheck_step == 30
+
+    @pytest.mark.asyncio
+    async def test_a_recheck_that_did_not_run_does_not_back_off(self, state_file):
+        manager = StampPoolManager(state_file=state_file)
+        manager._last_sync_ok = True
+        manager._replenishing = True  # a full run in progress: every re-check returns early
+        manager.add_stamp_to_pool(self.BATCH, 17, 1000000, 86400, usable=False)
+        with self._listing(self._rec()) as listing:
+            await self._run_loop(manager, steps=6)
+        assert listing.await_count == 0
+        assert manager._recheck_step == 30, "the step grew although no re-check ran"
+
+    def _failing_state_writes(self, state_file):
+        from app.core.atomic_io import atomic_write_json as real
+
+        def write(path, data):
+            if path == state_file:
+                raise OSError("disk full")
+            return real(path, data)
+        return patch('app.services.stamp_pool.atomic_write_json', side_effect=write)
+
+    async def _buy_not_usable(self, manager):
+        async def fake_buy(amount, depth, label):
+            return self.BATCH
+
+        with patch('app.services.stamp_pool.swarm_api.get_chainstate',
+                   return_value={"currentPrice": "24000"}), \
+             patch('app.services.stamp_pool.swarm_api.purchase_postage_stamp', side_effect=fake_buy), \
+             patch.object(manager, '_wait_for_stamp_usable', new=AsyncMock(return_value=False)):
+            assert await manager._purchase_stamp(17) == self.BATCH
+
+    @pytest.mark.asyncio
+    async def test_pending_entry_outlives_a_failed_state_write(self, state_file):
+        """Bought while the state write fails, listed usable, then a restart."""
+        manager = StampPoolManager(state_file=state_file)
+        with self._failing_state_writes(state_file):
+            await self._buy_not_usable(manager)
+            assert manager._state_dirty, "a failed write did not mark the state for a retry"
+            with self._listing(self._rec(usable=True)):
+                await manager._update_stamp_ttls()
+        assert self.BATCH in manager._pending, "pending was cleared before the state file listed the batch"
+
+        restarted = StampPoolManager(state_file=state_file)
+        with self._listing(self._rec(usable=True)):
+            await restarted.sync_from_bee_node()
+        assert self.BATCH in restarted._pool, "the batch was stranded after the restart"
+
+        with self._listing(self._rec(usable=True)):
+            await restarted._update_stamp_ttls()
+        assert self.BATCH not in restarted._pending
+        with open(state_file) as f:
+            assert self.BATCH in json.load(f)
+
+    @pytest.mark.asyncio
+    async def test_sync_keeps_the_pending_entry_when_its_save_fails(self, state_file):
+        with open(state_file, "w") as f:
+            json.dump([], f)
+        self._write_pending(state_file, datetime.now(timezone.utc).isoformat())
+        manager = StampPoolManager(state_file=state_file)
+        with self._failing_state_writes(state_file), self._listing(self._rec(usable=True)):
+            await manager.sync_from_bee_node()
+        assert self.BATCH in manager._pool
+        assert self.BATCH in manager._pending, "sync cleared pending although its save failed"
+
+    def test_unreadable_pending_file_log_says_what_happens(self, state_file, caplog):
+        import logging
+        with open(self._pending_file(state_file), "w") as f:
+            f.write("{not json")
+        with caplog.at_level(logging.ERROR, logger="app.services.stamp_pool"):
+            StampPoolManager(state_file=state_file)
+        text = " ".join(r.getMessage() for r in caplog.records)
+        assert "Refusing to start" not in text
+        assert ".corrupt-" in text
+        assert "Starting with an empty record" in text
 
     @pytest.mark.asyncio
     async def test_batches_held_past_the_grace_are_warned_about_hourly(self, state_file, caplog):

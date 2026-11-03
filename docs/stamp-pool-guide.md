@@ -286,7 +286,8 @@ While any stamp is held (bought, not usable yet), the task also re-runs the
 TTL check every `STAMP_POOL_HELD_RECHECK_SECONDS` (default 30) between full
 checks, so a held stamp becomes available soon after Bee lists it as usable.
 While the same stamps stay held, the wait between re-checks doubles, up to
-`STAMP_POOL_CHECK_INTERVAL_SECONDS`. With nothing held, no extra Bee calls are
+`STAMP_POOL_CHECK_INTERVAL_SECONDS`. A newly held stamp resets the wait, so
+it is re-checked within `STAMP_POOL_HELD_RECHECK_SECONDS`. With nothing held, no extra Bee calls are
 made. A full check never skips because of a re-check: one that starts during
 a re-check waits for it, at most 60 seconds, and then runs.
 
@@ -426,6 +427,9 @@ The sync after a restart and each TTL check hold such a stamp in two cases:
   (default 900) after the purchase. If Bee still does not list it then, it
   is removed from the pool and from the ownership registry. While the stamp
   is held, the state file lists it too, so a later restart finds it there.
+  The pending record is cleared only after the state file has been written
+  with the stamp in it. If writing the state file fails, the next sync
+  tries again.
   A missing pending record loses only this grace period. An unparseable one
   is copied once to `pool_state_pending.json.corrupt-<timestamp>` and then
   treated as empty. A purchase time with no time zone is read as UTC, and
