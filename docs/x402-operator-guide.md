@@ -399,7 +399,10 @@ The gateway performs pre-flight checks before accepting payments:
 The check reads the cached snapshot, so it adds no Bee call per request. It can lag by
 up to `HEALTH_SNAPSHOT_TTL_SECONDS` (15 s): just after Bee recovers, paid requests can
 still be refused for that long. Just after Bee fails, a paid request can still pass and
-fail after settlement for that long, which leads to the usual refund path.
+fail after settlement, which leads to the usual refund path. If Bee fails by not
+answering at all, refreshes take until their timeout to fail, so this window can last
+until the snapshot is too old to trust: up to `HEALTH_SNAPSHOT_MAX_TRUSTED_AGE_SECONDS`
+(60 s), not only one TTL.
 
 **Edge case:** the gate keys on Bee's `/wallet` endpoint. If `/wallet` fails while the rest
 of Bee still works (uploads succeed), every paid route is refused, including paid uploads
