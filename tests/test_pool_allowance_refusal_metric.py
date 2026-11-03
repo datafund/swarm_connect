@@ -30,9 +30,14 @@ def _refusals(size, scope, response):
     return pool_allowance_refusals_total.labels(size=size, scope=scope, response=response)._value.get()
 
 
+SIZES = tuple(SIZE_PRESETS) + ("other",)
+SCOPES = ("origin", "client")
+RESPONSES = ("402", "429", "409")
+
+
 def _all_refusals():
     return {(size, scope, response): _refusals(size, scope, response)
-            for size in SIZE_PRESETS for scope in ("origin", "client") for response in ("402", "429")}
+            for size in SIZES for scope in SCOPES for response in RESPONSES}
 
 
 def _pool_errors():
@@ -126,6 +131,62 @@ class TestAllowanceRefusalsAreCounted:
         assert _pool_errors() == errors_before + 1
 
 
+def _serve_only_a_larger_batch(pool, monkeypatch, depth):
+    """The requested size is out of stock; a batch of `depth` could stand in."""
+    monkeypatch.setattr(pool.stamp_pool_manager, "get_available_stamp", lambda d: None)
+    monkeypatch.setattr(pool.stamp_pool_manager, "get_available_stamp_any_size",
+                        lambda d: type("S", (), {"depth": depth})())
+
+
+class TestFallbackRefusalsAreCounted:
+    """A free acquire whose size is out of stock may be served a larger batch,
+    charged to the larger size's allowance. When that allowance is spent the
+    answer is 409 REQUESTED_SIZE_UNAVAILABLE, and it is still an allowance
+    refusal: counted with response 409 and the larger size."""
+
+    def test_origin_allowance_spent_on_the_larger_size(self, pool, monkeypatch):
+        monkeypatch.setattr(settings, "POOL_DAILY_ALLOWANCES", f"{APP}=0")
+        monkeypatch.setattr(settings, "POOL_DEFAULT_DAILY_ALLOWANCE", 0)
+        _serve_only_a_larger_batch(pool, monkeypatch, SIZE_PRESETS["medium"])
+        before, errors_before = _all_refusals(), _pool_errors()
+
+        resp = _acquire({"Origin": APP})
+
+        assert resp.status_code == 409, resp.text
+        assert resp.json()["detail"]["code"] == "REQUESTED_SIZE_UNAVAILABLE"
+        assert _only_changed(before, _all_refusals()) == {("medium", "origin", "409"): 1}
+        assert _pool_errors() == errors_before
+
+    def test_client_cap_spent_on_the_larger_size(self, pool, monkeypatch):
+        monkeypatch.setattr(settings, "POOL_DAILY_ALLOWANCES", "")
+        monkeypatch.setattr(settings, "POOL_DEFAULT_DAILY_ALLOWANCE", 10)
+        monkeypatch.setattr(settings, "POOL_ALLOWANCE_PER_IP", 0)
+        _serve_only_a_larger_batch(pool, monkeypatch, SIZE_PRESETS["large"])
+        before = _all_refusals()
+
+        resp = _acquire()
+
+        assert resp.status_code == 409, resp.text
+        assert resp.json()["detail"]["code"] == "REQUESTED_SIZE_UNAVAILABLE"
+        assert _only_changed(before, _all_refusals()) == {("large", "client", "409"): 1}
+
+    def test_a_non_preset_depth_is_counted_as_other(self, pool, monkeypatch):
+        """The pool can hold a batch of a non-preset depth (adopted from Bee at
+        the depth Bee reports). Its size name is depth-N, which must not become
+        a label value of its own."""
+        monkeypatch.setattr(settings, "POOL_DAILY_ALLOWANCES", f"{APP}=0")
+        monkeypatch.setattr(settings, "POOL_DEFAULT_DAILY_ALLOWANCE", 0)
+        _serve_only_a_larger_batch(pool, monkeypatch, 18)
+        before = _all_refusals()
+
+        resp = _acquire({"Origin": APP})
+
+        assert resp.status_code == 409, resp.text
+        assert _only_changed(before, _all_refusals()) == {("other", "origin", "409"): 1}
+        text = TestClient(app).get("/metrics").text
+        assert not [l for l in text.splitlines() if l.startswith(METRIC + "{") and "depth-" in l]
+
+
 class TestSeriesAndLabels:
 
     def test_every_series_exists_at_zero_in_a_fresh_process(self):
@@ -138,10 +199,12 @@ class TestSeriesAndLabels:
                                 capture_output=True, text=True, timeout=120)
         assert result.returncode == 0, result.stderr
         lines = result.stdout.splitlines()
-        missing = [
+        expected = [
             f'{METRIC}{{response="{r}",scope="{sc}",size="{s}"}} 0.0'
-            for s in SIZE_PRESETS for sc in ("origin", "client") for r in ("402", "429")
+            for s in SIZES for sc in SCOPES for r in RESPONSES
         ]
+        assert len(expected) == 24
+        missing = expected
         missing = [m for m in missing if m not in lines]
         assert not missing, f"not created at 0 at startup: {missing}"
 

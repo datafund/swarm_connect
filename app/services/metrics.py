@@ -132,22 +132,44 @@ for _size in SIZE_PRESETS:
 # status of gateway_pool_acquires_total: that counter's "error" is an empty pool
 # or a lost reservation race (409), and a dashboard panel read it as allowance
 # refusals for months. Every label is from a fixed set, never from the caller:
-# size is the preset charged, scope says WHICH allowance ran out ("origin" = the
-# per-application budget, "client" = the per-client cap), and response is the
-# answer given ("402" when paying would bypass the allowance, otherwise "429").
-# No origin, IP or wallet is a label. 3 x 2 x 2 = 12 series, all created at 0
+#   size     - the size whose allowance was spent: a preset name, or "other"
+#              for a batch of any other depth (see allowance_refusal_size_label);
+#   scope    - WHICH allowance ran out: "origin" = the per-application budget,
+#              "client" = the per-client cap;
+#   response - the answer given: "402" when paying would bypass the allowance,
+#              "429" otherwise, "409" when the requested size was out of stock
+#              and the allowance for the larger size that would stand in is spent.
+# No origin, IP or wallet is a label. 4 x 2 x 3 = 24 series, all created at 0
 # so the first refusal after a deploy is counted by increase().
 pool_allowance_refusals_total = Counter(
     "gateway_pool_allowance_refusals_total",
     "Free pool acquires refused because a daily allowance was used up",
     ["size", "scope", "response"],
 )
+POOL_ALLOWANCE_SIZES = tuple(SIZE_PRESETS) + ("other",)
 POOL_ALLOWANCE_SCOPES = ("origin", "client")
-POOL_ALLOWANCE_RESPONSES = ("402", "429")
-for _size in SIZE_PRESETS:
+POOL_ALLOWANCE_RESPONSES = ("402", "429", "409")
+for _size in POOL_ALLOWANCE_SIZES:
     for _scope in POOL_ALLOWANCE_SCOPES:
         for _response in POOL_ALLOWANCE_RESPONSES:
             pool_allowance_refusals_total.labels(size=_size, scope=_scope, response=_response)
+
+
+def allowance_refusal_size_label(size: str) -> str:
+    """Bound the size label to the presets plus "other".
+
+    The size charged is taken from the batch handed out, and the pool can hold
+    a batch of a non-preset depth: sync_from_bee_node adopts a known batch at
+    whatever depth Bee reports, and a free acquire may be served any larger
+    batch in stock. depth_to_size_name() then returns "depth-N", which as a
+    label would add a series for every such depth.
+    """
+    return size if size in SIZE_PRESETS else "other"
+
+
+def count_pool_allowance_refusal(size: str, scope: str, response: str) -> None:
+    pool_allowance_refusals_total.labels(
+        size=allowance_refusal_size_label(size), scope=scope, response=response).inc()
 
 x402_settlements_total = Counter(
     "gateway_x402_settlements_total",

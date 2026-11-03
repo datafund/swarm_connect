@@ -18,7 +18,7 @@ from app.core.config import settings
 from app.services.stamp_pool import stamp_pool_manager, PoolStampStatus
 from app.services.swarm_api import get_batch_expiry
 from app.services.stamp_ownership import stamp_ownership_manager
-from app.services.metrics import pool_acquires_total, pool_allowance_refusals_total
+from app.services.metrics import count_pool_allowance_refusal, pool_acquires_total
 from app.services.pool_allowance import pool_allowance_tracker
 from app.core.client_ip import get_client_key
 from app.services.signed_auth import POOL_CHECK_PREFIX, authorize_signed_request
@@ -247,10 +247,10 @@ async def _refuse_allowance(
         except Exception as e:
             logger.warning("Could not price the allowance refusal, answering 429: %s", e)
         else:
-            pool_allowance_refusals_total.labels(size=size, scope=scope, response="402").inc()
+            count_pool_allowance_refusal(size, scope, "402")
             raise HTTPException(status_code=status.HTTP_402_PAYMENT_REQUIRED, detail=payment_required)
 
-    pool_allowance_refusals_total.labels(size=size, scope=scope, response="429").inc()
+    count_pool_allowance_refusal(size, scope, "429")
     raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail=detail)
 
 
@@ -403,6 +403,14 @@ async def acquire_stamp(
             # it); the accurate answer is that the requested size is
             # momentarily unavailable.
             whose = "this application" if not allowed_by_budget else "this client"
+            # Counted as an allowance refusal with response "409" (#554). The
+            # size is charged_size, the larger size that would have stood in,
+            # because that is the allowance that was spent; the requested size
+            # was out of stock, and its own allowance was never checked. The
+            # scope is whichever check failed: the per-client check runs only
+            # once the per-application budget has passed.
+            count_pool_allowance_refusal(
+                charged_size, "origin" if not allowed_by_budget else "client", "409")
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
                 detail={
