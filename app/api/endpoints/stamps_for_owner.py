@@ -135,8 +135,10 @@ async def create_batch_for_owner(body: StampForOwnerRequest, request: Request) -
     if not (x402_mode == "paid" and config.paid_bypass_is_honoured()):
         # Unpaid (free tier, when enabled) or testnet-paid: a giveaway, bounded
         # like direct purchases by the free ceiling and the caller's budget.
-        from app.core.client_ip import get_client_ip
-        caller = get_client_ip(request)
+        # Keyed like them on get_client_key, which groups an IPv6 caller's /64:
+        # keyed on the full address, it could rotate addresses for fresh budgets (#468).
+        from app.core.client_ip import get_client_key
+        caller = get_client_key(request)
     hold, _refused, ceiling = spend_budget_tracker.reserve_spend(cost_bzz, caller)
     if hold is None:
         metrics.for_owner_batches_total.labels(status="ceiling").inc()

@@ -529,3 +529,297 @@ def test_capacity_refusal_releases_its_spend_hold(env, monkeypatch):
     assert r.status_code == 503
     assert fac.settle.await_count == 0
     assert _gateway_spent() == 0
+
+
+# --- after the 202: spend metric, hold and expiry (#468) ---------------------
+
+def _spend_recorded():
+    from prometheus_client import REGISTRY
+    return sum(REGISTRY.get_sample_value("gateway_stamp_spend_bzz_total",
+                                         {"operation": "stamp purchase", "charged": c}) or 0.0
+               for c in ("budget", "paid"))
+
+
+def test_late_delivery_is_counted_as_spent(env, monkeypatch):
+    """Delivered after the 202: the BZZ is in gateway_stamp_spend_bzz_total, as
+    for a purchase Bee answered in time."""
+    app, fac, buy, find = env
+    monkeypatch.setattr(settings, "SWARM_STAMP_PURCHASE_TIMEOUT_SECONDS", 0.05)
+    buy.side_effect = _slow_bee(BATCH)
+    before = _spend_recorded()
+    first, retry = _run_pending(app, None, key="k-late-spend")
+    assert first.status_code == 202
+    assert retry.status_code == 201
+    assert _spend_recorded() - before == pytest.approx(_gateway_spent())
+    assert _gateway_spent() > 0
+
+
+def test_late_delivery_found_by_label_is_counted_as_spent(env):
+    """The other late path: Bee gave no answer, the background lookup found it."""
+    app, fac, buy, find = env
+    find.side_effect = [None, BATCH]
+    before = _spend_recorded()
+    first, retry = _run_pending(app, None, key="k-late-lookup-spend")
+    assert first.status_code == 202 and retry.status_code == 201
+    assert _spend_recorded() - before == pytest.approx(_gateway_spent())
+
+
+def test_background_bee_4xx_releases_the_hold(env, monkeypatch):
+    """Bee refused the purchase after the 202: nothing was spent, so the hold
+    goes back now instead of at midnight, and nothing is counted as spent."""
+    app, fac, buy, find = env
+    monkeypatch.setattr(settings, "SWARM_STAMP_PURCHASE_TIMEOUT_SECONDS", 0.05)
+    req = httpx.Request("POST", "http://bee/stamps/1/17")
+    buy.side_effect = _slow_bee(httpx.HTTPStatusError(
+        "x", request=req, response=httpx.Response(400, json={"message": "insufficient funds"}, request=req)))
+    before = _spend_recorded()
+    first, retry = _run_pending(app, None, key="k-refused-hold")
+    assert first.status_code == 202
+    assert retry.json()["code"] == "DELIVERY_FAILED_AFTER_PAYMENT"
+    assert _gateway_spent() == 0
+    assert _spend_recorded() == before
+
+
+def test_background_bee_5xx_keeps_the_hold(env, monkeypatch):
+    """A 5xx may have spent: the hold stays and is counted as uncertain."""
+    from prometheus_client import REGISTRY
+    app, fac, buy, find = env
+    monkeypatch.setattr(settings, "SWARM_STAMP_PURCHASE_TIMEOUT_SECONDS", 0.05)
+    req = httpx.Request("POST", "http://bee/stamps/1/17")
+    buy.side_effect = _slow_bee(httpx.HTTPStatusError(
+        "x", request=req, response=httpx.Response(500, request=req)))
+    uncertain = lambda: REGISTRY.get_sample_value(
+        "gateway_spend_uncertain_bzz_total", {"operation": "stamp purchase"}) or 0.0
+    before = uncertain()
+    first, _ = _run_pending(app, None, key="k-5xx-hold")
+    assert first.status_code == 202
+    assert _gateway_spent() > 0
+    assert uncertain() - before == pytest.approx(_gateway_spent())
+
+
+def test_late_201_carries_expires_at(env, monkeypatch):
+    """The 201 a keyed retry gets after a late delivery has expires_at, as the 201
+    answered in time does: estimated from the amount at today's price."""
+    app, fac, buy, find = env
+    monkeypatch.setattr(settings, "SWARM_STAMP_PURCHASE_TIMEOUT_SECONDS", 0.05)
+    buy.side_effect = _slow_bee(BATCH)
+    first, retry = _run_pending(app, None, key="k-late-expiry")
+    assert first.status_code == 202 and retry.status_code == 201
+    amount = int(first.json()["amount"])
+    assert retry.json()["expires_at"] == swarm_api.expiry_from_amount(amount, 24000)
+    assert retry.json()["expires_at"] is not None
+
+
+# --- round 2: every pending outcome settles the hold once (#468) ----------------
+
+def _uncertain():
+    from prometheus_client import REGISTRY
+    return REGISTRY.get_sample_value("gateway_spend_uncertain_bzz_total", {"operation": "stamp purchase"}) or 0.0
+
+
+def test_timeout_then_not_found_counts_the_hold_as_uncertain(env):
+    """Bee timed out after the payment and the background lookup found nothing:
+    the hold stays and is counted as uncertain, once."""
+    app, fac, buy, find = env
+    find.return_value = None
+    before, spent_before = _uncertain(), _spend_recorded()
+    first, retry = _run_pending(app, None, key="k-not-found-uncertain")
+    assert first.status_code == 202
+    assert retry.json()["code"] == "DELIVERY_FAILED_AFTER_PAYMENT"
+    assert _gateway_spent() > 0
+    assert _uncertain() - before == pytest.approx(_gateway_spent())
+    assert _spend_recorded() == spent_before
+
+
+def test_batch_taken_by_someone_else_counts_the_hold_as_uncertain(env):
+    app, fac, buy, find = env
+    stamp_ownership_manager._registry[BATCH] = {"owner": "0x" + "d4" * 20, "mode": "paid"}
+    before = _uncertain()
+    first, _ = _run_pending(app, None, key="k-taken-uncertain")
+    assert first.status_code == 202
+    assert _uncertain() - before == pytest.approx(_gateway_spent())
+    assert _gateway_spent() > 0
+
+
+def test_lookup_error_in_the_background_counts_the_hold_as_uncertain(env):
+    app, fac, buy, find = env
+    find.side_effect = [None, RuntimeError("node gone")]
+    before = _uncertain()
+    first, _ = _run_pending(app, None, key="k-lookup-error-uncertain")
+    assert first.status_code == 202
+    assert _uncertain() - before == pytest.approx(_gateway_spent())
+
+
+def _cancelled_request_then_background(app, key):
+    """A paid request cut off while Bee works; its background half finishes."""
+    from app.api.endpoints import stamps
+
+    async def run():
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t") as c:
+            h = {"X-PAYMENT": pay(), "Idempotency-Key": key}
+            req = asyncio.ensure_future(c.post("/api/v1/stamps/", json=BODY, headers=h))
+            for _ in range(200):           # until Bee's request is running
+                if stamps._PENDING_TASKS:
+                    break
+                await asyncio.sleep(0.005)
+            req.cancel()
+            await asyncio.gather(req, return_exceptions=True)
+            for _ in range(400):
+                if not stamps._PENDING_TASKS:
+                    break
+                await asyncio.sleep(0.01)
+            assert not stamps._PENDING_TASKS
+    asyncio.run(run())
+
+
+def test_cancelled_request_then_delivered_is_counted_once_as_spent(env, monkeypatch):
+    """The request is cut off after the hand-off: only the background half
+    settles the hold, so the cost is spent, never also uncertain."""
+    app, fac, buy, find = env
+    monkeypatch.setattr(settings, "SWARM_STAMP_PURCHASE_TIMEOUT_SECONDS", 30)
+    buy.side_effect = _slow_bee(BATCH, delay=0.1)
+    before, spent_before = _uncertain(), _spend_recorded()
+    _cancelled_request_then_background(app, "k-cancel-delivered")
+    assert stamp_ownership_manager.get_stamp_info(BATCH)["owner"] == PAYER
+    assert _spend_recorded() - spent_before == pytest.approx(_gateway_spent())
+    assert _uncertain() == before
+
+
+def test_cancelled_request_then_bee_4xx_releases_without_counting(env, monkeypatch):
+    app, fac, buy, find = env
+    monkeypatch.setattr(settings, "SWARM_STAMP_PURCHASE_TIMEOUT_SECONDS", 30)
+    req = httpx.Request("POST", "http://bee/stamps/1/17")
+    buy.side_effect = _slow_bee(httpx.HTTPStatusError(
+        "x", request=req, response=httpx.Response(400, request=req)), delay=0.1)
+    before = _uncertain()
+    _cancelled_request_then_background(app, "k-cancel-4xx")
+    assert _gateway_spent() == 0
+    assert _uncertain() == before
+
+
+def test_shutdown_during_the_late_expiry_read_still_stores_the_201(env, monkeypatch):
+    """A cancel while the late 201's price is read must not leave the 202 for
+    the Idempotency-Key: the 201 is stored, without expires_at."""
+    from app.api.endpoints import stamps
+    app, fac, buy, find = env
+    monkeypatch.setattr(settings, "SWARM_STAMP_PURCHASE_TIMEOUT_SECONDS", 0.05)
+    buy.side_effect = _slow_bee(BATCH)
+
+    async def chainstate():
+        # Only the background half reads the price after the batch is
+        # registered: that is the read to hang.
+        if stamp_ownership_manager.get_stamp_info(BATCH):
+            await asyncio.sleep(3600)
+        return {"currentPrice": "24000", "minimumValidityBlocks": 17280, "block": 180000}
+
+    async def run():
+        with patch("app.services.swarm_api.get_chainstate", new=chainstate):
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t") as c:
+                h = lambda: {"X-PAYMENT": pay(), "Idempotency-Key": "k-late-cancel"}
+                first = await c.post("/api/v1/stamps/", json=BODY, headers=h())
+                for _ in range(200):       # until the batch is registered
+                    if stamp_ownership_manager.get_stamp_info(BATCH):
+                        break
+                    await asyncio.sleep(0.01)
+                await asyncio.sleep(0.05)  # now waiting on the price read
+                for t in list(stamps._PENDING_TASKS):
+                    t.cancel()
+                await asyncio.gather(*list(stamps._PENDING_TASKS), return_exceptions=True)
+                retry = await c.post("/api/v1/stamps/", json=BODY, headers=h())
+                return first, retry
+    first, retry = asyncio.run(run())
+    assert first.status_code == 202
+    assert retry.status_code == 201, retry.text
+    assert retry.json()["batchID"] == BATCH and retry.json()["expires_at"] is None
+
+
+# --- round 3: the cancellation paths keep the hold and count it once (#468) -------
+
+def test_background_cancelled_at_shutdown_counts_the_hold_once(env):
+    """The background search is cancelled at shutdown: the hold stays and is
+    counted as uncertain exactly once, by the background half."""
+    from app.api.endpoints import stamps
+    app, fac, buy, find = env
+    calls = []
+
+    async def lookup(*a, **kw):
+        calls.append(1)
+        if len(calls) > 1:              # the background search: still looking at shutdown
+            await asyncio.sleep(3600)
+        return None
+    find.side_effect = lookup
+    before, spent_before = _uncertain(), _spend_recorded()
+
+    async def run():
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t") as c:
+            r = await c.post("/api/v1/stamps/", json=BODY, headers={"X-PAYMENT": pay()})
+            for _ in range(200):
+                if len(calls) > 1:
+                    break
+                await asyncio.sleep(0.01)
+            assert len(calls) > 1, "the background search is running"
+            await stamps.drain_pending_purchases(0)
+            return r
+    assert asyncio.run(run()).status_code == 202
+    assert "interrupted" in _audit("payment_failed")[0]["data"]["reason"]
+    assert _gateway_spent() > 0                                   # the hold is kept
+    assert _uncertain() - before == pytest.approx(_gateway_spent())   # counted once
+    assert _spend_recorded() == spent_before
+
+
+def _cancel_request_while(app, started):
+    """Start a paid request, cancel it once `started()` is true, and return
+    whether a background half was left running."""
+    from app.api.endpoints import stamps
+
+    async def run():
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t") as c:
+            req = asyncio.ensure_future(c.post("/api/v1/stamps/", json=BODY, headers={"X-PAYMENT": pay()}))
+            for _ in range(400):
+                if started():
+                    break
+                await asyncio.sleep(0.005)
+            assert started(), "the request reached the point to cancel at"
+            req.cancel()
+            await asyncio.gather(req, return_exceptions=True)
+            await asyncio.sleep(0.05)    # anything left behind would run now
+            return bool(stamps._PENDING_TASKS)
+    return asyncio.run(run())
+
+
+def test_request_cancelled_during_the_in_handler_lookup_counts_the_hold_once(env):
+    """Cancelled before any hand-off, while the handler itself looks for the
+    batch: the handler keeps the hold and counts it once; nothing else does."""
+    app, fac, buy, find = env
+    looking = []
+
+    async def lookup(*a, **kw):
+        looking.append(1)
+        await asyncio.sleep(3600)
+    find.side_effect = lookup
+    before, spent_before = _uncertain(), _spend_recorded()
+    left_running = _cancel_request_while(app, lambda: bool(looking))
+    assert not left_running                                      # nothing handed off
+    assert len(looking) == 1
+    assert _gateway_spent() > 0                                   # the hold is kept
+    assert _uncertain() - before == pytest.approx(_gateway_spent())   # counted once
+    assert _spend_recorded() == spent_before
+
+
+def test_request_cancelled_during_settlement_counts_the_hold_once(env):
+    """Cancelled while the payment is settling: the outcome is unknown, so the
+    hold is kept and counted once, in the handler."""
+    app, fac, buy, find = env
+    settling = []
+
+    async def settle(*a, **kw):
+        settling.append(1)
+        await asyncio.sleep(3600)
+    fac.settle.side_effect = settle
+    before, spent_before = _uncertain(), _spend_recorded()
+    left_running = _cancel_request_while(app, lambda: bool(settling))
+    assert not left_running
+    buy.assert_not_called()
+    assert _gateway_spent() > 0
+    assert _uncertain() - before == pytest.approx(_gateway_spent())
+    assert _spend_recorded() == spent_before

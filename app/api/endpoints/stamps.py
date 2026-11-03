@@ -56,16 +56,24 @@ class SpendReservation:
         self.cost_bzz = cost_bzz
         self.caller = caller  # None: not charged to a caller's budget (paid)
         self.hold = hold
+        # Set when a background half (a paid purchase answered 202) takes the
+        # reservation over. Its outcome is then settled exactly once, there:
+        # recorded as spent, released, or kept as uncertain (#468).
+        self.handed_off = False
 
     def release_if_unspent(self, exc: BaseException) -> None:
         if spend_certainly_did_not_happen(exc):
             spend_budget_tracker.release_hold(self.hold)
         else:
-            gateway_spend_uncertain_bzz_total.labels(operation=self.operation).inc(self.cost_bzz)
-            logger.warning(
-                "%s failed with %s; the outcome is uncertain, so its %.6f BZZ stays "
-                "charged against the spending limits", self.operation, type(exc).__name__, self.cost_bzz,
-            )
+            self.keep_uncertain(type(exc).__name__)
+
+    def keep_uncertain(self, why: str) -> None:
+        """Keep the hold: the spend may have happened. Counted once, here."""
+        gateway_spend_uncertain_bzz_total.labels(operation=self.operation).inc(self.cost_bzz)
+        logger.warning(
+            "%s failed (%s); the outcome is uncertain, so its %.6f BZZ stays "
+            "charged against the spending limits", self.operation, why, self.cost_bzz,
+        )
 
     def record(self) -> None:
         stamp_spend_bzz_total.labels(
@@ -545,6 +553,9 @@ async def get_stamp_details(
 
 
 _PENDING_FIRST_WAIT_SECONDS = 10
+# Bound on the price read that dates a late 201's expires_at (#468); past it
+# the 201 is stored without one rather than wait on a slow node.
+_LATE_EXPIRY_PRICE_TIMEOUT_SECONDS = 5
 # Background lookups in flight. The event loop keeps only weak references to
 # tasks, so one nobody holds can be garbage-collected mid-search.
 _PENDING_TASKS: set = set()
@@ -607,7 +618,8 @@ def _outcome_unknown(e: httpx.HTTPError) -> bool:
 
 def _purchase_pending(request: Request, label: str, depth: int, amount: int,
                       start_block: Optional[int], purchase: Optional[asyncio.Task] = None,
-                      taken: Optional[str] = None) -> JSONResponse:
+                      taken: Optional[str] = None,
+                      reservation: Optional[SpendReservation] = None) -> JSONResponse:
     """202 for a paid purchase Bee did not confirm in time (#400).
 
     The payment has settled and the batch may exist. `purchase` is Bee's
@@ -617,6 +629,10 @@ def _purchase_pending(request: Request, label: str, depth: int, amount: int,
     else, which only needs recording. Either way, the batch is registered to
     the payer when it appears; with an Idempotency-Key, a retry then gets the
     201 instead of this 202.
+
+    `reservation` is the purchase's spend hold. The background half records it
+    as spent when the batch is delivered, and gives it back when Bee refuses
+    the purchase outright (#468).
     """
     from app.x402.audit import AuditEventType, log_audit_event, log_payment_failed
     from app.x402.settlement import request_nonce
@@ -639,9 +655,13 @@ def _purchase_pending(request: Request, label: str, depth: int, amount: int,
     try:
         task = asyncio.get_running_loop().create_task(_finish_pending_purchase(
             request, label, depth, amount, start_block, payer, tx,
-            getattr(request.state, "x402_idempotency_id", None), purchase, taken))
+            getattr(request.state, "x402_idempotency_id", None), purchase, taken, reservation))
         _PENDING_TASKS.add(task)
         task.add_done_callback(_PENDING_TASKS.discard)
+        if reservation is not None:
+            # The background half settles the hold from here on, so a request
+            # cancelled right after this does not count it a second time.
+            reservation.handed_off = True
     except Exception as e:
         # Nobody will finish this purchase: record it for the operator, and
         # still observe Bee's request so its outcome is not silently dropped.
@@ -669,7 +689,8 @@ def _purchase_pending(request: Request, label: str, depth: int, amount: int,
 async def _finish_pending_purchase(request: Request, label: str, depth: int, amount: int,
                                    start_block: Optional[int], payer: Optional[str],
                                    tx: Optional[str], idem, purchase: Optional[asyncio.Task] = None,
-                                   taken: Optional[str] = None) -> None:
+                                   taken: Optional[str] = None,
+                                   reservation: Optional[SpendReservation] = None) -> None:
     """Background half of _purchase_pending: find, register, record.
 
     Every way this ends leaves an audit record: delivered (late), or a
@@ -683,6 +704,20 @@ async def _finish_pending_purchase(request: Request, label: str, depth: int, amo
     from app.core.client_ip import get_client_ip
     from app.x402.idempotency import resolve_idempotent_result
     client_ip = get_client_ip(request)
+
+    # The hold is settled once: spent, released, or uncertain (#468).
+    accounted = False
+
+    def keep_uncertain(why: str) -> None:
+        """No batch delivered, and no definite answer that nothing was spent:
+        the hold stays until midnight and is counted as uncertain (#468)."""
+        nonlocal accounted
+        if reservation is not None and not accounted:
+            accounted = True
+            try:
+                reservation.keep_uncertain(why)
+            except Exception as e:
+                logger.error(f"Could not count the uncertain spend of a pending purchase (label {label}): {e}")
 
     def refund_needed(why: str) -> None:
         log_payment_failed(client_ip=client_ip,
@@ -702,6 +737,7 @@ async def _finish_pending_purchase(request: Request, label: str, depth: int, amo
     in_flight = False
     try:
         if taken:
+            keep_uncertain("batch found but registered to someone else")
             refund_needed(f"found ({taken}) but already registered to someone else")
             return
         if purchase is not None:
@@ -715,6 +751,16 @@ async def _finish_pending_purchase(request: Request, label: str, depth: int, amo
                 if not _outcome_unknown(e):
                     # The full text, which _bee_error_detail leaves out (#549).
                     logger.error(f"Bee refused a paid purchase (label {label}, tx {tx}): {e}")
+                    # A definite 4xx spent nothing: give the hold back now rather
+                    # than keep it until midnight (#468). Any other answer may
+                    # have spent, so it stays charged and is counted as uncertain.
+                    if reservation is not None:
+                        accounted = True
+                        try:
+                            reservation.release_if_unspent(e)
+                        except Exception as release_error:
+                            logger.error(f"Could not release the spend hold of a refused purchase "
+                                         f"(label {label}): {release_error}", exc_info=True)
                     refund_needed(f"refused by Bee ({_bee_error_detail(e)[1] or type(e).__name__})")
                     return
                 logger.error(f"Bee gave no answer to a paid purchase ({type(e).__name__}); looking for the batch")
@@ -726,12 +772,15 @@ async def _finish_pending_purchase(request: Request, label: str, depth: int, amo
                 label, depth, amount, _is_registered, start_block,
                 wait_seconds=settings.STAMP_PURCHASE_BACKGROUND_LOOKUP_SECONDS, interval=10)
         if batch_id is None:
+            keep_uncertain("batch not found after the payment settled")
             refund_needed("not found")
             return
         if not _register_purchase(request, batch_id, payer=payer, only_if_unowned=True):
+            keep_uncertain("batch found but registered to someone else")
             refund_needed(f"found ({batch_id}) but already registered to someone else")
             return
     except asyncio.CancelledError:
+        keep_uncertain("interrupted by shutdown")
         if in_flight:
             # Bee's request is being cut off with the process: if its
             # transaction was sent, the batch exists on-chain, unlabelled.
@@ -742,19 +791,41 @@ async def _finish_pending_purchase(request: Request, label: str, depth: int, amo
         raise
     except Exception as e:
         logger.error(f"Lost purchase lookup failed: {e}", exc_info=True)
+        keep_uncertain(f"lookup failed ({type(e).__name__})")
         refund_needed(f"lookup failed ({type(e).__name__})")
         return
 
     # Registered: from here on, bookkeeping only; it cannot undo the outcome.
     try:
+        # Counted as spent, as a purchase answered in time is (#468); a late
+        # delivery used to be missing from gateway_stamp_spend_bzz_total.
+        if reservation is not None:
+            try:
+                reservation.record()
+            except Exception as e:
+                logger.error(f"Could not count the spend of late-delivered batch {batch_id[:16]}: {e}")
         record_purchase(batch_id)
         logger.info(f"Pending purchase delivered: {batch_id[:16]} registered to {payer}")
         log_audit_event(event_type=AuditEventType.PAYMENT_DELIVERED, client_ip=client_ip, wallet_address=payer,
                         data={"transaction_hash": tx, "method": "POST", "path": request.url.path,
                               "network": settings.X402_NETWORK, "resource": {"batchID": batch_id},
                               "late": True, "nonce": request_nonce(request)})
-        body = StampPurchaseResponse(batchID=batch_id, message="Postage stamp purchased successfully")
-        resolve_idempotent_result(idem, status.HTTP_201_CREATED, body.model_dump_json().encode())
+        # Estimated from the amount funded at today's price (#383), like the
+        # 201 answered in time; None when the price cannot be read in time
+        # (#468). The 201 is stored for the Idempotency-Key in `finally`, so a
+        # shutdown that cancels the price read cannot leave a keyed retry
+        # with the 202.
+        expires_at = None
+        try:
+            price = int((await asyncio.wait_for(
+                swarm_api.get_chainstate(), _LATE_EXPIRY_PRICE_TIMEOUT_SECONDS))["currentPrice"])
+            expires_at = expiry_from_amount(amount, price)
+        except Exception as e:
+            logger.warning(f"No expiry for late-delivered batch {batch_id[:16]}: {e!r}")
+        finally:
+            body = StampPurchaseResponse(batchID=batch_id, message="Postage stamp purchased successfully",
+                                         expires_at=expires_at)
+            resolve_idempotent_result(idem, status.HTTP_201_CREATED, body.model_dump_json().encode())
     except Exception as e:
         logger.error(f"Lost purchase {batch_id[:16]} registered; bookkeeping after it failed: {e}", exc_info=True)
 
@@ -921,11 +992,12 @@ async def purchase_stamp(
                                                           settings.SWARM_STAMP_PURCHASE_TIMEOUT_SECONDS)
                     except asyncio.TimeoutError:
                         return _purchase_pending(request, label, effective_depth, amount, start_block,
-                                                 purchase=purchase)
+                                                 purchase=purchase, reservation=reservation)
                     except asyncio.CancelledError:
                         # This request was cut off; the purchase goes on. Finish it
                         # in the background so the batch still reaches the payer.
-                        _purchase_pending(request, label, effective_depth, amount, start_block, purchase=purchase)
+                        _purchase_pending(request, label, effective_depth, amount, start_block, purchase=purchase,
+                                          reservation=reservation)
                         raise
             except httpx.HTTPError as e:
                 # No answer about the purchase. It may still have happened. Unpaid,
@@ -943,12 +1015,17 @@ async def purchase_stamp(
                     logger.error(f"Lost purchase lookup failed: {lookup_error}")
                     batch_id = None
                 if batch_id is None:
-                    return _purchase_pending(request, label, effective_depth, amount, start_block)
+                    return _purchase_pending(request, label, effective_depth, amount, start_block,
+                                             reservation=reservation)
                 if not _register_purchase(request, batch_id, only_if_unowned=True):
-                    return _purchase_pending(request, label, effective_depth, amount, start_block, taken=batch_id)
+                    return _purchase_pending(request, label, effective_depth, amount, start_block, taken=batch_id,
+                                             reservation=reservation)
                 found_by_lookup = True
         except BaseException as exc:
-            reservation.release_if_unspent(exc)
+            # A request cancelled while Bee works hands the purchase to the
+            # background half first, which settles the hold itself (#468).
+            if not reservation.handed_off:
+                reservation.release_if_unspent(exc)
             raise
 
         # Ownership first: once the batch id is known, nothing that can fail

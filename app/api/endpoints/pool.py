@@ -474,9 +474,6 @@ async def acquire_stamp(
                 scope="client",
             )
 
-    # Get client identifier for logging
-    client_ip = http_request.client.host if http_request.client else "unknown"
-
     # Reserve the batch first, then collect payment. reserve_stamp is the
     # atomic claim; settling can take seconds, and a batch merely chosen but not
     # claimed could be taken by a concurrent acquire in that time, leaving a
@@ -484,7 +481,10 @@ async def acquire_stamp(
     # the pool (and counts toward its target) until settlement has succeeded; if
     # settlement fails it is simply available again.
     released = None
-    if stamp_pool_manager.reserve_stamp(stamp.batch_id, reserved_for=client_ip):
+    # reserved_for names the caller in the release log line: its key
+    # (get_client_key), not the TCP peer, which behind the reverse proxy is the
+    # proxy's own address (#468).
+    if stamp_pool_manager.reserve_stamp(stamp.batch_id, reserved_for=client_address):
         try:
             await settle_payment(http_request)
         except BaseException as e:

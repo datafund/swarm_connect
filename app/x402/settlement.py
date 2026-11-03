@@ -251,6 +251,11 @@ class OutcomeUnknownRegistry:
     def _path(self) -> str:
         return self._state_file or settings.X402_SETTLEMENT_UNKNOWN_STATE_FILE
 
+    def state_unreadable(self) -> bool:
+        """Whether the state file could not be read at startup (#468). Fixed
+        until a restart: the file is read only then."""
+        return bool(self._unreadable)
+
     def public_cause(self) -> Optional[str]:
         """Short and safe to publish (/health): the file's base name and whether it
         is unreadable or unwritable. Paths and error text stay in the log."""

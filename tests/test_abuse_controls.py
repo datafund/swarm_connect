@@ -85,6 +85,43 @@ def test_ipv6_rotation_shares_one_spend_budget(monkeypatch, tmp_path):
     assert codes == [201, 429]
 
 
+def test_ipv6_rotation_shares_one_for_owner_budget(monkeypatch, tmp_path):
+    """/stamps/for-owner keys the per-caller budget like /stamps/ does (#468):
+    two addresses from one /64 draw on the same daily budget."""
+    from unittest.mock import AsyncMock, patch
+    from app.api.endpoints import stamps_for_owner as ep
+    from app.core.config import settings
+    from app.main import app
+    from app.services import spend_budget
+    from app.services.spend_budget import SpendBudgetTracker
+    tracker = SpendBudgetTracker(state_file=str(tmp_path / "s.json"))
+    monkeypatch.setattr(spend_budget, "spend_budget_tracker", tracker)
+    monkeypatch.setattr(settings, "STAMP_PURCHASE_FOR_OTHERS_ENABLED", True)
+    monkeypatch.setattr(settings, "STAMP_FOR_OTHERS_REQUIRE_WHITELIST", False)
+    monkeypatch.setattr(settings, "STAMP_FOR_OTHERS_FREE_TIER_ENABLED", True)
+    monkeypatch.setattr(settings, "STAMP_DAILY_BZZ_PER_CALLER", 0.008)   # one ~0.0057 BZZ batch
+    monkeypatch.setattr(settings, "TRUSTED_PROXY_HOPS", 1)
+    chain = ep.gnosis_chain_client
+
+    async def create(owner, amount, depth, immutable=False):
+        return {"batch_id": "0x" + "ab" * 32, "tx_hash": "0xdead", "owner": owner}
+
+    codes = []
+    for ip in ["2001:db8:1:2::1", "2001:db8:1:2::2"]:
+        with patch("app.services.swarm_api.get_chainstate",
+                   new=AsyncMock(return_value={"currentPrice": "24000"})), \
+             patch.object(type(chain), "is_configured", new=property(lambda self: True)), \
+             patch.object(chain, "preflight", new=AsyncMock(return_value={"is_critical": False, "warnings": []})), \
+             patch.object(chain, "create_batch", new=AsyncMock(side_effect=create)), \
+             patch.object(ep, "record_purchase"), patch.object(ep, "stamp_ownership_manager"):
+            codes.append(TestClient(app).post(
+                "/api/v1/stamps/for-owner", json={"owner": "0x" + "1" * 40, "depth": 17, "duration_hours": 24},
+                headers={"X-Forwarded-For": ip}).status_code)
+    assert codes == [201, 503]
+    # One budget, keyed by the /64, not one per address.
+    assert set(tracker.snapshot()["spent"]) == {"2001:db8:1:2::/64"}
+
+
 
 def test_binary_chunks_without_content_type_are_not_depth_scanned(monkeypatch):
     """Random chunk bytes can look like deeply nested JSON; the chunk route is exempt."""
