@@ -560,6 +560,7 @@ class StampPoolManager:
             # Remove from pool (we no longer manage it)
             del self._pool[batch_id]
 
+            self._forget_pending_locked(batch_id)
             self._save_state(removed={batch_id})
             return stamp
 
@@ -607,6 +608,7 @@ class StampPoolManager:
             stamp.status = PoolStampStatus.RELEASED
             stamp.released_at = datetime.now(timezone.utc)
             del self._pool[batch_id]
+            self._forget_pending_locked(batch_id)
             self._save_state(removed={batch_id})
         logger.info(f"Released stamp {batch_id[:16]}... (depth={stamp.depth}) to {stamp.released_to or 'unknown'}")
         return stamp
@@ -1528,6 +1530,16 @@ class StampPoolManager:
         if batch_id not in self._pending:
             return False
         return self._pending_age(batch_id, now) < settings.STAMP_POOL_UNLISTED_GRACE_SECONDS
+
+    def _forget_pending_locked(self, batch_id: str) -> None:
+        """Drop a pending entry for a batch leaving the pool; call with the lock held.
+
+        A sold batch must not stay pending: sync evaluates pending ids even if
+        the state file lacks them, and would put it back up for sale while its
+        ownership record still says "pool".
+        """
+        if self._pending.pop(batch_id, None) is not None:
+            self._persist_pending_locked()
 
     def _clear_listed_pending(self, batch_ids: Set[str], file_lists_pool: bool) -> None:
         """Clear pending entries for batches Bee lists now.

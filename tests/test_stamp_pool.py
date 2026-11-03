@@ -2100,6 +2100,33 @@ class TestHeldBatchFollowUps:
         assert self.BATCH in manager._pool
         assert self.BATCH in manager._pending, "sync cleared pending although its save failed"
 
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("path", ["release_stamp", "release_reserved_stamp"])
+    async def test_a_sold_batch_is_no_longer_pending(self, state_file, path):
+        """Sold while still pending must not be re-imported by the next sync."""
+        manager = StampPoolManager(state_file=state_file)
+        with self._failing_state_writes(state_file):
+            await self._buy_not_usable(manager)
+            with self._listing(self._rec(usable=True)):
+                await manager._update_stamp_ttls()
+            assert self.BATCH in manager._pending  # the failed write kept it
+            if path == "release_stamp":
+                assert manager.release_stamp(self.BATCH, released_to="caller") is not None
+            else:
+                assert manager.reserve_stamp(self.BATCH, reserved_for="caller") is not None
+                assert manager.release_reserved_stamp(self.BATCH) is not None
+
+        assert self._owner_is_pool()  # the caller's registration has not happened (or failed)
+        assert manager._pending == {}, "a sold batch stayed pending"
+        with self._listing(self._rec(usable=True)):
+            await manager.sync_from_bee_node()
+        assert self.BATCH not in manager._pool, "a sold batch was put back up for sale"
+
+    def _owner_is_pool(self):
+        from app.services.stamp_ownership import POOL_OWNER, stamp_ownership_manager
+        record = stamp_ownership_manager.get_stamp_info(self.BATCH)
+        return record is not None and record["owner"] == POOL_OWNER
+
     def test_unreadable_pending_file_log_says_what_happens(self, state_file, caplog):
         import logging
         with open(self._pending_file(state_file), "w") as f:
