@@ -645,7 +645,7 @@ None of the three "maybe" answers is a `402` or carries `accepts`, so an x402 cl
 
 The gateway keeps these authorizations on disk for 24 hours, across restarts. After that, a refusal of the same authorization is an ordinary `402` with `accepts` again. So after a `PAYMENT_SETTLEMENT_UNAVAILABLE` or `PAYMENT_SETTLEMENT_UNKNOWN`, do not let your client pay automatically from a later `402` for the same authorization until you have checked its nonce.
 
-**Never send the same `X-PAYMENT` in parallel.** One authorization buys one delivery: of concurrent requests carrying it, at most one is settled, and the others get `402` "This payment authorization has already been used. Sign a new payment." with `accepts`. Treat that answer as "this authorization may already have been settled": check its nonce before signing a new payment, rather than paying from it automatically.
+**Never send the same `X-PAYMENT` in parallel.** One authorization buys one delivery: of concurrent requests carrying it, at most one is settled. A duplicate that arrives while the first is being settled gets `409 PAYMENT_SETTLEMENT_IN_PROGRESS` (no `accepts`, not charged): wait for the first request's answer and do not sign a new payment. One that arrives before or after that gets `402` "This payment authorization has already been used. Sign a new payment." with `accepts`. Treat that answer as "this authorization may already have been settled": check its nonce before signing a new payment, rather than paying from it automatically.
 
 If the gateway cannot read or write its record of these authorizations, every paid request gets `503 PAYMENT_STATE_UNAVAILABLE`, uncharged; retry later with the same `X-PAYMENT`. Free-tier requests are unaffected.
 
