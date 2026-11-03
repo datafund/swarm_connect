@@ -408,7 +408,7 @@ The gateway exposes a `/metrics` endpoint (Prometheus text format) when `METRICS
 - `gateway_stamp_spend_refusals_total{operation, limit}` — purchases and extends refused by a spending limit (`limit` = `per_request` or `daily_budget`)
 - `gateway_stamp_spend_bzz_total{operation, charged}` — BZZ committed through the stamp endpoints (`charged` = `budget` or `paid`)
 - `gateway_requests_by_client_total{client_type, outcome}` — which clients are served and whether they are (`client_type` = `mcp`/`cli`/`sdk-js`/`browser`/`curl`/`http-lib`/`bot`/`other`/`none`; `outcome` = `ok`/`client_error`/`rate_limited`/`payment_required`/`server_error`)
-- `gateway_notary_signatures_total{status}` (`success` = a signed document that was then stored on Swarm, counted after the upload so the Notarized Share KPI cannot exceed 100%; `error` = signing refused or failed. A signed upload that fails counts only as an upload error)
+- `gateway_notary_signatures_total{status}` (`success` = a signed document that was then stored on Swarm, counted after the upload so the Notarized Share KPI cannot exceed 100%; `error` = signing refused or failed, including an unexpected signing exception, which is also counted once as an upload error. A signed upload that fails counts only as an upload error)
 - `gateway_x402_payments_total{mode}` (paid/free/rejected)
 - `gateway_rate_limit_hits_total`
 - `gateway_chunk_uploads_total{status, mode}` (mode = paid/free/none), `gateway_chunk_upload_bytes_total`

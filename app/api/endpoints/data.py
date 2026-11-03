@@ -509,6 +509,12 @@ async def upload_data(
                         "suggestion": "Document must be JSON with a 'data' field: {\"data\": {...}, \"signatures\": [...]}"
                     }
                 )
+            except Exception:
+                # Signing failed unexpectedly (e.g. SigningServiceError from
+                # the key). Count it as a notary error here, then let the outer
+                # handler answer and count the upload error once.
+                notary_signatures_total.labels(status="error").inc()
+                raise
         elif sign is not None:
             raise HTTPException(
                 status_code=400,

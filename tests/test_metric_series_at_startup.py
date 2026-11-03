@@ -146,6 +146,87 @@ class TestNotarySuccessCountedAfterUpload:
         assert notarized <= stored
 
 
+@patch("app.api.endpoints.data.stamp_ownership_manager")
+@patch("app.api.endpoints.data.upload_data_to_swarm", new_callable=AsyncMock)
+class TestUnexpectedSigningFailureCountedAsNotaryError:
+    """
+    An exception the endpoint does not name, raised while signing, is a notary
+    error ("signing refused or failed") as well as one upload error. Neither
+    counter is incremented twice, and nothing is uploaded.
+    """
+
+    def _post(self, provenance_service):
+        from app.main import app
+        with patch("app.api.endpoints.data.get_provenance_service", return_value=provenance_service):
+            return TestClient(app).post(
+                f"/api/v1/data/?stamp_id={'ab' * 32}&sign=notary",
+                files={"file": ("doc.json", io.BytesIO(b'{"data": "test"}'), "application/json")},
+            )
+
+    def _assert_counted_once(self, response, before, mock_upload):
+        from app.services.metrics import notary_signatures_total, uploads_total
+        assert response.status_code == 500
+        assert _count(notary_signatures_total, "error") == before["notary_error"] + 1
+        assert _count(notary_signatures_total, "success") == before["notary_success"]
+        assert _count(uploads_total, "error") == before["upload_error"] + 1
+        assert _count(uploads_total, "success") == before["upload_success"]
+        mock_upload.assert_not_called()
+
+    def _before(self):
+        from app.services.metrics import notary_signatures_total, uploads_total
+        return {
+            "notary_error": _count(notary_signatures_total, "error"),
+            "notary_success": _count(notary_signatures_total, "success"),
+            "upload_error": _count(uploads_total, "error"),
+            "upload_success": _count(uploads_total, "success"),
+        }
+
+    def test_sign_document_raises_unexpected_error(self, mock_upload, mock_ownership):
+        mock_ownership.check_access.return_value = (True, "ok")
+        service = MagicMock(spec=ProvenanceService)
+        service.sign_document.side_effect = RuntimeError("unexpected")
+        before = self._before()
+
+        response = self._post(service)
+
+        self._assert_counted_once(response, before, mock_upload)
+
+    def test_sign_with_timestamp_fails_in_real_provenance_service(self, mock_upload, mock_ownership):
+        # The real ProvenanceService, with only the key-holding signing service
+        # replaced, so the failure comes from sign_with_timestamp as in production.
+        from app.services import provenance as provenance_module
+        from app.services.signing import SigningServiceError
+        mock_ownership.check_access.return_value = (True, "ok")
+        signing = MagicMock()
+        signing.is_configured = True
+        signing.sign_with_timestamp.side_effect = SigningServiceError("key unusable")
+        service = ProvenanceService(signing_service=signing)
+        before = self._before()
+
+        with patch.object(provenance_module.settings, "NOTARY_ENABLED", True):
+            response = self._post(service)
+
+        signing.sign_with_timestamp.assert_called_once()
+        self._assert_counted_once(response, before, mock_upload)
+
+    def test_named_signing_errors_still_counted_once(self, mock_upload, mock_ownership):
+        # The catch-all must not add a second notary error for the errors the
+        # endpoint already answers with 400.
+        from app.services.metrics import notary_signatures_total, uploads_total
+        from app.services.provenance import DocumentValidationError
+        mock_ownership.check_access.return_value = (True, "ok")
+        service = MagicMock(spec=ProvenanceService)
+        service.sign_document.side_effect = DocumentValidationError("no data field")
+        before = self._before()
+
+        response = self._post(service)
+
+        assert response.status_code == 400
+        assert _count(notary_signatures_total, "error") == before["notary_error"] + 1
+        assert _count(uploads_total, "error") == before["upload_error"] + 1
+        mock_upload.assert_not_called()
+
+
 class TestDashboardText:
 
     def _panel(self, panel_id):
@@ -164,3 +245,23 @@ class TestDashboardText:
         assert "can therefore exceed 100%" not in description
         assert "counted before the Swarm upload" not in description
         assert "only once the signed document is stored" in description
+
+    def test_notarized_share_warns_about_old_counts_in_the_window(self):
+        description = self._panel(112)["description"]
+        assert "for up to 7 days after this change is deployed" in description
+
+    def test_ratio_panels_divide_only_by_a_positive_upload_count(self):
+        # The upload series now start at 0, so a 7-day window with no uploads
+        # has a 0 denominator; x / 0 shows NaN, a > 0 filter shows "No data".
+        uploads = 'sum(increase(gateway_uploads_total{environment="main",status="success"}[7d]))'
+        for panel_id in (112, 114):
+            expr = self._panel(panel_id)["targets"][0]["expr"]
+            assert expr.endswith(f" / ({uploads} > 0)"), (panel_id, expr)
+
+    def test_stamps_by_size_keeps_sizes_present_on_one_side_only(self):
+        # `a + b` keeps only sizes present on both sides; the `or` branches keep
+        # a size with only pool acquires or only direct purchases.
+        expr = self._panel(61)["targets"][0]["expr"]
+        direct = 'sum by (size) (gateway_stamp_purchases_total{environment=~"$environment",status="success"})'
+        pool = 'sum by (size) (gateway_pool_acquires_total{environment=~"$environment",status="success"})'
+        assert expr == f"({direct} + {pool}) or {direct} or {pool}"
