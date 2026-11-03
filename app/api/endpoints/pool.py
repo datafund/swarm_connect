@@ -209,16 +209,18 @@ async def _refuse_allowance(
     caller is refused again (#480).
     """
     detail = dict(detail)
-    # While the gateway cannot accept payments (#589), a paid acquire or a paid
-    # direct purchase would get 503 PAYMENTS_UNAVAILABLE: offer neither, and
-    # answer the 429 saying the paid acquire is temporarily refused.
+    # While the gateway cannot accept payments (#589), a paid acquire would
+    # get 503 PAYMENTS_UNAVAILABLE: do not offer it. Where paying would bypass
+    # the allowance, say the paid acquire is temporarily refused. Where it
+    # would not (a testnet without the override), that is no way forward, so
+    # the direct-purchase guidance below stands: its free tier is not gated.
     payments_refused = False
     if settings.X402_ENABLED:
         from app.x402.accept_gate import payments_refusal
         payments_refused = payments_refusal() is not None
-    offer_payment = (settings.X402_ENABLED and settings.paid_bypass_is_honoured()
-                     and not payments_refused)
-    if payments_refused:
+    bypass = settings.X402_ENABLED and settings.paid_bypass_is_honoured()
+    offer_payment = bypass and not payments_refused
+    if payments_refused and bypass:
         # No Retry-After: the free allowance stays spent until resets_at, so a
         # client that honours it would loop on the unpaid acquire.
         message += (

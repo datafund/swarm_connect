@@ -18,8 +18,8 @@ For each HTTP request:
      facilitator settle call) or completed;
    - the response carries a payment header (X-Payment-Status,
      X-PAYMENT-RESPONSE, X-Payment-Transaction, X-Payment-Mode paid/failed);
-   - its body has a payment, idempotency, delivery or purchase code, or x402
-     fields.
+   - its body has a payment (including PAYMENTS_UNAVAILABLE), idempotency,
+     delivery or purchase code, or x402 fields.
    A response below 400 passes through unchanged, as does every response of a
    request none of whose Bee calls was refused.
 
@@ -142,7 +142,9 @@ class BeeGateMiddleware:
 # Response headers the x402 code sets on answers about a payment.
 _PAYMENT_HEADERS = (b"x-payment-status", b"x-payment-response", b"x-payment-transaction")
 # Codes of answers about a payment or its delivery (docs/error-codes.md).
-_PAYMENT_CODE_PREFIXES = ("PAYMENT_", "IDEMPOTENCY_", "DELIVERY_", "PURCHASE_")
+# PAYMENTS_ (#589): PAYMENTS_UNAVAILABLE already says this request was not
+# charged, and its reason and Retry-After are the client's answer.
+_PAYMENT_CODE_PREFIXES = ("PAYMENT_", "PAYMENTS_", "IDEMPOTENCY_", "DELIVERY_", "PURCHASE_")
 
 
 def _has_payment_header(start: Message) -> bool:

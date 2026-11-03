@@ -554,13 +554,14 @@ def require_payment():
 
 class TestPoolRefusalWhilePaymentsAreRefused:
 
-    def test_429_says_retry_later_and_does_not_send_callers_to_paid_routes(
-            self, monkeypatch, tmp_path, x402_on):
+    @staticmethod
+    def _refused(monkeypatch, tmp_path, network, bypass_override=False):
         from app.main import app
         from app.services import pool_allowance
         from app.services.pool_allowance import PoolAllowanceTracker
         import app.api.endpoints.pool as pool_ep
-        # A testnet, where the refusal would otherwise send callers to POST /stamps/.
+        monkeypatch.setattr(settings, "X402_NETWORK", network)
+        monkeypatch.setattr(settings, "X402_ALLOW_TESTNET_PAID_BYPASS", bypass_override)
         monkeypatch.setattr(settings, "STAMP_POOL_ENABLED", True)
         monkeypatch.setattr(settings, "POOL_DAILY_ALLOWANCES", "")
         monkeypatch.setattr(settings, "POOL_DEFAULT_DAILY_ALLOWANCE", 0)
@@ -572,12 +573,67 @@ class TestPoolRefusalWhilePaymentsAreRefused:
         _closed()
         r = TestClient(app).post("/api/v1/pool/acquire", json={"size": "small"})
         assert r.status_code == 429, r.text
-        # No Retry-After: the allowance stays spent until resets_at, so a client
-        # honouring it would loop on the unpaid acquire.
+        # No Retry-After either way: the allowance stays spent until resets_at,
+        # so a client honouring it would loop on the unpaid acquire.
         assert "Retry-After" not in r.headers
         d = r.json()["detail"]
+        assert d["resets_at"]
+        assert "accepts" not in r.json() and "accepts" not in d
+        return d
+
+    def test_where_paying_bypasses_it_says_the_paid_acquire_is_temporarily_refused(
+            self, monkeypatch, tmp_path, x402_on):
+        d = self._refused(monkeypatch, tmp_path, "base")
         assert "/api/v1/stamps/" not in d["message"]
         assert "paid acquire (X-PAYMENT" in d["message"]
         assert "temporarily refused" in d["message"]
-        assert d["resets_at"]
         assert "endpoint" not in d["alternative"]
+
+    def test_on_a_testnet_without_the_bypass_it_keeps_the_direct_purchase_guidance(
+            self, monkeypatch, tmp_path, x402_on):
+        # A paid acquire never bypasses the allowance here, so "retry the paid
+        # acquire later" could never succeed. Direct purchase on the free tier
+        # (not gated) still works.
+        d = self._refused(monkeypatch, tmp_path, "base-sepolia")
+        assert "X-PAYMENT" not in d["message"]
+        assert "temporarily refused" not in d["message"]
+        assert d["alternative"]["endpoint"] == "POST /api/v1/stamps/"
+
+    def test_testnet_with_the_override_behaves_like_a_mainnet(self, monkeypatch, tmp_path, x402_on):
+        d = self._refused(monkeypatch, tmp_path, "base-sepolia", bypass_override=True)
+        assert "paid acquire (X-PAYMENT" in d["message"]
+
+
+class TestBeeBusyNeverHidesPaymentsUnavailable:
+
+    def test_refused_bee_call_then_payments_unavailable_keeps_the_503(self, x402_on, facilitator):
+        """An unpaid request whose own Bee call was refused by the gate, then
+        refused by the payment gate: the 503 keeps PAYMENTS_UNAVAILABLE, its
+        reason and Retry-After, and is not rewritten to BEE_BUSY."""
+        from app.main import http_exception_handler
+        from app.middleware.bee_gate import BeeGateMiddleware
+        from app.services.bee_gate import bee_call_gate
+        from app.x402.dependency import require_x402_payment
+        from starlette.exceptions import HTTPException as StarletteHTTPException
+
+        async def refused_bee_call_then_payment(request: "Request"):
+            try:
+                raise bee_call_gate._refuse("user", 0.0)
+            except httpx.HTTPError:
+                pass
+            await require_x402_payment(request)
+
+        from fastapi import Request
+        refused_bee_call_then_payment.__annotations__["request"] = Request
+        app = FastAPI()
+        app.add_exception_handler(StarletteHTTPException, http_exception_handler)
+        router = APIRouter(dependencies=[Depends(refused_bee_call_then_payment)])
+        router.add_api_route("/api/v1/stamps/", _bought, methods=["POST"])
+        app.include_router(router)
+        app.add_middleware(BeeGateMiddleware)
+        _closed()
+        r = TestClient(app).post("/api/v1/stamps/")
+        assert r.status_code == 503
+        assert r.json()["code"] == "PAYMENTS_UNAVAILABLE"
+        assert r.json()["detail"]["reason"] == "balances_unreadable"
+        assert r.headers["Retry-After"] == "15"
