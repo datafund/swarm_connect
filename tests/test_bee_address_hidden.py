@@ -206,6 +206,7 @@ class TestPoolStatusHidesAddresses:
         (LOOKUP_TEXT, "no such host"),
         ("dial tcp [fd00::1]:1633: i/o timeout; peer 192.0.2.7 gone", "i/o timeout"),
         ("upstream bee.internal:1633 failed", "upstream <address> failed"),
+        ("could not reach bee:1633. tried rpc.internal:8545/v2/KEY.", "could not reach <address>."),
     ])
     @pytest.mark.asyncio
     async def test_purchase_error_hides_bare_addresses(self, tmp_path, message, kept):
@@ -251,6 +252,36 @@ class TestWithoutAddresses:
         ("peer fd00::1 gone", "peer <address> gone"),
         ("bee.internal:1633 down", "<address> down"),
         ("dial tcp bee:1633: refused", "dial tcp <address>: refused"),
+        ("dial tcp bee-dev:1633: refused", "dial tcp <address>: refused"),
+        ("upstream bee:80 down", "upstream <address> down"),
+        # An address at the end of a sentence (round-1 review of #563).
+        ("connection refused by 10.0.0.1.", "connection refused by <address>."),
+        ("connection to bee.internal:1633.", "connection to <address>."),
+        ("could not reach bee:1633.", "could not reach <address>."),
+        ("dial fd00::1: unreachable", "dial <address>: unreachable"),
+        ("dial tcp 10.0.0.1:1633.", "dial tcp <address>."),
+        # Credentials and paths without a scheme.
+        ("Post user:pass@rpc.internal:8545 x", "Post <address> x"),
+        ("rpc.internal:8545/v2/KEY", "<address>"),
+        ("call 10.0.0.1:8545/v2/KEY.", "call <address>."),
+        ("call [fd00::1]:1633/v2/KEY failed", "call <address> failed"),
+        # Percent-encoded URLs and case.
+        ("redirect=http%3A%2F%2Fbee.internal%3A1633%2Fx end", "redirect=<url> end"),
+        ("HTTP://BEE.INTERNAL:1633/x failed", "<url> failed"),
+        ("Lookup bee.internal on 127.0.0.11:53", "Lookup <host> on <address>"),
+        ("dial tcp: LOOKUP bee: no such host", "dial tcp: LOOKUP <host>: no such host"),
+        # IPv4-mapped IPv6 as a whole.
+        ("peer ::ffff:10.0.0.1 gone", "peer <address> gone"),
+        ("peer ::FFFF:192.0.2.7.", "peer <address>."),
+        # Bare host names: Go's x509 message and internal-only suffixes.
+        ("x509: certificate is valid for rpc.internal, other.internal, not bee.example",
+         "x509: certificate is valid for <host>, not <host>"),
+        ("x509: certificate is not valid for any names, but wanted to match bee.example.",
+         "x509: certificate is not valid for any names, but wanted to match <host>."),
+        ("no route to bee.svc.cluster.local", "no route to <host>"),
+        ("gateway gw.lan, node node1.home and bee.local failed",
+         "gateway <host>, node <host> and <host> failed"),
+        ("resolve bee.internal.", "resolve <host>."),
     ])
     def test_replaces_addresses(self, text, expected):
         assert without_addresses(text) == expected
@@ -274,6 +305,21 @@ class TestWithoutAddresses:
         "x 1.2.300.4",
         "batch 0xabc: not found",
         "HTTP 400",
+        # "key:number" fields with a short number or a known field name.
+        "want min:17",
+        "timeout:30",
+        "amount:100",
+        "batch:17",
+        "amount:10000",
+        "status:443",
+        # RFC 3339 timestamps.
+        "expires 2026-11-03T10:00:00Z",
+        "at 2026-11-03T10:00:00.123+01:00.",
+        "between 2026-11-03 10:00:00 and 2026-11-04 10:00:00",
+        # Go source positions and ordinary words.
+        "panic at main.go:1633",
+        "lookup failed",
+        "e.g. this, i.e. that.",
     ])
     def test_keeps_text_that_is_not_an_address(self, text):
         assert without_addresses(text) == text

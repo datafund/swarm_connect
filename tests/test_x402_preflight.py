@@ -328,7 +328,8 @@ class TestCheckPreflightBalances:
             "balance_bzz": 0.0,
             "threshold_bzz": 10.0,
             "wallet_address": None,
-            "warning": "Failed to fetch xBZZ balance: Connection refused"
+            "warning": ("Failed to fetch xBZZ balance from the Bee node (ConnectError); "
+                        "see the gateway log for details.")
         }
         mock_xdai.return_value = {
             "ok": True,
