@@ -202,6 +202,78 @@ def count_state_save_failure(file: str) -> None:
         logger.debug(f"Metrics: could not count a failed {file} state save: {e}")
 
 
+# State files that fail closed while unreadable (#468). Each store keeps
+# running but refuses what it guards until an operator restores or moves the
+# file and restarts: the pool pauses its spending (#547), the x402
+# settlement-unknown registry refuses every paid request, the idempotency store
+# refuses keyed paid requests, and the spend budget and pool allowance refuse
+# limited spending and free acquires until the next UTC day. 1 while unreadable,
+# else 0. Read from each store's own flag at scrape time, so the gauge needs no
+# traffic to show it. The ownership registry and the bandwidth credit ledger
+# are not here: an unreadable one stops startup, which "Gateway Down" reports.
+state_file_unreadable = Gauge(
+    "gateway_state_file_unreadable",
+    "1 while a state file that fails closed cannot be read and what it guards is "
+    "refused (file=pool|settlement_unknown|idempotency|spend_budget|pool_allowance)",
+    ["file"],
+)
+
+
+def _pool_state_unreadable() -> bool:
+    if not settings.STAMP_POOL_ENABLED:
+        return False
+    from app.services.stamp_pool import stamp_pool_manager
+    return stamp_pool_manager.state_file_unreadable()
+
+
+def _settlement_state_unreadable() -> bool:
+    from app.x402.settlement import outcome_unknown
+    return outcome_unknown.state_unreadable()
+
+
+def _idempotency_state_unreadable() -> bool:
+    from app.x402.idempotency import idempotency_store
+    return idempotency_store.state_unreadable()
+
+
+def _spend_budget_state_unreadable() -> bool:
+    from app.services.spend_budget import spend_budget_tracker
+    return spend_budget_tracker.state_unreadable()
+
+
+def _pool_allowance_state_unreadable() -> bool:
+    from app.services.pool_allowance import pool_allowance_tracker
+    return pool_allowance_tracker.state_unreadable()
+
+
+STATE_FILE_CHECKS = {
+    "pool": _pool_state_unreadable,
+    "settlement_unknown": _settlement_state_unreadable,
+    "idempotency": _idempotency_state_unreadable,
+    "spend_budget": _spend_budget_state_unreadable,
+    "pool_allowance": _pool_allowance_state_unreadable,
+}
+
+
+def _state_file_reader(file: str, check):
+    """A scrape-time reader that can never fail the scrape.
+
+    The stores are imported on first use, not here: app.x402.settlement imports
+    this module, so a module-level import would be circular.
+    """
+    def read() -> float:
+        try:
+            return 1.0 if check() else 0.0
+        except Exception as e:
+            logger.warning(f"Metrics: could not read the {file} state-file flag: {e}")
+            return 0.0
+    return read
+
+
+for _file, _check in STATE_FILE_CHECKS.items():
+    state_file_unreadable.labels(file=_file).set_function(_state_file_reader(_file, _check))
+
+
 x402_settlements_total = Counter(
     "gateway_x402_settlements_total",
     "x402 settlement outcomes (#375): settled, refused (nothing delivered), error "

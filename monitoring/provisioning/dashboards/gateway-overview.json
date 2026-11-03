@@ -417,9 +417,9 @@
       },
       {
         "id": 105, "title": "State File Health", "type": "timeseries",
-        "description": "Failed saves of a gateway state file in the last 15 minutes, by file (#506). file 'pool' is the stamp pool state, file 'ownership' the ownership registry, including saves refused because the pre-migration copy could not be written (#558). A failed save keeps the change in memory only: do not restart until a save succeeds again, or the change is lost and a sold batch can come back as pool stock. Any value above 0 fires the 'State file save failures' alert. The data starts at the deploy that added gateway_state_save_failures_total.",
+        "description": "Failed saves of a gateway state file in the last 15 minutes, by file (#506). file 'pool' is the stamp pool state, file 'ownership' the ownership registry, including saves refused because the pre-migration copy could not be written (#558). A failed save keeps the change in memory only: do not restart until a save succeeds again, or the change is lost and a sold batch can come back as pool stock. Any value above 0 fires the 'State file save failures' alert. 'unreadable' lines are 1 while a state file that fails closed cannot be read (#468): pool spending paused, paid or keyed paid requests refused, or limited spending and free acquires refused until the next UTC day; restore the file and restart, see the 'State file unreadable' alert. The data starts at the deploys that added gateway_state_save_failures_total and gateway_state_file_unreadable.",
         "gridPos": { "h": 8, "w": 24, "x": 0, "y": 120 },
-        "targets": [{ "expr": "sum by (file) (increase(gateway_state_save_failures_total{environment=~\"$environment\"}[15m]))", "legendFormat": "failed saves: {{file}}" }],
+        "targets": [{ "expr": "sum by (file) (increase(gateway_state_save_failures_total{environment=~\"$environment\"}[15m]))", "legendFormat": "failed saves: {{file}}" }, { "expr": "max by (file) (gateway_state_file_unreadable{environment=~\"$environment\"})", "legendFormat": "unreadable: {{file}}" }],
         "fieldConfig": { "defaults": { "unit": "short", "min": 0, "custom": { "drawStyle": "line", "lineInterpolation": "stepAfter", "fillOpacity": 10 } } }
       },
       {

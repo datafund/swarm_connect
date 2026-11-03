@@ -188,6 +188,11 @@ class IdempotencyStore:
     def unavailable(self, value: Optional[str]) -> None:
         self._unreadable = value
 
+    def state_unreadable(self) -> bool:
+        """Whether the state file could not be read at startup (#468). Fixed
+        until a restart: the file is read only then."""
+        return bool(self._unreadable)
+
     def public_cause(self) -> Optional[str]:
         """Short and safe to publish (/health): base name and unreadable,
         unwritable or unresponsive. Details stay in the log."""

@@ -1000,5 +1000,82 @@
     "noDataState": "OK",
     "ruleGroup": "critical",
     "title": "State file save failures"
+  },
+  {
+    "annotations": {
+      "summary": "{{ $labels.environment }}: {{ $labels.file }} state file unreadable",
+      "description": "A state file could not be read, and the gateway refuses what it guards until the file is restored. file=pool: pool spending is paused (no pool purchases or top-ups). settlement_unknown: every paid request gets 503 PAYMENT_STATE_UNAVAILABLE. idempotency: keyed paid requests get 503 IDEMPOTENCY_UNAVAILABLE. spend_budget: every stamp purchase, extension, for-owner batch and pool purchase is refused (503 SPEND_BUDGET_UNAVAILABLE) until the next UTC day. pool_allowance: free pool acquires get 503 POOL_ALLOWANCE_UNAVAILABLE until the next UTC day. The ERROR log names the file and its .corrupt-<timestamp> copy. Restore the file from backup, repair it, or move it away deliberately to start empty, then RESTART the gateway: the settlement_unknown, idempotency, spend_budget and pool_allowance files are read only at startup. The pool needs no restart; it resumes after its next full sync. For spend_budget, GATEWAY_DAILY_BZZ_CEILING=-1 is a temporary override that lets paid purchases and pool purchases through meanwhile; unpaid ones stay refused. An unreadable ownership registry or bandwidth credit ledger stops startup instead and shows as Gateway Down. See docs/mainnet-runbook.md section 4 and 5."
+    },
+    "condition": "C",
+    "data": [
+      {
+        "datasourceUid": "grafanacloud-prom",
+        "model": {
+          "expr": "max by (environment, host, file) (gateway_state_file_unreadable)",
+          "instant": true,
+          "intervalMs": 1000,
+          "maxDataPoints": 43200,
+          "refId": "A"
+        },
+        "queryType": "",
+        "refId": "A",
+        "relativeTimeRange": {
+          "from": 300,
+          "to": 0
+        }
+      },
+      {
+        "datasourceUid": "__expr__",
+        "model": {
+          "expression": "A",
+          "intervalMs": 1000,
+          "maxDataPoints": 43200,
+          "reducer": "last",
+          "refId": "B",
+          "type": "reduce"
+        },
+        "queryType": "",
+        "refId": "B",
+        "relativeTimeRange": {
+          "from": 0,
+          "to": 0
+        }
+      },
+      {
+        "datasourceUid": "__expr__",
+        "model": {
+          "conditions": [
+            {
+              "evaluator": {
+                "params": [
+                  0
+                ],
+                "type": "gt"
+              }
+            }
+          ],
+          "expression": "B",
+          "intervalMs": 1000,
+          "maxDataPoints": 43200,
+          "refId": "C",
+          "type": "threshold"
+        },
+        "queryType": "",
+        "refId": "C",
+        "relativeTimeRange": {
+          "from": 0,
+          "to": 0
+        }
+      }
+    ],
+    "execErrState": "Error",
+    "for": "0s",
+    "isPaused": false,
+    "labels": {
+      "severity": "critical"
+    },
+    "noDataState": "OK",
+    "ruleGroup": "critical",
+    "title": "State file unreadable"
   }
 ]

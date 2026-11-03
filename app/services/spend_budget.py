@@ -172,6 +172,14 @@ class SpendBudgetTracker:
             self._unreadable = None
             self._save()
 
+    def state_unreadable(self) -> bool:
+        """Whether today's file was unreadable, so limited spending is refused (#468).
+
+        False once the UTC day has rolled over, as check() then starts afresh.
+        """
+        with self._lock:
+            return bool(self._unreadable) and self._day == _today()
+
     def budget(self) -> float:
         return settings.STAMP_DAILY_BZZ_PER_CALLER
 

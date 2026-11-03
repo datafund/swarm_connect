@@ -161,6 +161,14 @@ class PoolAllowanceTracker:
             self._unreadable = None
             self._save()
 
+    def state_unreadable(self) -> bool:
+        """Whether today's file was unreadable, so limited allowances are refused (#468).
+
+        False once the UTC day has rolled over, as check() then starts afresh.
+        """
+        with self._lock:
+            return bool(self._unreadable) and self._day == _today()
+
     def allowance_for(self, origin: Optional[str]) -> int:
         """Configured daily allowance for an origin, or the default.
 

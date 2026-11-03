@@ -312,6 +312,14 @@ class StampPoolManager:
         self._refused_logged = None
         return True
 
+    def state_file_unreadable(self) -> bool:
+        """Whether pool spending is paused for an unreadable state file (#468).
+
+        True from the moment the file is found unreadable until a sync has
+        reconciled the pool with it (#547), which is when the pause lifts.
+        """
+        return self._needs_reconcile
+
     def _mark_state_file_unreadable(self) -> None:
         """Pause pool spending because the state file cannot be read.
 

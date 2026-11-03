@@ -341,3 +341,33 @@ async def test_unpaid_release_failure_is_still_an_ordinary_lost_race(tmp_path, m
     assert _acquire_count("settled_not_delivered") == before_paid
     # Nothing was paid, so nothing is logged as a paid non-delivery.
     assert not [m for m in caplog.messages if "PAID NON-DELIVERY" in m]
+
+
+@pytest.mark.asyncio
+async def test_release_log_names_the_caller_not_the_proxy(tmp_path, monkeypatch, caplog):
+    """Behind the reverse proxy the TCP peer is the proxy. The batch is reserved
+    for, and its release logged with, the caller's key (get_client_key) (#468)."""
+    from app.api.endpoints import pool
+    from app.core.config import settings
+    monkeypatch.setattr(settings, "STAMP_POOL_ENABLED", True)
+    monkeypatch.setattr(settings, "TRUSTED_PROXY_HOPS", 1)
+    mgr = _manager(tmp_path, "a" * 64)
+    monkeypatch.setattr(pool, "stamp_pool_manager", mgr)
+    monkeypatch.setattr(mgr, "trigger_replenishment_if_needed", lambda d: False)
+    monkeypatch.setattr(pool.stamp_ownership_manager, "register_stamp", lambda **kw: None)
+
+    async def settle(request):
+        return None
+
+    monkeypatch.setattr(pool, "settle_payment", settle)
+    app = FastAPI()
+    app.include_router(pool.router, prefix="/api/v1/pool")
+    transport = httpx.ASGITransport(app=app, client=("10.0.0.2", 51234))   # the proxy
+    with caplog.at_level("INFO", logger="app.services.stamp_pool"):
+        async with httpx.AsyncClient(transport=transport, base_url="http://t") as c:
+            r = await c.post("/api/v1/pool/acquire", json={"size": "small"},
+                             headers={"X-Forwarded-For": "2001:db8:1:2::77"})
+    assert r.status_code == 200, r.text
+    released = [m for m in caplog.messages if m.startswith("Released stamp")]
+    assert released and released[-1].endswith("to 2001:db8:1:2::/64"), released
+    assert not any("10.0.0.2" in m for m in released)

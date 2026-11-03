@@ -159,6 +159,18 @@ curl -s localhost:8899/health
 
 Then check an upload to a known owned stamp.
 
+**State file unreadable** (#468). The other state files fail closed without stopping the gateway: it keeps the unreadable file, saves a `.corrupt-<timestamp>` copy, logs an ERROR naming both, and refuses what the file guards. `gateway_state_file_unreadable{file}` is 1 meanwhile, and the **State file unreadable** alert fires:
+
+| `file` | What is refused | Clears |
+|---|---|---|
+| `pool` (`pool_state.json`) | Pool purchases and top-ups (spending paused, #547) | On the first full sync after the file is readable again; no restart needed |
+| `settlement_unknown` (`x402_settlement_unknown.json`) | Every paid request: `503 PAYMENT_STATE_UNAVAILABLE` | After a restart |
+| `idempotency` (`x402_idempotency.json`) | Paid requests with an Idempotency-Key: `503 IDEMPOTENCY_UNAVAILABLE` | After a restart |
+| `spend_budget` (`stamp_spend_budget.json`) | Every stamp purchase, extension, for-owner batch and pool purchase whose spending limit is set: `503 SPEND_BUDGET_UNAVAILABLE` | After a restart, or at the next UTC day |
+| `pool_allowance` (`pool_allowance.json`) | Free pool acquires: `503 POOL_ALLOWANCE_UNAVAILABLE` (paid acquires work) | After a restart, or at the next UTC day |
+
+Restore the file from backup, repair it, or move it away deliberately to start empty, then **restart the gateway**: all of these except the pool state are read only at startup, so restoring the file alone changes nothing. While the spend file is unreadable, `GATEWAY_DAILY_BZZ_CEILING=-1` (on recreate) is a temporary override: paid stamp purchases and pool purchases are charged to no limit and go through; unpaid ones stay refused while their own limits are set. Put the ceiling back once the file is restored. An unreadable ownership registry or bandwidth credit ledger does not show here: it stops startup, as below, and shows as **Gateway Down**.
+
 If a money-bearing state file (ownership, credit) is unreadable, the gateway **refuses to start** and keeps a `.corrupt-<timestamp>` copy next to the file *(requires #395)*. The container then restart-loops until the file is restored or deliberately moved away. That's intended: starting empty would lock owners out and wipe prepaid balances.
 
 **Ownership registry not saving** (#558). Before the gateway first rewrites an ownership registry from before #558 (batch ids in mixed case, or owner addresses not in lowercase), it copies the original to `<STAMP_OWNERSHIP_FILE>.pre-558-<UTC timestamp>` in the same directory (by default `stamp_owners.json.pre-558-<UTC timestamp>`). If that copy cannot be written, the gateway refuses every save of the registry, so the original is never overwritten. If the copy succeeds but the write of the registry file fails, the save fails too. In both cases the gateway keeps running, and ownership changes stay in memory only. A failed write (the second row below) can also happen on a registry that never needed migration, and the recovery is the same. While this lasts, `/health` shows one of these fixed texts in `state.warnings`, and each failed save logs an ERROR:
@@ -359,6 +371,7 @@ For a nonce-0 node, every start must carry the hint. Bee 2.8.1 reads it from `BE
 |---|---|---|
 | **x402 settlement problems** | `gateway_x402_settlements_total{result!="settled"}` increased: refused, error, settled_not_delivered or refused_after_unknown | Read the audit log (section 3). For `settled_not_delivered`, refund. For `refused_after_unknown` (a retry of a payment whose settlement got no answer was refused, so the earlier transfer probably went through), handle it as "Settlement error (outcome unknown)", matched on the nonce |
 | **State file save failures** | `gateway_state_save_failures_total{file}` increased: the gateway could not write the pool state (`file=pool`) or the ownership registry (`file=ownership`) and kept the change in memory only | **Do not restart.** Read the ERROR log line, free disk space or fix permissions on the data directory, and wait for the next save to succeed (section 4, "Ownership registry not saving"). A restart before then loses the changes, and a sold batch can come back as pool stock |
+| **State file unreadable** | `gateway_state_file_unreadable{file}` is 1: a state file that fails closed could not be read, and what it guards is refused | Restore the file from backup, repair it, or move it away deliberately, then restart (section 4, "State file unreadable") |
 | **BZZ pricing rate off market** *(requires #410)* | `X402_BZZ_USD_RATE` is more than 2× away from the market | Review and set the rate |
 | Low BZZ / xDAI / chequebook (existing) | The Bee node can't buy or upload | Fund the node wallet on Gnosis |
 | Gateway spend near its ceiling (once the spend-ceiling change is deployed) | `gateway_spend_bzz_today` approaching `gateway_spend_ceiling_bzz` | Check for abuse; raise the ceiling only deliberately |

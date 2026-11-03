@@ -529,3 +529,82 @@ def test_capacity_refusal_releases_its_spend_hold(env, monkeypatch):
     assert r.status_code == 503
     assert fac.settle.await_count == 0
     assert _gateway_spent() == 0
+
+
+# --- after the 202: spend metric, hold and expiry (#468) ---------------------
+
+def _spend_recorded():
+    from prometheus_client import REGISTRY
+    return sum(REGISTRY.get_sample_value("gateway_stamp_spend_bzz_total",
+                                         {"operation": "stamp purchase", "charged": c}) or 0.0
+               for c in ("budget", "paid"))
+
+
+def test_late_delivery_is_counted_as_spent(env, monkeypatch):
+    """Delivered after the 202: the BZZ is in gateway_stamp_spend_bzz_total, as
+    for a purchase Bee answered in time."""
+    app, fac, buy, find = env
+    monkeypatch.setattr(settings, "SWARM_STAMP_PURCHASE_TIMEOUT_SECONDS", 0.05)
+    buy.side_effect = _slow_bee(BATCH)
+    before = _spend_recorded()
+    first, retry = _run_pending(app, None, key="k-late-spend")
+    assert first.status_code == 202
+    assert retry.status_code == 201
+    assert _spend_recorded() - before == pytest.approx(_gateway_spent())
+    assert _gateway_spent() > 0
+
+
+def test_late_delivery_found_by_label_is_counted_as_spent(env):
+    """The other late path: Bee gave no answer, the background lookup found it."""
+    app, fac, buy, find = env
+    find.side_effect = [None, BATCH]
+    before = _spend_recorded()
+    first, retry = _run_pending(app, None, key="k-late-lookup-spend")
+    assert first.status_code == 202 and retry.status_code == 201
+    assert _spend_recorded() - before == pytest.approx(_gateway_spent())
+
+
+def test_background_bee_4xx_releases_the_hold(env, monkeypatch):
+    """Bee refused the purchase after the 202: nothing was spent, so the hold
+    goes back now instead of at midnight, and nothing is counted as spent."""
+    app, fac, buy, find = env
+    monkeypatch.setattr(settings, "SWARM_STAMP_PURCHASE_TIMEOUT_SECONDS", 0.05)
+    req = httpx.Request("POST", "http://bee/stamps/1/17")
+    buy.side_effect = _slow_bee(httpx.HTTPStatusError(
+        "x", request=req, response=httpx.Response(400, json={"message": "insufficient funds"}, request=req)))
+    before = _spend_recorded()
+    first, retry = _run_pending(app, None, key="k-refused-hold")
+    assert first.status_code == 202
+    assert retry.json()["code"] == "DELIVERY_FAILED_AFTER_PAYMENT"
+    assert _gateway_spent() == 0
+    assert _spend_recorded() == before
+
+
+def test_background_bee_5xx_keeps_the_hold(env, monkeypatch):
+    """A 5xx may have spent: the hold stays and is counted as uncertain."""
+    from prometheus_client import REGISTRY
+    app, fac, buy, find = env
+    monkeypatch.setattr(settings, "SWARM_STAMP_PURCHASE_TIMEOUT_SECONDS", 0.05)
+    req = httpx.Request("POST", "http://bee/stamps/1/17")
+    buy.side_effect = _slow_bee(httpx.HTTPStatusError(
+        "x", request=req, response=httpx.Response(500, request=req)))
+    uncertain = lambda: REGISTRY.get_sample_value(
+        "gateway_spend_uncertain_bzz_total", {"operation": "stamp purchase"}) or 0.0
+    before = uncertain()
+    first, _ = _run_pending(app, None, key="k-5xx-hold")
+    assert first.status_code == 202
+    assert _gateway_spent() > 0
+    assert uncertain() - before == pytest.approx(_gateway_spent())
+
+
+def test_late_201_carries_expires_at(env, monkeypatch):
+    """The 201 a keyed retry gets after a late delivery has expires_at, as the 201
+    answered in time does: estimated from the amount at today's price."""
+    app, fac, buy, find = env
+    monkeypatch.setattr(settings, "SWARM_STAMP_PURCHASE_TIMEOUT_SECONDS", 0.05)
+    buy.side_effect = _slow_bee(BATCH)
+    first, retry = _run_pending(app, None, key="k-late-expiry")
+    assert first.status_code == 202 and retry.status_code == 201
+    amount = int(first.json()["amount"])
+    assert retry.json()["expires_at"] == swarm_api.expiry_from_amount(amount, 24000)
+    assert retry.json()["expires_at"] is not None
