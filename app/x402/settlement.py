@@ -713,6 +713,23 @@ OUTCOME_UNKNOWN_ADVICE = (
 
 OUTCOME_UNKNOWN_HEADERS = {"X-Payment-Mode": "failed", "X-Payment-Status": "settlement_unknown"}
 
+# A facilitator's refusal reason, as a caller may see it (#576). Facilitators
+# answer with machine codes ("insufficient_funds",
+# "invalid_exact_evm_nonce_already_used"), which tell the client what to fix,
+# but also with free text: a refused settle on Base Sepolia returned a
+# multi-line RPC error naming the RPC URL and quoting the request body. Only a
+# short code is shown; anything else is replaced by fixed text, and the full
+# reason goes to the log and the audit record only.
+_FACILITATOR_CODE_RE = re.compile(r"[a-z0-9_]{1,64}")
+FACILITATOR_REASON_HIDDEN = "facilitator error; details in the gateway log"
+
+
+def public_facilitator_reason(reason) -> str:
+    """The facilitator's reason if it is a short machine code, else fixed text."""
+    if isinstance(reason, str) and _FACILITATOR_CODE_RE.fullmatch(reason):
+        return reason
+    return FACILITATOR_REASON_HIDDEN
+
 
 def payment_state_unavailable_detail(work_ran: bool = False) -> dict:
     if work_ran:
@@ -840,7 +857,7 @@ def outcome_unknown_refusal(auth_key: Tuple[str, str], reason: Optional[str] = N
         "x402_status": "settlement_unknown",
     }
     if reason:
-        detail["reason"] = reason
+        detail["reason"] = public_facilitator_reason(reason)    # the audit record has it in full
     return HTTPException(status_code=409, detail=detail, headers=dict(OUTCOME_UNKNOWN_HEADERS))
 
 
@@ -961,12 +978,15 @@ async def settle_payment(request: Request) -> None:
         x402_settlements_total.labels(result="refused").inc()
         # Last: a cancellation while the removal is written loses no record.
         await outcome_unknown.aresolve(auth_key, None, settled=False, gen=gen, release=True)
-        message = f"The payment could not be settled ({reason}). Nothing was delivered."
+        # The log and the audit record above keep the full reason; the caller
+        # sees it only if it is a short machine code (#576).
+        shown = public_facilitator_reason(reason)
+        message = f"The payment could not be settled ({shown}). Nothing was delivered."
         detail = {
             "code": "PAYMENT_SETTLEMENT_FAILED",
             "message": message,
             "x402_status": "settlement_failed",
-            "reason": reason,
+            "reason": shown,
         }
         # Also a well-formed x402 Payment Required body, so a client can sign a
         # fresh payment from it like from any other 402 (#372).

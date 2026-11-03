@@ -373,7 +373,7 @@ class TestX402MiddlewareFlow:
         from x402.types import VerifyResponse
         mock_fac = MagicMock()
         mock_fac.verify = AsyncMock(return_value=VerifyResponse(
-            is_valid=False, invalid_reason="Insufficient balance", payer=None
+            is_valid=False, invalid_reason="insufficient_funds", payer=None
         ))
         mock_get_fac.return_value = mock_fac
 
@@ -400,7 +400,7 @@ class TestX402MiddlewareFlow:
 
         assert response.status_code == 402
         body = response.json()["detail"]
-        assert "Insufficient balance" in body["error"]
+        assert "insufficient_funds" in body["error"]
 
 
 class TestMiddlewarePriceCalculation:
