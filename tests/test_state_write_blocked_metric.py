@@ -11,6 +11,7 @@ clears the flags with no paid traffic and no scrapes, through the background
 retry task in app/x402/state_retry.py.
 """
 import asyncio
+import inspect
 import json
 import os
 import subprocess
@@ -518,6 +519,57 @@ def test_the_lifespan_starts_and_stops_the_retry_task(monkeypatch):
     task = _run_lifespan_bounded(app, inside)
     assert state_retry._task is None
     assert task.done()
+
+
+def test_the_default_interval_is_write_retry_seconds(monkeypatch):
+    """The runbook and the alert promise a retry about every 5 to 10 seconds:
+    the task's pass every WRITE_RETRY_SECONDS, plus the stores' own limit of
+    one attempt per WRITE_RETRY_SECONDS."""
+    used = []
+
+    async def recording_run(interval):
+        used.append(interval)
+        await asyncio.sleep(3600)
+
+    monkeypatch.setattr(state_retry, "_run", recording_run)
+
+    async def run():
+        await state_retry.start_state_write_retry_task()
+        await asyncio.sleep(0)
+        await _stop_bounded()
+
+    asyncio.run(run())
+    assert used == [st.WRITE_RETRY_SECONDS]
+    assert st.WRITE_RETRY_SECONDS == idem.WRITE_RETRY_SECONDS == 5.0
+
+
+def test_the_lifespan_stops_the_retry_task_before_the_state_lanes(monkeypatch):
+    """Stopped after the lanes shut down, a last pass could queue a write on a
+    lane that is closing (and recreate its pool)."""
+    from app.main import app
+    from app.x402 import facilitator
+    monkeypatch.setattr(settings, "X402_ENABLED", True)
+    monkeypatch.setattr(facilitator, "validate_x402_config", lambda: None)
+    calls = []
+
+    def recording(name, real):
+        if inspect.iscoroutinefunction(real):
+            async def wrapper(*a, **kw):
+                calls.append(name)
+                return await real(*a, **kw)
+        else:
+            def wrapper(*a, **kw):
+                calls.append(name)
+                return real(*a, **kw)
+        return wrapper
+
+    monkeypatch.setattr(state_retry, "stop_state_write_retry_task",
+                        recording("stop_retry", state_retry.stop_state_write_retry_task))
+    monkeypatch.setattr(st, "shutdown_registry_io", recording("registry_io", st.shutdown_registry_io))
+    monkeypatch.setattr(idem, "shutdown_idempotency_io",
+                        recording("idempotency_io", idem.shutdown_idempotency_io))
+    _run_lifespan_bounded(app, lambda: state_retry._task)
+    assert calls == ["stop_retry", "registry_io", "idempotency_io"]
 
 
 def test_the_lifespan_starts_no_task_with_x402_off(monkeypatch):
