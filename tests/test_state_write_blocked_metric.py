@@ -192,6 +192,49 @@ def test_a_hung_lane_reads_stalled_before_any_request_is_refused(idem_store, reg
     assert _wait_until(lambda: _all_zero("idempotency") and _all_zero("settlement_unknown"))
 
 
+def test_idempotency_stall_flag_alone_reads_stalled(idem_store):
+    """A stall marked by a request that timed out, after its write left the
+    lane (or before any was queued): only the flag says so."""
+    store, _ = idem_store
+    assert idem._idempotency_io.backlog() == 0
+    store.mark_stalled("test: write did not finish in time")
+    assert idem._idempotency_io.oldest_age() == 0
+    assert _gauge("idempotency", "stalled") == 1
+    assert store._persist() is True                    # a completed write clears it
+    assert _gauge("idempotency", "stalled") == 0
+
+
+def test_settlement_stall_flag_alone_reads_stalled(registry):
+    reg, _ = registry
+    assert st._registry_io_backlog() == 0
+    reg.mark_stalled("test: write-ahead did not finish in time")
+    assert st._registry_io_oldest_age() == 0
+    assert _gauge("settlement_unknown", "stalled") == 1
+    assert reg._persist() is True
+    assert _gauge("settlement_unknown", "stalled") == 0
+
+
+@pytest.mark.parametrize("which", ["settlement_unknown", "idempotency"])
+def test_a_stale_write_does_not_clear_a_stall_but_the_probe_does(which, idem_store, registry):
+    """`_write` returns early, without I/O, for a snapshot older than the one on
+    disk. It does not clear a stall: it proves nothing about the disk now. The
+    stall then clears with the next probe, which always takes a fresh snapshot,
+    so the flag cannot stay set after the disk responds."""
+    store = registry[0] if which == "settlement_unknown" else idem_store[0]
+    lane_backlog = st._registry_io_backlog if which == "settlement_unknown" else idem._idempotency_io.backlog
+    old = store._snapshot()
+    new = store._snapshot()
+    assert store._write(*new) is True
+    store.mark_stalled("test")
+    assert store._write(*old) is True                  # early return, nothing written
+    assert store.write_stalled()
+    assert _gauge(which, "stalled") == 1
+    assert lane_backlog() == 0
+    assert state_retry.retry_blocked_writes() >= 1     # the background task's pass
+    assert _wait_until(lambda: not store.write_stalled())
+    assert _gauge(which, "stalled") == 0
+
+
 def test_a_full_registry_backlog_reads_stalled_until_it_drains(registry, monkeypatch):
     """abegin_settlement refuses a request once MAX_PENDING_REGISTRY_IO writes
     are pending, however young they are; the gauge reads the same check."""
