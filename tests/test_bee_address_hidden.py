@@ -20,7 +20,7 @@ from fastapi.testclient import TestClient
 
 from app.core.config import settings
 from app.main import app
-from app.services.bee_errors import NO_SAFE_CUT, public_bee_text, without_addresses
+from app.services.bee_errors import public_bee_text, without_addresses
 
 BEE = "http://bee.internal:1633"
 SECRETS = ("bee.internal", "1633", "10.0.0.1", "192.0.2.7", "127.0.0.11",
@@ -528,8 +528,9 @@ class TestRoundThree:
         ("x" * 195 + " fd00:1234:5678::1 end", "x" * 195 + "…"),
         ("y" * 190 + " dial tcp rpc.internal.example.com:8545 refused",
          "y" * 190 + " dial tcp…"),
-        # No whitespace before the cut: a fixed text, not a bare "…".
-        ("z" * 199 + "a" * 10, NO_SAFE_CUT),
+        # No whitespace before the cut: nothing is shown (the caller shows
+        # the HTTP status), not a bare "…".
+        ("z" * 199 + "a" * 10, None),
     ])
     def test_public_bee_text_cut(self, text, expected):
         assert public_bee_text(text) == expected
@@ -624,6 +625,126 @@ class TestRoundFour:
                 assert without_addresses(text) == text
 
     def test_no_safe_cut_point(self):
-        assert public_bee_text("x" * 300) == NO_SAFE_CUT
-        assert public_bee_text("y" * 3000) == NO_SAFE_CUT
+        assert public_bee_text("x" * 300) is None
+        assert public_bee_text("y" * 3000) is None
         assert public_bee_text("short word " + "y" * 3000) == "short word…"
+
+
+# --------------------------------------------------------------------------- #
+# Round 5: the safety gate, timestamps inside URLs, remaining scrubber gaps
+# --------------------------------------------------------------------------- #
+class TestRoundFive:
+
+    @pytest.mark.parametrize("text, expected", [
+        # A timestamp inside a URL or path no longer splits it.
+        ('Get "https://rpc.example.org/v2/logs?from=2026-01-01T00:00:00Z&apikey=zz99YYxx77AA"',
+         'Get "<url>"'),
+        ("dial rpc.example.org/2026-01-01T00:00:00Z/abc123XYZ789", "dial <address>"),
+        # What the first pass caught stays caught after decoding.
+        ("10.0.0.1%41 bee%2Einternal", "<address>A <host>"),
+        # An empty username.
+        ("Post :pa55word@bee:1633 x", "Post <address> x"),
+        # x509 names joined by "," without a space.
+        ("x509: certificate is valid for a.example,b.example, not c.example",
+         "x509: certificate is valid for <host>, not <host>"),
+        ("x509: certificate is valid for a.example,b.example,not c.example",
+         "x509: certificate is valid for <host>,not <host>"),
+        # A configured secret glued to "-" or "_".
+        ("id-0123abcdKEY4567_x", "id-<secret>_x"),
+        # A host after a "." that follows punctuation (found by the property test).
+        ("x509: .pkp.internal/v2/zT6yC5dQkvQv(", "x509: .<address>"),
+    ])
+    def test_scrubber_fixes(self, text, expected):
+        assert without_addresses(text) == expected
+
+    @pytest.mark.parametrize("text", [
+        # Left to the gate: the scrubber keeps these, the gate hides them.
+        "peer %C3%A910.0.0.1 gone",
+        "x509: certificate is valid for " + ", ".join(f"h{i}.example" for i in range(40))
+        + ", not z.example",
+        "see github.com/ethersphere/bee.internal/y",
+        "see github.com/x/rpc.internal:8545 y",
+        # Refused by design: timestamps, key:number fields, source positions,
+        # dotted words, and anything after "@", "%", "\\" or "?".
+        "expires 2026-01-01T00:00:00Z ok",
+        "want min:17",
+        "panic at main.go:42",
+        "e.g. this",
+        "user@example",
+        "load 50%25 done",
+        "path c:\\x",
+        "what?now",
+        "bad ::1 address",
+        "build 1.2.300.4",
+    ])
+    def test_gate_refuses(self, text):
+        assert public_bee_text(text) is None
+
+    @pytest.mark.parametrize("text", [
+        "out of funds",
+        "insufficient amount for 24h minimum validity",
+        "batch not usable",
+        "Bee is syncing",
+        "insufficient funds",
+        "not found",
+        "bee/2.8.1 user agent",
+        "version 2.8.1 is too old",
+        "Post \"<url>\": dial tcp <address>: connect: connection refused",
+        "is it ready? no",
+        "100% done",
+    ])
+    def test_gate_passes(self, text):
+        assert public_bee_text(text) == text
+
+    @pytest.mark.parametrize("call, verb", [(_purchase, "purchase"), (_extend, "extension")])
+    def test_refused_message_gives_the_status(self, call, verb):
+        exc = _status_error("stamps/100/17", 400, method="POST",
+                            json={"code": 400, "message": "panic at main.go:42"})
+        assert call(exc).json()["detail"] == f"Bee rejected the stamp {verb}: HTTP 400"
+
+    @pytest.mark.parametrize("call, verb", [(_purchase, "purchase"), (_extend, "extension")])
+    def test_timestamp_in_url_does_not_leak(self, call, verb):
+        message = ('Post "https://rpc.example.org/v2/logs?from=2026-01-01T00:00:00Z'
+                   '&apikey=zz99YYxx77AA": EOF')
+        exc = _status_error("stamps/100/17", 400, method="POST",
+                            json={"code": 400, "message": message})
+        detail = call(exc).json()["detail"]
+        assert "zz99YYxx77AA" not in detail and "rpc.example.org" not in detail, detail
+
+    def test_random_planted_addresses_never_shown(self):
+        """Property test: whatever the scrubber misses, the gate stops."""
+        import random
+        rng = random.Random(549)
+        letters = "abcdefghijklmnopqrstuvwxyz"
+        mixed = letters + letters.upper() + "0123456789"
+        glue = ["", " ", "<", ">", "@", "/", "(", ")", '"', "'", ",", ";", ":", "=", "?",
+                "#", "%3A", "%2F", "日", "é", "_", "-", ".", "[", "]"]
+        words = ["out", "of", "funds", "dial", "tcp", "failed", "Bee", "said", "lookup", "on",
+                 "refused", "not", "valid", "for", "token", "2.8.1", "x509:", "certificate", "is"]
+        configured = ["0123abcdKEY4567", "QUERYKEY123", "hunter22"]
+
+        def label():
+            return "".join(rng.choice(letters + "0123456789") for _ in range(rng.randint(3, 8)))
+
+        for _ in range(400):
+            ip = ".".join(str(rng.randint(1, 254)) for _ in range(4))
+            host = label() + rng.choice([".internal", ".example.com", ".corp.example", ".svc",
+                                         ".cluster.local", "." + label() + ".net"])
+            password = "".join(rng.choice(mixed) for _ in range(12))
+            port = str(rng.randint(1, 65535))
+            planted = rng.choice([
+                ip, f"{ip}:{port}", f"[fd00::{rng.randint(1, 9999):x}]:{port}", host,
+                f"{host}:{port}", f"{host}/v2/{password}",
+                f"{rng.choice(['http', 'https', 'wss'])}://{host}:{port}/x?key={password}",
+                f"user:{password}@{host}:{port}", f"{rng.choice(configured)}",
+                f"lookup {host} on {ip}:53", f"/dns4/{host}/tcp/{port}",
+            ])
+            parts = [rng.choice(words) for _ in range(rng.randint(0, 6))]
+            parts.insert(rng.randint(0, len(parts)),
+                         rng.choice(glue) + planted + rng.choice(glue))
+            text = " ".join(parts)
+            shown = public_bee_text(text)
+            if shown is None:
+                continue
+            for secret in (ip, host, password, *configured):
+                assert secret not in shown, (text, shown)

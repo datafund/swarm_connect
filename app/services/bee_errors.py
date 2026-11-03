@@ -9,8 +9,27 @@ text goes to the log.
 
 Bee's own message is still worth showing ("out of funds"), but it is response
 text: a proxy's error page or a Go network error can quote a URL, an IP, a
-host:port or the host it failed to resolve. public_bee_text() scrubs it with
-without_addresses() and caps it for a response.
+host:port or the host it failed to resolve. public_bee_text() prepares it
+for a response in three steps:
+
+- scrub: without_addresses() replaces addresses, hosts and secrets with
+  placeholders, so most messages stay readable;
+- cut: at most 2 KB is scrubbed, then the result is cut to 200 characters
+  without a partial word;
+- gate: the result is shown only if, with the placeholders removed, nothing
+  address-shaped is left (_looks_safe). Otherwise public_bee_text() returns
+  None and the caller shows only the HTTP status ("Bee rejected the stamp
+  purchase: HTTP 400"; on /pool/status the "Bee said" part is left out).
+
+The gate is the guarantee: a gap in the scrubber hides a message instead of
+leaking through it. The gate refuses ":" before a digit or "/", "//", "::",
+"@", "%", "\\" or "?" before a non-space character, and any dotted token
+except a version of at most three digit groups ("2.8.1"). So timestamps,
+"key:number" fields ("timeout:30"), Go source positions ("api.go:42"),
+dotted words ("e.g.") and public links are never shown, even where the
+scrubber keeps them; that is accepted. Known Bee messages ("out of funds",
+"insufficient amount for 24h minimum validity", "batch not usable", "Bee is
+syncing") and user agents ("bee/2.8.1") pass.
 
 without_addresses() replaces, in this order:
 
@@ -35,7 +54,9 @@ without_addresses() replaces, in this order:
    -> <host>, or <address> with a port.
 5. The names in Go's x509 "certificate is valid for A, B, not C" and
    "wanted to match C" -> <host>, each name taken whole up to a space, ","
-   or ";" ("not my-bee-gw"), giving back trailing sentence punctuation.
+   or ";" ("not my-bee-gw"), giving back trailing sentence punctuation. The
+   names may be joined by "," with or without a space. Limit: up to 33
+   names in the list; a longer list is not replaced (the gate hides it).
 6. IPv6 addresses -> <address>, bracketed or bare, with any port and path.
    A bare one must parse, and either have 3 or more groups (fd00::1:2,
    ::ffff:10.0.0.1, which takes a :port as well) or have groups on both
@@ -84,20 +105,31 @@ placeholder characters while scrubbing and turned into <url>, <address>,
 <host>, <port> and <secret> at the end, so a "<" in the text is not taken for
 an earlier replacement.
 
-Percent-encoded text is decoded (printable ASCII only, twice at most). If
-the decoded form has anything to replace, it is shown, decoded and
-scrubbed; otherwise the text keeps its encoding ("100%ff", "50%25"). RFC
-3339 timestamps are kept.
+Percent-encoded text is decoded (printable ASCII only, twice at most) in
+two ways: the first pass's result decoded and scrubbed again (what the
+first pass caught stays caught), and the original decoded and scrubbed. A
+decoded form is used only if decoding revealed something to replace, and
+the candidate with the least address-shaped residue wins; otherwise the
+text keeps its encoding ("100%ff", "50%25"). Limit: an encoded non-ASCII
+byte glued to an address ("%C3%A910.0.0.1") is not decoded, so the address
+is not replaced (the gate hides it).
+
+An RFC 3339 timestamp standing as a word of its own is kept out of the
+scrub; one inside a URL or path is scrubbed with it.
 
 public_bee_text() scrubs at most 2 KB (SCRUB_CAP), then cuts to 200
 characters. At either cut a word the cut lands inside is dropped and "…"
-added; if no whitespace comes before the cut, the message is replaced by
-"(Bee message omitted: no safe cut point)". Known limit: text past the 2 KB
-pre-cut is not seen, so a "lookup X" whose " on " falls past it loses that
-context and an unconfigured dotless X stays, as such names do anyway.
+added; if no whitespace comes before the cut, nothing is shown (None).
 
-Kept by design, because they cannot be told apart from ordinary text or
-belong to no gateway setting: a dotless host that is not configured
+Known scrubber limits, all covered by the gate: text past the 2 KB pre-cut
+is not seen, so a "lookup X" whose " on " falls past it keeps an
+unconfigured dotless X; x509 lists of more than 33 names; an address glued
+to an encoded non-ASCII byte; an internal host inside a public code or docs
+link (github.com/x/bee.internal/y) is kept with the link.
+
+Kept by the scrubber by design (and then refused by the gate where they
+are address-shaped), because they cannot be told apart from ordinary text
+or belong to no gateway setting: a dotless host that is not configured
 ("nethermind:8545", "localhost:8545"; Bee's own RPC endpoint is a Bee
 setting, not a gateway one), a bare dotted name with no port or path
 ("rpc.example.com"), short IPv6 forms such as "::1", "2001:db8::" and "a::b",
@@ -110,6 +142,7 @@ import bisect
 import functools
 import ipaddress
 import re
+from typing import Optional
 from urllib.parse import parse_qsl, unquote, urlsplit
 
 from app.core.config import settings
@@ -144,11 +177,19 @@ _LABEL = r"[A-Za-z0-9-]{1,63}"
 _DOTTED = rf"(?:{_LABEL}\.){{1,16}}{_LABEL}"
 # A host may follow "<", "@", "/" or a placeholder, but not a word character,
 # "." or "-", which would make it part of a longer name.
-_HOST_START = rf"(?<![{_W}.-])"
+# A "." before a host counts as a boundary unless a label character comes
+# before it (".pkp.internal" after punctuation is a host; "a.b.internal" is one
+# longer name).
+_HOST_START = rf"(?<![{_W}-])(?<![{_W}-]\.)"
 
 _PCT_RE = re.compile(r"%([2-7][0-9A-Fa-f])")
+# A timestamp is set aside only as a word of its own. Inside a URL or path
+# ("?from=2026-01-01T00:00:00Z&apikey=...") splitting there would cut the URL
+# in two and show what follows it.
 _RFC3339_RE = re.compile(
-    r"(\d{4}-\d{2}-\d{2}[Tt ]\d{2}:\d{2}(?::\d{2}(?:\.\d{1,9})?)?(?:[Zz]|[+-]\d{2}:?\d{2})?)")
+    r"(?<![^\s\"'(\[,;])"
+    r"(\d{4}-\d{2}-\d{2}[Tt ]\d{2}:\d{2}(?::\d{2}(?:\.\d{1,9})?)?(?:[Zz]|[+-]\d{2}:?\d{2})?)"
+    r"(?=$|[\s\"')\],;]|\.(?!\w))")
 _URL_RE = re.compile(r"(?<![a-z0-9+.-])[a-z][a-z0-9+.-]{0,31}://" + _TAIL, re.IGNORECASE)
 _MULTIADDR_RE = re.compile(
     r"(?<![\w/])/(ip4|ip6|dns|dns4|dns6|dnsaddr)/([^/\s]{1,253})(?:/(tcp|udp)/\d{1,5})?",
@@ -164,7 +205,7 @@ _AFTER_AT_RE = re.compile(r"([A-Za-z0-9-]{1,63}(?![\w.-]))?(:\d{1,10})?")
 _CRED_STOP_RE = re.compile(r"[\s\"'<>]")
 _USER_STOP_RE = re.compile(r"[\s\"'<>()=&?;,/:@]")
 _X509_RE = re.compile(
-    r"\b(certificate is valid for )((?:[^\s,]{1,253}, ){0,32}?[^\s,]{1,253})(, not )"
+    r"\b(certificate is valid for )((?:[^\s,]{1,253},\s?){0,32}?[^\s,]{1,253})(,\s?not )"
     r"([^\s,;]{1,253})"
     r"|\b(wanted to match )([^\s,;]{1,253})",
     re.IGNORECASE)
@@ -180,7 +221,8 @@ _LOOKUP_RE = re.compile(r"\b(lookup\s{1,8})(?![" + _SENTINELS + r"])([^\s:]{1,25
                         re.IGNORECASE)
 _HOST_PORT_RE = re.compile(rf"{_HOST_START}({_DOTTED}):\d{{1,10}}" + _PATH)
 _HOST_PATH_RE = re.compile(
-    rf"(?<![{_W}./-])((?:{_LABEL}\.){{1,16}}[A-Za-z]{{2,63}})(?:/|[?#](?=\S))" + _TAIL)
+    rf"(?<![{_W}/-])(?<![{_W}-]\.)((?:{_LABEL}\.){{1,16}}[A-Za-z]{{2,63}})(?:/|[?#](?=\S))"
+    + _TAIL)
 # Public code and docs hosts: a link to them in Bee's text reveals nothing,
 # unless the gateway itself is configured with one.
 _PUBLIC_HOSTS = ("github.com", "gitlab.com", "golang.org", "go.dev", "ethswarm.org")
@@ -260,7 +302,8 @@ def _configured_res(hosts, secrets):
     secret_re = None
     if secrets:
         names = "|".join(re.escape(s) for s in secrets)
-        secret_re = re.compile(rf"(?<![A-Za-z0-9_-])(?:{names})(?![A-Za-z0-9_-])")
+        # "-" and "_" are boundaries: a key glued into "id-KEY_x" is still found.
+        secret_re = re.compile(rf"(?<![A-Za-z0-9])(?:{names})(?![A-Za-z0-9])")
     host_re = None
     dotted = "|".join(re.escape(h) for h in hosts if "." in h)
     dotless = "|".join(re.escape(h) for h in hosts if "." not in h)
@@ -378,7 +421,7 @@ def _remove_userinfo(text, hosts):
         if colon < 0 or at - colon - 1 > _PASSWORD_MAX:
             continue
         start = max(_last_before(user_stops, colon) + 1, lo)
-        if not 1 <= colon - start <= _USER_MAX:
+        if colon - start > _USER_MAX:  # an empty username (":pass@host") counts too
             continue
         # A configured host right after the credentials goes too, since a
         # dotless one would otherwise be left as a bare word.
@@ -431,9 +474,10 @@ def _scrub(text, hosts, secrets):
     return _INTERNAL_NAME_RE.sub(_HOST, text)
 
 
-def _scrub_all(text, hosts, secrets):
-    # Placeholder characters in the input itself are not ours; drop them.
-    text = text.translate({ord(c): None for c in _SENTINELS})
+def _scrub_all(text, hosts, secrets, keep_placeholders=False):
+    if not keep_placeholders:
+        # Placeholder characters in the input itself are not ours; drop them.
+        text = text.translate({ord(c): None for c in _SENTINELS})
     parts = _RFC3339_RE.split(text)
     # re.split with one group: even indices are text, odd are timestamps.
     return "".join(p if i % 2 else _scrub(p, hosts, secrets) for i, p in enumerate(parts))
@@ -449,23 +493,46 @@ def _decode(text):
                        else m.group(0), text)
 
 
+def _decode_twice(text):
+    for _ in range(2):
+        if not _PCT_RE.search(text):
+            break
+        text = _decode(text)
+    return text
+
+
+def _residue(scrubbed):
+    """How much address-shaped text is left, by the safety gate's measure."""
+    rest = scrubbed.translate({ord(c): None for c in _SENTINELS})
+    return (len(_UNSAFE_RE.findall(rest))
+            + sum(not _VERSION_RE.fullmatch(t) for t in _DOTTED_TOKEN_RE.findall(rest)))
+
+
 def without_addresses(text: str) -> str:
     """Replace URLs, IP addresses, configured hosts and secrets in text."""
     hosts, secrets = _configured()
     scrubbed = _scrub_all(text, hosts, secrets)
-    decoded = text
-    for _ in range(2):
-        if not _PCT_RE.search(decoded):
-            break
-        decoded = _decode(decoded)
+    # Percent-encoding: two more candidates, used only when decoding revealed
+    # something to replace, so "100%ff" and "50%25" keep their encoding.
+    #   - the first pass's result, decoded and scrubbed again: what the first
+    #     pass caught stays caught;
+    #   - the original, decoded, then scrubbed: an encoding the first pass cut
+    #     into ("%2Fbee.internal") is read whole.
+    # The one with the least address-shaped residue wins; ties keep the
+    # earlier, less decoded one.
+    candidates = [scrubbed]
+    again = _decode_twice(scrubbed)
+    if again != scrubbed:
+        rescrubbed = _scrub_all(again, hosts, secrets, keep_placeholders=True)
+        if rescrubbed != again:
+            candidates.append(rescrubbed)
+    decoded = _decode_twice(text)
     if decoded != text:
-        # Decoding revealed text to scrub: show the decoded form, scrubbed
-        # ("bee%2Einternal%3A1633"). Otherwise keep the text's own encoding
-        # ("100%ff", "50%25").
         decoded_scrubbed = _scrub_all(decoded, hosts, secrets)
         if _replacements(decoded_scrubbed):
-            scrubbed = decoded_scrubbed
-    return scrubbed.translate(_FINAL)
+            candidates.append(decoded_scrubbed)
+    best = min(candidates, key=_residue)  # min keeps the first of equals
+    return best.translate(_FINAL)
 
 
 # Bee's text is scrubbed at this length, then cut for the response. The
@@ -474,27 +541,56 @@ def without_addresses(text: str) -> str:
 SCRUB_CAP = 2048
 
 
-def public_bee_text(text: str, limit: int = 200) -> str:
-    """Bee's own message, scrubbed and cut to `limit` for a public response.
+def public_bee_text(text: str, limit: int = 200) -> Optional[str]:
+    """Bee's own message, scrubbed and cut to `limit`, or None if it cannot
+    be shown safely; the caller then shows the HTTP status only.
 
     The text is scrubbed at SCRUB_CAP characters first. Wherever it is cut,
     at SCRUB_CAP or at `limit`, a word the cut lands inside is dropped and
-    "…" added, so no partial address is shown.
+    "…" added, so no partial address is shown; with no whitespace before the
+    cut, nothing is shown.
+
+    Then the safety gate: the result is shown only if, with its placeholders
+    removed, it has no address-shaped text at all (see _looks_safe). The
+    scrubber keeps messages readable; the gate is the guarantee. A gap in
+    the scrubber hides the message rather than leaking through it.
     """
     text = str(text)
     if len(text) > SCRUB_CAP:
         text = _drop_partial(text[:SCRUB_CAP], text[SCRUB_CAP])
         if text is None:
-            return NO_SAFE_CUT
-    scrubbed = without_addresses(text)
-    if len(scrubbed) <= limit:
-        return scrubbed
-    return _drop_partial(scrubbed[:limit], scrubbed[limit]) or NO_SAFE_CUT
+            return None
+    shown = without_addresses(text)
+    if len(shown) > limit:
+        shown = _drop_partial(shown[:limit], shown[limit])
+    if shown is None or not _looks_safe(shown):
+        return None
+    return shown
 
 
-# Shown when a message has no whitespace before the cut: dropping the word
-# the cut lands inside would leave nothing.
-NO_SAFE_CUT = "(Bee message omitted: no safe cut point)"
+_PLACEHOLDERS_RE = re.compile(r"<(?:url|address|host|port|secret)>")
+# ":" before a digit or "/" (a port, a scheme, a time), "//", "::", and "@",
+# "%", "\" or "?" before a non-space character.
+_UNSAFE_RE = re.compile(r":(?=[\d/])|//|::|[@%\\?](?=\S)")
+# Anchored at a token start, so a long run without a dot costs linear time.
+_DOTTED_TOKEN_RE = re.compile(r"(?<![A-Za-z0-9])[A-Za-z0-9]+(?:\.[A-Za-z0-9]+)+")
+_VERSION_RE = re.compile(r"\d+(?:\.\d+){1,2}")
+
+
+def _looks_safe(shown: str) -> bool:
+    """True if the text, placeholders removed, has nothing address-shaped.
+
+    Refused: ":" before a digit or "/" (so ports, times and "key:1" fields),
+    "//", "::", "@", "%", "\\" or "?" before a non-space character, and any
+    dotted token ("a.b", "e.g", "api.go") except a version of digits with at
+    most three groups ("2.8.1"); so four dotted digit groups are refused.
+    Strict on purpose: a harmless message hidden costs a detail, a leak
+    costs an address.
+    """
+    rest = _PLACEHOLDERS_RE.sub("", shown)
+    if _UNSAFE_RE.search(rest):
+        return False
+    return all(_VERSION_RE.fullmatch(t) for t in _DOTTED_TOKEN_RE.findall(rest))
 
 
 def _drop_partial(cut: str, next_char: str):

@@ -224,8 +224,9 @@ def _bee_error_detail(exc: httpx.HTTPError):
         pass
     if not message:
         message = (response.text or "").strip() or error_cause(exc)
-    # Scrubbed at a 2 KB cap, then cut to 200 without a partial word (#549).
-    return response.status_code, public_bee_text(message)
+    # Scrubbed at a 2 KB cap, cut to 200 without a partial word, and shown
+    # only if the safety gate passes it; otherwise the HTTP status (#549).
+    return response.status_code, public_bee_text(message) or error_cause(exc)
 
 
 def _is_owned_by(batch_id: str, wallet: str) -> bool:

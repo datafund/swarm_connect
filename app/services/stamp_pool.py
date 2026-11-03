@@ -938,9 +938,11 @@ class StampPoolManager:
                             said = f" — Bee said: {detail}" if detail else ""
                             logger.error(f"Failed to purchase depth-{depth} stamp: {e}{said}")
                             # Bee's own message, not str(e): that names the Bee URL (#534).
-                            # Scrubbed at 2 KB, then cut to 200 (#549).
+                            # Scrubbed at 2 KB, cut to 200, and shown only if the
+                            # safety gate passes it (#549).
                             shown = _bee_error_message(e, SCRUB_CAP + 1)
-                            shown = f" — Bee said: {public_bee_text(shown)}" if shown else ""
+                            shown = public_bee_text(shown) if shown else None
+                            shown = f" — Bee said: {shown}" if shown else ""
                             results["errors"].append(
                                 f"Failed to purchase depth-{depth} stamp: "
                                 f"{error_cause(e)}{shown}")
