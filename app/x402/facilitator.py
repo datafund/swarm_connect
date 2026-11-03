@@ -14,7 +14,10 @@ Two ways to authenticate, both optional:
   gateway refuses to start if these are set and it is missing). Note: CDP's
   facilitator route is x402 v2, and this gateway speaks x402 v1 (x402==1.0.0);
   whether CDP accepts v1 payloads must be confirmed before relying on it (see
-  #524).
+  #524). cdp-sdk signs each token for one path on its x402 route
+  (/platform/v2/x402/verify, /settle), so with CDP credentials the gateway
+  always calls that route: X402_FACILITATOR_URL must be empty or exactly
+  CDP_FACILITATOR_URL, and startup refuses anything else (#527).
 - X402_FACILITATOR_BEARER_TOKEN: a static bearer token, for facilitators that
   accept one.
 
@@ -37,11 +40,22 @@ PUBLIC_TESTNET_FACILITATOR = "x402.org"
 
 
 CDP_HOST = "api.cdp.coinbase.com"
+# The URL cdp-sdk returns, and the base of the paths it signs its tokens for
+# ({url}/verify, {url}/settle). The x402 client appends /verify and /settle to
+# the configured URL, so any other value (the bare host, say) would send a
+# token signed for one path to another (#527). A test checks this against the
+# installed cdp-sdk.
+CDP_FACILITATOR_URL = f"https://{CDP_HOST}/platform/v2/x402"
 
 
 def _host(url: str) -> str:
     from urllib.parse import urlparse
     return (urlparse(url).hostname or "").lower()
+
+
+def _strip_one_slash(url: str) -> str:
+    # The x402 client drops one trailing slash before appending /verify.
+    return url[:-1] if url.endswith("/") else url
 
 
 def _config() -> FacilitatorConfig:
@@ -61,10 +75,11 @@ def _config() -> FacilitatorConfig:
             headers = cdp_headers()
             return await headers if hasattr(headers, "__await__") else headers
 
-        # CDP signs its tokens for its own host, so only its own URL (or an
-        # explicit URL on that host) is used; validate_x402_config() refuses
-        # any other host rather than sending CDP credentials there.
-        return {"url": url if url and _host(url) == CDP_HOST else cdp["url"], "create_headers": create_headers}
+        # CDP signs each token for one path on its own route, so the URL
+        # cdp-sdk returns is always used, never the configured one.
+        # validate_x402_config() refuses any configured URL other than that
+        # route, so the two agree (#527).
+        return {"url": cdp["url"], "create_headers": create_headers}
 
     config: FacilitatorConfig = {"url": url}
     token = settings.X402_FACILITATOR_BEARER_TOKEN
@@ -120,7 +135,12 @@ def validate_x402_config() -> None:
     if uses_cdp:
         if url and _host(url) != CDP_HOST:
             problems.append(f"CDP credentials are set but X402_FACILITATOR_URL points at {_host(url)!r}; "
-                            f"leave it empty or use {CDP_HOST}")
+                            f"leave it empty or set it to {CDP_FACILITATOR_URL}")
+        elif url and _strip_one_slash(url) != CDP_FACILITATOR_URL:
+            # Never echo the value: the deploy log is public (#485).
+            problems.append(f"CDP credentials are set but X402_FACILITATOR_URL is not CDP's x402 route; "
+                            f"CDP signs its tokens only for {CDP_FACILITATOR_URL}/verify and /settle, "
+                            f"so leave it empty or set it to exactly {CDP_FACILITATOR_URL}")
         if not settings.X402_FACILITATOR_CDP_API_KEY_SECRET:
             problems.append("X402_FACILITATOR_CDP_API_KEY_SECRET is required with X402_FACILITATOR_CDP_API_KEY_ID")
         try:

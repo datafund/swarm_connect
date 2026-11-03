@@ -279,7 +279,7 @@ app/x402/
 
 ```bash
 X402_ENABLED=false           # Master switch (default: off)
-X402_FACILITATOR_URL=...     # Payment facilitator
+X402_FACILITATOR_URL=...     # Payment facilitator (with CDP credentials: empty or exactly https://api.cdp.coinbase.com/platform/v2/x402)
 X402_PAY_TO_ADDRESS=0x...    # USDC receiving wallet (Base)
 X402_NETWORK=base-sepolia    # Network identifier
 
@@ -690,6 +690,13 @@ the gateway would refuse exits 3 and fails the job with `x402 configuration
 refused`. Any other failure (compose, the Docker daemon, a settings error)
 fails it with `x402 configuration check could not run`. Either way the running
 gateway stays up, and the rest of the step (host services, Alloy) is skipped.
+
+The facilitator URL setting (`X402_FACILITATOR_URL`) must be empty or exactly
+`https://api.cdp.coinbase.com/platform/v2/x402` when CDP facilitator
+credentials are set: `cdp-sdk` signs each token for
+that route's `/verify` and `/settle`, and the x402 client appends those to
+the URL, so the bare host or any other path is refused (#527). The client
+always uses the URL `cdp-sdk` returns, never the configured one.
 
 The env file has already been rewritten by then. After a refused deploy, fix
 the GitHub variables or secrets and re-run the deploy. Do **not**
