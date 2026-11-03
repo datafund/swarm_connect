@@ -539,6 +539,19 @@
           "defaults": { "unit": "short", "decimals": 0, "custom": { "fillOpacity": 70, "lineWidth": 1 } },
           "overrides": [{ "matcher": { "id": "byName", "options": "Time" }, "properties": [{ "id": "unit", "value": "time:MM-DD" }] }]
         }
+      },
+      {
+        "id": 119, "title": "Requests by Client Type per UTC Day (13 days)", "type": "barchart",
+        "description": "Requests to the production gateway per UTC day, stacked by client type, so each bar's height is that day's total traffic. Production only: this row ignores the Environment dropdown. Every outcome is counted, including requests refused with 429 or 402; the 'Clients Being Turned Away' panel shows those on their own. The client type comes from a fixed User-Agent table: mcp is the MCP plugin, cli the Python CLI, sdk-js the JS SDK, http-lib a bare HTTP client, curl a command-line client, bot a crawler, other anything unrecognised, none no User-Agent. Scrapes of /metrics and healthchecks of / and /health are not counted. The data provenance app runs in a browser, so its requests are counted as browser together with every other browser; app traffic cannot yet be told apart from other browser traffic, and this split is only useful for the app once it can. Each bar is one UTC calendar day; the newest bar is today so far, a partial day. The range starts at midnight UTC 13 days ago and ends now, one bar per UTC date, and goes back no further because Grafana Cloud keeps 14 days of metrics.",
+        "gridPos": { "h": 8, "w": 24, "x": 0, "y": 164 },
+        "timeFrom": "now-13d/d", "interval": "1d",
+        "targets": [{ "expr": "sum by (client_type) (increase(gateway_requests_by_client_total{environment=\"main\"}[1d] offset -1d))", "legendFormat": "{{client_type}}" }],
+        "transformations": [{ "id": "joinByField", "options": { "byField": "Time", "mode": "outer" } }],
+        "options": { "xField": "Time", "orientation": "vertical", "stacking": "normal", "groupWidth": 0.75, "barWidth": 0.95, "showValue": "never", "xTickLabelRotation": 0, "xTickLabelSpacing": 0, "legend": { "showLegend": true, "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi", "sort": "desc" } },
+        "fieldConfig": {
+          "defaults": { "unit": "none", "decimals": 0, "custom": { "fillOpacity": 70, "lineWidth": 1 } },
+          "overrides": [{ "matcher": { "id": "byName", "options": "Time" }, "properties": [{ "id": "unit", "value": "time:MM-DD" }] }]
+        }
       }
     ],
     "schemaVersion": 39

@@ -428,7 +428,7 @@ The gateway exposes a `/metrics` endpoint (Prometheus text format) when `METRICS
 
 **Info**: `gateway_info{version, environment, x402_enabled, pool_enabled, notary_enabled, chunk_upload_enabled}`
 
-**Who we serve, and the line on caller data (#347).** Production traffic turned out to be almost entirely one client — the MCP plugin, run by AI agents in cloud sandboxes — and 37 of its 84 production requests were being refused with 429, because the free tier allows three requests a minute and an agent making several calls in sequence exceeds it. Finding that meant reading reverse-proxy access logs by hand on the host. `gateway_requests_by_client_total` makes it a dashboard panel.
+**Who we serve, and the line on caller data (#347).** Production traffic turned out to be almost entirely one client — the MCP plugin, run by AI agents in cloud sandboxes — and 37 of its 84 production requests were being refused with 429, because the free tier allows three requests a minute and an agent making several calls in sequence exceeds it. Finding that meant reading reverse-proxy access logs by hand on the host. `gateway_requests_by_client_total` makes it a dashboard panel. The Product KPIs row also charts it per UTC day by `client_type`, pinned to production (panel 119, #519). The data provenance app is counted as `browser` with every other browser, so app traffic cannot yet be told apart from other browser traffic.
 
 `client_type` comes from a fixed table in `app/services/client_type.py`, **never from the `User-Agent` directly**. A metric label must not take a value the caller chooses, or anyone can mint unlimited time series — a cost attack on the metrics bill and a Prometheus instance that slows for everyone. Anything unrecognised becomes `other`.
 
