@@ -668,7 +668,7 @@ class TestBatchIdCase:
         assert mgr.check_access(self.BATCH, self.OTHER, "paid")[0] is False
         assert mgr.check_access(self.BATCH, None, None)[0] is False
         assert self._read(state_file)[self.BATCH]["owner"] == self.OWNER
-        assert any("two spellings" in r.message for r in caplog.records)
+        assert any("spellings" in r.message for r in caplog.records)
 
     @pytest.mark.parametrize("owners", [
         ("0x" + "11" * 20, "0x" + "22" * 20),
@@ -683,8 +683,66 @@ class TestBatchIdCase:
         })
         before = open(state_file).read()
         mgr = StampOwnershipManager(state_file=state_file)
-        with pytest.raises(StateLoadError, match="two spellings"):
+        with pytest.raises(StateLoadError, match="several spellings"):
             mgr.load_on_startup()
         assert open(state_file).read() == before
         assert glob.glob(state_file + ".corrupt-*")
         assert mgr._registry == {}
+
+    # Three spellings of one id; every file order must give the same outcome.
+    SPELLINGS = ("ab" * 32, "AB" * 32, "Ab" * 32)
+
+    @pytest.mark.parametrize("order", list(__import__("itertools").permutations(range(3))))
+    @pytest.mark.parametrize("owners, expected", [
+        (("shared", "0x" + "11" * 20, "pool"), "0x" + "11" * 20),       # one wallet + both specials
+        (("0x" + "11" * 20, "0x" + "11" * 20, "shared"), "0x" + "11" * 20),  # one wallet twice + shared
+        (("pool", "pool", "pool"), "pool"),                                 # one distinct owner
+        (("shared", "pool", "shared"), None),                               # specials only: refuse
+        (("0x" + "11" * 20, "0x" + "22" * 20, "shared"), None),             # two wallets: refuse
+    ])
+    def test_three_spellings_outcome_is_order_independent(self, state_file, order, owners, expected):
+        from app.core.atomic_io import StateLoadError
+        records = [(self.SPELLINGS[i], {"owner": owners[i], "mode": "paid", "source": f"s{i}"})
+                   for i in range(3)]
+        self._write(state_file, dict(records[i] for i in order))
+        mgr = StampOwnershipManager(state_file=state_file)
+        if expected is None:
+            with pytest.raises(StateLoadError, match="several spellings"):
+                mgr.load_on_startup()
+            return
+        mgr.load_on_startup()
+        assert list(mgr._registry) == [self.BATCH]
+        kept = mgr.get_stamp_info(self.BATCH)
+        assert kept["owner"] == expected
+        # The kept record is also order-independent: the lowercase spelling if
+        # it has the winning owner, else the first winning spelling in sorted order.
+        winners = sorted(k for k, e in records if e["owner"] == expected)
+        expected_key = self.BATCH if self.BATCH in winners else winners[0]
+        assert kept["source"] == dict(records)[expected_key]["source"]
+        assert list(self._read(state_file)) == [self.BATCH]
+
+    def test_collision_messages_name_the_original_spellings(self, state_file, caplog):
+        from app.core.atomic_io import StateLoadError
+        upper_head = "AB" * 6 + "ab" * 26   # differs from BATCH in its first 12 characters
+        self._write(state_file, {
+            self.BATCH: {"owner": self.OWNER, "mode": "paid"},
+            upper_head: {"owner": "shared", "mode": "free"},
+        })
+        with caplog.at_level("WARNING", logger="app.services.stamp_ownership"):
+            StampOwnershipManager(state_file=state_file).load_on_startup()
+        warning = next(r.message for r in caplog.records if "spellings" in r.message)
+        assert repr(self.BATCH[:12] + "..." + self.BATCH[-4:]) in warning
+        assert repr(upper_head[:12] + "..." + upper_head[-4:]) in warning
+
+        # Spellings that differ only in the middle cannot be shortened apart:
+        # they are named in full.
+        middle = "ab" * 10 + "AB" + "ab" * 21
+        self._write(state_file, {
+            self.BATCH: {"owner": self.OWNER, "mode": "paid"},
+            middle: {"owner": self.OTHER, "mode": "paid"},
+        })
+        with pytest.raises(StateLoadError) as err:
+            StampOwnershipManager(state_file=state_file).load_on_startup()
+        assert repr(self.BATCH) in str(err.value)
+        assert repr(middle) in str(err.value)
+        assert self.OWNER in str(err.value) and self.OTHER in str(err.value)

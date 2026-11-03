@@ -57,31 +57,55 @@ def _batch_key(batch_id: str) -> str:
     return batch_id.lower() if isinstance(batch_id, str) else batch_id
 
 
-def _merge_case_collision(key: str, kept: dict, other: dict, state_file: str) -> dict:
-    """Pick the record to keep for two batch keys that differ only in case.
+def _spellings(keys) -> str:
+    """Name the original spellings of one batch id for a log line or an error.
 
-    The rule never grants access to a wallet that did not own the batch and
-    never silently drops a real owner:
-    - the same owner on both: one record is enough, keep ``kept``;
-    - a wallet against "shared" or "pool": the wallet wins. "shared" would open
-      the batch to everyone and "pool" would let the gateway sell it again; the
-      wallet is the only real owner, and owner -> pool/shared is never an
-      expected transition (register_stamp logs it as an error);
-    - anything else (two different wallets, "shared" against "pool"): there is
-      no safe guess, so the registry is refused as unreadable and the operator
-      resolves it in the file.
+    64-character ids are shortened to their first 12 and last 4 characters, as
+    long as the shortened forms stay distinct; otherwise they are shown in full.
     """
-    a, b = kept["owner"], other["owner"]
-    if a == b:
-        return kept
-    a_special, b_special = a in _SPECIAL_OWNERS, b in _SPECIAL_OWNERS
-    if a_special != b_special:
-        return other if a_special else kept
-    raise unreadable_state(
-        state_file,
-        f"batch {key[:16]} is registered under two spellings with different owners "
-        f"({a!r} and {b!r}); keep the right record and delete the other",
-    )
+    keys = sorted(keys)
+    short = [k if len(k) <= 20 else f"{k[:12]}...{k[-4:]}" for k in keys]
+    if len(set(short)) < len(keys):
+        short = keys
+    return ", ".join(repr(k) for k in short)
+
+
+def _resolve_case_collision(spellings: Dict[str, dict], state_file: str) -> dict:
+    """Pick the record to keep when one batch id is stored under several spellings.
+
+    ``spellings`` maps each original key (all equal when lowercased) to its
+    record. The decision depends only on the set of distinct owners, never on
+    file order, and never grants access to a wallet that did not own the batch
+    or silently drops a real owner:
+    - one distinct owner: one record is enough;
+    - exactly one wallet plus "shared" and/or "pool": the wallet wins. "shared"
+      would open the batch to everyone and "pool" would let the gateway sell it
+      again; the wallet is the only real owner, and owner -> pool/shared is
+      never an expected transition (register_stamp logs it as an error);
+    - anything else (two or more wallets, or "shared" and "pool" with no
+      wallet): there is no safe guess, so the registry is refused as unreadable
+      and the operator resolves it in the file.
+
+    Among the records with the winning owner, the one already under the
+    lowercase key is kept if there is one, else the first spelling in sorted
+    order, so the metadata kept is also independent of file order.
+    """
+    owners = {entry["owner"] for entry in spellings.values()}
+    wallets = owners - set(_SPECIAL_OWNERS)
+    if len(owners) == 1:
+        winner = next(iter(owners))
+    elif len(wallets) == 1:
+        winner = next(iter(wallets))
+    else:
+        raise unreadable_state(
+            state_file,
+            f"one batch is registered under several spellings ({_spellings(spellings)}) with "
+            f"different owners ({', '.join(repr(o) for o in sorted(owners))}); keep the record "
+            f"of the real owner and delete the others",
+        )
+    candidates = sorted(k for k, entry in spellings.items() if entry["owner"] == winner)
+    key = _batch_key(candidates[0])
+    return spellings[key] if key in candidates else spellings[candidates[0]]
 
 
 class StampOwnershipManager:
@@ -140,32 +164,33 @@ class StampOwnershipManager:
                 normalized += 1
 
         # Keys are lowercase batch ids (#558). A file written before that may
-        # hold mixed-case keys; lowercase them once here. Two keys that differ
-        # only in case are resolved by _merge_case_collision. A record whose key
-        # was already lowercase is visited first, so it is the one kept when
-        # both spellings name the same owner.
+        # hold mixed-case keys; lowercase them once here. All spellings of one
+        # id are grouped first and resolved together by _resolve_case_collision,
+        # so the outcome does not depend on the order of keys in the file.
+        groups: Dict[str, Dict[str, dict]] = {}
+        for batch_id, entry in data.items():
+            groups.setdefault(_batch_key(batch_id), {})[batch_id] = entry
         registry: Dict[str, dict] = {}
-        lowered = merged = 0
-        for batch_id in sorted(data, key=lambda k: k != _batch_key(k)):
-            entry = data[batch_id]
-            key = _batch_key(batch_id)
-            if key != batch_id:
-                lowered += 1
-            if key in registry:
-                kept = _merge_case_collision(key, registry[key], entry, state_file)
-                logger.warning(
-                    f"Ownership registry has batch {key[:16]} under two spellings, owners "
-                    f"{registry[key]['owner']!r} and {entry['owner']!r}; keeping {kept['owner']!r}")
-                registry[key] = kept
-                merged += 1
-            else:
-                registry[key] = entry
+        lowered = sum(1 for batch_id in data if _batch_key(batch_id) != batch_id)
+        merged = 0
+        for key, spellings in groups.items():
+            if len(spellings) == 1:
+                registry[key] = next(iter(spellings.values()))
+                continue
+            kept = _resolve_case_collision(spellings, state_file)
+            logger.warning(
+                f"Ownership registry has one batch under {len(spellings)} spellings "
+                f"({_spellings(spellings)}) with owners "
+                f"{', '.join(repr(spellings[k]['owner']) for k in sorted(spellings))}; "
+                f"keeping {kept['owner']!r}")
+            registry[key] = kept
+            merged += len(spellings) - 1
 
         self._registry = registry
         if normalized or lowered:
             logger.info(
-                f"Migrated {state_file}: {lowered} batch key(s) lowercased, {merged} case "
-                f"collision(s) merged, {normalized} owner address(es) normalised")
+                f"Migrated {state_file}: {lowered} batch key(s) lowercased, {merged} duplicate "
+                f"spelling(s) merged, {normalized} owner address(es) normalised")
             # Persist so the file ends lowercase. _save_state writes atomically
             # and only logs on failure: the original file is then left intact,
             # the registry in memory is complete, and the next load migrates the
