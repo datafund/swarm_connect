@@ -127,6 +127,7 @@ async def check_base_eth_balance() -> Dict[str, Any]:
         logger.error("X402_PAY_TO_ADDRESS not configured - cannot check balance")
         return {
             "ok": False,
+            "fetched": False,
             "is_critical": True,
             "balance_wei": 0,
             "balance_eth": 0.0,
@@ -168,6 +169,8 @@ async def check_base_eth_balance() -> Dict[str, Any]:
 
         return {
             "ok": ok,
+            # The balance was read; `ok` is False also for one read but below threshold.
+            "fetched": True,
             "is_critical": is_critical,
             "balance_wei": balance_wei,
             "balance_eth": balance_eth,
@@ -181,6 +184,7 @@ async def check_base_eth_balance() -> Dict[str, Any]:
         logger.error(f"Failed to check Base ETH balance: {e}")
         return {
             "ok": False,
+            "fetched": False,
             "is_critical": True,  # Treat RPC errors as critical (can't verify)
             "balance_wei": 0,
             "balance_eth": 0.0,
