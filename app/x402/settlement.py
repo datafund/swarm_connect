@@ -641,7 +641,7 @@ class OutcomeUnknownRegistry:
 
     async def abegin_settlement(self, key, kind):
         """begin_settlement off the event loop, on the registry pool. Returns
-        (prior, recorded, gen); on success the entry counts as asked. Refused at
+        (prior, recorded, gen); the entry is not yet "asked" (mark_asked, give_up). Refused at
         once (recorded False, so 503) while too many registry writes are pending.
         Waits at most X402_SETTLEMENT_STATE_WRITE_TIMEOUT_SECONDS: a hung disk
         then fails closed instead of hanging the request, the registry is marked
@@ -672,9 +672,17 @@ class OutcomeUnknownRegistry:
         except asyncio.CancelledError:
             self._give_up(key, gen, cfut)
             raise
-        if recorded:
-            self.mark_asked(key, got)
+        # Not yet "asked": the caller marks it (mark_asked) right before calling
+        # the facilitator, or gives it up (give_up) if it does not get that far.
         return prior, recorded, got
+
+    def give_up(self, key, gen: Optional[int]) -> None:
+        """A recorded write-ahead whose caller will not call the facilitator after
+        all (a later step failed): released now, removed in the background."""
+        if key is None or gen is None:
+            return
+        self.abandon(key, gen)
+        _submit_registry_io(self.remove_abandoned, key, None, gen)
 
     def _give_up(self, key, gen: int, cfut) -> None:
         self.abandon(key, gen)
@@ -951,7 +959,7 @@ async def settle_payment(request: Request) -> None:
     # For an Idempotency-Key: from here until the facilitator answers, the
     # outcome is unknown, and a retry must not be charged on the assumption
     # that nothing happened (idempotency.py).
-    from app.x402.idempotency import record_settlement, record_settling, settlement_refused
+    from app.x402.idempotency import arecord_settling, record_settlement, settlement_refused
     auth_key = getattr(request.state, "x402_auth_key", None)
     # Write-ahead: on disk before the facilitator is asked, so a kill while
     # waiting leaves an unknown outcome behind, not nothing (#553).
@@ -961,7 +969,18 @@ async def settle_payment(request: Request) -> None:
             raise settlement_in_progress_refusal(auth_key, request)
         raise HTTPException(status_code=503, headers={"Retry-After": "60"},
                             detail=payment_state_unavailable_detail())
-    record_settling(request)
+    # The Idempotency-Key's "settling" record, off the event loop and bounded:
+    # not on disk in time means no settlement, like a failed write-ahead.
+    try:
+        settling_recorded = await arecord_settling(request)
+    except BaseException:
+        outcome_unknown.give_up(auth_key, gen)
+        raise
+    if not settling_recorded:
+        outcome_unknown.give_up(auth_key, gen)
+        raise HTTPException(status_code=503, headers={"Retry-After": "60"},
+                            detail=payment_state_unavailable_detail())
+    outcome_unknown.mark_asked(auth_key, gen)
     try:
         result = await _facilitator().settle(payment=payment, payment_requirements=requirements)
     except Exception as e:

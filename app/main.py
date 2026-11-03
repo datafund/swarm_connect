@@ -405,11 +405,10 @@ async def read_root():
             payment_state_down = True
             warnings.append(f"PAYMENT_STATE_UNAVAILABLE: {cause}; every paid request gets 503 "
                             "until it is repaired (details in the gateway log)")
-        if idempotency_store.unavailable:
-            import os.path
-            warnings.append(f"IDEMPOTENCY_UNAVAILABLE: {os.path.basename(idempotency_store._path())} is "
-                            "unreadable; paid requests with an Idempotency-Key get 503 until it is "
-                            "repaired (details in the gateway log)")
+        idem_cause = idempotency_store.public_cause()
+        if idem_cause:
+            warnings.append(f"IDEMPOTENCY_UNAVAILABLE: {idem_cause}; paid requests with an "
+                            "Idempotency-Key get 503 until it is repaired (details in the gateway log)")
 
         # Determine overall status
         # Never return 503 — the gateway should always be reachable so

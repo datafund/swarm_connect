@@ -610,7 +610,7 @@ What the gateway does with the key (payments with `X-PAYMENT` only; the free tie
 | First request succeeded, but its response was too large to keep (over 64 KB) | `409` `IDEMPOTENCY_KEY_DELIVERED_NOT_STORED` with the `transaction`. It was delivered and paid once; look the result up through the resource itself |
 | The facilitator refused the first payment, or the request failed before settlement | Nothing stored; a retry is a new, paid attempt |
 | The retry presents the same `X-PAYMENT` that paid for the original | `402`: sign a new payment. Only a new, unused authorization gets the stored result. Not when the original's settlement got no answer: that is the `409` `IDEMPOTENCY_KEY_SETTLEMENT_UNKNOWN` above |
-| The gateway cannot read its idempotency store | `503` `IDEMPOTENCY_UNAVAILABLE`. Not charged; retry later with the same key |
+| The gateway cannot read or write its idempotency store (or its storage does not respond) | `503` `IDEMPOTENCY_UNAVAILABLE`. Not charged; retry later with the same key |
 
 Keys are scoped to the payer (the verified signer of `X-PAYMENT`), the method and the path, so another wallet's request with the same key is unaffected.
 
@@ -665,7 +665,7 @@ If the gateway cannot read or write its record of these authorizations, every pa
 | 409 `IDEMPOTENCY_KEY_DELIVERED_NOT_STORED` | The first request succeeded; its response was too large to replay | Look up the result; do not pay again |
 | 422 `IDEMPOTENCY_KEY_REUSED` | Same `Idempotency-Key` for a different request | Use a new key |
 | 409 `IDEMPOTENCY_KEY_SETTLED_PENDING` | The first request was paid but produced no stored result | Contact the operator with the `transaction` |
-| 503 `IDEMPOTENCY_UNAVAILABLE` | The gateway's idempotency store is unreadable | Retry later; not charged |
+| 503 `IDEMPOTENCY_UNAVAILABLE` | The gateway's idempotency store is unreadable, unwritable or not responding | Retry later; not charged |
 
 ## References
 

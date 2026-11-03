@@ -528,8 +528,20 @@ class X402Middleware(BaseHTTPMiddleware):
                 detail = payment_state_unavailable_detail(work_ran=True)
                 return JSONResponse(status_code=503, content={"detail": detail, **detail},
                                     headers={"Retry-After": "60"})
-            from app.x402.idempotency import record_settling, settlement_refused
-            record_settling(request)
+            from app.x402.idempotency import arecord_settling, settlement_refused
+            try:
+                settling_recorded = await arecord_settling(request)
+            except BaseException:
+                outcome_unknown.give_up(auth_key, gen)
+                raise
+            if not settling_recorded:
+                from app.x402.settlement import payment_state_unavailable_detail
+                outcome_unknown.give_up(auth_key, gen)
+                replay_guard.release(auth_key)
+                detail = payment_state_unavailable_detail(work_ran=True)
+                return JSONResponse(status_code=503, content={"detail": detail, **detail},
+                                    headers={"Retry-After": "60"})
+            outcome_unknown.mark_asked(auth_key, gen)
             try:
                 settlement = await self.facilitator_client.settle(
                     payment=payment_payload,
