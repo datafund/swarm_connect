@@ -328,6 +328,74 @@ for _file, _check in STATE_FILE_CHECKS.items():
     state_file_unreadable.labels(file=_file).set_function(_state_file_reader(_file, _check))
 
 
+# Payment-state writes that fail or stall (#585). While a write of the x402
+# settlement-unknown registry fails or does not finish in time, every paid
+# request gets 503 PAYMENT_STATE_UNAVAILABLE, unpaid; for the idempotency store,
+# paid requests with an Idempotency-Key get 503 IDEMPOTENCY_UNAVAILABLE. A file
+# that could not be read at startup is gateway_state_file_unreadable instead.
+# reason=failed: the last write raised (disk full, permissions); it clears when
+# a write of the latest state succeeds. reason=stalled: a write did not finish
+# in time, or the store's write lane has a write pending longer than the write
+# timeout (or, for the registry, too many pending), so the next paid request
+# would be refused; it clears when a write completes. Read at scrape time from
+# the stores' flags and lane bookkeeping only: reading never starts a write
+# (app/x402/state_retry.py retries in the background). All four series exist
+# from startup; with x402 off nothing is refused and they read 0.
+state_write_blocked = Gauge(
+    "gateway_state_write_blocked",
+    "1 while paid requests are refused because a payment-state write failed or "
+    "stalled (file=settlement_unknown|idempotency, reason=failed|stalled)",
+    ["file", "reason"],
+)
+STATE_WRITE_FILES = ("settlement_unknown", "idempotency")
+STATE_WRITE_REASONS = ("failed", "stalled")
+
+
+def _settlement_write_failed() -> bool:
+    if not settings.X402_ENABLED:
+        return False
+    from app.x402.settlement import outcome_unknown
+    return outcome_unknown.write_failed()
+
+
+def _settlement_write_stalled() -> bool:
+    if not settings.X402_ENABLED:
+        return False
+    from app.x402 import settlement
+    # The same checks abegin_settlement makes before refusing a request.
+    return (settlement.outcome_unknown.write_stalled()
+            or settlement._registry_io_oldest_age() > settings.X402_SETTLEMENT_STATE_WRITE_TIMEOUT_SECONDS
+            or settlement._registry_io_backlog() >= settlement.MAX_PENDING_REGISTRY_IO)
+
+
+def _idempotency_write_failed() -> bool:
+    if not settings.X402_ENABLED:
+        return False
+    from app.x402.idempotency import idempotency_store
+    return idempotency_store.write_failed()
+
+
+def _idempotency_write_stalled() -> bool:
+    if not settings.X402_ENABLED:
+        return False
+    from app.x402 import idempotency
+    # The same check arecord_settling makes before refusing a keyed request.
+    return (idempotency.idempotency_store.write_stalled()
+            or idempotency._idempotency_io.oldest_age() > settings.X402_SETTLEMENT_STATE_WRITE_TIMEOUT_SECONDS)
+
+
+STATE_WRITE_CHECKS = {
+    ("settlement_unknown", "failed"): _settlement_write_failed,
+    ("settlement_unknown", "stalled"): _settlement_write_stalled,
+    ("idempotency", "failed"): _idempotency_write_failed,
+    ("idempotency", "stalled"): _idempotency_write_stalled,
+}
+
+for (_file, _reason), _check in STATE_WRITE_CHECKS.items():
+    state_write_blocked.labels(file=_file, reason=_reason).set_function(
+        _flag_reader(f"{_file} write-{_reason}", _check))
+
+
 x402_settlements_total = Counter(
     "gateway_x402_settlements_total",
     "x402 settlement outcomes (#375): settled, refused (nothing delivered), error "
@@ -514,9 +582,74 @@ for _rank in range(1, settings.TOP_CALLERS_N + 1):
     top_caller_requests.labels(rank=str(_rank)).set_function(_top_caller_reader(_rank))
 top_callers_distinct.set_function(_top_callers_distinct)
 
+# Every endpoint swarm_api counts errors for exists from startup (#586). The
+# "Bee calls failing" alert reads increase() of this counter, and a series
+# first seen at 1 gives increase() 0 for that error. The gateway restarts on
+# every deploy, so without this the first errors after a restart would not
+# count towards the alert. Keep in step with the _record_bee_error() calls in
+# app/services/swarm_api.py; a test reads them from the source.
+BEE_ERROR_ENDPOINTS = ("batches", "purchase", "upload", "chunk_upload", "download", "wallet")
+for _endpoint in BEE_ERROR_ENDPOINTS:
+    bee_api_errors_total.labels(endpoint=_endpoint)
 bee_poll_total = Counter(
-    "gateway_bee_poll_total", "Balance poll attempts", ["status"]
+    "gateway_bee_poll_total",
+    "Balance poll attempts (status=error when any balance could not be fetched)",
+    ["status"],
 )
+
+# Whether each balance could be read on the last poll (#586). The balance
+# gauges above keep their last value when a read fails, so that a Bee or RPC
+# hiccup does not report a 0 balance and page as "wallet empty". That also
+# means a balance gauge alone cannot tell a current value from one that is
+# hours old: on 2026-11-03 every wallet read failed for over 30 minutes and the
+# gauges showed the last good balance throughout. These two say which it is.
+#   gateway_balance_check_ok{check}: 1 when the last read succeeded, else 0.
+#     A read that succeeds with a balance below threshold is 1: the value is
+#     current, and the balance alerts judge it.
+#   gateway_balance_last_success_timestamp_seconds{check}: Unix time of the last
+#     successful read, 0 until there is one. Covers a poll loop that stopped
+#     altogether, which would leave check_ok at its last value.
+# check = xbzz | xdai | chequebook (Bee node wallet, always polled),
+#         base_eth (x402 pay-to wallet, when X402_ENABLED),
+#         gnosis_signer (buy-for-owner signer, when STAMP_PURCHASE_FOR_OTHERS_ENABLED).
+balance_check_ok = Gauge(
+    "gateway_balance_check_ok",
+    "1 when the last poll read this balance, 0 when the read failed and the "
+    "balance gauge still shows an older value (check=xbzz|xdai|chequebook|base_eth|gnosis_signer)",
+    ["check"],
+)
+balance_last_success = Gauge(
+    "gateway_balance_last_success_timestamp_seconds",
+    "Unix time of the last successful read of this balance, 0 if none yet",
+    ["check"],
+)
+
+
+def enabled_balance_checks() -> tuple:
+    """The balance checks this configuration polls."""
+    checks = ["xbzz", "xdai", "chequebook"]
+    if settings.X402_ENABLED is True:
+        checks.append("base_eth")
+    if settings.STAMP_PURCHASE_FOR_OTHERS_ENABLED is True:
+        checks.append("gnosis_signer")
+    return tuple(checks)
+
+
+# The series of the enabled checks exist from startup at 0: "not read yet".
+# The poll runs within seconds of startup, well inside the alert's 15 minutes.
+for _check in enabled_balance_checks():
+    balance_check_ok.labels(check=_check)
+    balance_last_success.labels(check=_check)
+
+
+def record_balance_check(check: str, ok: bool) -> None:
+    """Record the outcome of one balance read; never raises."""
+    try:
+        balance_check_ok.labels(check=check).set(1 if ok else 0)
+        if ok:
+            balance_last_success.labels(check=check).set(time.time())
+    except Exception as e:  # pragma: no cover - metrics must never break the poll
+        logger.debug(f"Metrics: could not record the {check} balance check: {e}")
 chunk_uploads_total = Counter(
     "gateway_chunk_uploads_total", "Pre-stamped chunk forwarding attempts", ["status", "mode"]
 )
@@ -741,6 +874,83 @@ async def _update_bzz_rates() -> None:
         )
 
 
+def _forget_balance_check(check: str) -> None:
+    """Drop a check's series when there is nothing to read for it."""
+    for gauge in (balance_check_ok, balance_last_success):
+        try:
+            gauge.remove(check)
+        except KeyError:
+            pass
+
+
+def _fetched(result: dict, balance_key: str) -> bool:
+    """Whether a preflight/base-balance result holds a balance actually read.
+
+    `ok` cannot say this: it is also False for a balance read successfully but
+    below its threshold. The check functions set `fetched`; the fallback is the
+    rule used before it existed, for a result built without it.
+    """
+    if "fetched" in result:
+        return bool(result["fetched"])
+    return bool(result.get("ok") or result.get(balance_key, 0) > 0)
+
+
+async def update_balance_metrics() -> None:
+    """Read the wallet balances into their gauges, and record whether each read worked.
+
+    A balance gauge is updated only when its read succeeded, and keeps its last
+    value otherwise, so a transient Bee or RPC failure does not report a 0
+    balance. gateway_balance_check_ok says which of the two happened (#586).
+    Each read is isolated, so one failing does not skip the others. Never raises.
+    """
+    all_fetched = True
+
+    async def read(check, fn, balance_key, apply):
+        nonlocal all_fetched
+        try:
+            result = await fn()
+            ok = _fetched(result, balance_key)
+            if ok:
+                apply(result)
+        except Exception as e:
+            ok = False
+            logger.debug(f"Metrics: failed to get the {check} balance: {e}")
+        record_balance_check(check, ok)
+        if not ok:
+            all_fetched = False
+
+    # Preflight checks parse all balances correctly (BZZ from bzzBalance, xDAI
+    # from nativeTokenBalance).
+    from app.x402.preflight import (
+        check_xbzz_balance,
+        check_xdai_balance,
+        check_chequebook_balance,
+    )
+    await read("xbzz", check_xbzz_balance, "balance_bzz",
+               lambda r: wallet_bzz_balance.labels(
+                   wallet=r.get("wallet_address") or "unknown").set(r["balance_bzz"]))
+    await read("xdai", check_xdai_balance, "balance_xdai",
+               lambda r: wallet_xdai_balance.labels(
+                   wallet=r.get("wallet_address") or "unknown").set(r["balance_xdai"]))
+    # check_chequebook_balance returns `available_balance_bzz`. The poll read
+    # `available_bzz` (the key in check_preflight_balances' summary) until
+    # #586, so a successful read raised KeyError: the gauge sat at 0 in both
+    # environments and every poll counted as an error.
+    await read("chequebook", check_chequebook_balance, "available_balance_bzz",
+               lambda r: chequebook_available_balance.set(r["available_balance_bzz"]))
+    # The Bee node wallet poll: an error when any of its three reads failed.
+    # It used to count success whenever no exception escaped, and the check
+    # functions catch their own, so it counted success while every read failed.
+    bee_poll_total.labels(status="success" if all_fetched else "error").inc()
+
+    # Base ETH balance (only when x402 enabled)
+    if settings.X402_ENABLED:
+        from app.x402.base_balance import check_base_eth_balance
+        await read("base_eth", check_base_eth_balance, "balance_eth",
+                   lambda r: base_eth_balance.labels(
+                       wallet=r.get("address") or "unknown").set(r["balance_eth"]))
+
+
 async def _poll_balances():
     """Periodically poll wallet balances and update Prometheus gauges."""
     while True:
@@ -754,48 +964,7 @@ async def _poll_balances():
             if _start_time is not None:
                 uptime_seconds.set(time.monotonic() - _start_time)
 
-            # Wallet balances — use preflight checks which parse all balances
-            # correctly (BZZ from bzzBalance, xDAI from nativeTokenBalance).
-            # Only update gauges on success — keep last known value on failure
-            # to avoid false 0-balance alerts from transient Bee node issues.
-            try:
-                from app.x402.preflight import (
-                    check_xbzz_balance,
-                    check_xdai_balance,
-                    check_chequebook_balance,
-                )
-                xbzz = await check_xbzz_balance()
-                if xbzz.get("ok") or xbzz.get("balance_bzz", 0) > 0:
-                    wallet_bzz_balance.labels(
-                        wallet=xbzz.get("wallet_address") or "unknown"
-                    ).set(xbzz["balance_bzz"])
-
-                xdai = await check_xdai_balance()
-                if xdai.get("ok") or xdai.get("balance_xdai", 0) > 0:
-                    wallet_xdai_balance.labels(
-                        wallet=xdai.get("wallet_address") or "unknown"
-                    ).set(xdai["balance_xdai"])
-
-                cheque = await check_chequebook_balance()
-                if cheque.get("ok") or cheque.get("available_bzz", 0) > 0:
-                    chequebook_available_balance.set(cheque["available_bzz"])
-
-                bee_poll_total.labels(status="success").inc()
-            except Exception as e:
-                bee_poll_total.labels(status="error").inc()
-                logger.debug(f"Metrics: failed to get wallet balances: {e}")
-
-            # Base ETH balance (only when x402 enabled)
-            if settings.X402_ENABLED:
-                try:
-                    from app.x402.base_balance import check_base_eth_balance
-                    base = await check_base_eth_balance()
-                    if base.get("ok") or base.get("balance_eth", 0) > 0:
-                        base_eth_balance.labels(
-                            wallet=base.get("address") or "unknown"
-                        ).set(base["balance_eth"])
-                except Exception as e:
-                    logger.debug(f"Metrics: failed to get base ETH balance: {e}")
+            await update_balance_metrics()
 
             # Network-wide batch count and min TTL (Bee /batches — every batch on
             # Swarm, so the minimum TTL is almost always someone else's batch about
@@ -886,9 +1055,17 @@ async def _poll_balances():
                 try:
                     from app.services.gnosis_chain import gnosis_chain_client
                     if gnosis_chain_client.is_configured:
-                        bals = await gnosis_chain_client.get_balances()
-                        gnosis_signer_xbzz_balance.set(bals["xbzz_plur"] / 1e16)
-                        gnosis_signer_xdai_balance.set(bals["xdai_wei"] / 1e18)
+                        try:
+                            bals = await gnosis_chain_client.get_balances()
+                            gnosis_signer_xbzz_balance.set(bals["xbzz_plur"] / 1e16)
+                            gnosis_signer_xdai_balance.set(bals["xdai_wei"] / 1e18)
+                        except Exception:
+                            record_balance_check("gnosis_signer", False)
+                            raise
+                        record_balance_check("gnosis_signer", True)
+                    else:
+                        # Nothing to read: no signer, so no check to report.
+                        _forget_balance_check("gnosis_signer")
                 except Exception as e:
                     logger.debug(f"Metrics: failed to get Gnosis signer balances: {e}")
 

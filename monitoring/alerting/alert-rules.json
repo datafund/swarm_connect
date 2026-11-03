@@ -1,7 +1,7 @@
 [
   {
     "annotations": {
-      "description": "Bee node has almost no BZZ left. Users cannot purchase stamps.\n\nFund this wallet on Gnosis (chain 100) immediately:\n{{ if $labels.wallet }}{{ $labels.wallet }}{{ else }}not reported by this deployment yet \u2014 open the health URL below and read x402.bee_gnosis_wallet.wallet_address{{ end }}\n\nFull status: {{ if eq $labels.environment \"main\" }}https://provenance-gateway.datafund.io/health{{ else if eq $labels.environment \"development\" }}https://provenance-gateway.dev.datafund.io/health{{ else }}https://provenance-gateway.datafund.io/health (or the .dev. host \u2014 environment label was \"{{ $labels.environment }}\"){{ end }}",
+      "description": "Bee node has almost no BZZ left. Users cannot purchase stamps.\n\nFund this wallet on Gnosis (chain 100) immediately:\n{{ if $labels.wallet }}{{ $labels.wallet }}{{ else }}not reported by this deployment yet \u2014 open the health URL below and read x402.bee_gnosis_wallet.wallet_address{{ end }}\n\nFull status: {{ if eq $labels.environment \"main\" }}https://provenance-gateway.datafund.io/health{{ else if eq $labels.environment \"development\" }}https://provenance-gateway.dev.datafund.io/health{{ else }}https://provenance-gateway.datafund.io/health (or the .dev. host \u2014 environment label was \"{{ $labels.environment }}\"){{ end }}\n\nIf the balance cannot be read, this value is the last one read and may be old: check gateway_balance_check_ok, or the \"Balance check failing\" alert.",
       "summary": "BZZ balance below 3 (current: {{ printf \"%.2f\" $values.B.Value }})"
     },
     "condition": "C",
@@ -155,7 +155,7 @@
   },
   {
     "annotations": {
-      "description": "Bee node is running low on BZZ. Stamp purchases fail once it reaches 0.\n\nFund this wallet on Gnosis (chain 100):\n{{ if $labels.wallet }}{{ $labels.wallet }}{{ else }}not reported by this deployment yet \u2014 open the health URL below and read x402.bee_gnosis_wallet.wallet_address{{ end }}\n\nFull status: {{ if eq $labels.environment \"main\" }}https://provenance-gateway.datafund.io/health{{ else if eq $labels.environment \"development\" }}https://provenance-gateway.dev.datafund.io/health{{ else }}https://provenance-gateway.datafund.io/health (or the .dev. host \u2014 environment label was \"{{ $labels.environment }}\"){{ end }}",
+      "description": "Bee node is running low on BZZ. Stamp purchases fail once it reaches 0.\n\nFund this wallet on Gnosis (chain 100):\n{{ if $labels.wallet }}{{ $labels.wallet }}{{ else }}not reported by this deployment yet \u2014 open the health URL below and read x402.bee_gnosis_wallet.wallet_address{{ end }}\n\nFull status: {{ if eq $labels.environment \"main\" }}https://provenance-gateway.datafund.io/health{{ else if eq $labels.environment \"development\" }}https://provenance-gateway.dev.datafund.io/health{{ else }}https://provenance-gateway.datafund.io/health (or the .dev. host \u2014 environment label was \"{{ $labels.environment }}\"){{ end }}\n\nIf the balance cannot be read, this value is the last one read and may be old: check gateway_balance_check_ok, or the \"Balance check failing\" alert.",
       "summary": "BZZ balance below 10 (current: {{ printf \"%.2f\" $values.B.Value }})"
     },
     "condition": "C",
@@ -232,7 +232,7 @@
   },
   {
     "annotations": {
-      "description": "Informational only, paused (#371). The x402 facilitator pays settlement gas; the pay-to wallet never sends a transaction, so its ETH balance does not affect payments. A cold mainnet pay-to wallet correctly holds 0 ETH.",
+      "description": "Informational only, paused (#371). The x402 facilitator pays settlement gas; the pay-to wallet never sends a transaction, so its ETH balance does not affect payments. A cold mainnet pay-to wallet correctly holds 0 ETH.\n\nIf the balance cannot be read, this value is the last one read and may be old: check gateway_balance_check_ok, or the \"Balance check failing\" alert.",
       "summary": "Pay-to wallet Base ETH (informational): {{ printf \"%.4f\" $values.B.Value }}"
     },
     "condition": "C",
@@ -309,7 +309,7 @@
   },
   {
     "annotations": {
-      "description": "Bee node is running low on xDAI for gas. On-chain operations fail once it runs out.\n\nFund this wallet on Gnosis (chain 100):\n{{ if $labels.wallet }}{{ $labels.wallet }}{{ else }}not reported by this deployment yet \u2014 open the health URL below and read x402.bee_gnosis_wallet.wallet_address{{ end }}\n\nFull status: {{ if eq $labels.environment \"main\" }}https://provenance-gateway.datafund.io/health{{ else if eq $labels.environment \"development\" }}https://provenance-gateway.dev.datafund.io/health{{ else }}https://provenance-gateway.datafund.io/health (or the .dev. host \u2014 environment label was \"{{ $labels.environment }}\"){{ end }}",
+      "description": "Bee node is running low on xDAI for gas. On-chain operations fail once it runs out.\n\nFund this wallet on Gnosis (chain 100):\n{{ if $labels.wallet }}{{ $labels.wallet }}{{ else }}not reported by this deployment yet \u2014 open the health URL below and read x402.bee_gnosis_wallet.wallet_address{{ end }}\n\nFull status: {{ if eq $labels.environment \"main\" }}https://provenance-gateway.datafund.io/health{{ else if eq $labels.environment \"development\" }}https://provenance-gateway.dev.datafund.io/health{{ else }}https://provenance-gateway.datafund.io/health (or the .dev. host \u2014 environment label was \"{{ $labels.environment }}\"){{ end }}\n\nIf the balance cannot be read, this value is the last one read and may be old: check gateway_balance_check_ok, or the \"Balance check failing\" alert.",
       "summary": "xDAI balance below 0.1 (current: {{ printf \"%.2f\" $values.B.Value }})"
     },
     "condition": "C",
@@ -1077,6 +1077,622 @@
     "noDataState": "OK",
     "ruleGroup": "critical",
     "title": "State file unreadable"
+  },
+  {
+    "annotations": {
+      "summary": "{{ $labels.environment }}: {{ $labels.file }} state writes failing or stalled; paid requests refused",
+      "description": "A write of a payment state file failed or did not finish in time, and the gateway refuses paid requests, unpaid, until a write succeeds (gateway_state_write_blocked, for 1 minute). file=settlement_unknown: every paid request gets 503 PAYMENT_STATE_UNAVAILABLE. file=idempotency: paid requests with an Idempotency-Key get 503 IDEMPOTENCY_UNAVAILABLE; paid requests without one still work. The reason label on the \"State File Health\" panel says which: reason=failed means the last write raised (usually disk full, or permissions on the data directory for uid 10001); reason=stalled means a hung or very slow volume, in any of three forms: a request's write did not finish within X402_SETTLEMENT_STATE_WRITE_TIMEOUT_SECONDS, which sets the store's stalled flag until a write completes; a write is still pending past that timeout, even before a request has been refused; or, for settlement_unknown only, 64 registry writes are pending at once. Read the ERROR log line (\"could not persist settlement-unknown state\", \"Could not persist idempotency state\" or \"disk I/O is not responding\") and fix the cause. It then clears by itself: the gateway retries the write about every 5 to 10 seconds, also with no paid traffic, and the alert resolves at the next evaluation. A restart is not needed and does not fix the disk. It is safe for payments: a settlement write-ahead that fails is taken back and its request is not settled, and an idempotency key's settling record is on disk before its payment settles. It can cost replays: a keyed request that settled after the writes began to fail answers a retry with 409 instead of the stored result, for up to 24 hours. A restart IS needed when reason=stalled stays after the disk responds again: a write stuck in the kernel keeps its worker, and nothing else clears it. A file that cannot be read after the restart shows as \"State file unreadable\". See docs/mainnet-runbook.md section 5."
+    },
+    "condition": "C",
+    "data": [
+      {
+        "datasourceUid": "grafanacloud-prom",
+        "model": {
+          "expr": "max by (environment, host, file) (gateway_state_write_blocked)",
+          "instant": true,
+          "intervalMs": 1000,
+          "maxDataPoints": 43200,
+          "refId": "A"
+        },
+        "queryType": "",
+        "refId": "A",
+        "relativeTimeRange": {
+          "from": 300,
+          "to": 0
+        }
+      },
+      {
+        "datasourceUid": "__expr__",
+        "model": {
+          "expression": "A",
+          "intervalMs": 1000,
+          "maxDataPoints": 43200,
+          "reducer": "last",
+          "refId": "B",
+          "type": "reduce"
+        },
+        "queryType": "",
+        "refId": "B",
+        "relativeTimeRange": {
+          "from": 0,
+          "to": 0
+        }
+      },
+      {
+        "datasourceUid": "__expr__",
+        "model": {
+          "conditions": [
+            {
+              "evaluator": {
+                "params": [
+                  0
+                ],
+                "type": "gt"
+              }
+            }
+          ],
+          "expression": "B",
+          "intervalMs": 1000,
+          "maxDataPoints": 43200,
+          "refId": "C",
+          "type": "threshold"
+        },
+        "queryType": "",
+        "refId": "C",
+        "relativeTimeRange": {
+          "from": 0,
+          "to": 0
+        }
+      }
+    ],
+    "execErrState": "Error",
+    "for": "1m",
+    "isPaused": false,
+    "labels": {
+      "severity": "critical"
+    },
+    "noDataState": "OK",
+    "ruleGroup": "critical",
+    "title": "State file writes blocked"
+  },
+  {
+    "annotations": {
+      "summary": "{{ $labels.environment }}: {{ printf \"%.0f\" $values.B.Value }} failed Bee calls in 5 min",
+      "description": "The gateway's calls to its Bee node are failing at a sustained rate (gateway_bee_api_errors_total, over 20 in 5 minutes for 5 minutes). The process can stay up and keep answering /metrics, so \"Gateway Down\" stays quiet while uploads, downloads, stamp purchases and wallet reads fail. Normal is about 2 per 5 minutes; the 2026-11-03 staging incident reached 619.\n\nWhat to check, in order:\n1. Which calls fail: the \"Bee API Errors\" panel, by endpoint.\n2. Whether Bee itself is fine: \"Bee Node Not Scraped\" and bee_up, and the Bee node's own log.\n3. The gateway log (Loki, level=ERROR) for the exception. PoolTimeout while Bee answers a fresh request means the gateway's shared HTTP client is stuck (swarm_connect#587); only a restart of the gateway container clears it today.\nDo NOT restart blindly: first check the \"State file save failures\" alert and gateway_state_unsaved. A restart loses changes that are not saved yet. See docs/mainnet-runbook.md section 5.\n\nFull status: {{ if eq $labels.environment \"main\" }}https://provenance-gateway.datafund.io/health{{ else if eq $labels.environment \"development\" }}https://provenance-gateway.dev.datafund.io/health{{ else }}https://provenance-gateway.datafund.io/health (or the .dev. host \u2014 environment label was \"{{ $labels.environment }}\"){{ end }}"
+    },
+    "condition": "C",
+    "data": [
+      {
+        "datasourceUid": "grafanacloud-prom",
+        "model": {
+          "expr": "sum by (environment, host) (increase(gateway_bee_api_errors_total[5m]))",
+          "instant": true,
+          "intervalMs": 1000,
+          "maxDataPoints": 43200,
+          "refId": "A"
+        },
+        "queryType": "",
+        "refId": "A",
+        "relativeTimeRange": {
+          "from": 600,
+          "to": 0
+        }
+      },
+      {
+        "datasourceUid": "__expr__",
+        "model": {
+          "expression": "A",
+          "intervalMs": 1000,
+          "maxDataPoints": 43200,
+          "reducer": "last",
+          "refId": "B",
+          "type": "reduce"
+        },
+        "queryType": "",
+        "refId": "B",
+        "relativeTimeRange": {
+          "from": 0,
+          "to": 0
+        }
+      },
+      {
+        "datasourceUid": "__expr__",
+        "model": {
+          "conditions": [
+            {
+              "evaluator": {
+                "params": [
+                  20
+                ],
+                "type": "gt"
+              }
+            }
+          ],
+          "expression": "B",
+          "intervalMs": 1000,
+          "maxDataPoints": 43200,
+          "refId": "C",
+          "type": "threshold"
+        },
+        "queryType": "",
+        "refId": "C",
+        "relativeTimeRange": {
+          "from": 0,
+          "to": 0
+        }
+      }
+    ],
+    "execErrState": "Error",
+    "for": "5m",
+    "isPaused": false,
+    "labels": {
+      "severity": "critical"
+    },
+    "noDataState": "OK",
+    "ruleGroup": "critical",
+    "title": "Bee calls failing"
+  },
+  {
+    "annotations": {
+      "summary": "{{ $labels.environment }}: {{ humanizePercentage $values.B.Value }} of responses are 5xx (10 min)",
+      "description": "More than 20% of the gateway's responses to real requests over 10 minutes were 5xx, for 5 minutes. Only counted when the gateway answered at least 20 real requests in those 10 minutes, so one 502 at low traffic does not page. Health traffic (the / and /health handlers: Docker's healthcheck, the public /health probe, monitors) is left out of both the share and the 20: it is about 20 requests per 10 minutes on its own, never answered 5xx in the week measured, and would otherwise meet the guard by itself and dilute the share. 502s from the reverse proxy when the gateway does not answer at all are not in this metric; \"Public health check failing\" covers those.\n\nCheck the \"HTTP Status Code Breakdown\" panel and the gateway log (Loki, level=ERROR). 502/503/504 from the gateway usually mean Bee calls are failing; see \"Bee calls failing\". Do NOT restart blindly: first check the \"State file save failures\" alert and gateway_state_unsaved. A restart loses changes that are not saved yet.\n\nFull status: {{ if eq $labels.environment \"main\" }}https://provenance-gateway.datafund.io/health{{ else if eq $labels.environment \"development\" }}https://provenance-gateway.dev.datafund.io/health{{ else }}https://provenance-gateway.datafund.io/health (or the .dev. host \u2014 environment label was \"{{ $labels.environment }}\"){{ end }}"
+    },
+    "condition": "C",
+    "data": [
+      {
+        "datasourceUid": "grafanacloud-prom",
+        "model": {
+          "expr": "(sum by (environment, host) (increase(http_requests_total{handler!~\"/|/health|/metrics\",status=~\"5..\"}[10m])) / sum by (environment, host) (increase(http_requests_total{handler!~\"/|/health|/metrics\"}[10m]))) and on (environment, host) (sum by (environment, host) (increase(http_requests_total{handler!~\"/|/health|/metrics\"}[10m])) >= 20)",
+          "instant": true,
+          "intervalMs": 1000,
+          "maxDataPoints": 43200,
+          "refId": "A"
+        },
+        "queryType": "",
+        "refId": "A",
+        "relativeTimeRange": {
+          "from": 600,
+          "to": 0
+        }
+      },
+      {
+        "datasourceUid": "__expr__",
+        "model": {
+          "expression": "A",
+          "intervalMs": 1000,
+          "maxDataPoints": 43200,
+          "reducer": "last",
+          "refId": "B",
+          "type": "reduce"
+        },
+        "queryType": "",
+        "refId": "B",
+        "relativeTimeRange": {
+          "from": 0,
+          "to": 0
+        }
+      },
+      {
+        "datasourceUid": "__expr__",
+        "model": {
+          "conditions": [
+            {
+              "evaluator": {
+                "params": [
+                  0.2
+                ],
+                "type": "gt"
+              }
+            }
+          ],
+          "expression": "B",
+          "intervalMs": 1000,
+          "maxDataPoints": 43200,
+          "refId": "C",
+          "type": "threshold"
+        },
+        "queryType": "",
+        "refId": "C",
+        "relativeTimeRange": {
+          "from": 0,
+          "to": 0
+        }
+      }
+    ],
+    "execErrState": "Error",
+    "for": "5m",
+    "isPaused": false,
+    "labels": {
+      "severity": "critical"
+    },
+    "noDataState": "OK",
+    "ruleGroup": "critical",
+    "title": "Gateway 5xx responses"
+  },
+  {
+    "annotations": {
+      "summary": "{{ $labels.environment }}: public /health has not answered 200 for 5 minutes",
+      "description": "Alloy's probe of the public /health URL got no 200 within 8 seconds on any attempt in the last 5 minutes (probe_http_status_code; 0 means a timeout or connection failure). /health always answers 200 when the gateway answers at all, so users get errors or timeouts too.\n\nThis also covers Docker's \"unhealthy\" state: the container healthcheck calls the same handler with a 10 s timeout, so whenever Docker marks the container unhealthy this probe fails as well. Nothing restarts the container on it, deliberately.\n\nWhat to check: the URL by hand with curl -m 10; on the host, docker ps for the container's health; the reverse proxy; the gateway log. A slow /health with Bee errors is \"Bee calls failing\". If the probe has failed since the Alloy deploy that added it and the URL works from elsewhere, the host cannot reach its own public hostname: see docs/mainnet-runbook.md section 5. Do NOT restart blindly: first check the \"State file save failures\" alert and gateway_state_unsaved. A restart loses changes that are not saved yet.\n\nFull status: {{ if eq $labels.environment \"main\" }}https://provenance-gateway.datafund.io/health{{ else if eq $labels.environment \"development\" }}https://provenance-gateway.dev.datafund.io/health{{ else }}https://provenance-gateway.datafund.io/health (or the .dev. host \u2014 environment label was \"{{ $labels.environment }}\"){{ end }}"
+    },
+    "condition": "C",
+    "data": [
+      {
+        "datasourceUid": "grafanacloud-prom",
+        "model": {
+          "expr": "1 - max by (environment, host) (max_over_time((probe_http_status_code{job=\"swarm_connect/health_probe\"} == bool 200)[5m:1m]))",
+          "instant": true,
+          "intervalMs": 1000,
+          "maxDataPoints": 43200,
+          "refId": "A"
+        },
+        "queryType": "",
+        "refId": "A",
+        "relativeTimeRange": {
+          "from": 600,
+          "to": 0
+        }
+      },
+      {
+        "datasourceUid": "__expr__",
+        "model": {
+          "expression": "A",
+          "intervalMs": 1000,
+          "maxDataPoints": 43200,
+          "reducer": "last",
+          "refId": "B",
+          "type": "reduce"
+        },
+        "queryType": "",
+        "refId": "B",
+        "relativeTimeRange": {
+          "from": 0,
+          "to": 0
+        }
+      },
+      {
+        "datasourceUid": "__expr__",
+        "model": {
+          "conditions": [
+            {
+              "evaluator": {
+                "params": [
+                  0
+                ],
+                "type": "gt"
+              }
+            }
+          ],
+          "expression": "B",
+          "intervalMs": 1000,
+          "maxDataPoints": 43200,
+          "refId": "C",
+          "type": "threshold"
+        },
+        "queryType": "",
+        "refId": "C",
+        "relativeTimeRange": {
+          "from": 0,
+          "to": 0
+        }
+      }
+    ],
+    "execErrState": "Error",
+    "for": "1m",
+    "isPaused": false,
+    "labels": {
+      "severity": "critical"
+    },
+    "noDataState": "OK",
+    "ruleGroup": "critical",
+    "title": "Public health check failing"
+  },
+  {
+    "annotations": {
+      "summary": "{{ $labels.environment }}: public /health takes {{ printf \"%.1f\" $values.B.Value }} s on average",
+      "description": "Alloy's probe of the public /health URL averaged over 5 seconds over 10 minutes, for 10 minutes. /health makes uncached upstream calls to Bee and the Base RPC on every request (swarm_connect#588), so a slow upstream shows here first. Measured on 2026-11-03: production took about 3.5 s, mostly the Base RPC; #588's cached /health should bring it under 1 s. Over 8 s the probe fails and \"Public health check failing\" takes over. Docker marks the container unhealthy at 10 s.\n\nFull status: {{ if eq $labels.environment \"main\" }}https://provenance-gateway.datafund.io/health{{ else if eq $labels.environment \"development\" }}https://provenance-gateway.dev.datafund.io/health{{ else }}https://provenance-gateway.datafund.io/health (or the .dev. host \u2014 environment label was \"{{ $labels.environment }}\"){{ end }}"
+    },
+    "condition": "C",
+    "data": [
+      {
+        "datasourceUid": "grafanacloud-prom",
+        "model": {
+          "expr": "max by (environment, host) (avg_over_time(probe_duration_seconds{job=\"swarm_connect/health_probe\"}[10m]))",
+          "instant": true,
+          "intervalMs": 1000,
+          "maxDataPoints": 43200,
+          "refId": "A"
+        },
+        "queryType": "",
+        "refId": "A",
+        "relativeTimeRange": {
+          "from": 600,
+          "to": 0
+        }
+      },
+      {
+        "datasourceUid": "__expr__",
+        "model": {
+          "expression": "A",
+          "intervalMs": 1000,
+          "maxDataPoints": 43200,
+          "reducer": "last",
+          "refId": "B",
+          "type": "reduce"
+        },
+        "queryType": "",
+        "refId": "B",
+        "relativeTimeRange": {
+          "from": 0,
+          "to": 0
+        }
+      },
+      {
+        "datasourceUid": "__expr__",
+        "model": {
+          "conditions": [
+            {
+              "evaluator": {
+                "params": [
+                  5
+                ],
+                "type": "gt"
+              }
+            }
+          ],
+          "expression": "B",
+          "intervalMs": 1000,
+          "maxDataPoints": 43200,
+          "refId": "C",
+          "type": "threshold"
+        },
+        "queryType": "",
+        "refId": "C",
+        "relativeTimeRange": {
+          "from": 0,
+          "to": 0
+        }
+      }
+    ],
+    "execErrState": "Error",
+    "for": "10m",
+    "isPaused": false,
+    "labels": {
+      "severity": "warning"
+    },
+    "noDataState": "OK",
+    "ruleGroup": "warning",
+    "title": "Public health check slow"
+  },
+  {
+    "annotations": {
+      "summary": "{{ $labels.environment }}: /health reports the Bee node not healthy",
+      "description": "Every probe of the public /health in 10 minutes answered 200 but without bee_node.healthy=true, for 5 minutes. healthy is false when the gateway cannot query the node's topology/status, when Bee's network availability is not \"Available\", or while the node is warming up. Uploads can then report success without reaching the network.\n\nOpen the health URL below and read bee_node.warnings. \"could not query the Bee node\" points at the gateway-to-Bee path (see \"Bee calls failing\"); \"network availability\" or a low peer count points at the Bee node itself.\n\nFull status: {{ if eq $labels.environment \"main\" }}https://provenance-gateway.datafund.io/health{{ else if eq $labels.environment \"development\" }}https://provenance-gateway.dev.datafund.io/health{{ else }}https://provenance-gateway.datafund.io/health (or the .dev. host \u2014 environment label was \"{{ $labels.environment }}\"){{ end }}"
+    },
+    "condition": "C",
+    "data": [
+      {
+        "datasourceUid": "grafanacloud-prom",
+        "model": {
+          "expr": "min by (environment, host) (min_over_time(probe_failed_due_to_regex{job=\"swarm_connect/health_probe\"}[10m]))",
+          "instant": true,
+          "intervalMs": 1000,
+          "maxDataPoints": 43200,
+          "refId": "A"
+        },
+        "queryType": "",
+        "refId": "A",
+        "relativeTimeRange": {
+          "from": 600,
+          "to": 0
+        }
+      },
+      {
+        "datasourceUid": "__expr__",
+        "model": {
+          "expression": "A",
+          "intervalMs": 1000,
+          "maxDataPoints": 43200,
+          "reducer": "last",
+          "refId": "B",
+          "type": "reduce"
+        },
+        "queryType": "",
+        "refId": "B",
+        "relativeTimeRange": {
+          "from": 0,
+          "to": 0
+        }
+      },
+      {
+        "datasourceUid": "__expr__",
+        "model": {
+          "conditions": [
+            {
+              "evaluator": {
+                "params": [
+                  0
+                ],
+                "type": "gt"
+              }
+            }
+          ],
+          "expression": "B",
+          "intervalMs": 1000,
+          "maxDataPoints": 43200,
+          "refId": "C",
+          "type": "threshold"
+        },
+        "queryType": "",
+        "refId": "C",
+        "relativeTimeRange": {
+          "from": 0,
+          "to": 0
+        }
+      }
+    ],
+    "execErrState": "Error",
+    "for": "5m",
+    "isPaused": false,
+    "labels": {
+      "severity": "critical"
+    },
+    "noDataState": "OK",
+    "ruleGroup": "critical",
+    "title": "Bee node not healthy (public /health)"
+  },
+  {
+    "annotations": {
+      "summary": "{{ $labels.environment }}: {{ $labels.check }} balance cannot be read; its gauge shows an old value",
+      "description": "The gateway could not read the {{ $labels.check }} balance on its last poll, or has not read it successfully for 15 minutes, for 15 minutes. The balance gauges keep their last value when a read fails, so the balance panels and the balance alerts are judging a stale number until this clears. check: xbzz, xdai and chequebook come from the Bee node (a failure usually comes with \"Bee calls failing\"), base_eth from the Base RPC, gnosis_signer from the Gnosis RPC. Read the WARNING/ERROR lines \"Failed to check ... balance\" in the gateway log.\n\nFull status: {{ if eq $labels.environment \"main\" }}https://provenance-gateway.datafund.io/health{{ else if eq $labels.environment \"development\" }}https://provenance-gateway.dev.datafund.io/health{{ else }}https://provenance-gateway.datafund.io/health (or the .dev. host \u2014 environment label was \"{{ $labels.environment }}\"){{ end }}"
+    },
+    "condition": "C",
+    "data": [
+      {
+        "datasourceUid": "grafanacloud-prom",
+        "model": {
+          "expr": "max by (environment, host, check) (gateway_balance_check_ok == bool 0) + max by (environment, host, check) ((time() - gateway_balance_last_success_timestamp_seconds) > bool 900)",
+          "instant": true,
+          "intervalMs": 1000,
+          "maxDataPoints": 43200,
+          "refId": "A"
+        },
+        "queryType": "",
+        "refId": "A",
+        "relativeTimeRange": {
+          "from": 600,
+          "to": 0
+        }
+      },
+      {
+        "datasourceUid": "__expr__",
+        "model": {
+          "expression": "A",
+          "intervalMs": 1000,
+          "maxDataPoints": 43200,
+          "reducer": "last",
+          "refId": "B",
+          "type": "reduce"
+        },
+        "queryType": "",
+        "refId": "B",
+        "relativeTimeRange": {
+          "from": 0,
+          "to": 0
+        }
+      },
+      {
+        "datasourceUid": "__expr__",
+        "model": {
+          "conditions": [
+            {
+              "evaluator": {
+                "params": [
+                  0
+                ],
+                "type": "gt"
+              }
+            }
+          ],
+          "expression": "B",
+          "intervalMs": 1000,
+          "maxDataPoints": 43200,
+          "refId": "C",
+          "type": "threshold"
+        },
+        "queryType": "",
+        "refId": "C",
+        "relativeTimeRange": {
+          "from": 0,
+          "to": 0
+        }
+      }
+    ],
+    "execErrState": "Error",
+    "for": "15m",
+    "isPaused": false,
+    "labels": {
+      "severity": "warning"
+    },
+    "noDataState": "OK",
+    "ruleGroup": "warning",
+    "title": "Balance check failing"
+  },
+  {
+    "annotations": {
+      "summary": "{{ $labels.environment }}: no public /health probe results, so the probe alerts cannot fire",
+      "description": "The gateway on this host is reporting metrics, but no public /health probe result has arrived for this environment for 45 minutes (15-minute lookback, then 30 minutes). The three probe alerts (\"Public health check failing\", \"Public health check slow\", \"Bee node not healthy (public /health)\") stay silent when there is no data, so without this rule losing the probe would go unnoticed.\n\nThe usual cause: Alloy on the host runs config.alloy from the branch deployed last. Each deploy clones its own branch into the host checkout and recreates Alloy from it, so while the probe is only on dev, a main deploy removes it and the next dev deploy brings it back. Once the probe is on main this should not happen. Otherwise Alloy failed to load its config (docker logs of the Alloy container) or was not recreated by the deploy. See docs/mainnet-runbook.md section 5, \"After the first deploy that adds the probe\".\n\nFull status: {{ if eq $labels.environment \"main\" }}https://provenance-gateway.datafund.io/health{{ else if eq $labels.environment \"development\" }}https://provenance-gateway.dev.datafund.io/health{{ else }}https://provenance-gateway.datafund.io/health (or the .dev. host \u2014 environment label was \"{{ $labels.environment }}\"){{ end }}"
+    },
+    "condition": "C",
+    "data": [
+      {
+        "datasourceUid": "grafanacloud-prom",
+        "model": {
+          "expr": "count by (environment, host) (up{job=~\"prometheus.scrape.(main|development)\"}) unless on (environment, host) count by (environment, host) (last_over_time(probe_http_status_code{job=\"swarm_connect/health_probe\"}[15m]))",
+          "instant": true,
+          "intervalMs": 1000,
+          "maxDataPoints": 43200,
+          "refId": "A"
+        },
+        "queryType": "",
+        "refId": "A",
+        "relativeTimeRange": {
+          "from": 900,
+          "to": 0
+        }
+      },
+      {
+        "datasourceUid": "__expr__",
+        "model": {
+          "expression": "A",
+          "intervalMs": 1000,
+          "maxDataPoints": 43200,
+          "reducer": "last",
+          "refId": "B",
+          "type": "reduce"
+        },
+        "queryType": "",
+        "refId": "B",
+        "relativeTimeRange": {
+          "from": 0,
+          "to": 0
+        }
+      },
+      {
+        "datasourceUid": "__expr__",
+        "model": {
+          "conditions": [
+            {
+              "evaluator": {
+                "params": [
+                  0
+                ],
+                "type": "gt"
+              }
+            }
+          ],
+          "expression": "B",
+          "intervalMs": 1000,
+          "maxDataPoints": 43200,
+          "refId": "C",
+          "type": "threshold"
+        },
+        "queryType": "",
+        "refId": "C",
+        "relativeTimeRange": {
+          "from": 0,
+          "to": 0
+        }
+      }
+    ],
+    "execErrState": "Error",
+    "for": "30m",
+    "isPaused": false,
+    "labels": {
+      "severity": "warning"
+    },
+    "noDataState": "OK",
+    "ruleGroup": "warning",
+    "title": "Public health probe missing"
   },
   {
     "annotations": {
