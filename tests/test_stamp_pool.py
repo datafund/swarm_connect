@@ -2,6 +2,7 @@
 """
 Unit tests for the Stamp Pool feature.
 """
+import asyncio
 import json
 import os
 import tempfile
@@ -1472,6 +1473,44 @@ class TestPaidBatchAlwaysEntersThePool:
         result = await self._buy(manager, listing)
         assert result == self.BATCH
         assert manager._pool[self.BATCH].ttl_at_creation == 12345
+
+    @pytest.mark.asyncio
+    async def test_batch_missing_from_the_listing_is_registered_to_the_pool(self, state_file):
+        """Added without its listing record, the batch is still owned by the pool (#312)."""
+        from app.services.stamp_ownership import POOL_OWNER, stamp_ownership_manager
+        manager = StampPoolManager(state_file=state_file)
+        result = await self._buy(manager, [[]])
+        assert result == self.BATCH
+        record = stamp_ownership_manager.get_stamp_info(self.BATCH)
+        assert record is not None, "a paid batch added without its listing was left unregistered"
+        assert record["owner"] == POOL_OWNER
+
+    async def _buy_cancelled(self, manager, wait, listing):
+        async def fake_buy(amount, depth, label):
+            return self.BATCH
+
+        with patch('app.services.stamp_pool.swarm_api.get_chainstate',
+                   return_value={"currentPrice": "24000"}), \
+             patch('app.services.stamp_pool.swarm_api.purchase_postage_stamp',
+                   side_effect=fake_buy), \
+             patch('app.services.stamp_pool.swarm_api.get_all_stamps_processed',
+                   new=AsyncMock(side_effect=listing)), \
+             patch.object(manager, '_wait_for_stamp_usable', new=AsyncMock(side_effect=wait)):
+            with pytest.raises(asyncio.CancelledError):
+                await manager._purchase_stamp(17)
+
+    @pytest.mark.asyncio
+    async def test_cancel_while_waiting_for_usable_still_adds_the_batch(self, state_file):
+        """A cancellation (e.g. shutdown) after Bee accepted the purchase keeps the batch."""
+        manager = StampPoolManager(state_file=state_file)
+        await self._buy_cancelled(manager, asyncio.CancelledError(), [[]])
+        self._assert_held_and_saved(manager, state_file, self.BATCH)
+
+    @pytest.mark.asyncio
+    async def test_cancel_during_the_listing_still_adds_the_batch(self, state_file):
+        manager = StampPoolManager(state_file=state_file)
+        await self._buy_cancelled(manager, [True], asyncio.CancelledError())
+        self._assert_held_and_saved(manager, state_file, self.BATCH)
 
 
 class TestTopUpRespectsTheReserveConfig:

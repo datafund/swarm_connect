@@ -1446,32 +1446,49 @@ class StampPoolManager:
                 spend_budget_tracker.release_hold(hold)
                 return None
 
-            # Wait for stamp to become usable (up to 90 seconds)
-            usable = await self._wait_for_stamp_usable(batch_id, timeout=90)
-
             # The batch is paid for, so it enters the pool and its state file
-            # whatever happens next. The listing below only refines the TTL.
-            # Before, a usable batch missing from that listing (or a listing
+            # whatever happens next. The waits below only refine the TTL.
+            # Before, a usable batch missing from the listing (or a listing
             # that raised) was never added: the pool lost a batch it had paid
             # for, and a later run bought another to fill the gap.
             ttl = duration_hours * 3600
-            if usable:
-                try:
-                    stamps = await swarm_api.get_all_stamps_processed()
-                    stamp_data = next((s for s in stamps if s.get("batchID") == batch_id), None)
-                except Exception as e:
-                    stamp_data = None
-                    logger.warning(f"Could not list stamps after buying {batch_id[:16]}...: {e}")
-                if stamp_data:
-                    ttl = coerce_int(stamp_data.get("batchTTL"), ttl)
+            try:
+                # Wait for stamp to become usable (up to 90 seconds)
+                usable = await self._wait_for_stamp_usable(batch_id, timeout=90)
+                if usable:
+                    try:
+                        stamps = await swarm_api.get_all_stamps_processed()
+                        stamp_data = next((s for s in stamps if s.get("batchID") == batch_id), None)
+                    except Exception as e:
+                        stamp_data = None
+                        logger.warning(f"Could not list stamps after buying {batch_id[:16]}...: {e}")
+                    if stamp_data:
+                        ttl = coerce_int(stamp_data.get("batchTTL"), ttl)
+                    else:
+                        logger.warning(
+                            f"Stamp {batch_id[:16]}... is usable but missing from the stamp listing; "
+                            f"adding it with the purchased TTL ({ttl}s)"
+                        )
                 else:
-                    logger.warning(
-                        f"Stamp {batch_id[:16]}... is usable but missing from the stamp listing; "
-                        f"adding it with the purchased TTL ({ttl}s)"
-                    )
-            else:
-                logger.warning(f"Stamp {batch_id[:16]}... purchased but not yet usable")
-                # Add anyway, it will become usable soon
+                    logger.warning(f"Stamp {batch_id[:16]}... purchased but not yet usable")
+                    # Add anyway, it will become usable soon
+            except asyncio.CancelledError:
+                # Cancelled (e.g. at shutdown) after Bee accepted the purchase.
+                # Add the batch as the not-usable path does, synchronously so
+                # no further await can be interrupted, then let the
+                # cancellation through.
+                logger.warning(
+                    f"Purchase of {batch_id[:16]}... was cancelled after Bee accepted it; "
+                    f"adding it to the pool with the purchased TTL ({ttl}s)"
+                )
+                self.add_stamp_to_pool(
+                    batch_id=batch_id,
+                    depth=depth,
+                    amount=amount,
+                    ttl=duration_hours * 3600,
+                    label=label
+                )
+                raise
             self.add_stamp_to_pool(
                 batch_id=batch_id,
                 depth=depth,
