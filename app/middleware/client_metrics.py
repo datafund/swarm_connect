@@ -7,7 +7,7 @@ and why no per-caller identity is exported.
 import hashlib
 import logging
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from threading import Lock
 from typing import Set
 
@@ -16,7 +16,7 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from app.core.client_ip import get_client_ip
 from app.services.client_type import classify, outcome_for
-from app.services.metrics import distinct_callers, requests_by_client_total
+from app.services.metrics import distinct_callers, distinct_callers_previous_day, requests_by_client_total
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +45,8 @@ class _DistinctCallerCounter:
         self._salt = os.urandom(16)
         self._day = self._today()
         self._seen: Set[bytes] = set()
+        # The final count of the UTC day before self._day, kept from the rollover.
+        self._previous = 0
 
     @staticmethod
     def _today() -> str:
@@ -70,9 +72,25 @@ class _DistinctCallerCounter:
             self._roll_over_locked()
             return len(self._seen)
 
+    def previous_day_count(self) -> int:
+        """The final count of the previous UTC day, checked against the clock.
+
+        Callers seen after the last scrape before midnight are in no sample of
+        gateway_distinct_callers: the first scrape after midnight already reads
+        the new day. This value keeps that final count. It is exported all
+        through the next day, so panel 118 can attribute it to the day it
+        belongs to. It is 0 when the previous day was not counted by this
+        process (a restart, or a day with no rollover in between).
+        """
+        with self._lock:
+            self._roll_over_locked()
+            return self._previous
+
     def _roll_over_locked(self) -> None:
         today = self._today()
         if today != self._day:
+            yesterday = (datetime.strptime(today, "%Y-%m-%d") - timedelta(days=1)).strftime("%Y-%m-%d")
+            self._previous = len(self._seen) if self._day == yesterday else 0
             self._day = today
             self._seen = set()
 
@@ -83,6 +101,7 @@ distinct_caller_counter = _DistinctCallerCounter()
 # is per process: it assumes one gateway process (no --workers, no prometheus
 # multiprocess mode), as the count itself already does.
 distinct_callers.set_function(distinct_caller_counter.count)
+distinct_callers_previous_day.set_function(distinct_caller_counter.previous_day_count)
 
 
 class ClientMetricsMiddleware:

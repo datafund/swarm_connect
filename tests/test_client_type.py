@@ -294,3 +294,68 @@ class TestDistinctCallersResetAtScrapeTime:
             assert _scraped_distinct_callers() == 3.0
         finally:
             c._day, c._seen = saved_day, saved_seen
+
+
+def _scraped(name):
+    body = TestClient(app).get("/metrics").text
+    for line in body.splitlines():
+        if line.startswith(name + " "):
+            return float(line.split()[1])
+    raise AssertionError(f"{name} missing from /metrics")
+
+
+class TestPreviousDayFinalCount:
+    """Callers seen after the last scrape before midnight appear in no sample of
+    gateway_distinct_callers: the first scrape after midnight already reads the
+    new day as 0. gateway_distinct_callers_previous_day keeps that final count
+    through the next day, for the per-day panel to attribute to its own day."""
+
+    def test_callers_after_the_last_scrape_before_midnight_are_exported(self, monkeypatch):
+        c = distinct_caller_counter
+        saved_day, saved_seen, saved_prev = c._day, c._seen, getattr(c, "_previous", 0)
+        day = {"v": "2026-11-02"}
+        monkeypatch.setattr(c, "_today", staticmethod(lambda: day["v"]))
+        try:
+            c._day, c._seen = day["v"], set()
+            for i in range(16):
+                c.observe(f"198.51.100.{i}")
+            assert _scraped("gateway_distinct_callers") == 16.0       # 23:59:55
+            for i in range(16, 20):                                     # 23:59:56-59
+                c.observe(f"198.51.100.{i}")
+            day["v"] = "2026-11-03"
+            assert _scraped("gateway_distinct_callers") == 0.0        # 00:00:10
+            assert _scraped("gateway_distinct_callers_previous_day") == 20.0, \
+                "the previous day's final count is in no exported sample"
+            c.observe("203.0.113.9")                                    # later that day
+            assert _scraped("gateway_distinct_callers") == 1.0
+            assert _scraped("gateway_distinct_callers_previous_day") == 20.0
+        finally:
+            c._day, c._seen, c._previous = saved_day, saved_seen, saved_prev
+
+    def test_either_gauge_read_first_after_midnight_gives_the_same_split(self, monkeypatch):
+        from app.middleware import client_metrics
+        c = client_metrics._DistinctCallerCounter()
+        day = {"v": "2026-11-02"}
+        monkeypatch.setattr(c, "_today", staticmethod(lambda: day["v"]))
+        c._day = day["v"]
+        c.observe("1.2.3.4")
+        c.observe("5.6.7.8")
+        day["v"] = "2026-11-03"
+        assert c.previous_day_count() == 2
+        assert c.count() == 0
+        assert c.previous_day_count() == 2
+
+    def test_a_day_that_was_not_counted_is_not_reported_as_the_previous_one(self, monkeypatch):
+        from app.middleware import client_metrics
+        c = client_metrics._DistinctCallerCounter()
+        day = {"v": "2026-11-01"}
+        monkeypatch.setattr(c, "_today", staticmethod(lambda: day["v"]))
+        c._day = day["v"]
+        c.observe("1.2.3.4")
+        day["v"] = "2026-11-03"                  # no rollover on 2026-11-02
+        assert c.previous_day_count() == 0
+        assert c.count() == 0
+
+    def test_a_new_process_reports_no_previous_day(self):
+        from app.middleware import client_metrics
+        assert client_metrics._DistinctCallerCounter().previous_day_count() == 0
