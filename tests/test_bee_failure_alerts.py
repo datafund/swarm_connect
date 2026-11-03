@@ -327,10 +327,17 @@ def test_probe_regex_rejects_a_body_without_bee_node(monkeypatch):
     async def broken(use_cache=True):
         raise RuntimeError("summary failed")
 
+    # Since #589 a failed node summary is reported as bee_node.healthy false
+    # (it used to leave bee_node out); the probe must reject that body.
     monkeypatch.setattr(swarm_api, "get_node_status_summary", broken)
     body = _health_body(BEE_HEALTHY, monkeypatch)
-    assert '"bee_node"' not in body
+    assert json.loads(body)["bee_node"]["healthy"] is False
     assert not _probe_regex().search(body)
+
+    # A body with no bee_node at all is rejected too.
+    no_node = json.dumps({"status": "ok", "x402": {"enabled": False}}, separators=(",", ":"))
+    assert '"bee_node"' not in no_node
+    assert not _probe_regex().search(no_node)
 
 
 def test_probe_regex_is_not_fooled_by_a_healthy_key_elsewhere():
