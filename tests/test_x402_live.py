@@ -18,6 +18,14 @@ Environment variables:
                                reads. TEST_GATEWAY_URL is accepted as a legacy alias.
     TEST_WALLET_PRIVATE_KEY  - Private key for test wallet (with testnet USDC);
                                only test_payment_with_x402_client needs it, and it pays.
+    ALLOW_LIVE_STAMP_PURCHASE - Required (1/true/yes) for test_free_tier_access, which
+                               has the gateway buy a real postage batch with its BZZ.
+                               Same switch as tests/test_integration_gateway.py.
+
+The payment and free-tier tests read GET /health once and skip unless the gateway
+reports x402 enabled (and, for the free-tier tests, the free tier enabled). With
+x402 off — the config default, e.g. a local gateway — a well-formed stamp request
+is not refused with 402 but goes straight to the handler and buys a batch.
 
 Protected routes validate the request before payment, pricing and the free tier
 (#427). A request that is malformed gets 422 before any of those, so a test that
@@ -29,7 +37,7 @@ import requests
 import json
 from typing import Optional
 
-# Skip all tests in this module unless --run-live is provided
+# Skip all tests in this module unless RUN_LIVE_TESTS is set
 def pytest_configure(config):
     config.addinivalue_line(
         "markers", "live: mark test as requiring live testnet (deselect with '-m \"not live\"')"
@@ -38,14 +46,23 @@ def pytest_configure(config):
 
 # Check if live tests should run
 def should_run_live_tests() -> bool:
-    """Check if live tests are enabled via environment or pytest flag."""
-    return os.environ.get("RUN_LIVE_TESTS", "").lower() in ("1", "true", "yes")
+    """Check if live tests are enabled via the environment."""
+    return _flag("RUN_LIVE_TESTS")
+
+
+def _flag(name: str) -> bool:
+    return os.environ.get(name, "").lower() in ("1", "true", "yes")
+
+
+# Spending is a separate decision from running live tests, as in
+# tests/test_integration_gateway.py.
+ALLOW_LIVE_STAMP_PURCHASE = _flag("ALLOW_LIVE_STAMP_PURCHASE")
 
 
 # Skip decorator for live tests
 live_test = pytest.mark.skipif(
     not should_run_live_tests(),
-    reason="Live tests disabled. Set RUN_LIVE_TESTS=1 or use --run-live flag"
+    reason="Live tests disabled. Set RUN_LIVE_TESTS=1"
 )
 
 
@@ -84,6 +101,43 @@ def get_test_config():
     }
 
 
+@pytest.fixture(scope="module")
+def gateway_x402() -> dict:
+    """The gateway's x402 section of GET /health, read once per module.
+
+    {} when the gateway reports none, which is what a gateway with x402
+    disabled does. Skips when the gateway cannot be reached.
+    """
+    url = f"{gateway_url()}/health"
+    try:
+        response = requests.get(url, timeout=15)
+    except requests.RequestException as e:
+        pytest.skip(f"Gateway not reachable at {url}: {e}")
+    if response.status_code != 200:
+        pytest.skip(f"GET {url} answered {response.status_code}")
+    return response.json().get("x402") or {}
+
+
+@pytest.fixture
+def x402_enabled(gateway_x402) -> dict:
+    """Skip unless the gateway enforces x402.
+
+    Without it a well-formed POST /stamps/ is not refused with 402: it reaches
+    the handler and buys a batch with the gateway's BZZ.
+    """
+    if gateway_x402.get("enabled") is not True:
+        pytest.skip(f"x402 is not enabled on {gateway_url()}; a valid stamp request there would buy a batch")
+    return gateway_x402
+
+
+@pytest.fixture
+def free_tier_enabled(x402_enabled) -> dict:
+    """Skip unless x402 and its free tier are both enabled."""
+    if (x402_enabled.get("free_tier") or {}).get("enabled") is not True:
+        pytest.skip(f"The x402 free tier is not enabled on {gateway_url()}")
+    return x402_enabled
+
+
 class TestGatewayHealth:
     """Basic gateway connectivity tests."""
 
@@ -114,7 +168,7 @@ class TestX402ResponseFormat:
     """Test that 402 responses are correctly formatted."""
 
     @live_test
-    def test_protected_endpoint_returns_402(self):
+    def test_protected_endpoint_returns_402(self, x402_enabled):
         """Protected endpoint returns 402 without payment."""
         config = get_test_config()
 
@@ -145,7 +199,7 @@ class TestX402ResponseFormat:
 
 
     @live_test
-    def test_402_contains_valid_payment_address(self):
+    def test_402_contains_valid_payment_address(self, x402_enabled):
         """Verify 402 contains a valid Ethereum address."""
         config = get_test_config()
 
@@ -167,7 +221,7 @@ class TestX402PaymentFlow:
     """Test full payment flow with real x402 client."""
 
     @live_test
-    def test_payment_with_x402_client(self):
+    def test_payment_with_x402_client(self, x402_enabled):
         """
         Full payment flow using x402 Python client.
 
@@ -211,42 +265,57 @@ class TestFreeTierFlow:
     """Test free tier access flow."""
 
     @live_test
-    def test_free_tier_access(self):
-        """Test that free tier allows limited access."""
+    def test_free_tier_access(self, free_tier_enabled):
+        """Test that free tier allows limited access.
+
+        A successful request has the gateway BUY A REAL POSTAGE BATCH with its
+        own BZZ (on staging, a mainnet batch), so it needs ALLOW_LIVE_STAMP_PURCHASE.
+        """
+        if not ALLOW_LIVE_STAMP_PURCHASE:
+            pytest.skip("Buys a real postage batch on the gateway; set ALLOW_LIVE_STAMP_PURCHASE=1 to run it")
         config = get_test_config()
 
         # Opt in to the free tier
         response = requests.post(
             f"{config['gateway_url']}/api/v1/stamps/",
-            json={"size": "small", "duration_hours": 25},
+            json=VALID_STAMP_BODY,
             headers={"X-Payment-Mode": "free"},
+            timeout=180,
         )
+        print(f"Free tier stamp request: {response.status_code}")
 
-        if response.status_code == 402:
-            print("Free tier is DISABLED - got 402")
-            return
-
-        if response.ok:
-            print("Free tier request succeeded")
-            # Check for free tier header
-            payment_mode = response.headers.get("X-Payment-Mode")
-            if payment_mode == "free-tier":
-                print("Confirmed free tier access via header")
-
-            # Check rate limit headers
+        if response.status_code == 201:
+            assert response.headers.get("X-Payment-Mode") == "free-tier", (
+                f"Free-tier success without the free-tier header: {dict(response.headers)}")
+            assert response.json().get("batchID"), f"No batchID: {response.text}"
             limit = response.headers.get("X-RateLimit-Limit")
             remaining = response.headers.get("X-RateLimit-Remaining")
             print(f"Rate limit: {remaining}/{limit} remaining")
+            return
 
-        elif response.status_code == 429:
-            print("Free tier rate limit exceeded")
-            data = response.json()
-            info = data.get("payment_info") or data.get("detail", {}).get("payment_info")
-            assert info, "429 should include payment upgrade info"
+        body = response.json() if response.headers.get("content-type", "").startswith("application/json") else {}
+        detail = body.get("detail") if isinstance(body.get("detail"), dict) else {}
+        code = detail.get("code")
+
+        # The free tier's own rate limit: must point at the paid route.
+        if response.status_code == 429 and code is None:
+            info = body.get("payment_info") or detail.get("payment_info")
+            assert info, f"429 should include payment upgrade info: {response.text}"
             print(f"Upgrade info: {info}")
+            return
+
+        # The gateway's spending limits refused the purchase: the free tier
+        # worked, but whether a batch is handed out was not checked.
+        if (response.status_code, code) in {
+            (429, "DAILY_SPEND_BUDGET_EXHAUSTED"),
+            (503, "GATEWAY_DAILY_SPEND_CEILING"),
+        }:
+            pytest.skip(f"Not checked: spending limit reached ({code}): {response.text[:200]}")
+
+        pytest.fail(f"Unexpected free-tier response {response.status_code}: {response.text[:500]}")
 
     @live_test
-    def test_free_tier_rate_limit(self):
+    def test_free_tier_rate_limit(self, free_tier_enabled):
         """Test that free tier enforces rate limits."""
         config = get_test_config()
 
@@ -275,12 +344,12 @@ class TestFreeTierFlow:
                 print(f"Rate limited after {i+1} requests")
                 break
 
-        # Should eventually get rate limited (if free tier enabled)
-        # or get 402 immediately (if free tier disabled)
-        assert 429 in results or 402 in results, f"Expected rate limit or payment required, got {results}"
+        # The free tier is enabled (the fixture checked), so ten requests must
+        # run into its limit. A 402 here would mean the opt-in was ignored.
+        assert 429 in results, f"Expected the free tier to rate-limit, got {results}"
 
     @live_test
-    def test_malformed_request_is_refused_before_free_tier(self):
+    def test_malformed_request_is_refused_before_free_tier(self, free_tier_enabled):
         """A malformed free-tier request gets 422 and takes no free-tier slot (#427).
 
         More requests than the free tier allows in a minute, all malformed: every
