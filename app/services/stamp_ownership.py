@@ -12,8 +12,10 @@ import filecmp
 import glob
 import json
 import logging
+import os
 import re
 import shutil
+import tempfile
 from datetime import datetime, timezone
 from threading import Lock
 from typing import Dict, Optional, Set, Tuple
@@ -60,19 +62,13 @@ def _batch_key(batch_id: str) -> str:
     return batch_id.lower() if isinstance(batch_id, str) else batch_id
 
 
-def _spellings(keys, full: bool = False) -> str:
-    """Name the original spellings of one batch id for a log line or an error.
+def _spellings(keys) -> str:
+    """Name the exact original spellings of one batch id, for a log line or an error."""
+    return ", ".join(repr(k) for k in sorted(keys))
 
-    With ``full`` (the refusal error, which an operator acts on) every id is
-    printed exactly. Otherwise (the merge WARNING) 64-character ids are
-    shortened to their first 12 and last 4 characters, as long as the shortened
-    forms stay distinct; the exact keys are in the pre-migration copy.
-    """
-    keys = sorted(keys)
-    short = keys if full else [k if len(k) <= 20 else f"{k[:12]}...{k[-4:]}" for k in keys]
-    if len(set(short)) < len(keys):
-        short = keys
-    return ", ".join(repr(k) for k in short)
+
+def _utc_stamp() -> str:
+    return datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')
 
 
 def _keep_pre_migration_copy(state_file: str) -> str:
@@ -81,14 +77,36 @@ def _keep_pre_migration_copy(state_file: str) -> str:
     The migration drops the records of merged spellings, so their mode,
     acquired_at and source survive only in this copy. One copy per distinct
     content: a restart that migrates the same file again (because the save
-    failed) reuses the existing copy instead of adding another. Raises on
-    failure; the caller then does not save.
+    failed) reuses the existing copy instead of adding another.
+
+    The copy is written atomically (temp file in the same directory, fsync,
+    os.replace), so a failure such as a full disk never leaves a partial
+    ``.pre-558-`` file that a later run would take for the real copy. A name
+    already in use (two different copies in the same UTC second) gets a numeric
+    suffix. Raises on failure.
     """
     for existing in sorted(glob.glob(f"{glob.escape(state_file)}.pre-558-*")):
         if filecmp.cmp(state_file, existing, shallow=False):
             return existing
-    backup = f"{state_file}.pre-558-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
-    shutil.copy2(state_file, backup)
+    base = f"{state_file}.pre-558-{_utc_stamp()}"
+    backup, n = base, 0
+    while os.path.exists(backup):
+        n += 1
+        backup = f"{base}-{n}"
+    directory = os.path.dirname(state_file) or "."
+    fd, tmp_path = tempfile.mkstemp(dir=directory, prefix=".tmp-pre558-")
+    try:
+        with os.fdopen(fd, "wb") as dst, open(state_file, "rb") as src:
+            shutil.copyfileobj(src, dst)
+            dst.flush()
+            os.fsync(dst.fileno())
+        os.replace(tmp_path, backup)
+    except Exception:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
     return backup
 
 
@@ -120,7 +138,7 @@ def _resolve_case_collision(spellings: Dict[str, dict], state_file: str) -> dict
         winner = next(iter(wallets))
     else:
         reason = (
-            f"one batch is registered under several spellings ({_spellings(spellings, full=True)}) "
+            f"one batch is registered under several spellings ({_spellings(spellings)}) "
             f"with different owners ({', '.join(repr(o) for o in sorted(owners))}); keep the "
             f"record of the real owner and delete the others")
         # Logged here as well as raised: if the startup traceback is lost, the
@@ -143,6 +161,10 @@ class StampOwnershipManager:
         self._registry: Dict[str, dict] = {}  # lowercase batch_id -> {owner, mode, acquired_at, source}
         self._lock = Lock()
         self._state_file = state_file
+        # True while a load-time migration has changed the registry in memory
+        # but the original file has not been copied aside yet (#558). No save
+        # may overwrite the original until that copy exists.
+        self._migration_needs_copy = False
 
     def _get_state_file_path(self) -> str:
         """Get the state file path, using override or settings."""
@@ -151,6 +173,19 @@ class StampOwnershipManager:
     def _save_state(self):
         """Persist ownership registry to state file."""
         state_file = self._get_state_file_path()
+        if self._migration_needs_copy:
+            # The file on disk is still the pre-migration original; it holds
+            # the only copy of merged spellings' records. Copy it first, or do
+            # not write. Not writing behaves like a failed write: logged, and
+            # the change stays in memory for the next save.
+            try:
+                backup = _keep_pre_migration_copy(state_file)
+            except Exception as e:
+                logger.error(f"Not saving ownership state to {state_file}: the pre-migration file "
+                             f"could not be copied aside ({e}); the change is kept in memory only")
+                return
+            self._migration_needs_copy = False
+            logger.info(f"Kept the pre-migration ownership registry at {backup}")
         try:
             atomic_write_json(state_file, self._registry)
             logger.debug(f"Saved ownership state: {len(self._registry)} stamps to {state_file}")
@@ -211,24 +246,18 @@ class StampOwnershipManager:
             merged += len(spellings) - 1
 
         self._registry = registry
+        self._migration_needs_copy = bool(normalized or lowered)
         if normalized or lowered:
             logger.info(
                 f"Migrated {state_file}: {lowered} batch key(s) lowercased, {merged} duplicate "
                 f"spelling(s) merged, {normalized} owner address(es) normalised")
-            # Persist so the file ends lowercase, after keeping the original
-            # aside (merged spellings' records exist only there afterwards).
-            # If the copy fails, do not save. _save_state writes atomically and
-            # only logs on failure. Either way the original file is then left
-            # intact, the registry in memory is complete, and the next load
-            # migrates the same file again.
-            try:
-                backup = _keep_pre_migration_copy(state_file)
-            except Exception as e:
-                logger.error(f"Could not copy {state_file} before migrating it ({e}); "
-                             f"not saving the migration, the file is left as it was")
-            else:
-                logger.info(f"Kept the pre-migration ownership registry at {backup}")
-                self._save_state()
+            # Persist so the file ends lowercase. _save_state first copies the
+            # original aside (merged spellings' records survive only there) and
+            # refuses to write while that copy fails, here and on every later
+            # save. A failed copy or write leaves the original file intact, the
+            # registry in memory is complete, and the next load migrates the
+            # same file again.
+            self._save_state()
         logger.info(f"Loaded ownership state: {len(self._registry)} stamps from {state_file}")
 
     def register_stamp(

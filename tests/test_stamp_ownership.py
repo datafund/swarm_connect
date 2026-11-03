@@ -723,19 +723,20 @@ class TestBatchIdCase:
 
     def test_collision_messages_name_the_original_spellings(self, state_file, caplog):
         from app.core.atomic_io import StateLoadError
-        upper_head = "AB" * 6 + "ab" * 26   # differs from BATCH in its first 12 characters
+        # Differs from BATCH in the head AND the middle: a shortened form would
+        # not show the exact key, so the merge WARNING names every spelling in full.
+        head_and_middle = "AB" * 6 + "ab" * 4 + "AB" + "ab" * 21
         self._write(state_file, {
             self.BATCH: {"owner": self.OWNER, "mode": "paid"},
-            upper_head: {"owner": "shared", "mode": "free"},
+            head_and_middle: {"owner": "shared", "mode": "free"},
         })
         with caplog.at_level("WARNING", logger="app.services.stamp_ownership"):
             StampOwnershipManager(state_file=state_file).load_on_startup()
         warning = next(r.message for r in caplog.records if "spellings" in r.message)
-        assert repr(self.BATCH[:12] + "..." + self.BATCH[-4:]) in warning
-        assert repr(upper_head[:12] + "..." + upper_head[-4:]) in warning
+        assert repr(self.BATCH) in warning
+        assert repr(head_and_middle) in warning
 
-        # Spellings that differ only in the middle cannot be shortened apart:
-        # they are named in full.
+        # The refusal error names them in full too.
         middle = "ab" * 10 + "AB" + "ab" * 21
         self._write(state_file, {
             self.BATCH: {"owner": self.OWNER, "mode": "paid"},
@@ -782,14 +783,14 @@ class TestBatchIdCase:
         self._write(state_file, {self.UPPER: {"owner": self.OWNER, "mode": "paid"}})
         before = open(state_file).read()
         mgr = StampOwnershipManager(state_file=state_file)
-        with patch("app.services.stamp_ownership.shutil.copy2", side_effect=OSError("read-only")), \
+        with patch("app.services.stamp_ownership._keep_pre_migration_copy", side_effect=OSError("read-only")), \
                 patch("app.services.stamp_ownership.atomic_write_json") as write, \
                 caplog.at_level("ERROR", logger="app.services.stamp_ownership"):
             mgr.load_on_startup()
         write.assert_not_called()
         assert open(state_file).read() == before
         assert mgr.get_stamp_info(self.BATCH)["owner"] == self.OWNER
-        assert any("not saving the migration" in r.message for r in caplog.records)
+        assert any("could not be copied aside" in r.message for r in caplog.records)
 
     def test_refusal_prints_exact_ids_and_logs_error(self, state_file, caplog):
         from app.core.atomic_io import StateLoadError
@@ -807,3 +808,78 @@ class TestBatchIdCase:
         assert repr(a) in str(err.value) and repr(b) in str(err.value)
         errors = [r.message for r in caplog.records if r.levelname == "ERROR"]
         assert any(repr(a) in m and repr(b) in m and self.OTHER in m for m in errors)
+
+    def test_later_write_after_failed_copy_never_overwrites_the_original(self, state_file, caplog):
+        """Round-3 review: a failed copy must hold back every later save too.
+
+        Before the fix the load skipped its own save, but the next
+        register_stamp saved the merged registry over the original, losing the
+        merged records with no copy; the next start then saw a clean file.
+        """
+        import glob
+        self._write(state_file, {
+            self.BATCH: {"owner": self.OWNER, "mode": "paid", "source": "pool_acquire"},
+            self.UPPER: {"owner": "shared", "mode": "free", "source": "direct_purchase"},
+        })
+        before = open(state_file).read()
+        mgr = StampOwnershipManager(state_file=state_file)
+        with patch("app.services.stamp_ownership._keep_pre_migration_copy", side_effect=OSError("no space")):
+            mgr.load_on_startup()
+            with caplog.at_level("ERROR", logger="app.services.stamp_ownership"):
+                assert mgr.register_stamp("cd" * 32, owner=self.OTHER, mode="paid", source="pool_acquire")
+                mgr.remove_stamp(self.BATCH)
+        # Nothing was written over the original, and the changes are in memory.
+        assert open(state_file).read() == before
+        assert glob.glob(state_file + ".pre-558-*") == []
+        assert mgr.get_stamp_info("cd" * 32)["owner"] == self.OTHER
+        assert mgr.get_stamp_info(self.BATCH) is None
+        # One ERROR for the load's own save, one for each later write.
+        assert sum("could not be copied aside" in r.message for r in caplog.records) == 3
+
+        # Once copying works again, the next save copies the original first.
+        mgr.register_stamp("ef" * 32, owner=self.OWNER, mode="paid", source="pool_acquire")
+        copies = glob.glob(state_file + ".pre-558-*")
+        assert len(copies) == 1 and open(copies[0]).read() == before
+        saved = self._read(state_file)
+        assert set(saved) == {"cd" * 32, "ef" * 32}
+
+        # Later saves do not copy again.
+        mgr.remove_stamp("ef" * 32)
+        assert len(glob.glob(state_file + ".pre-558-*")) == 1
+
+    def test_failed_copy_leaves_no_partial_file(self, state_file):
+        import glob
+        import os
+        self._write(state_file, {self.UPPER: {"owner": self.OWNER, "mode": "paid"}})
+        before = open(state_file).read()
+
+        def partial_then_fail(src, dst, *a, **k):
+            dst.write(src.read(10))
+            raise OSError(28, "No space left on device")
+
+        with patch("app.services.stamp_ownership.shutil.copyfileobj", side_effect=partial_then_fail):
+            StampOwnershipManager(state_file=state_file).load_on_startup()
+        assert glob.glob(state_file + ".pre-558-*") == []
+        assert [f for f in os.listdir(os.path.dirname(state_file)) if f.startswith(".tmp")] == []
+        assert open(state_file).read() == before
+
+        # fsync failing after a full copy is handled the same way.
+        with patch("app.services.stamp_ownership.os.fsync", side_effect=OSError(5, "I/O error")):
+            StampOwnershipManager(state_file=state_file).load_on_startup()
+        assert glob.glob(state_file + ".pre-558-*") == []
+        assert [f for f in os.listdir(os.path.dirname(state_file)) if f.startswith(".tmp")] == []
+
+    def test_copies_in_the_same_second_get_distinct_names(self, state_file):
+        import glob
+        with patch("app.services.stamp_ownership._utc_stamp", return_value="20260101T000000Z"):
+            self._write(state_file, {self.UPPER: {"owner": self.OWNER, "mode": "paid"}})
+            first = open(state_file).read()
+            StampOwnershipManager(state_file=state_file).load_on_startup()
+            self._write(state_file, {self.MIXED: {"owner": self.OTHER, "mode": "paid"}})
+            second = open(state_file).read()
+            StampOwnershipManager(state_file=state_file).load_on_startup()
+        copies = sorted(glob.glob(state_file + ".pre-558-*"))
+        assert copies == [state_file + ".pre-558-20260101T000000Z",
+                          state_file + ".pre-558-20260101T000000Z-1"]
+        assert open(copies[0]).read() == first
+        assert open(copies[1]).read() == second
