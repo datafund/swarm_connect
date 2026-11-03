@@ -223,8 +223,9 @@ def _bee_error_detail(exc: httpx.HTTPError):
     except Exception:
         pass
     if not message:
-        message = (response.text or "").strip()[:200] or error_cause(exc)
-    return response.status_code, without_addresses(str(message))
+        message = (response.text or "").strip() or error_cause(exc)
+    # Capped before scrubbing: Bee's text is untrusted and of any length.
+    return response.status_code, without_addresses(str(message)[:200])
 
 
 def _is_owned_by(batch_id: str, wallet: str) -> bool:

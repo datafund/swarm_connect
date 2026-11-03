@@ -29,6 +29,26 @@ STAMP_ID = "a" * 64
 
 client = TestClient(app)
 
+# Hosts the gateway is configured with in these tests. The scrubber replaces
+# a bare word (or a hyphenated one without a dot) only when it is one of
+# these, so "timeout:30" and "chain-id:100" stay (#549).
+CONFIGURED = {
+    "SWARM_BEE_API_URL": "http://bee:1633",
+    "GNOSIS_RPC_URL": "http://bee-dev:1633/",
+    "BASE_RPC_URL": "https://rpc.internal/v2/not-a-real-key",
+    "X402_FACILITATOR_URL": "https://bee.internal/facilitator",
+}
+
+
+@pytest.fixture(autouse=True)
+def configured_hosts():
+    patches = [patch.object(settings, k, v) for k, v in CONFIGURED.items()]
+    for p in patches:
+        p.start()
+    yield
+    for p in reversed(patches):
+        p.stop()
+
 
 def _status_error(path, status=503, method="GET", **response_kwargs):
     """An HTTPStatusError exactly as httpx raises it for a Bee answer."""
@@ -181,6 +201,21 @@ class TestStampErrorsHideBeeAddress:
         _assert_hidden(detail)
         assert "lookup <host> on <address>: no such host" in detail, detail
 
+    def test_long_bee_message_is_capped_and_fast(self, call, verb):
+        # Bee's text is untrusted and of any length; it is capped at 200
+        # characters before scrubbing, so a 100 KB message cannot stall the
+        # request (#549, round-2 review).
+        import time
+        exc = _status_error("stamps/100/17", 400, method="POST",
+                            json={"code": 400, "message": "a" * 100_000})
+        start = time.perf_counter()
+        response = call(exc)
+        assert time.perf_counter() - start < 1.0
+
+        assert response.status_code == 400, response.text
+        detail = response.json()["detail"]
+        assert detail == f"Bee rejected the stamp {verb}: " + "a" * 200
+
     def test_bee_message_kept_as_is(self, call, verb):
         exc = _status_error("stamps/100/17", 400, method="POST",
                             json={"code": 400, "message": "out of funds"})
@@ -279,8 +314,35 @@ class TestWithoutAddresses:
         ("x509: certificate is not valid for any names, but wanted to match bee.example.",
          "x509: certificate is not valid for any names, but wanted to match <host>."),
         ("no route to bee.svc.cluster.local", "no route to <host>"),
-        ("gateway gw.lan, node node1.home and bee.local failed",
+        ("gateway gw.site.lan, node n1.house.home and bee.cluster.local failed",
          "gateway <host>, node <host> and <host> failed"),
+        ("service bee.ns.svc down", "service <host> down"),
+        # Configured hosts, bare or hyphenated, with any port (round 2).
+        ("dial bee:1000", "dial <address>"),
+        ("bee:8", "<address>"),
+        ("bee:99999", "<address>"),
+        ("address bee:99999: invalid port", "address <address>: invalid port"),
+        ("lookup bee-dev.", "lookup <host>."),
+        # The cost of matching configured names as whole words in any case:
+        # with the Bee host named "bee", the word itself is replaced too.
+        ("Bee is syncing", "<host> is syncing"),
+        ("dial BEE-DEV:1633 failed", "dial <address> failed"),
+        ("lookup x on 10.0.0.1:53", "lookup <host> on <address>"),
+        # Invalid ports, dotted host with a path, '@' in a password.
+        ("dial 10.0.0.1:99999", "dial <address>"),
+        ("rpc.example.com/v2/KEY failed", "<address> failed"),
+        ("user:p@ss@rpc.example.com:8545 x", "<address> x"),
+        # Partial and double percent-encoding.
+        ("bee%2Einternal%3A1633", "<address>"),
+        ("peer 10%2E0%2E0%2E1", "peer <address>"),
+        ("http%253A%252F%252Fbee.internal%253A1633%252Fx end", "<url> end"),
+        # Leading zeros, port fragments, multiaddrs.
+        ("peer 010.000.000.001 gone", "peer <address> gone"),
+        ("peer ::ffff:10.0.0.1:1633 gone", "peer <address> gone"),
+        ("dial 10.0.0.1:1633_x", "dial <address>_x"),
+        ("/dns4/bee.example.com/tcp/1634", "/dns4/<host>/tcp/<port>"),
+        ("/ip4/10.0.0.1/tcp/1634/p2p/QmPeerId", "/ip4/<address>/tcp/<port>/p2p/QmPeerId"),
+        ("/ip6/fd00::1/udp/1634/quic", "/ip6/<address>/udp/<port>/quic"),
         ("resolve bee.internal.", "resolve <host>."),
     ])
     def test_replaces_addresses(self, text, expected):
@@ -301,7 +363,7 @@ class TestWithoutAddresses:
         # Numbers that look like addresses but are not.
         "at 12:34:56",
         "slice [0:10]",
-        "bee version 2.8.1",
+        "node version 2.8.1",
         "x 1.2.300.4",
         "batch 0xabc: not found",
         "HTTP 400",
@@ -320,6 +382,38 @@ class TestWithoutAddresses:
         "panic at main.go:1633",
         "lookup failed",
         "e.g. this, i.e. that.",
+        # Fields that look like word:number (round 2); none is a configured host.
+        "CurrentPrice:24000",
+        "gasLimit:21000",
+        "nonce:1234",
+        "expected:2048 actual:1024",
+        "neighborhood:1633",
+        "pageSize:1024",
+        "chain-id:100",
+        "retry-after:120",
+        "content-length:4096",
+        "pool-17-abcd:1",
+        "lookup failed: no such host",
+        # Short IPv6-like forms and ordinary .local/.home words.
+        "::",
+        "a::b",
+        "cafe::",
+        "file.local",
+        "my.home",
+        "see app/services/x.py/ and/or",
     ])
     def test_keeps_text_that_is_not_an_address(self, text):
         assert without_addresses(text) == text
+
+    @pytest.mark.parametrize("unit", [
+        "a", "1", ".", ":", "-", "%3A", "@", "a.", "a:", "1.", "1.1.1.1:", "a-",
+        "a@", "a:a@", "::", "a::", "/", "a.b/", "http://", "a://", "%25",
+        "/ip4/", "lookup a.", "certificate is valid for a, ", "[1:", "a.a:1",
+        "bee:", "a.internal.", "::ffff:1.1.1.1:",
+    ])
+    def test_100kb_adversarial_input_is_fast(self, unit):
+        import time
+        text = (unit * (100_000 // len(unit) + 1))[:100_000]
+        start = time.perf_counter()
+        without_addresses(text)
+        assert time.perf_counter() - start < 0.5, f"slow on {unit!r} x 100 KB"
