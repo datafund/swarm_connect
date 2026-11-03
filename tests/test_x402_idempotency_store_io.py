@@ -34,7 +34,9 @@ def _wait_until(predicate, timeout=3.0):
 def store(tmp_path, monkeypatch):
     s = IdempotencyStore(state_file=str(tmp_path / "idem.json"))
     monkeypatch.setattr(idem, "idempotency_store", s)
-    monkeypatch.setattr(idem, "WRITE_RETRY_SECONDS", 0)
+    # raising=False: the base has no such setting; the behavioural tests then fail
+    # on their assertions there, not on this fixture.
+    monkeypatch.setattr(idem, "WRITE_RETRY_SECONDS", 0, raising=False)
     return s
 
 
@@ -198,3 +200,82 @@ def test_health_shows_an_unresponsive_idempotency_store(store, monkeypatch):
         response = asyncio.run(read_root())
     warning = next(w for w in response["x402"]["warnings"] if "IDEMPOTENCY_UNAVAILABLE" in w)
     assert "unresponsive" in warning and response["status"] == "ok"
+
+
+# --- PR #569 review 1 --------------------------------------------------------
+
+def test_an_idempotency_hang_leaves_unkeyed_paid_requests_working(fac, store, monkeypatch):
+    """The idempotency store has its own I/O lane: its hang refuses keyed requests only,
+    and /health names the idempotency file, not the settlement-unknown one."""
+    from unittest.mock import patch as p
+    from app.core.config import settings
+    from app.main import read_root
+    monkeypatch.setattr(settings, "X402_SETTLEMENT_STATE_WRITE_TIMEOUT_SECONDS", 0.2)
+    gate, _ = _gate_writes(monkeypatch)
+    app, bought = _app(fac)
+    c = TestClient(app)
+    keyed = c.post("/api/v1/stamps/", json={"depth": 17},
+                   headers={"X-PAYMENT": pay(), "Idempotency-Key": "k-hang"})
+    assert keyed.status_code == 503
+    time.sleep(0.3)                                  # the hung write is now older than the timeout
+    unkeyed = c.post("/api/v1/stamps/", json={"depth": 17}, headers={"X-PAYMENT": pay()})
+    assert unkeyed.status_code == 201 and len(bought) == 1
+    keyed2 = c.post("/api/v1/stamps/", json={"depth": 17},
+                    headers={"X-PAYMENT": pay(), "Idempotency-Key": "k-hang2"})
+    assert keyed2.status_code == 503 and keyed2.json()["detail"]["code"] == "IDEMPOTENCY_UNAVAILABLE"
+    with p("app.main.settings") as s, \
+         p("app.x402.base_balance.check_base_eth_balance", new=AsyncMock(return_value={
+             "ok": True, "is_critical": False, "balance_eth": 1.0, "threshold_eth": 0.005,
+             "critical_eth": 0.001, "address": "0xT", "warning": None})), \
+         p("app.x402.preflight.check_preflight_balances", new=AsyncMock(return_value={
+             "can_accept": True, "warnings": [], "errors": [], "balances": {}})), \
+         p("app.services.swarm_api.get_node_status_summary",
+           new=AsyncMock(return_value={"healthy": True, "network_availability": "Available", "warnings": []})):
+        s.X402_ENABLED = True
+        s.PROJECT_NAME = "t"
+        response = asyncio.run(read_root())
+    warnings = response["x402"]["warnings"]
+    assert any(w.startswith("IDEMPOTENCY_UNAVAILABLE") and "idem.json" in w for w in warnings)
+    assert not any("PAYMENT_STATE_UNAVAILABLE" in w for w in warnings)
+    assert response["status"] == "ok"
+    gate.set()
+
+
+def test_background_writes_are_coalesced(store, monkeypatch):
+    """A burst of changes while a write runs costs one more write, not one per change."""
+    writes = []
+    real = idem.atomic_write_json
+    started = threading.Event()
+
+    def slow(path, data):
+        writes.append(len(data["entries"]))
+        started.set()
+        time.sleep(0.1)
+        real(path, data)
+
+    monkeypatch.setattr(idem, "atomic_write_json", slow)
+    tokens = []
+    for i in range(50):
+        state, _, token = store.begin(f"e{i}", "h", f"a{i}")
+        tokens.append(token)
+    store.mark_settled("e0", tokens[0], "a0", "0xtx", persist="background")
+    assert started.wait(2)
+    for i in range(1, 50):
+        store.mark_settled(f"e{i}", tokens[i], f"a{i}", "0xtx", persist="background")
+    assert _wait_until(lambda: idem._idempotency_io.backlog() == 0, timeout=5)
+    assert len(writes) <= 3                       # the running one, at most one coalesced, no 49
+    assert writes[-1] == 50                       # the last write has every change
+
+
+def test_the_stall_clears_under_constant_registry_traffic(store, monkeypatch):
+    """The probe decision uses the store's own backlog, not the registry's."""
+    gate = threading.Event()
+    blockers = [st._submit_registry_io(gate.wait, 10) for _ in range(3)]
+    try:
+        store.mark_stalled("test")
+        assert store.unavailable                   # schedules a probe on the idempotency lane
+        assert _wait_until(lambda: not store.unavailable)
+    finally:
+        gate.set()
+        for b in blockers:
+            b.result(5)

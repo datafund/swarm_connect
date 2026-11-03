@@ -102,7 +102,9 @@ async def lifespan(app: FastAPI):
     # Pending settlement-state writes (#553): wait for them, bounded, so a
     # write-ahead or resolution in progress is not cut off by the exit.
     from app.x402.settlement import shutdown_registry_io
+    from app.x402.idempotency import shutdown_idempotency_io
     await asyncio.to_thread(shutdown_registry_io, 5.0)
+    await asyncio.to_thread(shutdown_idempotency_io, 5.0)
 
     # Close shared HTTP client (must be last)
     await close_client()

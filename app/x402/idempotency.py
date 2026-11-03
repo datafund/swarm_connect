@@ -69,12 +69,23 @@ from starlette.datastructures import UploadFile
 from starlette.responses import Response
 
 from app.core.atomic_io import atomic_write_json
+from app.core.io_lane import IOLane
 from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
 # While the state file cannot be written, retry (or probe) at most this often.
 WRITE_RETRY_SECONDS = 5.0
+
+# The store's own I/O lane (#569): its writes are whole-file rewrites, which
+# can be large, and a hang here must refuse only keyed requests, not delay
+# or trip the settlement-unknown registry's lane.
+_idempotency_io = IOLane(2, "x402-idempotency-state")
+
+
+def shutdown_idempotency_io(timeout: float = 5.0) -> None:
+    """At gateway shutdown: wait, bounded, for pending idempotency writes."""
+    _idempotency_io.shutdown(timeout)
 
 IDEMPOTENCY_HEADER = "Idempotency-Key"
 REPLAYED_HEADER = "Idempotent-Replayed"
@@ -158,6 +169,7 @@ class IdempotencyStore:
         self._written_seq = 0
         self._last_write_attempt = 0.0
         self._retrying = False
+        self._queued_write = None     # the queued, not yet started write (coalescing)
         self._load()
 
     @property
@@ -262,8 +274,27 @@ class IdempotencyStore:
             self.schedule_persist()
 
     def schedule_persist(self):
-        from app.x402.settlement import _submit_registry_io
-        return _submit_registry_io(self._persist)
+        """Queue a write of the current state on the store's lane. Coalesced: while
+        a queued write has not started, it is returned instead of a new one; it
+        snapshots when it starts, so it includes every change made before then.
+        A burst of changes during a long write therefore costs one more write."""
+        with self._lock:
+            if self._queued_write is not None:
+                return self._queued_write
+            job = {}
+            fut = _idempotency_io.submit(self._run_queued_write, job)
+            job["future"] = fut
+            self._queued_write = fut
+            return fut
+
+    def _run_queued_write(self, job: dict) -> bool:
+        # schedule_persist holds `_lock` until job["future"] is set, so it is
+        # set by the time this acquires it.
+        with self._lock:
+            # Started: later changes need a write of their own.
+            if self._queued_write is job.get("future"):
+                self._queued_write = None
+        return self._persist()
 
     async def apersist(self, timeout: float) -> bool:
         """Write the current state off the event loop; wait at most `timeout`.
@@ -284,9 +315,8 @@ class IdempotencyStore:
             self._stalled = why
 
     def _retry_in_background(self) -> None:
-        from app.x402.settlement import _registry_io_backlog
-        if self._stalled and not self._write_error and _registry_io_backlog():
-            return      # pending writes clear the stall when they complete
+        if self._stalled and not self._write_error and _idempotency_io.backlog():
+            return      # this store's pending writes clear the stall when they complete
         with self._lock:
             if self._retrying or time.monotonic() - self._last_write_attempt < WRITE_RETRY_SECONDS:
                 return
@@ -300,8 +330,7 @@ class IdempotencyStore:
                 with self._lock:
                     self._retrying = False
 
-        from app.x402.settlement import _submit_registry_io
-        _submit_registry_io(run)
+        _idempotency_io.submit(run)
 
     def _save(self) -> None:
         """Kept for callers outside this module: writes now, on this thread."""
@@ -516,6 +545,7 @@ class IdempotencyStore:
             self._unreadable = None
             self._write_error = None
             self._stalled = None
+            self._queued_write = None
             self._last_write_attempt = 0.0
 
 
@@ -725,11 +755,10 @@ async def arecord_settling(request: Request) -> bool:
     idem = getattr(request.state, "x402_idempotency_id", None)
     if idem is None:
         return True
-    from app.x402.settlement import _registry_io_oldest_age
     timeout = settings.X402_SETTLEMENT_STATE_WRITE_TIMEOUT_SECONDS
     if idempotency_store.unavailable:
         return False
-    if _registry_io_oldest_age() > timeout:
+    if _idempotency_io.oldest_age() > timeout:
         idempotency_store.mark_stalled(f"a state write has been pending for over {timeout}s")
         return False
     auth_key = getattr(request.state, "x402_auth_key", None)
