@@ -79,8 +79,13 @@ class _DistinctCallerCounter:
         gateway_distinct_callers: the first scrape after midnight already reads
         the new day. This value keeps that final count. It is exported all
         through the next day, so panel 118 can attribute it to the day it
-        belongs to. It is 0 when the previous day was not counted by this
-        process (a restart, or a day with no rollover in between).
+        belongs to. It is 0 when this process has not counted the previous
+        day: it started after that day ended, or no rollover fell between the
+        two days. If the process restarted partway through the previous day,
+        the value is the count since that restart, not the whole day's.
+        Neither case overcounts, and panel 118 takes the larger of this and
+        the day's highest count, so a short value only leaves the bar where
+        the day gauge already put it.
         """
         with self._lock:
             self._roll_over_locked()

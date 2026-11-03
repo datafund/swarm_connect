@@ -850,16 +850,39 @@ def test_verify_uses_the_destination_of_the_last_upload(e):
     assert "destination" in r.stderr
 
 
-# Runs argv with SIGINT at its default action. A child inherits an ignored
-# SIGINT, and a shell without job control ignores SIGINT in every command it
-# starts with `&`, so a suite launched as `pytest ... &` ran the restore below
-# with Ctrl-C ignored by bash, the docker shim, sh and tar alike: nothing
-# reacted, and p.wait timed out after 30 s whatever the load. bash cannot undo
-# that itself (a trap on a signal ignored at entry is dropped), so this resets
-# it before exec, to the state a terminal's Ctrl-C finds.
-def with_default_sigint(argv):
-    return [sys.executable, "-c", "import os, signal, sys; signal.signal(signal.SIGINT, signal.SIG_DFL); "
-            "os.execvp(sys.argv[1], sys.argv[1:])", *argv]
+# Popen arguments that start a child with SIGINT, SIGPIPE and SIGXFSZ at their
+# default actions, the state a terminal's Ctrl-C finds. A child inherits an
+# ignored signal, and a shell without job control ignores SIGINT in every
+# command it starts with `&`, so a suite launched as `pytest ... &` ran the
+# restore below with Ctrl-C ignored by bash, the docker shim, sh and tar alike:
+# nothing reacted, and p.wait timed out after 30 s whatever the load. Python
+# itself ignores SIGPIPE and SIGXFSZ. bash cannot undo any of this (a trap on a
+# signal ignored at entry is silently dropped, so restore_bee_keys.sh would
+# lose its INT and PIPE traps), so the child is reset before exec:
+# restore_signals puts SIGPIPE and SIGXFSZ back to the default, and preexec_fn
+# does the same for SIGINT. No interpreter sits in between: an exec through
+# Python would ignore SIGPIPE again on the way.
+def _default_sigint():
+    import signal
+    signal.signal(signal.SIGINT, signal.SIG_DFL)
+
+
+DEFAULT_SIGNALS = {"restore_signals": True, "preexec_fn": _default_sigint}
+
+
+def test_default_signals_let_bash_keep_its_int_and_pipe_traps():
+    """Even from a parent that ignores SIGINT (as under `&`) and SIGPIPE (as
+    Python does), bash started this way keeps traps on both."""
+    import signal
+    saved = signal.signal(signal.SIGINT, signal.SIG_IGN)     # what `pytest ... &` gives us
+    try:
+        assert signal.getsignal(signal.SIGPIPE) == signal.SIG_IGN   # Python's own default
+        out = subprocess.run(["bash", "-c", "trap 'exit 130' INT TERM HUP PIPE; trap -p"],
+                             capture_output=True, text=True, timeout=30, **DEFAULT_SIGNALS).stdout
+    finally:
+        signal.signal(signal.SIGINT, saved)
+    assert "SIGINT" in out, out
+    assert "SIGPIPE" in out, out
 
 
 def test_interrupted_restore_leaves_no_partial_keys(e):
@@ -873,9 +896,9 @@ def test_interrupted_restore_leaves_no_partial_keys(e):
     m = make_manifest(e.tmp / "m.sha256", files)
     data = make_tar(files)
     assert len(data) > 4 * 10240
-    p = subprocess.Popen(with_default_sigint(["bash", str(RESTORE), "restore", "vol-r", str(m)]),
+    p = subprocess.Popen(["bash", str(RESTORE), "restore", "vol-r", str(m)],
                          env=e.env, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                         stderr=subprocess.PIPE, start_new_session=True)
+                         stderr=subprocess.PIPE, start_new_session=True, **DEFAULT_SIGNALS)
     p.stdin.write(data[:3 * 10240])
     p.stdin.flush()
     keys = e.volumes / "vol-r" / "keys"

@@ -359,3 +359,16 @@ class TestPreviousDayFinalCount:
     def test_a_new_process_reports_no_previous_day(self):
         from app.middleware import client_metrics
         assert client_metrics._DistinctCallerCounter().previous_day_count() == 0
+
+    def test_a_restart_partway_through_a_day_reports_the_count_since_the_restart(self, monkeypatch):
+        """Documented, not a defect: a process started during day D counts only
+        the callers it saw, so D's final count is the count since the restart."""
+        from app.middleware import client_metrics
+        day = {"v": "2026-11-02"}
+        c = client_metrics._DistinctCallerCounter()       # started partway through 11-02
+        monkeypatch.setattr(c, "_today", staticmethod(lambda: day["v"]))
+        c._day = day["v"]
+        for i in range(3):
+            c.observe(f"198.51.100.{i}")
+        day["v"] = "2026-11-03"
+        assert c.previous_day_count() == 3
