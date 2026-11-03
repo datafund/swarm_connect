@@ -94,7 +94,7 @@ def test_all_results_exist_from_startup():
     from prometheus_client import REGISTRY
     names = {s.labels["result"] for m in REGISTRY.collect() if m.name == "gateway_x402_settlements"
              for s in m.samples if s.name == "gateway_x402_settlements_total"}
-    assert {"settled", "refused", "error", "settled_not_delivered"} <= names
+    assert {"settled", "refused", "error", "settled_not_delivered", "refused_after_unknown"} <= names
 
 
 def test_settled_but_not_delivered_is_counted_and_not_recorded_as_delivered():
@@ -111,6 +111,39 @@ def test_an_unknown_settlement_outcome_is_an_error_not_a_refusal():
     """Middleware fallback path (route without a settle point)."""
     before_error, before_refused = _count("error"), _count("refused")
     r = _run(RuntimeError("facilitator timeout"), path="/api/v1/data/manifest")
-    assert r.status_code == 402
+    # 502 PAYMENT_SETTLEMENT_UNKNOWN since #553 (was 402, which reads as a refusal).
+    assert r.status_code == 502
+    assert r.json()["code"] == "PAYMENT_SETTLEMENT_UNKNOWN"
     assert _count("error") == before_error + 1
     assert _count("refused") == before_refused
+
+
+NONCE = "0x" + "00" * 32   # create_valid_payment_header's
+
+
+def _events(kind):
+    # Most recent first.
+    return [e for e in read_audit_log() if e["event_type"] == kind]
+
+
+def test_payment_records_carry_the_authorization_nonce():
+    """#553 review 2: reconciliation matches a transfer to its request by the nonce."""
+    assert _run(SettleResponse(success=True, transaction=TX)).status_code == 200
+    assert _events("payment_settled")[0]["data"]["nonce"] == NONCE
+    assert _events("payment_delivered")[0]["data"]["nonce"] == NONCE
+
+
+def test_refused_and_failed_settlements_carry_the_nonce():
+    from app.x402.settlement import outcome_unknown, replay_guard
+    _run(SettleResponse(success=False, errorReason="insufficient_funds"))
+    assert _events("payment_settled")[0]["data"]["nonce"] == NONCE
+    replay_guard.reset()
+    _run(RuntimeError("facilitator timeout"))
+    assert _events("payment_failed")[0]["data"]["nonce"] == NONCE
+    replay_guard.reset(); outcome_unknown.reset()
+    _run(RuntimeError("facilitator timeout"), path="/api/v1/data/manifest")
+    assert _events("payment_failed")[0]["data"]["nonce"] == NONCE
+    replay_guard.reset(); outcome_unknown.reset()
+    _run(SettleResponse(success=True, transaction=TX), path="/api/v1/stamps/fail")
+    failed = _events("payment_failed")[0]
+    assert failed["data"]["stage"] == "delivery_after_settlement" and failed["data"]["nonce"] == NONCE

@@ -44,6 +44,7 @@ for _var, _name in (
     ("STAMP_SPEND_BUDGET_STATE_FILE", "stamp_spend_budget.json"),
     ("X402_AUDIT_LOG_PATH", "x402_audit.jsonl"),
     ("X402_IDEMPOTENCY_STATE_FILE", "x402_idempotency.json"),
+    ("X402_SETTLEMENT_UNKNOWN_STATE_FILE", "x402_settlement_unknown.json"),
 ):
     os.environ[_var] = os.path.join(_STATE_DIR, _name)
 
@@ -95,12 +96,14 @@ def _reset_payment_replay_guard():
     The guard is process-wide by design (one authorization, one delivery), and
     tests reuse the same signed test authorization.
     """
-    from app.x402.settlement import replay_guard
+    from app.x402.settlement import outcome_unknown, replay_guard
     from app.x402.idempotency import idempotency_store
     replay_guard.reset()
+    outcome_unknown.reset()
     idempotency_store.reset()
     yield
     replay_guard.reset()
+    outcome_unknown.reset()
     idempotency_store.reset()
 
 

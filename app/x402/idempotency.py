@@ -224,11 +224,24 @@ class IdempotencyStore:
                 if entry["request_hash"] != request_hash:
                     return "mismatch", None, None
                 if entry.get("auth") == auth:
+                    # The authorization that paid for the original. Unless its
+                    # settlement got no answer: then "sign a new payment" (a
+                    # 402 with accepts) could charge twice (#553).
+                    if entry.get("state") == SETTLING:
+                        return SETTLING, entry, None
                     return "original_auth", None, None
                 return entry["state"], entry, None
             token = secrets.token_hex(8)
             self._pending[eid] = (request_hash, now + IN_FLIGHT_TIMEOUT_SECONDS, token)
             return "new", None, token
+
+    def peek(self, eid: str) -> Optional[dict]:
+        """The stored entry for eid, if any and not expired. Changes nothing."""
+        with self._lock:
+            entry = self._entries.get(eid)
+            if entry is None or entry.get("expires", 0) <= time.time():
+                return None
+            return dict(entry)
 
     def _owns(self, eid: str, token: str) -> bool:
         pending = self._pending.get(eid)
@@ -414,17 +427,53 @@ def _replay_response(entry: dict, payer: str) -> Response:
     return Response(content=body, status_code=entry["status"], headers=headers)
 
 
-def _log_replay(request: Request, payer: str, entry: dict) -> None:
+def _log_replay(request: Request, payer: str, entry: dict, retry_nonce: Optional[str] = None) -> None:
     # A verify with no settle: reconciliation needs to see why.
     from app.core.client_ip import get_client_ip
     from app.x402.audit import AuditEventType, log_audit_event
     log_audit_event(
         event_type=AuditEventType.PAYMENT_IDEMPOTENT_REPLAY,
         data={"method": request.method, "path": request.url.path,
-              "transaction_hash": entry.get("transaction"), "network": settings.X402_NETWORK},
+              "transaction_hash": entry.get("transaction"), "network": settings.X402_NETWORK,
+              # The retry's own authorization: verified, never settled.
+              "nonce": retry_nonce},
         client_ip=get_client_ip(request),
         wallet_address=payer,
     )
+
+
+def _settlement_unknown_409(entry: dict) -> HTTPException:
+    """The answer for a key whose first request's settlement got no answer."""
+    return HTTPException(status_code=409, detail={
+        "code": "IDEMPOTENCY_KEY_SETTLEMENT_UNKNOWN",
+        "message": ("The payment for the first request with this Idempotency-Key was sent for "
+                    "settlement but no answer came back, so it may or may not have been "
+                    "collected. This request was not charged, and this key stays taken. "
+                    "Do not pay again from this response. Check on-chain whether the "
+                    "original authorization (nonce below) was used. If it was, contact the "
+                    "operator with the nonce. If it was not, the facilitator may still submit "
+                    "it, so wait until its validBefore has passed, or cancel it on-chain with "
+                    "EIP-3009 cancelAuthorization, then retry with a new payment and a new "
+                    "Idempotency-Key."),
+        "nonce": entry.get("nonce"),
+        "x402_status": "settlement_unknown",
+    })
+
+
+async def raise_if_key_settlement_unknown(request: Request, payer: str) -> None:
+    """Raise the key's settlement-unknown 409 if this request's Idempotency-Key has one.
+
+    For a request refused before the key is looked up (its authorization is
+    reserved because it settled under another key): the key's own answer is
+    the 409, not a 402 "already used" that clients pay from (#553).
+    """
+    key = request.headers.get(IDEMPOTENCY_HEADER)
+    if key is None or not (0 < len(key) <= MAX_KEY_LENGTH):
+        return
+    entry = idempotency_store.peek(entry_id(payer, request.method, request.url.path, key))
+    if entry is not None and entry.get("state") == SETTLING \
+            and entry.get("request_hash") == await _request_hash(request):
+        raise _settlement_unknown_409(entry)
 
 
 async def begin_idempotent_request(request: Request, payer: str,
@@ -454,7 +503,7 @@ async def begin_idempotent_request(request: Request, payer: str,
         return eid, token
     if state == DONE:
         logger.info(f"x402: idempotent replay for payer {payer} on {request.url.path}; new payment not settled")
-        _log_replay(request, payer, entry)
+        _log_replay(request, payer, entry, auth_key[1])
         raise IdempotentReplay(_replay_response(entry, payer))
     if state == "unavailable":
         raise HTTPException(status_code=503, detail={
@@ -469,16 +518,7 @@ async def begin_idempotent_request(request: Request, payer: str,
                         "Retry with the same key shortly; this payment was not charged."),
         })
     if state == SETTLING:
-        raise HTTPException(status_code=409, detail={
-            "code": "IDEMPOTENCY_KEY_SETTLEMENT_UNKNOWN",
-            "message": ("The payment for the first request with this Idempotency-Key was sent for "
-                        "settlement but no answer came back, so it may or may not have been "
-                        "collected. This payment was not charged. Before paying again, check "
-                        "whether the original authorization (nonce below) was used on-chain; if "
-                        "it was, contact the operator."),
-            "nonce": entry.get("nonce"),
-            "x402_status": "settlement_unknown",
-        })
+        raise _settlement_unknown_409(entry)
     if state == DELIVERED:
         tx = entry.get("transaction") or "unknown"
         raise HTTPException(status_code=409, headers={"X-Payment-Transaction": tx}, detail={

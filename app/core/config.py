@@ -148,6 +148,15 @@ class Settings(BaseSettings):
     X402_IDEMPOTENCY_STATE_FILE: str = "data/x402_idempotency.json"
     # Bound on stored entries; the oldest completed ones are evicted first.
     X402_IDEMPOTENCY_MAX_ENTRIES: int = 10000
+    # Payment authorizations whose settlement got no answer, kept 24 h so a
+    # retry of a possibly collected payment is never answered with a payable
+    # 402, and work that already ran is not run again, across restarts (#553).
+    X402_SETTLEMENT_UNKNOWN_STATE_FILE: str = "data/x402_settlement_unknown.json"
+    # Longest wait for a write of that file on the request path. A write-ahead
+    # that takes longer (a hung disk) refuses the payment with 503, unsettled.
+    # Validated: > 0, at most 60, finite (nan would break the event loop's
+    # timeout handling); anything else stops the gateway at startup.
+    X402_SETTLEMENT_STATE_WRITE_TIMEOUT_SECONDS: float = Field(5.0, gt=0, le=60, allow_inf_nan=False)
 
     # === Base Chain Settings (for monitoring USDC receipts) ===
     BASE_RPC_URL: str = "https://sepolia.base.org"

@@ -51,6 +51,7 @@ def atomic_write_json(path: str, data: Any) -> None:
             f.flush()
             os.fsync(f.fileno())
         os.replace(tmp_path, path)
+        _fsync_directory(directory)
     except Exception:
         # Never leave a partial temp file behind on failure.
         try:
@@ -60,7 +61,22 @@ def atomic_write_json(path: str, data: Any) -> None:
         raise
 
 
-def load_json_state(path: str) -> Optional[dict]:
+def _fsync_directory(directory: str) -> None:
+    """Make the rename itself durable. Best effort: some platforms and
+    filesystems cannot open or fsync a directory (e.g. Windows)."""
+    try:
+        fd = os.open(directory, os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(fd)
+    except OSError:
+        pass
+    finally:
+        os.close(fd)
+
+
+def load_json_state(path: str, consequence: Optional[str] = None) -> Optional[dict]:
     """Read a JSON object from ``path`` for a store that must not lose data.
 
     Returns None when the file does not exist, which is the only case in which
@@ -80,25 +96,27 @@ def load_json_state(path: str) -> Optional[dict]:
     except FileNotFoundError:
         return None
     except Exception as e:
-        raise unreadable_state(path, e) from e
+        raise unreadable_state(path, e, consequence) from e
     if not isinstance(data, dict):
-        raise unreadable_state(path, f"expected a JSON object, got {type(data).__name__}")
+        raise unreadable_state(path, f"expected a JSON object, got {type(data).__name__}", consequence)
     return data
 
 
-def unreadable_state(path: str, reason: Any) -> StateLoadError:
+def unreadable_state(path: str, reason: Any, consequence: Optional[str] = None) -> StateLoadError:
     """Build the StateLoadError for an unreadable state file, backing it up once.
+
+    `consequence` replaces the default "Refusing to start ..." sentence, for a
+    store that fails closed some other way.
 
     The containers restart on failure, so this runs on every attempt of a crash
     loop. A new copy is made only when no existing backup has identical
     content, so the loop cannot fill the volume.
     """
     kept = keep_corrupt_copy(path)
-    return StateLoadError(
-        f"State file {path} could not be read ({reason}); {kept}. Refusing to start "
-        f"with empty state, which would overwrite it. Repair or restore the file, "
-        f"or move it away deliberately to start fresh."
-    )
+    if consequence is None:
+        consequence = ("Refusing to start with empty state, which would overwrite it. Repair "
+                       "or restore the file, or move it away deliberately to start fresh.")
+    return StateLoadError(f"State file {path} could not be read ({reason}); {kept}. {consequence}")
 
 
 def keep_corrupt_copy(path: str) -> str:

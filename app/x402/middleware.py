@@ -13,6 +13,7 @@ ensuring malformed requests get 422 errors instead of 402.
 Uses the official x402 Python SDK for payment handling.
 """
 import json
+import asyncio
 import logging
 from typing import Callable, Optional
 
@@ -215,6 +216,43 @@ def create_402_response(
 _RESOURCE_FIELDS = ("batchID", "batch_id", "reference", "credited_bytes")
 
 
+def _task_is_being_cancelled() -> bool:
+    """Whether this request's own task is being cancelled.
+
+    Task.cancelling() exists from Python 3.11. Python 3.10 offers no reliable
+    way to tell a cancellation of this task from an inner CancelledError, so
+    there every CancelledError counts as a real cancellation and is re-raised:
+    the safe choice, since swallowing a real one would keep a cancelled task
+    running. The outcome is recorded either way (settlement_interrupted).
+    """
+    task = asyncio.current_task()
+    if task is None:
+        return False
+    cancelling = getattr(task, "cancelling", None)
+    if cancelling is None:          # Python 3.10
+        return True
+    return bool(cancelling())
+
+
+def _settlement_unknown_response(request: Request) -> JSONResponse:
+    """502 PAYMENT_SETTLEMENT_UNKNOWN: the work ran, the facilitator did not answer.
+
+    Fields at the top level (as first documented) and under `detail`, like
+    every other payment-settlement error (#553).
+    """
+    from app.x402.settlement import OUTCOME_UNKNOWN_ADVICE, OUTCOME_UNKNOWN_HEADERS, request_nonce
+    body = {
+        "code": "PAYMENT_SETTLEMENT_UNKNOWN",
+        "message": ("The request was processed, but the payment facilitator did not answer, so "
+                    "it is unknown whether the payment was collected. The result is withheld. "
+                    + OUTCOME_UNKNOWN_ADVICE),
+        "nonce": request_nonce(request),
+        "x402_status": "settlement_unknown",
+    }
+    return JSONResponse(status_code=502, content={"detail": dict(body), **body},
+                        headers=dict(OUTCOME_UNKNOWN_HEADERS))
+
+
 def _log_delivery(request: Request, settlement, body: bytes, client_ip: str, payer: Optional[str]) -> None:
     """One audit line linking a settlement to what it paid for (#375).
 
@@ -222,6 +260,7 @@ def _log_delivery(request: Request, settlement, body: bytes, client_ip: str, pay
     a "paid but got nothing" question can be answered from the audit log.
     """
     from app.x402.audit import AuditEventType, log_audit_event
+    from app.x402.settlement import request_nonce
     resource = {}
     # Paid routes answer with small JSON bodies; skip anything else rather than
     # parse a large payload just for the audit line.
@@ -242,6 +281,7 @@ def _log_delivery(request: Request, settlement, body: bytes, client_ip: str, pay
             "amount": getattr(requirements, "max_amount_required", None),
             "network": settings.X402_NETWORK,
             "resource": resource,
+            "nonce": request_nonce(request),
         },
         client_ip=client_ip,
         wallet_address=payer,
@@ -423,8 +463,16 @@ class X402Middleware(BaseHTTPMiddleware):
         if x402_mode == "paid":
             try:
                 out = await self._finish_paid(request, response)
-            except BaseException:
+            except BaseException as exc:
                 finish_idempotent_request(request, None)
+                # An inner CancelledError at the fallback settle point (the
+                # facilitator call was cancelled, this task was not): still a
+                # response to send, the structured unknown outcome (#553). A
+                # cancellation of this task itself is re-raised.
+                from app.x402.settlement import AFTER_WORK
+                if (getattr(request.state, "x402_settlement_interrupted", None) == AFTER_WORK
+                        and not _task_is_being_cancelled()):
+                    return _settlement_unknown_response(request)
                 raise
             # Stores a 2xx result for the request's Idempotency-Key, if any.
             finish_idempotent_request(request, out)
@@ -441,7 +489,9 @@ class X402Middleware(BaseHTTPMiddleware):
         of its own, and then checks the result: SettleResponse reports failure
         with success=False rather than an exception (#355).
         """
-        from app.x402.settlement import replay_guard
+        from app.x402.settlement import (AFTER_WORK, OUTCOME_UNKNOWN_ADVICE, OUTCOME_UNKNOWN_HEADERS,
+                                         outcome_unknown, outcome_unknown_refusal, replay_guard,
+                                         request_nonce)
         from app.x402.audit import log_payment_failed, log_payment_settled
 
         settlement = getattr(request.state, "x402_settlement", None)
@@ -461,6 +511,23 @@ class X402Middleware(BaseHTTPMiddleware):
             payment_payload = getattr(request.state, "x402_payment", None)
             payment_requirements = getattr(request.state, "x402_requirements", None)
             unknown_outcome = False
+            auth_key = getattr(request.state, "x402_auth_key", None)
+            # Write-ahead, AFTER_WORK: the work has run (#553). If it cannot be
+            # written, do not settle: the result is withheld, nothing charged,
+            # and the authorization released for a retry.
+            prior, recorded, gen = await outcome_unknown.abegin_settlement(auth_key, AFTER_WORK)
+            if not recorded:
+                from app.x402.settlement import (payment_state_unavailable_detail,
+                                                 settlement_in_progress_refusal)
+                if outcome_unknown.in_flight(auth_key):
+                    refusal = settlement_in_progress_refusal(auth_key, request, work_ran=True)
+                    d = refusal.detail
+                    return JSONResponse(status_code=409, headers=refusal.headers,
+                                        content={"detail": d, "code": d["code"], "message": d["message"]})
+                replay_guard.release(auth_key)
+                detail = payment_state_unavailable_detail(work_ran=True)
+                return JSONResponse(status_code=503, content={"detail": detail, **detail},
+                                    headers={"Retry-After": "60"})
             from app.x402.idempotency import record_settling, settlement_refused
             record_settling(request)
             try:
@@ -470,37 +537,73 @@ class X402Middleware(BaseHTTPMiddleware):
                 )
                 failure = None if settlement.success else (settlement.error_reason or "unknown")
             except Exception as e:
+                outcome_unknown.release(auth_key)    # an unknown outcome now
                 logger.error(f"x402: Payment settlement failed: {type(e).__name__}: {e}", exc_info=True)
                 failure = f"{type(e).__name__}"
                 unknown_outcome = True
+            except BaseException as e:
+                # Interrupted (CancelledError) after the work ran: recorded as
+                # AFTER_WORK, then re-raised; no response can be sent (#553).
+                outcome_unknown.release(auth_key)
+                from app.x402.settlement import settlement_interrupted
+                settlement_interrupted(request, AFTER_WORK, e)
+                raise
+            # A definite answer stays in flight until its resolution is written
+            # (aresolve releases it): a duplicate in between is "in progress".
             if failure is not None:
                 logger.error(f"x402: settlement failed after delivery on {request.url.path}: {failure}")
                 if unknown_outcome:
                     # The facilitator may or may not have moved the money: not
-                    # a refusal. Same record as settlement.py uses for it.
+                    # a refusal. Same record as settlement.py uses for it. Not
+                    # a 402 either (#553): an x402 client pays again on a 402,
+                    # and the work has already run. The result stays withheld,
+                    # the idempotency entry stays "settling" and the
+                    # authorization stays reserved: its nonce may be spent.
                     log_payment_failed(client_ip=client_ip, reason=failure, stage="settle",
-                                       wallet_address=payer)
+                                       wallet_address=payer, nonce=request_nonce(request))
                     x402_settlements_total.labels(result="error").inc()
+                    # The write-ahead entry (AFTER_WORK, on disk) is the record:
+                    # the dependency stops any later attempt with it before the
+                    # work runs again, also once the reservation has lapsed.
+                    return _settlement_unknown_response(request)
                 else:
                     settlement_refused(request)
                     log_payment_settled(client_ip=client_ip, payer=payer, transaction_hash=None,
-                                        network=settings.X402_NETWORK, success=False, error_reason=failure)
-                    x402_settlements_total.labels(result="refused").inc()
-                return JSONResponse(
-                    status_code=402,
-                    content={
-                        "code": "PAYMENT_SETTLEMENT_FAILED",
-                        "message": f"The payment could not be settled ({failure}).",
-                        "x402_status": "settlement_failed",
-                    },
-                    headers={"X-Payment-Mode": "failed"},
-                )
+                                        network=settings.X402_NETWORK, success=False, error_reason=failure,
+                                        nonce=request_nonce(request))
+                    remembered = prior is not None
+                    x402_settlements_total.labels(
+                        result="refused_after_unknown" if remembered else "refused").inc()
+                    if not remembered:
+                        # Last: records first, then the removal write.
+                        await outcome_unknown.aresolve(auth_key, None, settled=False, gen=gen, release=True)
+                    if remembered:
+                        outcome_unknown.release(auth_key)    # nothing to resolve: the entry stays
+                        # An earlier attempt may have spent the nonce: no 402 (#553).
+                        # This route's work has now run: the write-ahead already
+                        # made the entry AFTER_WORK, so it never runs again.
+                        refusal = outcome_unknown_refusal(auth_key, failure, where="settle",
+                                                          request=request, work_ran=True)
+                        d = refusal.detail
+                        return JSONResponse(status_code=refusal.status_code,
+                                            content={"detail": d, "code": d["code"], "message": d["message"]},
+                                            headers=refusal.headers)
+                body = {
+                    "code": "PAYMENT_SETTLEMENT_FAILED",
+                    "message": f"The payment could not be settled ({failure}).",
+                    "x402_status": "settlement_failed",
+                }
+                # Top level as first documented, and under `detail` like the rest.
+                return JSONResponse(status_code=402, content={"detail": dict(body), **body},
+                                    headers={"X-Payment-Mode": "failed"})
             log_payment_settled(client_ip=client_ip, payer=payer,
                                 transaction_hash=getattr(settlement, "transaction", None),
-                                network=settings.X402_NETWORK, success=True)
+                                network=settings.X402_NETWORK, success=True, nonce=request_nonce(request))
             from app.x402.idempotency import record_settlement
             record_settlement(request, settlement)
             x402_settlements_total.labels(result="settled").inc()
+            # Last: records first, then the removal write (shielded).
+            await outcome_unknown.aresolve(auth_key, prior, settled=True, gen=gen, release=True)
 
         tx_hash = getattr(settlement, "transaction", None) or "unknown"
         if not ok:
@@ -510,7 +613,8 @@ class X402Middleware(BaseHTTPMiddleware):
                          f"returned {response.status_code}; refund needed")
             log_payment_failed(client_ip=client_ip,
                                reason=f"HTTP {response.status_code} after settlement; tx={tx_hash}",
-                               stage="delivery_after_settlement", wallet_address=payer)
+                               stage="delivery_after_settlement", wallet_address=payer,
+                               nonce=request_nonce(request))
             x402_settlements_total.labels(result="settled_not_delivered").inc()
 
         body = b""
@@ -540,10 +644,19 @@ class X402Middleware(BaseHTTPMiddleware):
         can be retried. After settlement the payer has paid for nothing: record
         it for a refund and return the transaction to cite.
         """
-        from app.x402.settlement import replay_guard
+        from app.x402.settlement import replay_guard, request_nonce
         from app.x402.audit import log_payment_failed
 
         settlement = getattr(request.state, "x402_settlement", None)
+        if settlement is None and getattr(request.state, "x402_settlement_interrupted", None):
+            # Settlement was in flight when the request was interrupted: the
+            # transfer may have gone through. Not "not charged", and the
+            # authorization stays reserved; it is in the unknown-outcome
+            # registry (settlement.settlement_interrupted) (#553).
+            from app.x402.settlement import OUTCOME_UNKNOWN_HEADERS, settlement_unavailable_detail
+            detail = settlement_unavailable_detail(request, interrupted=True)
+            return JSONResponse(status_code=502, content={"detail": detail, **detail},
+                                headers=dict(OUTCOME_UNKNOWN_HEADERS))
         if settlement is None:
             replay_guard.release(getattr(request.state, "x402_auth_key", None))
             logger.error(f"x402: paid request to {request.url.path} failed before settlement", exc_info=True)
@@ -555,7 +668,8 @@ class X402Middleware(BaseHTTPMiddleware):
         log_payment_failed(client_ip=get_client_ip(request),
                            reason=f"exception after settlement; tx={tx_hash}",
                            stage="delivery_after_settlement",
-                           wallet_address=getattr(request.state, "x402_payer", None))
+                           wallet_address=getattr(request.state, "x402_payer", None),
+                           nonce=request_nonce(request))
         return JSONResponse(
             status_code=500,
             content={

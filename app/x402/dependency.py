@@ -637,6 +637,15 @@ async def require_x402_payment(request: Request) -> None:
         }
         raise HTTPException(status_code=402, detail=response_body)
 
+    # Without its record of payments whose settlement got no answer, the
+    # gateway could answer a retry of a collected payment with a payable 402
+    # or run work again: refuse paid requests, unpaid, until it is repaired.
+    from app.x402.settlement import outcome_unknown as _outcome_unknown
+    if _outcome_unknown.unavailable:
+        from app.x402.settlement import payment_state_unavailable_detail
+        raise HTTPException(status_code=503, headers={"Retry-After": "60"},
+                            detail=payment_state_unavailable_detail())
+
     # Verify payment with facilitator
     try:
         facilitator = _get_facilitator_client()
@@ -659,6 +668,21 @@ async def require_x402_payment(request: Request) -> None:
     if not verify_response.is_valid:
         invalid_reason = getattr(verify_response, 'invalid_reason', None) or 'Unknown reason'
         logger.warning(f"x402: Payment verification failed: {invalid_reason}")
+        # A facilitator may reject a spent nonce at verify. If this
+        # authorization's earlier settlement got no answer, that is likely
+        # why: no 402 and no `accepts`, or the client pays again (#553).
+        from app.x402.settlement import (authorization_key, outcome_unknown, outcome_unknown_refusal,
+                                         settlement_in_progress_refusal)
+        unknown_key = authorization_key(payment_payload)
+        in_flight, unknown_kind = outcome_unknown.state(unknown_key)
+        if in_flight:
+            raise settlement_in_progress_refusal(unknown_key, request)
+        if unknown_kind is not None:
+            # Counted like a refusal at settle (#553): probably the earlier
+            # transfer spent the nonce.
+            from app.services.metrics import x402_settlements_total
+            x402_settlements_total.labels(result="refused_after_unknown").inc()
+            raise outcome_unknown_refusal(unknown_key, invalid_reason, where="verify", request=request)
         response_body = {
             "x402Version": X402_VERSION,
             "error": f"Payment verification failed: {invalid_reason}",
@@ -712,8 +736,38 @@ async def require_x402_payment(request: Request) -> None:
             },
         )
 
+    # An authorization whose settlement got no answer AFTER its work ran (the
+    # middleware fallback) never runs the work again, also once its
+    # reservation has lapsed (#553). One whose settlement got no answer before
+    # any work (settle_payment) may be retried: it settles at most once.
+    from app.x402.settlement import (AFTER_WORK, outcome_unknown, outcome_unknown_refusal,
+                                     settlement_in_progress_refusal)
+    # A parallel duplicate while this process waits on the facilitator for the
+    # same authorization: "in progress", not "unknown" (#553).
+    in_flight, unknown_kind = outcome_unknown.state(auth_key)
+    if in_flight:
+        raise settlement_in_progress_refusal(auth_key, request)
+    if unknown_kind == AFTER_WORK:
+        logger.warning(f"x402: retry of an authorization whose settlement outcome is unknown "
+                       f"after its work ran, from {client_ip}")
+        raise outcome_unknown_refusal(auth_key, where="after_work", request=request)
+
     if not replay_guard.reserve(auth_key):
         logger.warning(f"x402: Payment authorization reused by {client_ip}")
+        # Read again, atomically: the first request's write-ahead may have run
+        # on another thread since the check above.
+        in_flight, unknown_kind = outcome_unknown.state(auth_key)
+        if in_flight:
+            raise settlement_in_progress_refusal(auth_key, request)
+        if unknown_kind is not None:
+            # In use by a concurrent retry of an authorization whose
+            # settlement outcome is unknown: not "sign a new payment" (#553).
+            raise outcome_unknown_refusal(auth_key, where="in_use", request=request)
+        # The same authorization under an Idempotency-Key whose first request's
+        # settlement got no answer: that key's 409, as documented, even when
+        # the authorization has since settled under another key (#553).
+        from app.x402.idempotency import raise_if_key_settlement_unknown
+        await raise_if_key_settlement_unknown(request, payer=auth_key[0])
         raise HTTPException(
             status_code=402,
             detail={

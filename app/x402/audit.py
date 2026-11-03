@@ -303,9 +303,11 @@ def log_payment_settled(
     network: str,
     success: bool,
     error_reason: Optional[str] = None,
-    request_id: Optional[str] = None
+    request_id: Optional[str] = None,
+    nonce: Optional[str] = None,
 ) -> Optional[str]:
-    """Log a payment settlement event."""
+    """Log a payment settlement event. `nonce`: the payment authorization's,
+    which identifies the on-chain transfer whatever its transaction hash."""
     return log_audit_event(
         event_type=AuditEventType.PAYMENT_SETTLED,
         data={
@@ -313,6 +315,7 @@ def log_payment_settled(
             "transaction_hash": transaction_hash,
             "network": network,
             "error_reason": error_reason,
+            "nonce": nonce,
         },
         client_ip=client_ip,
         wallet_address=payer,
@@ -325,14 +328,16 @@ def log_payment_failed(
     reason: str,
     stage: str,
     wallet_address: Optional[str] = None,
-    request_id: Optional[str] = None
+    request_id: Optional[str] = None,
+    nonce: Optional[str] = None,
 ) -> Optional[str]:
-    """Log a payment failure event."""
+    """Log a payment failure event. `nonce`: the payment authorization's."""
     return log_audit_event(
         event_type=AuditEventType.PAYMENT_FAILED,
         data={
             "reason": reason,
             "stage": stage,
+            "nonce": nonce,
         },
         client_ip=client_ip,
         wallet_address=wallet_address,

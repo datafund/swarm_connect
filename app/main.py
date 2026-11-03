@@ -12,6 +12,7 @@ from fastapi.utils import is_body_allowed_for_status_code
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.responses import Response
 from http import HTTPStatus
+import asyncio
 import logging
 import time
 
@@ -97,6 +98,11 @@ async def lifespan(app: FastAPI):
     # is closed.
     from app.api.endpoints.stamps import drain_pending_purchases
     await drain_pending_purchases(settings.SHUTDOWN_PENDING_PURCHASE_GRACE_SECONDS)
+
+    # Pending settlement-state writes (#553): wait for them, bounded, so a
+    # write-ahead or resolution in progress is not cut off by the exit.
+    from app.x402.settlement import shutdown_registry_io
+    await asyncio.to_thread(shutdown_registry_io, 5.0)
 
     # Close shared HTTP client (must be last)
     await close_client()
@@ -398,6 +404,24 @@ async def read_root():
         warnings.extend(gnosis.get("warnings", []))
         errors.extend(gnosis.get("errors", []))
 
+        # Payment state the gateway could not read or write (#553): paid
+        # requests are refused, unpaid, until an operator repairs it.
+        from app.x402.settlement import outcome_unknown
+        from app.x402.idempotency import idempotency_store
+        payment_state_down = False
+        # Public: the code and a short cause only. Paths and exception text
+        # are in the gateway log.
+        cause = outcome_unknown.public_cause()
+        if cause:
+            payment_state_down = True
+            warnings.append(f"PAYMENT_STATE_UNAVAILABLE: {cause}; every paid request gets 503 "
+                            "until it is repaired (details in the gateway log)")
+        if idempotency_store.unavailable:
+            import os.path
+            warnings.append(f"IDEMPOTENCY_UNAVAILABLE: {os.path.basename(idempotency_store._path())} is "
+                            "unreadable; paid requests with an Idempotency-Key get 503 until it is "
+                            "repaired (details in the gateway log)")
+
         # Determine overall status
         # Never return 503 — the gateway should always be reachable so
         # operators can see what's wrong. Docker healthcheck and reverse
@@ -405,7 +429,7 @@ async def read_root():
         # where the container is marked unhealthy and users see nothing.
         if len(errors) > 0:
             response_data["status"] = "critical"
-        elif not gnosis["can_accept"]:
+        elif not gnosis["can_accept"] or payment_state_down:
             response_data["status"] = "degraded"
 
         # Add x402 details
