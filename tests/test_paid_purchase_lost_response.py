@@ -364,6 +364,27 @@ def test_slow_bee_refusal_is_recorded_as_such(env, monkeypatch):
     find.assert_not_called()
 
 
+@pytest.mark.parametrize("bee_response", [
+    {"text": ""},
+    {"json": {"message": "dial tcp 10.0.0.1:1633: connect: refused (bee.internal)"}},
+])
+def test_slow_bee_refusal_hides_the_bee_address(env, monkeypatch, bee_response):
+    """A refusal after payment: neither the refund reason in the audit log nor
+    any response names the internal Bee address (#549)."""
+    app, fac, buy, find = env
+    monkeypatch.setattr(settings, "SWARM_STAMP_PURCHASE_TIMEOUT_SECONDS", 0.05)
+    req = httpx.Request("POST", "http://bee.internal:1633/stamps/1/17")
+    buy.side_effect = _slow_bee(httpx.HTTPStatusError(
+        "Client error '400 Bad Request' for url 'http://bee.internal:1633/stamps/1/17'",
+        request=req, response=httpx.Response(400, request=req, **bee_response)))
+    first, retry = _run_pending(app, None, key="k-refused-hidden")
+    reason = _audit("payment_failed")[0]["data"]["reason"]
+    assert "refused by Bee" in reason
+    for shown in (reason, first.text, retry.text):
+        for secret in ("bee.internal", "10.0.0.1", "1633"):
+            assert secret not in shown, shown
+
+
 def test_slow_bee_connection_lost_falls_back_to_the_label(env, monkeypatch):
     app, fac, buy, find = env
     monkeypatch.setattr(settings, "SWARM_STAMP_PURCHASE_TIMEOUT_SECONDS", 0.05)

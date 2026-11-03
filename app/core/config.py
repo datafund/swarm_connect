@@ -180,6 +180,15 @@ class Settings(BaseSettings):
 
     # Pool monitoring settings
     STAMP_POOL_CHECK_INTERVAL_SECONDS: int = 900  # How often to check pool (15 minutes)
+    # A batch the pool bought but Bee has not listed yet (Bee lists it only
+    # after its chain listener processes BatchCreated, some blocks behind the
+    # tip) is held, not dropped, for this long after the purchase. After that
+    # it is treated as gone and removed with its ownership record.
+    STAMP_POOL_UNLISTED_GRACE_SECONDS: int = Field(900, gt=0)
+    # While any batch is held (bought, not usable yet), the background task
+    # re-runs the TTL check this often instead of waiting for the next full
+    # check, so the batch becomes available soon after Bee lists it usable.
+    STAMP_POOL_HELD_RECHECK_SECONDS: int = Field(30, gt=0)
     # Hard ceiling on how many batches the pool may buy in a rolling hour,
     # across every depth and every code path.
     #

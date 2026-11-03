@@ -161,6 +161,21 @@ Then check an upload to a known owned stamp.
 
 If a money-bearing state file (ownership, credit) is unreadable, the gateway **refuses to start** and keeps a `.corrupt-<timestamp>` copy next to the file *(requires #395)*. The container then restart-loops until the file is restored or deliberately moved away. That's intended: starting empty would lock owners out and wipe prepaid balances.
 
+**Ownership registry not saving** (#558). Before the gateway first rewrites an ownership registry from before #558 (batch ids in mixed case, or owner addresses not in lowercase), it copies the original to `<STAMP_OWNERSHIP_FILE>.pre-558-<UTC timestamp>` in the same directory (by default `stamp_owners.json.pre-558-<UTC timestamp>`). If that copy cannot be written, the gateway refuses every save of the registry, so the original is never overwritten. If the copy succeeds but the write of the registry file fails, the save fails too. In both cases the gateway keeps running, and ownership changes stay in memory only. A failed write (the second row below) can also happen on a registry that never needed migration, and the recovery is the same. While this lasts, `/health` shows one of these fixed texts in `state.warnings`, and each failed save logs an ERROR:
+
+| Cause | `state.warnings` text | ERROR log line |
+|---|---|---|
+| The pre-migration copy cannot be written, so saves are refused | `ownership registry changes are not being saved: the pre-migration copy of the registry file could not be written. Changes are kept in memory only and are lost on restart. See the ERROR log and docs/mainnet-runbook.md` | `Not saving ownership state to <file>: the pre-migration file could not be copied aside (<error>); the change is kept in memory only` |
+| The write of the registry file failed | `ownership registry changes are not being saved: the last write of the registry file failed. Changes are kept in memory only and are lost on restart. See the ERROR log and docs/mainnet-runbook.md` | `Failed to save ownership state to <file>: <error>` |
+
+The error in the log line gives the cause, for example `No space left on device` or `Permission denied`. These warnings do not change `status`. `status` can still be `degraded` or `critical` for Bee node or wallet reasons, so a monitor that reads only `status` does not report a registry that is not saving. Check `state.warnings` itself.
+
+To recover:
+1. **Do not restart the gateway.** A restart loses every ownership change made since it started, and the buyers of those batches lose access. The file on disk is intact. After a refused save it is the original, and the next start migrates it again.
+2. Fix the cause from the log line: free disk space on the volume that holds the data directory, or fix permissions so the gateway user (uid 10001) can create files in that directory. Both the copy and the registry file are written as a temporary file in the same directory and then renamed.
+3. Wait for the next ownership write: a stamp purchase, a pool acquire or a pool removal. It makes the copy first if one is still missing, then saves the whole registry from memory. There is no command to start a write.
+4. Check that `state.warnings` in `/health` is empty again. After a refused save, also check that the log has `Kept the pre-migration ownership registry at <file>.pre-558-<timestamp>` and that the copy exists. Keep the copy: records merged from spellings of one batch id that differ only in case keep their `mode`, `acquired_at` and `source` only there.
+
 **Audit log size.** `data/x402_audit.jsonl` grows with every paid request. Rotate it with logrotate, using `copytruncate` because the gateway keeps it open for appends:
 
 ```

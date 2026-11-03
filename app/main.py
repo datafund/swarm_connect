@@ -319,6 +319,9 @@ async def read_root():
       `reserve_size`, `reserve_size_within_radius`, `pullsync_rate`, `batch_commitment`),
       chain sync (`last_synced_block`, `chain_tip`, `chain_sync_lag_blocks`), plus a
       `healthy` flag and advisory `warnings`
+    - `state`: gateway state files, with advisory `warnings` (fixed text) that never
+      change `status`: for example, ownership registry saves are refused because the
+      pre-migration copy cannot be written, so changes are lost on restart
     - `x402` (when payments enabled): wallet status, free tier availability, and warnings
 
     **When x402 payments are enabled**, the response includes:
@@ -377,6 +380,14 @@ async def read_root():
             response_data["status"] = "degraded"
     except Exception as e:
         logger.warning(f"Health: failed to summarize Bee node status: {e}")
+
+    # Gateway state files. A registry that cannot save loses every ownership
+    # change on restart (#558). The warning is advisory and never changes
+    # `status`: anything that treats a non-ok status as unhealthy could restart
+    # the container, and a restart is what loses those changes. The text is
+    # fixed (no path, no exception text); the ERROR log has the details.
+    from app.services.stamp_ownership import stamp_ownership_manager
+    response_data["state"] = {"warnings": stamp_ownership_manager.health_warnings()}
 
     # If x402 is enabled, include wallet status
     if settings.X402_ENABLED:
