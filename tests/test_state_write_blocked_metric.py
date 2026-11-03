@@ -192,6 +192,27 @@ def test_a_hung_lane_reads_stalled_before_any_request_is_refused(idem_store, reg
     assert _wait_until(lambda: _all_zero("idempotency") and _all_zero("settlement_unknown"))
 
 
+def test_a_full_registry_backlog_reads_stalled_until_it_drains(registry, monkeypatch):
+    """abegin_settlement refuses a request once MAX_PENDING_REGISTRY_IO writes
+    are pending, however young they are; the gauge reads the same check."""
+    reg, disk = registry
+    monkeypatch.setattr(settings, "X402_SETTLEMENT_STATE_WRITE_TIMEOUT_SECONDS", 30)
+    monkeypatch.setattr(st, "MAX_PENDING_REGISTRY_IO", 3)
+    disk.gate.clear()
+    for _ in range(3):
+        st._submit_registry_io(reg._persist)
+    assert st._registry_io_backlog() == 3
+    assert st._registry_io_oldest_age() < 30          # not the age check
+    assert not reg.write_stalled()                     # and not the flag
+    assert _gauge("settlement_unknown", "stalled") == 1
+    # The request path refuses at the same point.
+    prior, recorded, _ = asyncio.run(reg.abegin_settlement(KEY, BEFORE_WORK))
+    assert recorded is False
+    disk.gate.set()
+    assert _wait_until(lambda: st._registry_io_backlog() == 0)
+    assert _wait_until(lambda: _gauge("settlement_unknown", "stalled") == 0)
+
+
 # --- the reader has no side effects ------------------------------------------
 
 def test_scraping_never_starts_a_write(idem_store, registry):
@@ -297,6 +318,43 @@ def test_a_shutdown_while_the_retry_task_runs(idem_store, registry):
     assert _wait_until(lambda: not store.write_failed())
 
 
+def test_a_pass_that_raises_does_not_end_the_task(monkeypatch, x402_on):
+    def broken():
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(state_retry, "_stores", broken)
+    assert state_retry.retry_blocked_writes() == 0      # the pass itself never raises
+
+    async def run():
+        await state_retry.start_state_write_retry_task(interval=0.01)
+        task = state_retry._task
+        await asyncio.sleep(0.1)                          # several failing passes
+        assert not task.done()
+        await state_retry.stop_state_write_retry_task()   # does not raise
+        return task
+
+    task = asyncio.run(run())
+    assert task.cancelled() and state_retry._task is None
+
+
+def test_stop_does_not_raise_when_the_task_failed(monkeypatch):
+    """Even a task that ended with an error of its own is stopped quietly, so
+    the shutdown steps after it (state-write lanes, HTTP client) still run."""
+    async def run():
+        async def failed():
+            raise RuntimeError("boom")
+
+        task = asyncio.ensure_future(failed())
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        assert task.done()
+        monkeypatch.setattr(state_retry, "_task", task)
+        await state_retry.stop_state_write_retry_task()
+
+    asyncio.run(run())
+    assert state_retry._task is None
+
+
 def test_the_lifespan_starts_and_stops_the_retry_task(monkeypatch):
     from app.main import app
     from app.x402 import facilitator
@@ -326,7 +384,8 @@ def test_alert_rule_fires_while_any_write_is_blocked():
     assert rule["for"] == "1m"
     description = rule["annotations"]["description"]
     for text in ("settlement_unknown", "idempotency", "PAYMENT_STATE_UNAVAILABLE",
-                 "IDEMPOTENCY_UNAVAILABLE", "restart", "section 5"):
+                 "IDEMPOTENCY_UNAVAILABLE", "restart", "section 5",
+                 "stalled flag", "past that timeout", "64 registry writes are pending"):
         assert text in description
 
 

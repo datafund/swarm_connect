@@ -33,15 +33,20 @@ def _stores():
 def retry_blocked_writes() -> int:
     """One pass: start the store's own retry for each store whose writes are
     failing or stalled. Returns how many stores were blocked."""
-    if not settings.X402_ENABLED:
-        return 0
     blocked = 0
-    for store in _stores():
+    try:
+        if not settings.X402_ENABLED:
+            return 0
+        stores = _stores()
+    except Exception as e:      # never let one bad pass end the task
+        logger.warning("x402: state write retry check failed: %s", e)
+        return 0
+    for store in stores:
         try:
             if store.write_failed() or store.write_stalled():
                 blocked += 1
                 store.unavailable   # starts the rate-limited background retry or probe
-        except Exception as e:      # never let one bad pass end the task
+        except Exception as e:      # one store's failure does not skip the other
             logger.warning("x402: state write retry check failed: %s", e)
     return blocked
 
@@ -49,7 +54,10 @@ def retry_blocked_writes() -> int:
 async def _run(interval: float) -> None:
     while True:
         await asyncio.sleep(interval)
-        retry_blocked_writes()
+        try:
+            retry_blocked_writes()
+        except Exception as e:  # pragma: no cover - retry_blocked_writes catches its own
+            logger.warning("x402: state write retry pass failed: %s", e)
 
 
 async def start_state_write_retry_task(interval: Optional[float] = None) -> None:
@@ -75,4 +83,8 @@ async def stop_state_write_retry_task() -> None:
         await task
     except asyncio.CancelledError:
         pass
+    except Exception as e:
+        # The task ended with an error of its own: the shutdown steps after
+        # this one (state-write lanes, the HTTP client) must still run.
+        logger.error("x402: state write retry task had failed: %s", e)
     logger.info("x402: state write retry task stopped")
