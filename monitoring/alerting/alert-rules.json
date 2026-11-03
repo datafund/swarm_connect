@@ -926,15 +926,15 @@
   },
   {
     "annotations": {
-      "summary": "{{ $labels.environment }}: {{ $labels.file }} state file not saved ({{ printf \"%.0f\" $values.B.Value }} failed saves in 15 min)",
-      "description": "The gateway could not write a state file and kept the change in memory only (file=pool: the stamp pool state; file=ownership: the ownership registry, including saves refused because the pre-migration copy could not be written). Do NOT restart or redeploy: a restart loses every change since the last good save, buyers lose access to batches they paid for, and a sold batch can be re-imported as pool stock and sold again. Read the ERROR log line (\"Failed to save pool state\", \"Failed to save ownership state\" or \"Not saving ownership state\"), fix the cause (disk full, or permissions on the data directory for uid 10001), and wait for the next save to succeed; for ownership, /health state.warnings is empty again once it has. See docs/mainnet-runbook.md section 4 and 5."
+      "summary": "{{ $labels.environment }}: {{ $labels.file }} state file not saved; changes are in memory only",
+      "description": "A save of a gateway state file failed and the change is kept in memory only. The alert stays active while gateway_state_unsaved is 1, that is until a save succeeds, and for 15 minutes after any failed save. file=ownership: the ownership registry, including saves refused because the pre-migration copy could not be written; nothing retries the save, so it clears only with the next ownership change that saves. file=pool: the stamp pool state; the next sync writes it again. What a restart would lose: if only the ownership file is behind, buyers lose access to batches they paid for. If only the pool file is behind, a batch just bought for the pool can be in neither the pool file nor the pending record, so after a restart it is paid for but not in the pool; a sold batch is still not re-imported, because the ownership check (#477) stops it. If both files are behind, a sold batch can come back as pool stock and be sold again. Do NOT restart or redeploy until gateway_state_unsaved is 0 again. Read the ERROR log line (\"Failed to save pool state\", \"Failed to save ownership state\" or \"Not saving ownership state\"), fix the cause (disk full, or permissions on the data directory for uid 10001), and wait for the next save to succeed; for ownership, /health state.warnings is empty again once it has. See docs/mainnet-runbook.md section 4 and 5."
     },
     "condition": "C",
     "data": [
       {
         "datasourceUid": "grafanacloud-prom",
         "model": {
-          "expr": "sum by (environment, host, file) (increase(gateway_state_save_failures_total[15m]))",
+          "expr": "(sum by (environment, host, file) (increase(gateway_state_save_failures_total[15m])) > 0) or (max by (environment, host, file) (gateway_state_unsaved) > 0)",
           "instant": true,
           "intervalMs": 1000,
           "maxDataPoints": 43200,
