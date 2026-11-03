@@ -29,6 +29,7 @@ from app.core.atomic_io import StateLoadError, atomic_write_json, keep_corrupt_c
 from app.core.config import settings
 from app.services import swarm_api
 from app.services.bee_errors import SCRUB_CAP, error_cause, public_bee_text
+from app.services.http_client import exc_text
 from app.services.swarm_api import coerce_int
 from app.services.stamp_ownership import POOL_OWNER, stamp_ownership_manager
 
@@ -735,7 +736,7 @@ class StampPoolManager:
                 # already, by _spending_paused_for_state_file.
                 logger.warning(f"Immediate replenishment: purchase returned no batch_id for depth {depth}")
         except Exception as e:
-            logger.error(f"Immediate replenishment failed for depth {depth}: {e}")
+            logger.error(f"Immediate replenishment failed for depth {depth}: {exc_text(e)}")
             self._errors.append(f"Immediate replenishment failed (depth {depth}): "
                                 f"{error_cause(e)}; see the gateway log for details.")
         finally:
@@ -1126,7 +1127,7 @@ class StampPoolManager:
         except Exception as e:
             # The full text can name the Bee API address (httpx puts the URL
             # in HTTPStatusError). It goes to the log only (#534).
-            logger.error(f"Error syncing stamps from Bee node: {e}")
+            logger.error(f"Error syncing stamps from Bee node: {exc_text(e)}")
             self._last_sync_error = (f"Sync error: could not read stamps from the Bee node "
                                      f"({error_cause(e)}); see the gateway log for details.")
             self._errors.append(self._last_sync_error)
@@ -1322,7 +1323,7 @@ class StampPoolManager:
                         except Exception as e:
                             detail = _bee_error_message(e)
                             said = f" — Bee said: {detail}" if detail else ""
-                            logger.error(f"Failed to purchase depth-{depth} stamp: {e}{said}")
+                            logger.error(f"Failed to purchase depth-{depth} stamp: {exc_text(e)}{said}")
                             # Bee's own message, not str(e): that names the Bee URL (#534).
                             # Scrubbed at 2 KB, cut to 200, and shown only if the
                             # safety gate passes it (#549).
@@ -1407,7 +1408,7 @@ class StampPoolManager:
                         else:
                             debug["result"] = "refused by a spending ceiling"
                     except Exception as e:
-                        logger.error(f"Failed to top up stamp {stamp.batch_id[:16]}...: {e}")
+                        logger.error(f"Failed to top up stamp {stamp.batch_id[:16]}...: {exc_text(e)}")
                         results["errors"].append(
                             f"Failed to top up stamp {stamp.batch_id[:16]}...: "
                             f"{error_cause(e)}; see the gateway log for details.")
@@ -1884,7 +1885,7 @@ class StampPoolManager:
             if isinstance(e, Exception):
                 detail = _bee_error_message(e)
                 logger.error(
-                    f"Failed to purchase stamp for pool (depth={depth}): {e}"
+                    f"Failed to purchase stamp for pool (depth={depth}): {exc_text(e)}"
                     + (f" — Bee said: {detail}" if detail else "")
                 )
             raise
@@ -1919,7 +1920,7 @@ class StampPoolManager:
             else:
                 logger.warning(f"Stamp TTL lookup failed for {batch_id[:16]}...: HTTP {response.status_code}")
         except Exception as e:
-            logger.warning(f"Error getting stamp TTL for {batch_id[:16]}...: {e}")
+            logger.warning(f"Error getting stamp TTL for {batch_id[:16]}...: {exc_text(e)}")
         return None
 
     async def _update_stamp_ttls(self):
@@ -2004,7 +2005,7 @@ class StampPoolManager:
                 self._warn_overdue_held(now)
 
         except Exception as e:
-            logger.warning(f"Error updating stamp TTLs: {e}")
+            logger.warning(f"Error updating stamp TTLs: {exc_text(e)}")
 
     async def _topup_stamp(self, batch_id: str) -> Optional[bool]:
         """Top up a stamp with additional TTL.
@@ -2101,7 +2102,7 @@ class StampPoolManager:
                 # Failed before the top-up call (e.g. the price lookup, or a
                 # cancellation there): nothing was spent.
                 self._release_spend_slot(slot)
-            logger.error(f"Failed to top up stamp {batch_id[:16]}...: {e}")
+            logger.error(f"Failed to top up stamp {batch_id[:16]}...: {exc_text(e)}")
             raise
 
     async def start_background_task(self):

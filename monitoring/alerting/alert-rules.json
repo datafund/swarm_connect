@@ -1693,5 +1693,82 @@
     "noDataState": "OK",
     "ruleGroup": "warning",
     "title": "Public health probe missing"
+  },
+  {
+    "annotations": {
+      "summary": "{{ $labels.environment }}: Bee HTTP client pool has stuck slots",
+      "description": "At least 10% of the shared HTTP client's pool slots (BEE_HTTP_MAX_CONNECTIONS, 100 by default) have been stuck for 10 minutes: connections that are neither idle nor closed and serve no request, left by requests cancelled right after the pool gave them a new connection (#587). Each one lowers the gateway's capacity toward Bee and Base RPC for good. The gateway replaces the client by itself only once at least BEE_HTTP_POOL_STUCK_FRACTION (25% by default) is stuck and calls fail with PoolTimeout, so this alert covers the earlier, partial phase. Check: gateway_bee_http_pool_connections{state=\"stuck\"} rising over time, gateway_bee_http_pool_timeouts_total, and PoolTimeout in the gateway's ERROR log. Find the source of the cancellations (a load test, clients disconnecting, Bee answering slowly). If the count keeps rising, restart the gateway container at a quiet moment: it clears the pool, but it also cuts off every request in flight, including uploads, downloads and paid stamp purchases still waiting on Bee. gateway_bee_http_client_replacements_total{result} shows whether the self-recovery ran. See docs/mainnet-runbook.md section 5."
+    },
+    "condition": "C",
+    "data": [
+      {
+        "datasourceUid": "grafanacloud-prom",
+        "model": {
+          "expr": "max by (environment, host) (gateway_bee_http_pool_connections{state=\"stuck\"}) / max by (environment, host) (gateway_bee_http_pool_max_connections)",
+          "instant": true,
+          "intervalMs": 1000,
+          "maxDataPoints": 43200,
+          "refId": "A"
+        },
+        "queryType": "",
+        "refId": "A",
+        "relativeTimeRange": {
+          "from": 600,
+          "to": 0
+        }
+      },
+      {
+        "datasourceUid": "__expr__",
+        "model": {
+          "expression": "A",
+          "intervalMs": 1000,
+          "maxDataPoints": 43200,
+          "reducer": "last",
+          "refId": "B",
+          "type": "reduce"
+        },
+        "queryType": "",
+        "refId": "B",
+        "relativeTimeRange": {
+          "from": 0,
+          "to": 0
+        }
+      },
+      {
+        "datasourceUid": "__expr__",
+        "model": {
+          "conditions": [
+            {
+              "evaluator": {
+                "params": [
+                  0.1
+                ],
+                "type": "gte"
+              }
+            }
+          ],
+          "expression": "B",
+          "intervalMs": 1000,
+          "maxDataPoints": 43200,
+          "refId": "C",
+          "type": "threshold"
+        },
+        "queryType": "",
+        "refId": "C",
+        "relativeTimeRange": {
+          "from": 0,
+          "to": 0
+        }
+      }
+    ],
+    "execErrState": "Error",
+    "for": "10m",
+    "isPaused": false,
+    "labels": {
+      "severity": "warning"
+    },
+    "noDataState": "OK",
+    "ruleGroup": "warning",
+    "title": "Bee HTTP pool slots stuck"
   }
 ]

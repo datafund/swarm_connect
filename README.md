@@ -273,6 +273,7 @@ Swarm Connect is a FastAPI-based API gateway that provides comprehensive access 
 
 #### 🛡️ Reliability Features
 - **Request Timeouts**: 10-second timeout for external API calls
+- **HTTP Client Self-Recovery**: the shared client is replaced when cancelled requests leave its pool stuck (#587); pool timeouts, stuck connections and replacements are exported as metrics
 - **Error Recovery**: Multiple layers of exception handling
 - **Flexible Response Parsing**: Handles different Swarm API response formats
 - **Logging**: Structured logging for debugging and monitoring

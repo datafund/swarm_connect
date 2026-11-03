@@ -135,6 +135,27 @@ stamp listing could store data on postage the gateway had paid for.
 addresses, balances, configuration flags and request volumes. Block it at your
 proxy; an agent on the same host or network reaches it directly.
 
+**Every Bee call fails with `PoolTimeout` while Bee itself answers.** The
+shared HTTP client's pool can fill with slots that hold no connection: httpcore
+keeps a slot when a request is cancelled (a client disconnect, a timeout) right
+after the pool gave it a new connection. The gateway replaces the client by
+itself when there were `BEE_HTTP_POOL_RECOVERY_THRESHOLD` `PoolTimeout`s in a
+row, at least `BEE_HTTP_POOL_STUCK_FRACTION` of the pool is stuck, and Bee
+answers `GET /health` on a new connection. Watch
+`gateway_bee_http_pool_connections{state="stuck"}`,
+`gateway_bee_http_pool_timeouts_total` and
+`gateway_bee_http_client_replacements_total{result}`. Error log lines name the
+exception type, so these show as `PoolTimeout` rather than an empty message.
+`result="probe_failed"` means Bee does not answer on a new connection either:
+look at Bee, not the gateway. A restart of the gateway container also clears
+the pool.
+
+**The shared HTTP client ignores proxy environment variables.** Bee API and
+Base RPC calls go out directly even when `HTTP_PROXY`, `HTTPS_PROXY` or
+`ALL_PROXY` is set in the container: the client is built with its own
+transport (#587), and httpx applies those variables only to clients without
+one. Bee is on the compose network and must not go through a proxy.
+
 **Diagnosing Bee with only gateway access.** `GET /api/v1/debug/bee/{path}` is a
 read-only, signature-gated proxy to allow-listed Bee endpoints, for when you have
 the gateway but not the node. Disabled unless `DEBUG_ALLOWED_ADDRESSES` is set.

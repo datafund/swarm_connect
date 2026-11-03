@@ -21,6 +21,7 @@ from x402.facilitator import FacilitatorClient
 
 from app.core.config import settings
 from app.core.client_ip import client_key
+from app.services.http_client import exc_text
 from app.services.metrics import x402_payments_total
 from app.services.bandwidth_credit import invalid_topup_mb_detail, valid_topup_mb
 from app.services.stamp_ownership import normalize_address
@@ -561,7 +562,7 @@ async def require_x402_payment(request: Request) -> None:
         # not have: 404, #572) is the answer, not a pricing failure.
         raise
     except Exception as e:
-        logger.error(f"x402: Failed to calculate price: {e}")
+        logger.error(f"x402: Failed to calculate price: {exc_text(e)}")
         raise HTTPException(
             status_code=503,
             detail={

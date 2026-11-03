@@ -418,6 +418,67 @@ rate_limit_hits_total = Counter(
 bee_api_errors_total = Counter(
     "gateway_bee_api_errors_total", "Upstream Bee node errors", ["endpoint"]
 )
+# Shared outbound HTTP client pool (#587). A PoolTimeout means a request
+# waited the whole pool timeout without getting a connection. Replacements
+# are counted by outcome: replaced, replaced_unverified (the pool could not be
+# read, so the Bee probe alone decided), probe_failed (Bee did not answer on a
+# new connection either), not_stuck (timeouts, but the pool is busy rather
+# than holding leaked slots). All series exist from startup.
+bee_http_pool_timeouts_total = Counter(
+    "gateway_bee_http_pool_timeouts_total",
+    "Outbound requests of the shared HTTP client that got no pool connection in time (PoolTimeout)",
+)
+BEE_HTTP_REPLACEMENT_RESULTS = ("replaced", "replaced_unverified", "probe_failed", "not_stuck")
+bee_http_client_replacements_total = Counter(
+    "gateway_bee_http_client_replacements_total",
+    "Recovery checks of the shared HTTP client after repeated PoolTimeouts, by outcome "
+    "(result=replaced|replaced_unverified|probe_failed|not_stuck)",
+    ["result"],
+)
+for _result in BEE_HTTP_REPLACEMENT_RESULTS:
+    bee_http_client_replacements_total.labels(result=_result)
+
+# Connections in the shared client's pool, read at scrape time. state=active
+# (serving a request), idle (kept alive), stuck (neither idle nor closed and
+# held by no request: the slots #587 leaks). NaN when the pool cannot be read.
+bee_http_pool_connections = Gauge(
+    "gateway_bee_http_pool_connections",
+    "Connections in the shared HTTP client's pool (state=active|idle|stuck)",
+    ["state"],
+)
+bee_http_pool_requests = Gauge(
+    "gateway_bee_http_pool_requests",
+    "Requests in the shared HTTP client's pool, waiting for or holding a connection",
+)
+
+
+def _pool_reader(key: str):
+    """A scrape-time reader of the shared client's pool; never fails the scrape."""
+    def read() -> float:
+        try:
+            from app.services.http_client import _client, current_pool_snapshot
+            if _client is None:
+                return 0.0
+            snapshot = current_pool_snapshot()
+            return float("nan") if snapshot is None else float(snapshot[key])
+        except Exception as e:
+            logger.debug(f"Metrics: could not read the HTTP client pool: {e}")
+            return float("nan")
+    return read
+
+
+# The configured pool size, so the "Bee HTTP pool slots stuck" alert can use
+# a ratio that follows BEE_HTTP_MAX_CONNECTIONS.
+bee_http_pool_max_connections = Gauge(
+    "gateway_bee_http_pool_max_connections",
+    "Configured connection limit of the shared HTTP client's pool (BEE_HTTP_MAX_CONNECTIONS)",
+)
+bee_http_pool_max_connections.set_function(lambda: float(settings.BEE_HTTP_MAX_CONNECTIONS))
+
+for _state in ("active", "idle", "stuck"):
+    bee_http_pool_connections.labels(state=_state).set_function(_pool_reader(_state))
+bee_http_pool_requests.set_function(_pool_reader("requests"))
+
 # Every endpoint swarm_api counts errors for exists from startup (#586). The
 # "Bee calls failing" alert reads increase() of this counter, and a series
 # first seen at 1 gives increase() 0 for that error. The gateway restarts on
