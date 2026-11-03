@@ -12,7 +12,6 @@ import os
 import re
 import subprocess
 import sys
-from unittest.mock import AsyncMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
@@ -30,6 +29,7 @@ NEW_RULES = {
     "Public health check slow",
     "Bee node not healthy (public /health)",
     "Balance check failing",
+    "Public health probe missing",
 }
 
 
@@ -95,7 +95,7 @@ def test_probe_rules_select_only_this_probe():
     """The stack holds Synthetic Monitoring probe_* series for other sites."""
     rules = _rules()
     for title in ("Public health check failing", "Public health check slow",
-                  "Bee node not healthy (public /health)"):
+                  "Bee node not healthy (public /health)", "Public health probe missing"):
         expr = _expr(rules[title])
         assert "probe_" in expr, title
         for selector in re.findall(r"probe_\w+(\{[^}]*\})?", expr):
@@ -122,6 +122,25 @@ def test_bee_not_healthy_rule_reads_the_body_check():
     rule = _rules()["Bee node not healthy (public /health)"]
     assert "min_over_time(probe_failed_due_to_regex" in _expr(rule)
     assert _threshold(rule) == ("gt", 0)
+
+
+def test_probe_missing_rule_makes_a_lost_probe_visible():
+    """The probe rules are silent on no data, so losing the probe needs its own rule.
+
+    Each deploy recreates Alloy from the branch it deployed, so while the probe
+    is only on dev, a main deploy removes it. This fires per environment when the
+    gateway reports metrics and the probe does not.
+    """
+    rule = _rules()["Public health probe missing"]
+    expr = _expr(rule)
+    # Gateways only: not bee_up, and not the probe scrape (whose up is dropped).
+    assert 'up{job=~"prometheus.scrape.(main|development)"}' in expr
+    assert "unless on (environment, host)" in expr
+    assert "last_over_time(probe_http_status_code{" + PROBE_JOB + "}[15m])" in expr
+    assert _threshold(rule) == ("gt", 0)
+    assert rule["for"] == "30m"
+    assert rule["labels"]["severity"] == "warning"
+    assert rule["noDataState"] == "OK"
 
 
 def test_balance_check_rule_covers_failed_and_stale_reads():
@@ -202,46 +221,95 @@ def _probe_regex():
     return re.compile(m.group(1))
 
 
-NODE = {"mode": "light", "version": "2.8.1-x", "api_version": "8.1.0", "bee_status": "ok",
-        "overlay": "ab" * 32, "connected_peers": 140, "population": 14000, "depth": 10,
-        "reachability": "Public", "network_availability": "Available", "warming_up": False,
-        "healthy": True, "warnings": []}
+# Bee's own answers, by endpoint, as get_node_status_summary() reads them. The
+# /health body below is then built by the real summary and the real handler, so
+# a change to either changes what these tests check.
+BEE_HEALTHY = {
+    "topology": {"networkAvailability": "Available", "population": 14000, "depth": 10,
+                 "reachability": "Public", "connected": 140},
+    "status": {"beeMode": "light", "connectedPeers": 140, "isWarmingUp": False,
+               "neighborhoodSize": 141, "storageRadius": 0, "committedDepth": 0,
+               "reserveSize": 0, "reserveSizeWithinRadius": 0, "pullsyncRate": 0,
+               "batchCommitment": 7007502336, "lastSyncedBlock": 49087290},
+    "health": {"status": "ok", "version": "2.8.1-x", "apiVersion": "8.1.0"},
+    "addresses": {"overlay": "ab" * 32},
+    "chainstate": {"chainTip": 49087297},
+}
 
 
-def _health_body(node):
+def _with(endpoint, **changes):
+    answers = {k: dict(v) for k, v in BEE_HEALTHY.items()}
+    answers[endpoint].update(changes)
+    return answers
+
+
+def _health_body(bee_answers, monkeypatch):
+    """GET /health with Bee answering `bee_answers` (endpoint -> JSON, or None = failed)."""
     from app.main import app
-    with patch("app.services.swarm_api.get_node_status_summary", new_callable=AsyncMock) as summary, \
-         patch("app.main.settings.X402_ENABLED", False):
-        if isinstance(node, Exception):
-            summary.side_effect = node
-        else:
-            summary.return_value = node
-        response = TestClient(app).get("/health")
+    from app.services import swarm_api
+
+    async def fake_fetch(client, endpoint):
+        answer = bee_answers.get(endpoint)
+        return dict(answer) if answer else {}
+
+    monkeypatch.setattr(swarm_api, "_fetch_bee_json", fake_fetch)
+    # The shared client exists only inside the app lifespan; fake_fetch ignores it.
+    monkeypatch.setattr(swarm_api, "get_client", lambda: object())
+    monkeypatch.setitem(swarm_api._node_status_cache, "data", None)
+    monkeypatch.setitem(swarm_api._node_status_cache, "ts", 0.0)
+    monkeypatch.setattr("app.main.settings.X402_ENABLED", False)
+    response = TestClient(app).get("/health")
     assert response.status_code == 200
     return response.text
 
 
-def test_probe_regex_matches_a_healthy_node():
-    assert _probe_regex().search(_health_body(NODE))
+def test_probe_regex_matches_a_healthy_node(monkeypatch):
+    body = _health_body(BEE_HEALTHY, monkeypatch)
+    assert json.loads(body)["bee_node"]["healthy"] is True
+    assert _probe_regex().search(body)
 
 
-@pytest.mark.parametrize("node", [
-    dict(NODE, healthy=False, network_availability="Unavailable",
-         warnings=["network availability is 'Unavailable'"]),
-    dict(NODE, healthy=False, warnings=["could not query the Bee node (topology/status unavailable)"]),
-    dict(NODE, healthy=False, warming_up=True, warnings=["node is warming up"]),
-])
-def test_probe_regex_rejects_an_unhealthy_node(node):
-    assert not _probe_regex().search(_health_body(node))
+def test_bee_node_has_no_nested_value_before_healthy(monkeypatch):
+    """The regex reads up to `healthy` without crossing a brace.
+
+    A nested object or list added to bee_node ahead of `healthy` would make the
+    regex miss a healthy node and fire a false critical alert. That must fail
+    here instead: move the new field after `healthy`, or change the regex.
+    """
+    node = json.loads(_health_body(BEE_HEALTHY, monkeypatch))["bee_node"]
+    keys = list(node)
+    assert "healthy" in keys
+    for key in keys[:keys.index("healthy")]:
+        assert not isinstance(node[key], (dict, list)), (
+            f"bee_node.{key} is nested and comes before 'healthy'; the probe regex "
+            "in monitoring/alloy/config.alloy would no longer match")
 
 
-def test_probe_regex_rejects_a_body_without_bee_node():
-    body = _health_body(RuntimeError("Bee unreachable"))
+@pytest.mark.parametrize("answers", [
+    _with("topology", networkAvailability="Unavailable"),
+    _with("status", isWarmingUp=True),
+    # The gateway cannot query the node at all: the 2026-11-03 case.
+    {"topology": None, "status": None, "health": None, "addresses": None, "chainstate": None},
+], ids=["network-unavailable", "warming-up", "bee-unreachable"])
+def test_probe_regex_rejects_an_unhealthy_node(answers, monkeypatch):
+    body = _health_body(answers, monkeypatch)
+    assert json.loads(body)["bee_node"]["healthy"] is False
+    assert not _probe_regex().search(body)
+
+
+def test_probe_regex_rejects_a_body_without_bee_node(monkeypatch):
+    from app.services import swarm_api
+
+    async def broken(use_cache=True):
+        raise RuntimeError("summary failed")
+
+    monkeypatch.setattr(swarm_api, "get_node_status_summary", broken)
+    body = _health_body(BEE_HEALTHY, monkeypatch)
     assert '"bee_node"' not in body
     assert not _probe_regex().search(body)
 
 
 def test_probe_regex_is_not_fooled_by_a_healthy_key_elsewhere():
-    body = json.dumps({"status": "ok", "bee_node": dict(NODE, healthy=False),
+    body = json.dumps({"status": "ok", "bee_node": {"mode": "light", "healthy": False, "warnings": []},
                        "other": {"healthy": True}}, separators=(",", ":"))
     assert not _probe_regex().search(body)

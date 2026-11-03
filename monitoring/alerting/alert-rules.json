@@ -1539,5 +1539,82 @@
     "noDataState": "OK",
     "ruleGroup": "warning",
     "title": "Balance check failing"
+  },
+  {
+    "annotations": {
+      "summary": "{{ $labels.environment }}: no public /health probe results, so the probe alerts cannot fire",
+      "description": "The gateway on this host is reporting metrics, but no public /health probe result has arrived for this environment for 45 minutes (15-minute lookback, then 30 minutes). The three probe alerts (\"Public health check failing\", \"Public health check slow\", \"Bee node not healthy (public /health)\") stay silent when there is no data, so without this rule losing the probe would go unnoticed.\n\nThe usual cause: Alloy on the host runs config.alloy from the branch deployed last. Each deploy clones its own branch into the host checkout and recreates Alloy from it, so while the probe is only on dev, a main deploy removes it and the next dev deploy brings it back. Once the probe is on main this should not happen. Otherwise Alloy failed to load its config (docker logs of the Alloy container) or was not recreated by the deploy. See docs/mainnet-runbook.md section 5, \"After the first deploy that adds the probe\".\n\nFull status: {{ if eq $labels.environment \"main\" }}https://provenance-gateway.datafund.io/health{{ else if eq $labels.environment \"development\" }}https://provenance-gateway.dev.datafund.io/health{{ else }}https://provenance-gateway.datafund.io/health (or the .dev. host \u2014 environment label was \"{{ $labels.environment }}\"){{ end }}"
+    },
+    "condition": "C",
+    "data": [
+      {
+        "datasourceUid": "grafanacloud-prom",
+        "model": {
+          "expr": "count by (environment, host) (up{job=~\"prometheus.scrape.(main|development)\"}) unless on (environment, host) count by (environment, host) (last_over_time(probe_http_status_code{job=\"swarm_connect/health_probe\"}[15m]))",
+          "instant": true,
+          "intervalMs": 1000,
+          "maxDataPoints": 43200,
+          "refId": "A"
+        },
+        "queryType": "",
+        "refId": "A",
+        "relativeTimeRange": {
+          "from": 900,
+          "to": 0
+        }
+      },
+      {
+        "datasourceUid": "__expr__",
+        "model": {
+          "expression": "A",
+          "intervalMs": 1000,
+          "maxDataPoints": 43200,
+          "reducer": "last",
+          "refId": "B",
+          "type": "reduce"
+        },
+        "queryType": "",
+        "refId": "B",
+        "relativeTimeRange": {
+          "from": 0,
+          "to": 0
+        }
+      },
+      {
+        "datasourceUid": "__expr__",
+        "model": {
+          "conditions": [
+            {
+              "evaluator": {
+                "params": [
+                  0
+                ],
+                "type": "gt"
+              }
+            }
+          ],
+          "expression": "B",
+          "intervalMs": 1000,
+          "maxDataPoints": 43200,
+          "refId": "C",
+          "type": "threshold"
+        },
+        "queryType": "",
+        "refId": "C",
+        "relativeTimeRange": {
+          "from": 0,
+          "to": 0
+        }
+      }
+    ],
+    "execErrState": "Error",
+    "for": "30m",
+    "isPaused": false,
+    "labels": {
+      "severity": "warning"
+    },
+    "noDataState": "OK",
+    "ruleGroup": "warning",
+    "title": "Public health probe missing"
   }
 ]

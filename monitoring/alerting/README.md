@@ -192,7 +192,7 @@ The process kept running and answering `/metrics`, so `up` stayed 1 and
 10 s, and the proxy answered 502. Bee itself was healthy, so **Bee Node Not
 Scraped** stayed quiet too. The balance gauges kept their last value, so the
 balance alerts were judging a number half an hour old. Six rules cover what
-was missing:
+was missing, and a seventh makes sure the probe itself is not lost silently:
 
 | rule | fires on | for | severity |
 |---|---|---|---|
@@ -200,7 +200,8 @@ was missing:
 | Gateway 5xx responses | 5xx share of `http_requests_total` over 10m > 20%, with at least 20 requests | 5m | critical |
 | Public health check failing | no 200 from the probe for 5 minutes | 1m | critical |
 | Public health check slow | probe average over 10m > 5 s | 10m | warning |
-| Bee node not healthy (public /health) | `probe_failed_due_to_regex` 1 on every probe for 10m | 5m | critical |
+| Bee node not healthy (public /health) | `probe_failed_due_to_regex` 1 on every probe for 10m (so about 15 minutes in all) | 5m | critical |
+| Public health probe missing | gateway `up` series for an environment with no probe result in the last 15m | 30m | warning |
 | Balance check failing | `gateway_balance_check_ok` 0, or no successful read for 15 min | 15m | warning |
 
 All are grouped by `environment` and `host`, and all are `noDataState: OK`.
@@ -234,9 +235,16 @@ same handler with a 10 s timeout, so whenever Docker marks the container
 unhealthy, the probe fails too. Nothing restarts the container automatically:
 a restart loses any change still in memory only (**State file save failures**).
 
-The rules have no data until Alloy runs the new config. Check the probe series
-after the first deploy (`docs/mainnet-runbook.md` section 5, "After the first
-deploy that adds the probe").
+The rules have no data until Alloy runs the new config, and Alloy runs the
+config of the branch deployed last: each deploy clones its own branch into the
+host checkout and recreates Alloy from it. While the probe is only on `dev`, a
+main deploy removes it and the next dev deploy brings it back. The probe rules
+are `noDataState: OK` and go quiet when that happens. That is why **Public health
+probe missing** exists: it fires per environment when the gateway reports
+metrics but no probe result has arrived for 15 minutes, held for 30 minutes.
+Re-check the probe series after every main deploy until the change is on
+`main` (`docs/mainnet-runbook.md` section 5, "After the first deploy that adds
+the probe").
 
 ### A check from outside: Grafana Synthetic Monitoring
 
