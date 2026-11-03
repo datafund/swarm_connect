@@ -510,8 +510,8 @@
         "fieldConfig": { "defaults": { "unit": "short", "decimals": 0, "thresholds": { "mode": "absolute", "steps": [{ "value": null, "color": "purple" }] } } }
       },
       {
-        "id": 117, "title": "KPIs per UTC Day (13 days)", "type": "timeseries",
-        "description": "Daily totals of the KPIs above, production, over the last 13 days regardless of the dashboard time picker. Each bar is one UTC calendar day, midnight to midnight. The newest bar is today so far, a partial day that grows until midnight UTC. The range starts at midnight UTC 13 days ago and ends now, so it shows 13 full days plus today. It starts at midnight UTC because the dashboard shows times in UTC; otherwise the oldest bar would be cut off. It goes back no further because Grafana Cloud keeps 14 days of metrics, and a range of 14 days or more is cut at the retention limit, which breaks the day alignment.",
+        "id": 117, "title": "KPIs per UTC Day (13 days)", "type": "barchart",
+        "description": "Daily totals of the KPIs above, production, over the last 13 days regardless of the dashboard time picker. Each bar is one UTC calendar day, midnight to midnight. The newest bar is today so far, a partial day that grows until midnight UTC. The range starts at midnight UTC 13 days ago and ends now, so it shows 13 full days plus today, one bar per UTC date. It is a bar chart with one slot per date rather than a time axis, so today's bar is drawn in full at any time of day instead of being cut off at the current time. It goes back no further because Grafana Cloud keeps 14 days of metrics, and a range of 14 days or more is cut at the retention limit, which breaks the day alignment.",
         "gridPos": { "h": 8, "w": 16, "x": 0, "y": 156 },
         "timeFrom": "now-13d/d", "interval": "1d",
         "targets": [
@@ -520,15 +520,25 @@
           { "expr": "sum(increase(gateway_downloads_total{environment=\"main\",status=\"success\"}[1d] offset -1d))", "legendFormat": "downloads" },
           { "expr": "sum(increase(gateway_pool_acquires_total{environment=\"main\",status=\"success\"}[1d] offset -1d))", "legendFormat": "pool acquires" }
         ],
-        "fieldConfig": { "defaults": { "unit": "short", "decimals": 0, "custom": { "drawStyle": "bars", "fillOpacity": 60, "barAlignment": 1 } } }
+        "transformations": [{ "id": "joinByField", "options": { "byField": "Time", "mode": "outer" } }],
+        "options": { "xField": "Time", "orientation": "vertical", "stacking": "none", "groupWidth": 0.75, "barWidth": 0.95, "showValue": "never", "xTickLabelRotation": 0, "xTickLabelSpacing": 0, "legend": { "showLegend": true, "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi", "sort": "none" } },
+        "fieldConfig": {
+          "defaults": { "unit": "short", "decimals": 0, "custom": { "fillOpacity": 70, "lineWidth": 1 } },
+          "overrides": [{ "matcher": { "id": "byName", "options": "Time" }, "properties": [{ "id": "unit", "value": "time:MM-DD" }] }]
+        }
       },
       {
-        "id": 118, "title": "Distinct Callers per UTC Day (13 days)", "type": "timeseries",
-        "description": "Highest distinct-caller count reached each UTC day, production, last 13 days. Each bar is one UTC calendar day, midnight to midnight. The newest bar is today so far, a partial day. The count resets at midnight UTC, so each bar is that day's highest count. Bars for days before that midnight reset was deployed can show the previous day's total. Approximate: the count also resets on restart, so a day with a deploy shows less than the true number. The range starts at midnight UTC 13 days ago and ends now, so it shows 13 full days plus today. It starts at midnight UTC because the dashboard shows times in UTC; otherwise the oldest bar would be cut off. It goes back no further because Grafana Cloud keeps 14 days of metrics, and a range of 14 days or more is cut at the retention limit, which breaks the day alignment.",
+        "id": 118, "title": "Distinct Callers per UTC Day (13 days)", "type": "barchart",
+        "description": "Highest distinct-caller count reached each UTC day, production, last 13 days. Each bar is one UTC calendar day, midnight to midnight. The newest bar is today so far, a partial day. The count resets at midnight UTC, so each bar is that day's highest count. Bars for days before that midnight reset was deployed can show the previous day's total. Approximate: the count also resets on restart, so a day with a deploy shows less than the true number. The range starts at midnight UTC 13 days ago and ends now, so it shows 13 full days plus today, one bar per UTC date. It is a bar chart with one slot per date rather than a time axis, so today's bar is drawn in full at any time of day instead of being cut off at the current time. It goes back no further because Grafana Cloud keeps 14 days of metrics, and a range of 14 days or more is cut at the retention limit, which breaks the day alignment.",
         "gridPos": { "h": 8, "w": 8, "x": 16, "y": 156 },
         "timeFrom": "now-13d/d", "interval": "1d",
         "targets": [{ "expr": "max_over_time(sum(gateway_distinct_callers{environment=\"main\"})[1d:5m] offset -1d)", "legendFormat": "callers" }],
-        "fieldConfig": { "defaults": { "unit": "short", "decimals": 0, "custom": { "drawStyle": "bars", "fillOpacity": 60, "barAlignment": 1 } } }
+        "transformations": [{ "id": "joinByField", "options": { "byField": "Time", "mode": "outer" } }],
+        "options": { "xField": "Time", "orientation": "vertical", "stacking": "none", "groupWidth": 0.75, "barWidth": 0.95, "showValue": "never", "xTickLabelRotation": 0, "xTickLabelSpacing": 0, "legend": { "showLegend": true, "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi", "sort": "none" } },
+        "fieldConfig": {
+          "defaults": { "unit": "short", "decimals": 0, "custom": { "fillOpacity": 70, "lineWidth": 1 } },
+          "overrides": [{ "matcher": { "id": "byName", "options": "Time" }, "properties": [{ "id": "unit", "value": "time:MM-DD" }] }]
+        }
       }
     ],
     "schemaVersion": 39
