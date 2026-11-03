@@ -8,15 +8,20 @@ These tests require:
 3. Network access to the x402 facilitator
 
 To run these tests:
-    # First, start the gateway in another terminal:
-    X402_ENABLED=true X402_FREE_TIER_ENABLED=false X402_PAY_TO_ADDRESS=0x... python run.py
+    RUN_LIVE_TESTS=1 pytest tests/test_x402_live.py -v -s                    # staging
+    RUN_LIVE_TESTS=1 GATEWAY_URL=http://localhost:8000 pytest ... -v -s     # local
 
-    # Then run the live tests:
-    pytest tests/test_x402_live.py -v --run-live
+Environment variables:
+    RUN_LIVE_TESTS           - Required (1/true/yes); otherwise every test is skipped
+    GATEWAY_URL              - Gateway URL (default: staging, never production).
+                               The same variable tests/test_integration_gateway.py
+                               reads. TEST_GATEWAY_URL is accepted as a legacy alias.
+    TEST_WALLET_PRIVATE_KEY  - Private key for test wallet (with testnet USDC);
+                               only test_payment_with_x402_client needs it, and it pays.
 
-Environment variables required:
-    TEST_WALLET_PRIVATE_KEY  - Private key for test wallet (with testnet USDC)
-    TEST_GATEWAY_URL         - Gateway URL (default: http://localhost:8000)
+Protected routes validate the request before payment, pricing and the free tier
+(#427). A request that is malformed gets 422 before any of those, so a test that
+wants a 402 or a free-tier slot has to send a well-formed body.
 """
 import os
 import pytest
@@ -51,10 +56,29 @@ def payment_required_body(response) -> dict:
     return data if "accepts" in data else data["detail"]
 
 
+# Defaults to staging, like tests/test_integration_gateway.py, so one variable
+# points both live modules at the same gateway. Production is never a default.
+STAGING_URL = "https://provenance-gateway.dev.datafund.io"
+
+
+def gateway_url() -> str:
+    """GATEWAY_URL, else the legacy TEST_GATEWAY_URL, else staging."""
+    return (os.environ.get("GATEWAY_URL")
+            or os.environ.get("TEST_GATEWAY_URL")
+            or STAGING_URL).rstrip("/")
+
+
+# A well-formed stamp purchase. Since #427 a malformed body is refused with 422
+# before payment is considered, so tests that expect a 402 must send this.
+# Without a payment header or the free-tier opt-in it is refused with 402 before
+# the handler runs, so nothing is bought.
+VALID_STAMP_BODY = {"size": "small", "duration_hours": 25}
+
+
 def get_test_config():
     """Get test configuration from environment."""
     return {
-        "gateway_url": os.environ.get("TEST_GATEWAY_URL", "http://localhost:8000"),
+        "gateway_url": gateway_url(),
         "wallet_private_key": os.environ.get("TEST_WALLET_PRIVATE_KEY"),
         "network": "base-sepolia",
     }
@@ -94,9 +118,10 @@ class TestX402ResponseFormat:
         """Protected endpoint returns 402 without payment."""
         config = get_test_config()
 
-        response = requests.post(f"{config['gateway_url']}/api/v1/stamps/")
+        response = requests.post(
+            f"{config['gateway_url']}/api/v1/stamps/", json=VALID_STAMP_BODY, timeout=30)
 
-        # Without a payment or free-tier header this is always 402
+        # A valid request without a payment or free-tier header is always 402
         assert response.status_code == 402, f"Unexpected status: {response.status_code}"
 
         if response.status_code == 402:
@@ -124,10 +149,10 @@ class TestX402ResponseFormat:
         """Verify 402 contains a valid Ethereum address."""
         config = get_test_config()
 
-        response = requests.post(f"{config['gateway_url']}/api/v1/stamps/", json={})
+        response = requests.post(
+            f"{config['gateway_url']}/api/v1/stamps/", json=VALID_STAMP_BODY, timeout=30)
 
-        if response.status_code != 402:
-            pytest.skip(f"Got {response.status_code}, not 402")
+        assert response.status_code == 402, f"Unexpected status: {response.status_code}"
 
         req = payment_required_body(response)["accepts"][0]
 
@@ -225,18 +250,26 @@ class TestFreeTierFlow:
         """Test that free tier enforces rate limits."""
         config = get_test_config()
 
-        # Make multiple requests quickly
+        # A well-formed free-tier upload to a batch nobody owns. It passes
+        # validation, so it takes a free-tier slot; the handler then refuses it
+        # (403, the batch is not the caller's) before anything is uploaded or
+        # bought. A malformed body would not do: since #427 it gets 422 before
+        # the free-tier check and never counts against the limit.
+        unowned_batch = "0" * 64
+
         results = []
         for i in range(10):
-            # An invalid body is refused (422) after the free-tier check, so
-            # this spends nothing while still counting against the limit.
             response = requests.post(
-                f"{config['gateway_url']}/api/v1/stamps/",
-                json={"depth": 99},
+                f"{config['gateway_url']}/api/v1/data/",
+                params={"stamp_id": unowned_batch},
                 headers={"X-Payment-Mode": "free"},
+                files={"file": ("rate-limit.txt", b"rate limit probe", "text/plain")},
+                timeout=30,
             )
             results.append(response.status_code)
             print(f"Request {i+1}: {response.status_code}")
+            assert response.status_code not in (200, 201), (
+                f"Upload to an unowned batch succeeded: {response.text}")
 
             if response.status_code == 429:
                 print(f"Rate limited after {i+1} requests")
@@ -244,7 +277,29 @@ class TestFreeTierFlow:
 
         # Should eventually get rate limited (if free tier enabled)
         # or get 402 immediately (if free tier disabled)
-        assert 429 in results or 402 in results, "Expected rate limit or payment required"
+        assert 429 in results or 402 in results, f"Expected rate limit or payment required, got {results}"
+
+    @live_test
+    def test_malformed_request_is_refused_before_free_tier(self):
+        """A malformed free-tier request gets 422 and takes no free-tier slot (#427).
+
+        More requests than the free tier allows in a minute, all malformed: every
+        one is 422, none 429. Holds even when the window is already used up,
+        because validation comes before the free-tier check.
+        """
+        config = get_test_config()
+
+        results = []
+        for _ in range(5):
+            response = requests.post(
+                f"{config['gateway_url']}/api/v1/stamps/",
+                json={"depth": 99},
+                headers={"X-Payment-Mode": "free"},
+                timeout=30,
+            )
+            results.append(response.status_code)
+
+        assert results == [422] * len(results), f"Expected only 422, got {results}"
 
 
 # Standalone test runner

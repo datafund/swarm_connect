@@ -39,7 +39,7 @@ explicit opt-in, on three separate switches:
 | variable | effect | default |
 |---|---|---|
 | `RUN_LIVE_TESTS=1` | run the live modules at all | off |
-| `GATEWAY_URL=...` | which gateway to talk to | staging (**never** production) |
+| `GATEWAY_URL=...` | which gateway to talk to (both modules; `TEST_GATEWAY_URL` is a legacy alias) | staging (**never** production) |
 | `ALLOW_LIVE_STAMP_PURCHASE=1` | let a fixture buy a postage batch | off |
 
 ```bash
