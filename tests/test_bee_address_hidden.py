@@ -394,7 +394,7 @@ class TestWithoutAddresses:
         "bee version 2.8.1",
         # A dotless configured host as a plain word: a compose service name
         # (public in docker-compose.yml) and a word in Bee's own text.
-        "Bee is syncing",
+        "Bee node not ready",
         "bee node not ready, retry",
         "x 1.2.300.4",
         "batch 0xabc: not found",
@@ -651,6 +651,9 @@ class TestRoundFive:
          "x509: certificate is valid for <host>,not <host>"),
         # A configured secret glued to "-" or "_".
         ("id-0123abcdKEY4567_x", "id-<secret>_x"),
+        # Long x509 lists (the limit is now 1024 names).
+        ("x509: certificate is valid for " + ", ".join(f"h{i}.example" for i in range(40))
+         + ", not z.example", "x509: certificate is valid for <host>, not <host>"),
         # A host after a "." that follows punctuation (found by the property test).
         ("x509: .pkp.internal/v2/zT6yC5dQkvQv(", "x509: .<address>"),
     ])
@@ -660,8 +663,6 @@ class TestRoundFive:
     @pytest.mark.parametrize("text", [
         # Left to the gate: the scrubber keeps these, the gate hides them.
         "peer %C3%A910.0.0.1 gone",
-        "x509: certificate is valid for " + ", ".join(f"h{i}.example" for i in range(40))
-        + ", not z.example",
         "see github.com/ethersphere/bee.internal/y",
         "see github.com/x/rpc.internal:8545 y",
         # Refused by design: timestamps, key:number fields, source positions,
@@ -684,7 +685,7 @@ class TestRoundFive:
         "out of funds",
         "insufficient amount for 24h minimum validity",
         "batch not usable",
-        "Bee is syncing",
+        "syncing in progress",
         "insufficient funds",
         "not found",
         "bee/2.8.1 user agent",
@@ -711,40 +712,138 @@ class TestRoundFive:
         detail = call(exc).json()["detail"]
         assert "zz99YYxx77AA" not in detail and "rpc.example.org" not in detail, detail
 
-    def test_random_planted_addresses_never_shown(self):
-        """Property test: whatever the scrubber misses, the gate stops."""
-        import random
-        rng = random.Random(549)
-        letters = "abcdefghijklmnopqrstuvwxyz"
-        mixed = letters + letters.upper() + "0123456789"
-        glue = ["", " ", "<", ">", "@", "/", "(", ")", '"', "'", ",", ";", ":", "=", "?",
-                "#", "%3A", "%2F", "日", "é", "_", "-", ".", "[", "]"]
-        words = ["out", "of", "funds", "dial", "tcp", "failed", "Bee", "said", "lookup", "on",
-                 "refused", "not", "valid", "for", "token", "2.8.1", "x509:", "certificate", "is"]
-        configured = ["0123abcdKEY4567", "QUERYKEY123", "hunter22"]
 
-        def label():
-            return "".join(rng.choice(letters + "0123456789") for _ in range(rng.randint(3, 8)))
 
-        for _ in range(400):
-            ip = ".".join(str(rng.randint(1, 254)) for _ in range(4))
-            host = label() + rng.choice([".internal", ".example.com", ".corp.example", ".svc",
-                                         ".cluster.local", "." + label() + ".net"])
-            password = "".join(rng.choice(mixed) for _ in range(12))
-            port = str(rng.randint(1, 65535))
-            planted = rng.choice([
-                ip, f"{ip}:{port}", f"[fd00::{rng.randint(1, 9999):x}]:{port}", host,
-                f"{host}:{port}", f"{host}/v2/{password}",
-                f"{rng.choice(['http', 'https', 'wss'])}://{host}:{port}/x?key={password}",
-                f"user:{password}@{host}:{port}", f"{rng.choice(configured)}",
-                f"lookup {host} on {ip}:53", f"/dns4/{host}/tcp/{port}",
-            ])
-            parts = [rng.choice(words) for _ in range(rng.randint(0, 6))]
-            parts.insert(rng.randint(0, len(parts)),
-                         rng.choice(glue) + planted + rng.choice(glue))
-            text = " ".join(parts)
-            shown = public_bee_text(text)
-            if shown is None:
-                continue
-            for secret in (ip, host, password, *configured):
-                assert secret not in shown, (text, shown)
+# --------------------------------------------------------------------------- #
+# Round 6: a stricter gate, checked against Bee's own messages
+# --------------------------------------------------------------------------- #
+import os  # noqa: E402
+import pathlib  # noqa: E402
+
+BEE_MESSAGES = [
+    line.rstrip("\n")
+    for line in (pathlib.Path(__file__).parent / "fixtures" / "bee_api_messages.txt")
+    .read_text(encoding="utf-8").splitlines()
+    if line and not line.startswith("#")
+]
+
+
+def test_fixture_holds_all_bee_api_messages():
+    assert len(BEE_MESSAGES) == 135  # 128 pkg/api literals + 7 status texts
+    assert "syncing in progress" in BEE_MESSAGES
+
+
+@pytest.mark.parametrize("message", BEE_MESSAGES)
+def test_every_bee_api_message_is_shown_unchanged(message):
+    assert public_bee_text(message) == message
+
+
+# Bypasses measured against 8eb7e53 in the round-6 review.
+LONG_URL = "http://x/" + "a" * 2021
+ROUND6_BYPASSES = [
+    ("host:fe80:abcd:ef01:abcd:ef01:abcd:ef01:abcd", "fe80"),
+    ("tcp:fdaa:bbbb:cccc:dddd:eeee:ffff:aaaa:bbcd x", "fdaa"),
+    ("10\uff0e0\uff0e0\uff0e1\uff1a1633", "1633"),
+    ("bee\u22361633", "1633"),
+    ("10.0\u200b.0.1", "0.1"),
+    ("0x0a000001", "0a000001"),
+    ("167772161", "167772161"),
+    ("10 0 0 1", "10 0 0 1"),
+    ("ip-10-0-0-1", "10-0-0-1"),
+    ("dial tcp: lookup nethermind: no such host", "nethermind"),
+    ("lookup bee-prod: no such host", "bee-prod"),
+    (LONG_URL + " lookup nethermind on 127.0.0.11:53", "nethermind"),
+]
+
+
+class TestRoundSix:
+
+    @pytest.mark.parametrize("text, secret", ROUND6_BYPASSES)
+    def test_bypass_is_not_shown(self, text, secret):
+        shown = public_bee_text(text)
+        assert shown is None or secret not in shown, shown
+
+    @pytest.mark.parametrize("text, expected", [
+        ("host:fe80:abcd:ef01:abcd:ef01:abcd:ef01:abcd", "host:<address>"),
+        ("via:fdaa:bbbb:cccc:dddd:eeee:ffff:aaaa:bbcd x", "via:<address> x"),
+        ("tcp:fdaa:bbbb:cccc:dddd:eeee:ffff:aaaa:bbcd x", "tcp:<address> x"),
+    ])
+    def test_ipv6_after_word_colon(self, text, expected):
+        assert without_addresses(text) == expected
+
+    @pytest.mark.parametrize("text", [
+        "x\u200b", "full\uff1awidth", "caf\u00e9", "a:b", "x:1", "dead:beef:",
+        "1-2-3-4", "1 2 3 4", "id 1234567", "0xdeadbeef", "lookup zz: no such host",
+        "lookup zz…", "auth hunter22ip failed",
+    ])
+    def test_gate_refuses_new_shapes(self, text):
+        assert public_bee_text(text) is None
+
+    @pytest.mark.parametrize("text", [
+        "new lookup failed", "lookup at failed", "lookup <host> on <address>",
+        "error: done", "code 123456", "0xabcde",
+    ])
+    def test_gate_passes(self, text):
+        assert public_bee_text(text) == text
+
+
+_SEEDS = [int(x) for x in os.environ.get("BEE_SCRUB_SEEDS", "549").split(",") if x]
+
+
+@pytest.mark.parametrize("seed", _SEEDS)
+def test_random_planted_addresses_never_shown(seed):
+    """Property test: whatever the scrubber misses, the gate stops.
+
+    Other seeds: BEE_SCRUB_SEEDS=1,2,3 pytest tests/test_bee_address_hidden.py
+    """
+    import ipaddress
+    import random
+    rng = random.Random(seed)
+    letters = "abcdefghijklmnopqrstuvwxyz"
+    mixed = letters + letters.upper() + "0123456789"
+    glue = ["", " ", "<", ">", "@", "/", "(", ")", '"', "'", ",", ";", ":", "=", "?",
+            "#", "%3A", "%2F", "\u65e5", "\u00e9", "_", "-", ".", "[", "]", "via:", "ip",
+            "\u200b"]
+    words = ["out", "of", "funds", "dial", "tcp", "failed", "Bee", "said", "on",
+             "refused", "not", "valid", "for", "token", "2.8.1", "x509:", "certificate", "is"]
+    configured = ["0123abcdKEY4567", "QUERYKEY123", "hunter22"]
+
+    def label():
+        return "".join(rng.choice(letters + "0123456789") for _ in range(rng.randint(3, 8)))
+
+    for _ in range(400):
+        octets = [rng.randint(1, 254) for _ in range(4)]
+        ip = ".".join(map(str, octets))
+        host = label() + rng.choice([".internal", ".example.com", ".corp.example", ".svc",
+                                     ".cluster.local", "." + label() + ".net"])
+        name = "zz" + label()  # an unconfigured dotless host name
+        password = "".join(rng.choice(mixed) for _ in range(12))
+        port = str(rng.randint(1024, 65535))
+        v6 = "fe80:" + ":".join(f"{rng.randint(0, 65535):x}" for _ in range(7))
+        full_width = ip.replace(".", "\uff0e") + "\uff1a" + port
+        zero_width = ip.replace(".", ".\u200b", 1)
+        as_int = str(int(ipaddress.IPv4Address(ip)))
+        as_hex = f"0x{int(ipaddress.IPv4Address(ip)):08x}"
+        spaced = " ".join(map(str, octets))
+        dashed = "ip-" + "-".join(map(str, octets))
+        planted, secrets = rng.choice([
+            (ip, [ip]), (f"{ip}:{port}", [ip, port]),
+            (f"[fd00::{rng.randint(1, 9999):x}]:{port}", [port]), (host, [host]),
+            (f"{host}:{port}", [host, port]), (f"{host}/v2/{password}", [host, password]),
+            (f"https://{host}:{port}/x?key={password}", [host, port, password]),
+            (f"user:{password}@{host}:{port}", [password, host, port]),
+            (rng.choice(configured), configured),
+            (f"lookup {host} on {ip}:53", [host, ip]), (f"/dns4/{host}/tcp/{port}", [host, port]),
+            (v6, [v6, v6[:9]]), (f"lookup {name}: no such host", [name]),
+            (f"lookup {name} on {ip}:53", [name, ip]), (full_width, [full_width, port]),
+            (zero_width, [zero_width]), (as_int, [as_int]), (as_hex, [as_hex]),
+            (spaced, [spaced]), (dashed, [dashed[3:]]),
+        ])
+        parts = [rng.choice(words) for _ in range(rng.randint(0, 6))]
+        parts.insert(rng.randint(0, len(parts)), rng.choice(glue) + planted + rng.choice(glue))
+        text = " ".join(parts)
+        shown = public_bee_text(text)
+        if shown is None:
+            continue
+        for secret in secrets:
+            assert secret not in shown, (seed, text, shown)

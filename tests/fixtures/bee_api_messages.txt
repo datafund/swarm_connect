@@ -1,0 +1,138 @@
+# Literal error messages from Bee's pkg/api (github.com/ethersphere/bee, non-test .go files,
+# jsonhttp.<Status>(w, "...") calls), one per line, plus the HTTP status texts Bee sends
+# when a handler passes no message. Public Bee source text, copied for #549.
+act or history entry not found
+add file failed
+add metadata failed
+address not found or incorrect
+batch is overissued
+batch not found
+batch not usable
+batch not usable yet
+batch not usable yet or does not exist
+batch with id not found
+block number unavailable
+bzz download: feed is not a legacy payload
+bzz download: feed pointing to the wrapped chunk not found
+BZZ token address unavailable
+cannot create batch
+cannot create tag
+cannot dilute batch
+cannot get or create tag
+cannot get tag
+cannot migrate stake
+cannot read request
+cannot stake
+cannot topup batch
+cannot update label
+cannot withdraw stake
+Chain is disabled. This endpoint is unavailable.
+Chequebook is disabled. This endpoint is unavailable.
+chunk is not a single owner chunk
+chunk not found
+contract is not paused
+could not parse headers
+create manifest failed
+debug storage info not available
+done split act failed
+done split failed
+done split grantees failed
+done split history failed
+done split: failed
+error unmarshaling metadata
+error unmarshaling request body
+failed making sample with proofs
+failed to calculate if node has enough funds to play
+failed to create history
+failed to get redistribution status
+failed to read request body
+failed to save stamp issuer
+feed not found
+feed type not found
+get blocklisted peers failed
+get issuer failed
+get staked amount failed
+granteelist not found
+insufficient amount for 24h minimum validity
+insufficient stake amount
+insufficient stake to migrate
+insufficient stake to withdraw
+invalid add list
+invalid batch id
+invalid depth
+invalid filename in tar archive
+invalid grantee list
+invalid public key
+invalid request body
+invalid revoke list
+invalid swarm-tag query parameter
+invalid timestamp
+is retrievable check failed
+issuer does not exist
+joiner failed
+label is required
+list pinned root references failed
+lookup at failed
+manifest store failed
+mapStructure feed update
+marshal current index failed
+marshal index
+marshal next index failed
+minimum validity blocks unavailable
+new lookup failed
+no chain backend
+no update found
+Node is syncing. This endpoint is unavailable. Try again later.
+not enough balance
+not implemented
+ok
+only BZZ or NativeToken options are accepted
+out of funds
+path address not found
+peer not found
+pin collection failed
+pin root hash: checking of tracking pin
+pin root hash: checking of tracking pin failed
+pin root hash: create collection failed
+pingpong: ping failed
+pinned root hash: check reference failed
+postage stamp issuer
+provided address not whitelisted
+pss send failed
+re-upload failed
+read chunk failed
+remove from empty grantee list
+requested chunk cannot be retrieved
+signer ethereum address
+simultaneous on-chain operations not supported
+simultaneous operations not supported
+soc address cannot be created
+stamping failed
+Storage incentives are disabled. This endpoint is unavailable.
+Swap is disabled. This endpoint is unavailable.
+syncing failed
+syncing in progress
+tag not found
+tag not present
+unable to acquire balance from the chain backend
+unable to acquire erc20 balance
+unable to calculate commitment
+unable to check batch
+unable to estimate batch expiration
+unable to get balance
+unable to get batch
+unable to get neighborhoods status
+unable to iterate all batches
+unable to save stamper data
+unable to transfer
+unable to transfer amount
+unpin root hash: deletion of pin failed
+upgrade failed
+wrapped chunk cannot be retrieved
+Bad Request
+Unauthorized
+Forbidden
+Not Found
+Internal Server Error
+Not Implemented
+Service Unavailable

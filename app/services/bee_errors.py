@@ -22,14 +22,20 @@ for a response in three steps:
   purchase: HTTP 400"; on /pool/status the "Bee said" part is left out).
 
 The gate is the guarantee: a gap in the scrubber hides a message instead of
-leaking through it. The gate refuses ":" before a digit or "/", "//", "::",
-"@", "%", "\\" or "?" before a non-space character, and any dotted token
-except a version of at most three digit groups ("2.8.1"). So timestamps,
-"key:number" fields ("timeout:30"), Go source positions ("api.go:42"),
-dotted words ("e.g.") and public links are never shown, even where the
-scrubber keeps them; that is accepted. Known Bee messages ("out of funds",
-"insufficient amount for 24h minimum validity", "batch not usable", "Bee is
-syncing") and user agents ("bee/2.8.1") pass.
+leaking through it. _looks_safe lists what it refuses: non-ASCII text, a
+":" not followed by a space or the end, "//", "::", glued "@", "%", "\\"
+or "?", colon-separated hex groups, four digit groups however separated,
+integer and hex IPs, Go's "lookup X:" / "lookup X on" with a real name,
+dotted tokens other than short versions, and any configured secret
+anywhere, even glued into a longer word. So timestamps, "key:number"
+fields, Go source positions, dotted words and links are never shown.
+
+That costs nothing for Bee itself: Bee's own API error messages carry no
+addresses, and all 128 literal messages in Bee's pkg/api plus the HTTP
+status texts pass the gate unchanged (tests/fixtures/bee_api_messages.txt),
+for example "out of funds", "syncing in progress" and "batch not usable".
+The scrubber exists for text from proxies and other intermediaries between
+the gateway and Bee, such as HTML error pages and Go network errors.
 
 without_addresses() replaces, in this order:
 
@@ -55,8 +61,8 @@ without_addresses() replaces, in this order:
 5. The names in Go's x509 "certificate is valid for A, B, not C" and
    "wanted to match C" -> <host>, each name taken whole up to a space, ","
    or ";" ("not my-bee-gw"), giving back trailing sentence punctuation. The
-   names may be joined by "," with or without a space. Limit: up to 33
-   names in the list; a longer list is not replaced (the gate hides it).
+   names may be joined by "," with or without a space. Up to 1024 names,
+   more than fit in the 2 KB that public_bee_text scrubs.
 6. IPv6 addresses -> <address>, bracketed or bare, with any port and path.
    A bare one must parse, and either have 3 or more groups (fd00::1:2,
    ::ffff:10.0.0.1, which takes a :port as well) or have groups on both
@@ -80,7 +86,7 @@ without_addresses() replaces, in this order:
    ("bee:1633", "BEE/stamps" -> <address>), or in steps 3, 4 and 8, but
    not right after "/", where it is a path segment
    (github.com/ethersphere/bee/v2).
-   "bee/2.8.1" (a user agent) and "Bee is syncing" stay.
+   "bee/2.8.1" (a user agent) and "Bee node not ready" stay.
 10. A dotted name with a port -> <address> (bee.internal:1633), with any
     path, query or fragment after it; "main.go:123" is a Go source position
     and stays.
@@ -121,11 +127,16 @@ public_bee_text() scrubs at most 2 KB (SCRUB_CAP), then cuts to 200
 characters. At either cut a word the cut lands inside is dropped and "…"
 added; if no whitespace comes before the cut, nothing is shown (None).
 
-Known scrubber limits, all covered by the gate: text past the 2 KB pre-cut
-is not seen, so a "lookup X" whose " on " falls past it keeps an
-unconfigured dotless X; x509 lists of more than 33 names; an address glued
-to an encoded non-ASCII byte; an internal host inside a public code or docs
-link (github.com/x/bee.internal/y) is kept with the link.
+Known scrubber limits, each refused by the gate (tests in TestRoundFive and
+TestRoundSix): text past the 2 KB pre-cut is not seen, so a "lookup X" whose
+" on " falls past it keeps an unconfigured X, and the gate refuses the
+"lookup X…" left at the cut; an address glued to an encoded non-ASCII byte
+("%C3%A910.0.0.1", refused for the glued "%"); an internal host inside a
+public code or docs link (refused as a dotted token).
+
+Not hidden by either: a bare single-label host name that nobody configured,
+with no port, path or "lookup" before it ("dial nethermind failed"). It
+cannot be told from a word, and on its own it names no reachable address.
 
 Kept by the scrubber by design (and then refused by the gate where they
 are address-shaped), because they cannot be told apart from ordinary text
@@ -205,7 +216,7 @@ _AFTER_AT_RE = re.compile(r"([A-Za-z0-9-]{1,63}(?![\w.-]))?(:\d{1,10})?")
 _CRED_STOP_RE = re.compile(r"[\s\"'<>]")
 _USER_STOP_RE = re.compile(r"[\s\"'<>()=&?;,/:@]")
 _X509_RE = re.compile(
-    r"\b(certificate is valid for )((?:[^\s,]{1,253},\s?){0,32}?[^\s,]{1,253})(,\s?not )"
+    r"\b(certificate is valid for )((?:[^\s,]{1,253},\s?){0,1023}?[^\s,]{1,253})(,\s?not )"
     r"([^\s,;]{1,253})"
     r"|\b(wanted to match )([^\s,;]{1,253})",
     re.IGNORECASE)
@@ -214,6 +225,12 @@ _BRACKETED_V6_RE = re.compile(
 _BARE_V6_RE = re.compile(
     r"(?<![0-9A-Fa-f:])(?<!\d\.)((?:[0-9A-Fa-f]{0,4}:){2,7}(?:(\d{1,3}(?:\.\d{1,3}){3})|[0-9A-Fa-f]{0,4}))"
     r"(%[\w.-]{1,32})?((?<=\d):\d{1,5}(?!\d))?")
+# An IPv6 address right after "word:" ("host:fe80:...", "via:fdaa:..."). Run
+# before _BARE_V6_RE, which would otherwise start at a hex letter of the word
+# ("vi<address>") or not at all.
+_WORD_COLON_V6_RE = re.compile(
+    r"(?<=[A-Za-z_]:)((?:[0-9A-Fa-f]{0,4}:){2,7}(?:\d{1,3}(?:\.\d{1,3}){3}|[0-9A-Fa-f]{0,4}))"
+    r"(?![0-9A-Za-z_:])")
 _IPV4_RE = re.compile(
     r"(?<!\d)(?<!\d\.)(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})(?![A-Za-z0-9]|\.\d)"
     r"(?::\d{1,10})?" + _PATH)
@@ -447,6 +464,8 @@ def _scrub(text, hosts, secrets):
     text = _remove_userinfo(text, hosts)
     text = _X509_RE.sub(_x509, text)
     text = _BRACKETED_V6_RE.sub(_bracketed_v6, text)
+    text = _WORD_COLON_V6_RE.sub(
+        lambda m: _ADDR if _v6_is_address(m.group(1)) else m.group(0), text)
     text = _BARE_V6_RE.sub(_bare_v6, text)
     text = _IPV4_RE.sub(_ipv4, text)
 
@@ -565,29 +584,58 @@ def public_bee_text(text: str, limit: int = 200) -> Optional[str]:
         shown = _drop_partial(shown[:limit], shown[limit])
     if shown is None or not _looks_safe(shown):
         return None
+    # A configured secret glued into a longer word ("hunter22ip") is not a
+    # whole token, so the scrubber keeps it; it is never shown either way.
+    if any(secret in shown for secret in _configured()[1]):
+        return None
     return shown
 
 
 _PLACEHOLDERS_RE = re.compile(r"<(?:url|address|host|port|secret)>")
-# ":" before a digit or "/" (a port, a scheme, a time), "//", "::", and "@",
-# "%", "\" or "?" before a non-space character.
-_UNSAFE_RE = re.compile(r":(?=[\d/])|//|::|[@%\\?](?=\S)")
+# The gate's refusals, on the text with placeholders removed (see _looks_safe).
+_UNSAFE_RE = re.compile(
+    r"[^\x20-\x7e]"                                # any non-ASCII or control character
+    r"|:(?! |$)"                                     # ":" not followed by a space or the end
+    r"|//|::|[@%\\?](?=\S)"                        # "//", "::", "@", "%", "\\", "?" glued
+    r"|(?:[0-9A-Fa-f]{1,4}:){2,}"                    # colon-separated hex groups
+    r"|(?<!\d)\d{1,3}(?:[ .-]\d{1,3}){3}(?!\d)"     # 10 0 0 1, 10.0.0.1, ip-10-0-0-1
+    r"|\d{7,}|0[xX][0-9A-Fa-f]{6,}")               # integer or hex IPs
+# Go's resolver error, "lookup X: ..." or "lookup X on ...", or one cut short
+# ("lookup X…"), where X is not a placeholder, also glued to a word
+# ("_lookup X:"). Checked before placeholders are removed. Bee's own "new lookup failed" and "lookup at failed" pass.
+_LOOKUP_UNSAFE_RE = re.compile(
+    r"lookup\s+(?!<(?:url|address|host|port|secret)>)[^\s:…]+(?=:|\s+on\b|…)",
+    re.IGNORECASE)
 # Anchored at a token start, so a long run without a dot costs linear time.
 _DOTTED_TOKEN_RE = re.compile(r"(?<![A-Za-z0-9])[A-Za-z0-9]+(?:\.[A-Za-z0-9]+)+")
 _VERSION_RE = re.compile(r"\d+(?:\.\d+){1,2}")
 
 
 def _looks_safe(shown: str) -> bool:
-    """True if the text, placeholders removed, has nothing address-shaped.
+    """True if nothing address-shaped is left once placeholders are removed.
 
-    Refused: ":" before a digit or "/" (so ports, times and "key:1" fields),
-    "//", "::", "@", "%", "\\" or "?" before a non-space character, and any
-    dotted token ("a.b", "e.g", "api.go") except a version of digits with at
-    most three groups ("2.8.1"); so four dotted digit groups are refused.
-    Strict on purpose: a harmless message hidden costs a detail, a leak
-    costs an address.
+    Refused: any non-ASCII or control character (full-width or lookalike
+    punctuation, zero-width characters); a ":" not followed by a space or the
+    end of the text (ports, times, "key:1" fields, "host:..."); "//" and
+    "::"; "@", "%", "\\" or "?" before a non-space character; two or more
+    colon-separated hex groups; four groups of 1-3 digits separated by
+    spaces, dots or hyphens ("10 0 0 1", "ip-10-0-0-1"); integers of 7 or
+    more digits and 0x hex of 6 or more (integer IPs); Go's resolver form
+    "lookup X:" / "lookup X on" (or one cut short) where X is not a
+    placeholder; and any dotted token except a version of digits with at
+    most three groups ("2.8.1").
+
+    Strict on purpose: Bee's own API messages carry no addresses, and all of
+    them pass (tests/fixtures/bee_api_messages.txt); what is refused is
+    text from proxies and intermediaries, where a hidden detail costs little
+    and a leak costs an address. The "…" this module adds at a cut is
+    allowed.
     """
+    if _LOOKUP_UNSAFE_RE.search(shown):
+        return False
     rest = _PLACEHOLDERS_RE.sub("", shown)
+    if rest.endswith("…"):
+        rest = rest[:-1]
     if _UNSAFE_RE.search(rest):
         return False
     return all(_VERSION_RE.fullmatch(t) for t in _DOTTED_TOKEN_RE.findall(rest))
