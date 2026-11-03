@@ -83,6 +83,9 @@ class BeeStub:
         self._server: Optional[asyncio.base_events.Server] = None
         self.latency_by_prefix: Dict[str, float] = {}
         self._writers = set()
+        # Path prefixes whose requests are dropped without an answer (the
+        # client sees the server disconnect: an unknown outcome).
+        self.drop_prefixes: set = set()
 
     async def start(self) -> "BeeStub":
         self._server = await asyncio.start_server(self._handle, self.host, self.port, backlog=1024)
@@ -143,6 +146,9 @@ class BeeStub:
                 elif path == "/__reset":
                     self.reset()
                     status, payload, ctype = _json({"ok": True})
+                elif any(path.startswith(p) for p in self.drop_prefixes):
+                    self.counts[path.split("?", 1)[0]] += 1
+                    break  # closes the connection with no response
                 else:
                     self.counts[path.split("?", 1)[0]] += 1
                     self.in_flight += 1

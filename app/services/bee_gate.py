@@ -62,7 +62,7 @@ class BeeBusyError(httpx.TransportError):
 class RequestGateState:
     """Per-request gate state, shared with tasks the request starts."""
 
-    __slots__ = ("refused", "committed", "payment_attempted")
+    __slots__ = ("refused", "committed", "payment_attempted", "change_sent")
 
     def __init__(self) -> None:
         self.refused = False      # one of this request's Bee calls was refused
@@ -70,6 +70,11 @@ class RequestGateState:
         # Settlement of this request's payment was started: from here on its
         # outcome may be unknown, so its answer must never be replaced.
         self.payment_attempted = False
+        # A Bee call that can change state (any method but GET and HEAD: a
+        # purchase, a top-up, an upload) got a slot and was handed to the
+        # transport. Whatever happened to it, "nothing was charged" is no
+        # longer known to be true.
+        self.change_sent = False
 
 
 _request_state: contextvars.ContextVar[Optional[RequestGateState]] = contextvars.ContextVar(
@@ -313,6 +318,10 @@ class GatedTransport(httpx.AsyncBaseTransport):
         if not settings.BEE_CALL_GATE_ENABLED or not is_bee_request(request):
             return await self.inner.handle_async_request(request)
         slot = await bee_call_gate.acquire(slot_class(request))
+        if request.method not in ("GET", "HEAD"):
+            state = _request_state.get()
+            if state is not None:
+                state.change_sent = True
         try:
             response = await self.inner.handle_async_request(request)
         except BaseException:

@@ -288,6 +288,23 @@ def test_a_request_carrying_a_payment_is_never_rewritten(plain):
     assert r.status_code == 422 and r.json()["detail"] == "bad input"
 
 
+def test_rewrite_keeps_rate_limit_headers_and_drops_the_rest():
+    app = FastAPI()
+
+    @app.get("/limited")
+    async def limited():
+        await swallow_a_refusal()
+        raise HTTPException(status_code=502, detail="x",
+                            headers={"X-RateLimit-Limit": "60", "X-RateLimit-Remaining": "12",
+                                     "X-Something-Else": "1"})
+    app.add_middleware(BeeGateMiddleware)
+    r = TestClient(app, raise_server_exceptions=False).get("/limited")
+    assert r.status_code == 503 and r.json()["code"] == "BEE_BUSY"
+    assert r.headers["x-ratelimit-limit"] == "60" and r.headers["x-ratelimit-remaining"] == "12"
+    assert "x-something-else" not in r.headers
+    assert r.headers["content-length"] == str(len(r.content))
+
+
 @pytest.mark.parametrize("path", ["/plain-422", "/plain-502"])
 def test_a_plain_error_with_no_payment_is_still_rewritten(plain, path):
     r = plain.get(path)
@@ -361,3 +378,148 @@ async def test_client_recovery_runs_as_background(monkeypatch):
         for k, v in saved.items():
             setattr(hc, k, v)
     assert seen == [None]
+
+
+# --------------------------------------------------------------------------
+# A state-changing Bee call that was sent ends the rewrite (#588 review 2)
+#
+# The real stamps router, the gateway's shared client and a stub Bee over TCP.
+# The first Bee read is refused by the gate and swallowed (get_local_stamps
+# returns [] on any error); then the top-up or purchase itself is sent and the
+# stub drops the connection: an unknown outcome, where BZZ may have been
+# spent. The answer must stay what it was before the gate existed.
+# --------------------------------------------------------------------------
+
+import pytest_asyncio  # noqa: E402
+
+from app.core.config import settings  # noqa: E402
+from app.services import http_client as hc  # noqa: E402
+from app.services import swarm_api  # noqa: E402
+from tests.tools.bee_stub import BATCH_ID, BeeStub  # noqa: E402
+
+
+@pytest_asyncio.fixture
+async def bee(monkeypatch):
+    stub = await BeeStub().start()
+    saved = {k: getattr(hc, k) for k in (
+        "_client", "_transport", "_replace_lock", "_recovery_task", "_last_recovery_attempt")}
+    monkeypatch.setattr(settings, "SWARM_BEE_API_URL", stub.base_url)
+    monkeypatch.setattr(settings, "BEE_CALL_GATE_ENABLED", True)
+    monkeypatch.setattr(settings, "BEE_CALL_SLOT_WAIT_SECONDS", 0.05)
+    bee_call_gate.reset()
+    await hc.init_client()
+    try:
+        yield stub
+    finally:
+        await hc.close_client()
+        await stub.stop()
+        for k, v in saved.items():
+            setattr(hc, k, v)
+
+
+async def _local_stamps_refused():
+    """get_local_stamps whose /stamps call the gate refused: it swallows the
+    error and returns [], as the real one does for any httpx error."""
+    try:
+        raise refused_by_the_gate()
+    except httpx.HTTPError:
+        return []
+
+
+def _stamps_app(x402=False):
+    from app.api.endpoints import stamps
+    app = FastAPI()
+    deps = [Depends(require_x402_payment)] if x402 else []
+    app.include_router(stamps.router, prefix="/api/v1/stamps", dependencies=deps)
+    if x402:
+        app.add_middleware(X402Middleware, facilitator_client=MagicMock())
+    app.add_middleware(BeeGateMiddleware)
+    return app
+
+
+async def _call(app, method, path, **kw):
+    transport = httpx.ASGITransport(app=app, raise_app_exceptions=False)
+    async with httpx.AsyncClient(transport=transport, base_url="http://gw") as c:
+        return await c.request(method, path, **kw)
+
+
+@pytest.mark.asyncio
+async def test_extend_sent_after_a_refused_read_keeps_its_502(bee, monkeypatch):
+    """The reviewer's case: PATCH /stamps/{id}/extend, x402 off. Before the PR: 502."""
+    monkeypatch.setattr(swarm_api, "get_local_stamps", _local_stamps_refused)
+    bee.drop_prefixes = {"/stamps/topup/"}
+    r = await _call(_stamps_app(), "PATCH", f"/api/v1/stamps/{BATCH_ID}/extend", json={"duration_hours": 48})
+    assert any(p.startswith("/stamps/topup/") for p in bee.counts)   # the top-up was sent
+    assert r.status_code == 502
+    assert_not_rewritten(r)
+    assert "retry-after" not in r.headers
+
+
+@pytest.mark.asyncio
+async def test_purchase_refused_before_any_post_is_still_rewritten(bee, monkeypatch):
+    """Nothing state-changing reached Bee: 503 BEE_BUSY is true."""
+    async def chainstate():
+        raise refused_by_the_gate()
+    monkeypatch.setattr(swarm_api, "get_chainstate", chainstate)
+    r = await _call(_stamps_app(), "POST", "/api/v1/stamps/", json={"duration_hours": 24, "depth": 17})
+    assert r.status_code == 503
+    assert r.json()["code"] == "BEE_BUSY"
+    assert not any(p.startswith("/stamps/") for p in bee.counts)
+
+
+@pytest.mark.asyncio
+async def test_purchase_post_refused_by_the_gate_is_rewritten(bee, monkeypatch):
+    """The purchase POST itself got no slot, so it was not sent."""
+    bee_call_gate._bind_loop()
+    bee_call_gate.held["user"] = settings.BEE_MAX_CONCURRENT_CALLS - settings.BEE_RESERVED_BACKGROUND_CALLS
+    monkeypatch.setattr(swarm_api, "get_chainstate", AsyncMock(return_value=dict(CHAIN)))
+    monkeypatch.setattr(swarm_api, "check_sufficient_funds", AsyncMock(return_value={
+        "sufficient": True, "wallet_balance_bzz": 10.0, "required_bzz": 0.01, "shortfall_bzz": 0.0}))
+    r = await _call(_stamps_app(), "POST", "/api/v1/stamps/", json={"duration_hours": 24, "depth": 17})
+    assert r.status_code == 503 and r.json()["code"] == "BEE_BUSY"
+    assert bee.stats()["total"] == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("x402", [False, True], ids=["x402-off", "x402-free-tier"])
+async def test_unpaid_purchase_sent_after_a_refused_read_keeps_its_502(bee, monkeypatch, x402):
+    """Unpaid purchases, with x402 off and on the x402 free tier: a read refused
+    and swallowed, then the purchase POST sent and lost. BZZ may be spent."""
+    from app.x402.ratelimit import reset_rate_limiter
+    reset_rate_limiter()
+    if x402:
+        monkeypatch.setattr(settings, "X402_ENABLED", True)
+        monkeypatch.setattr(settings, "X402_PAY_TO_ADDRESS", "0xpayee")
+        monkeypatch.setattr(settings, "X402_NETWORK", "base-sepolia")
+        monkeypatch.setattr(settings, "X402_FREE_TIER_ENABLED", True)
+        monkeypatch.setattr("app.x402.dependency._calculate_price_for_request",
+                            AsyncMock(return_value={"price_usd": 0.02, "description": "t"}))
+
+    async def funds(required):
+        try:
+            raise refused_by_the_gate()   # a read refused and swallowed
+        except httpx.HTTPError:
+            pass
+        return {"sufficient": True, "wallet_balance_bzz": 10.0, "required_bzz": 0.01, "shortfall_bzz": 0.0}
+    monkeypatch.setattr(swarm_api, "check_sufficient_funds", funds)
+    bee.drop_prefixes = {"/stamps/"}
+    headers = {"X-Payment-Mode": "free"} if x402 else {}
+    r = await _call(_stamps_app(x402), "POST", "/api/v1/stamps/", json={"duration_hours": 24, "depth": 17},
+                    headers=headers)
+    reset_rate_limiter()
+    assert any(p.startswith("/stamps/") for p in bee.counts)   # the purchase was sent
+    assert r.status_code == 502
+    assert_not_rewritten(r)
+    assert "retry-after" not in r.headers
+
+
+@pytest.mark.asyncio
+async def test_a_read_sent_after_the_refusal_does_not_stop_the_rewrite(bee, monkeypatch):
+    """GET and HEAD change nothing, so a refused read followed by a sent read
+    that fails still answers 503 BEE_BUSY: nothing was charged."""
+    from app.api.endpoints import stamps  # noqa: F401
+    monkeypatch.setattr(swarm_api, "get_local_stamps", _local_stamps_refused)
+    bee.drop_prefixes = {"/batches"}
+    r = await _call(_stamps_app(), "GET", "/api/v1/stamps/")
+    assert any(p.startswith("/batches") for p in bee.counts)
+    assert r.status_code == 503 and r.json()["code"] == "BEE_BUSY"

@@ -66,6 +66,10 @@ async def gateway():
         patch.object(settings, "BEE_MAX_CONCURRENT_TRANSFERS", TRANSFERS),
         patch.object(settings, "BEE_CALL_SLOT_WAIT_SECONDS", 0.2),
         patch.object(settings, "HEALTH_SNAPSHOT_TTL_SECONDS", TTL),
+        # get_node_status_summary's own 15 s cache would hide every snapshot
+        # refresh after the first from the /topology count. Off, each refresh
+        # reads Bee, so the count measures the snapshot alone.
+        patch("app.services.swarm_api.NODE_STATUS_TTL_SECONDS", 0),
     ]
     for p in patches:
         p.start()
@@ -145,6 +149,8 @@ async def test_flood_leaves_health_fast_and_bee_bounded(gateway, record_property
     # sides: at least 2.5 s, or 50 times the unloaded median if that is larger.
     p99_bound = max(2.5, 50 * baseline)
     ok_before = refreshes.labels(result="ok")._value.get()
+    from app.services.swarm_api import _node_status_cache
+    _node_status_cache.update({"data": None, "ts": 0.0})
     stub.reset()
 
     duration, latencies, statuses, no_retry_after, wrong_body = await replay(client)
@@ -174,7 +180,9 @@ async def test_flood_leaves_health_fast_and_bee_bounded(gateway, record_property
     assert set(statuses["/health"]) == {200} and set(statuses["/"]) == {200}
     # Bee calls for /health are bounded by time, not by request count: at most
     # one snapshot per TTL (plus the first and one in progress at the end).
-    assert by_path.get("/topology", 0) <= max_refreshes
+    # Every refresh reads Bee (node cache off), so this counts refreshes: at
+    # least one ran, and no more than one per TTL.
+    assert 1 <= by_path.get("/topology", 0) <= max_refreshes
     assert by_path.get("/wallet", 0) <= 2 * max_refreshes
     assert sum(by_path.get(p, 0) for p in HEALTH_PATHS) <= 9 * max_refreshes
     # Bee never has more calls in flight than the gate allows.
