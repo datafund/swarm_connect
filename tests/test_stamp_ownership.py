@@ -894,7 +894,7 @@ class TestBatchIdCase:
         """
         from unittest.mock import AsyncMock
         from app.main import app
-        from app.services.stamp_ownership import SAVES_REFUSED_WARNING
+        from app.services.stamp_ownership import SAVE_FAILED_WARNING, SAVES_REFUSED_WARNING
 
         self._write(state_file, {self.UPPER: {"owner": self.OWNER, "mode": "paid"}})
         mgr = StampOwnershipManager(state_file=state_file)
@@ -922,9 +922,22 @@ class TestBatchIdCase:
         text = json.dumps(body["state"])
         assert state_file not in text and "secret" not in text and "No space" not in text
 
-        # Copying works again: the next save succeeds and the warning clears.
-        mgr.register_stamp("ef" * 32, owner=self.OWNER, mode="paid", source="pool_acquire")
-        assert set(self._read(state_file)) == {self.BATCH, "cd" * 32, "ef" * 32}
+        # Copying works again but the write itself fails: the refusal is over,
+        # and /health still says the changes are not saved.
+        before = open(state_file).read()
+        with patch("app.services.stamp_ownership.atomic_write_json",
+                   side_effect=OSError(secret_error)):
+            mgr.register_stamp("ef" * 32, owner=self.OWNER, mode="paid", source="pool_acquire")
+            body = health()
+        assert open(state_file).read() == before
+        assert body["state"]["warnings"] == [SAVE_FAILED_WARNING]
+        assert body["status"] == "ok"
+        text = json.dumps(body["state"])
+        assert state_file not in text and "secret" not in text and "No space" not in text
+
+        # The next save succeeds as a whole and the warning clears.
+        mgr.register_stamp("12" * 32, owner=self.OWNER, mode="paid", source="pool_acquire")
+        assert set(self._read(state_file)) == {self.BATCH, "cd" * 32, "ef" * 32, "12" * 32}
         body = health()
         assert body["state"]["warnings"] == []
         assert body["status"] == "ok"

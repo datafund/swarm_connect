@@ -44,6 +44,14 @@ SAVES_REFUSED_WARNING = (
     "registry file could not be written. Changes are kept in memory only and are "
     "lost on restart. See the ERROR log and docs/mainnet-runbook.md")
 
+# /health warning while the last save of the registry file failed. Also fixed
+# text. Separate from the one above because the cause differs: the copy may
+# succeed and the write still fail (full disk, permissions).
+SAVE_FAILED_WARNING = (
+    "ownership registry changes are not being saved: the last write of the registry "
+    "file failed. Changes are kept in memory only and are lost on restart. See the "
+    "ERROR log and docs/mainnet-runbook.md")
+
 
 def normalize_address(address: Optional[str]) -> Optional[str]:
     """Return the address lowercased and 0x-prefixed, or None if it is not one.
@@ -176,10 +184,17 @@ class StampOwnershipManager:
         # True while saves are being refused because that copy failed; shown on
         # /health so the refusal is not visible in the logs only.
         self._saves_refused = False
+        # True while the last write of the registry file failed.
+        self._save_failed = False
 
     def health_warnings(self) -> list:
-        """Return fixed-text warnings for /health; empty when saves work."""
-        return [SAVES_REFUSED_WARNING] if self._saves_refused else []
+        """Return fixed-text warnings for /health; empty once a save succeeds."""
+        warnings = []
+        if self._saves_refused:
+            warnings.append(SAVES_REFUSED_WARNING)
+        if self._save_failed:
+            warnings.append(SAVE_FAILED_WARNING)
+        return warnings
 
     def _get_state_file_path(self) -> str:
         """Get the state file path, using override or settings."""
@@ -205,8 +220,10 @@ class StampOwnershipManager:
             logger.info(f"Kept the pre-migration ownership registry at {backup}")
         try:
             atomic_write_json(state_file, self._registry)
+            self._save_failed = False
             logger.debug(f"Saved ownership state: {len(self._registry)} stamps to {state_file}")
         except Exception as e:
+            self._save_failed = True
             logger.error(f"Failed to save ownership state to {state_file}: {e}")
 
     def _load_state(self):
