@@ -158,8 +158,13 @@ into load on Bee:
   `HEALTH_SNAPSHOT_TTL_SECONDS` (default 15) by a single background refresh, so
   a request costs no Bee or RPC call. `snapshot.age_seconds` in the response,
   and `gateway_health_snapshot_age_seconds`, say how old it is.
-  `snapshot.warnings` says when refreshes fail; it is advisory and never
-  changes `status`. `/` is the same handler with the same body, so the CLI and
+  `snapshot.warnings` says when refreshes fail. One failed refresh is
+  advisory; once the snapshot is also older than
+  `HEALTH_SNAPSHOT_MAX_TRUSTED_AGE_SECONDS` (default 60) it is too old to
+  trust, `status` is `degraded` and paid requests get `503
+  PAYMENTS_UNAVAILABLE` (#589). An unreachable Bee node
+  (`bee_node.api_reachable: false`) is `degraded` too, never `critical`.
+  `/` is the same handler with the same body, so the CLI and
   MCP checks (any 2xx) and the SDK check (`status != "critical"`) are
   unchanged. Docker's healthcheck (`curl -f http://localhost:8000/`) tests
   that the process answers. It never tested Bee: `/health` answers 200 whatever
