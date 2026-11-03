@@ -197,7 +197,7 @@ was missing, and a seventh makes sure the probe itself is not lost silently:
 | rule | fires on | for | severity |
 |---|---|---|---|
 | Bee calls failing | `increase(gateway_bee_api_errors_total[5m])` > 20 | 5m | critical |
-| Gateway 5xx responses | 5xx share of `http_requests_total` over 10m > 20%, with at least 20 requests | 5m | critical |
+| Gateway 5xx responses | 5xx share of `http_requests_total` over 10m > 20%, with at least 20 requests; both leave out the health handlers `/`, `/health`, `/metrics` | 5m | critical |
 | Public health check failing | no 200 from the probe for 5 minutes | 1m | critical |
 | Public health check slow | probe average over 10m > 5 s | 10m | warning |
 | Bee node not healthy (public /health) | `probe_failed_due_to_regex` 1 on every probe for 10m (so about 15 minutes in all) | 5m | critical |
@@ -211,8 +211,21 @@ Absence is the **No Data** watchdog's job.
 - Bee call errors were about 2 per 5 minutes at p99 and at most 8.4 on
   production. The incident reached 619. Over 20 happened in only 9
   five-minute windows, all on development, during the incident week.
-- The 5xx condition held in 4 five-minute samples in the week, all on
-  development.
+- 5xx share: health traffic is left out of the share and of the 20-request
+  guard. Docker's healthcheck of `/` alone is a median 22.6 requests per
+  10 minutes on production (19.5 on development), so it met a guard on all
+  requests by itself: production passed that guard in 754 of 1,008 ten-minute
+  windows, against 36 with health traffic left out. It also only dilutes the
+  share: `/` and `/health` answered no 5xx in 44,600 requests over the week,
+  and they were 83% of production's requests. Replayed read-only against the
+  week with 1-minute steps, the rule fires once, on development, at 09:54 UTC
+  on 2026-11-03 (pending from 09:49), and stays firing until the series ended
+  at about 10:15. The version counting all requests also fired at 09:54, but
+  fell below 20% at 10:00 and fired a second time at 10:06. It fired late:
+  most failed requests in the first half of the incident were not 5xx
+  (the load test's 429/422/402), and the 5xx share passed 20% only from
+  about 09:50. **Bee calls failing** fired first, at 09:31 (pending from
+  09:26, replayed the same way).
 - Production `/health` took about 3.5 s on 2026-11-03, so the slow threshold is
   5 s, not 3 s. `/health` makes uncached upstream calls on every request
   (#588); once that is cached, the threshold can come down.

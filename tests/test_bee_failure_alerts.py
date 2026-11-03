@@ -82,13 +82,37 @@ def test_bee_call_error_rule():
 def test_5xx_rule_is_a_share_with_a_minimum_traffic_guard():
     rule = _rules()["Gateway 5xx responses"]
     expr = _expr(rule)
-    assert 'http_requests_total{status=~"5.."}' in expr
-    assert "/ sum by (environment, host) (increase(http_requests_total[10m]))" in expr
+    assert _threshold(rule) == ("gt", 0.2)
+    assert rule["for"] == "5m"
     # One 502 at low traffic must not page.
     assert "and on (environment, host)" in expr
     assert ">= 20" in expr
-    assert _threshold(rule) == ("gt", 0.2)
-    assert rule["for"] == "5m"
+
+
+HEALTH_HANDLERS = ("/", "/health", "/metrics")
+
+
+def test_5xx_rule_leaves_health_traffic_out_of_the_share_and_the_guard():
+    """Docker's healthcheck alone sends about 20 requests to / per 10 minutes.
+
+    Counted, it met the 20-request guard by itself (75% of 10-minute windows on
+    production in the week to 2026-11-03), and, never answered 5xx, it diluted
+    the share. Every http_requests_total selector in the rule, the numerator,
+    the denominator and the guard, must leave the health handlers out.
+    """
+    expr = _expr(_rules()["Gateway 5xx responses"])
+    selectors = re.findall(r"http_requests_total(\{[^}]*\})?", expr)
+    assert len(selectors) == 3, expr
+    for selector in selectors:
+        m = re.search(r'handler!~"([^"]+)"', selector)
+        assert m, f"health traffic not excluded in {selector!r}"
+        excluded = re.compile(m.group(1))
+        for handler in HEALTH_HANDLERS:
+            assert excluded.fullmatch(handler), handler
+        # Anchored like PromQL: real handlers are not excluded by accident.
+        for handler in ("/api/v1/stamps/", "/api/v1/data/{reference}", "/api/v1/wallet", "/docs"):
+            assert not excluded.fullmatch(handler), handler
+    assert 'status=~"5.."' in selectors[0]
 
 
 def test_probe_rules_select_only_this_probe():
