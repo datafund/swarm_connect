@@ -19,7 +19,7 @@ from app.core.config import settings
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 ALERT_RULES = os.path.join(REPO_ROOT, "monitoring", "alerting", "alert-rules.json")
-FILES = ("pool", "settlement_unknown", "idempotency", "spend_budget", "pool_allowance")
+FILES = ("pool", "pool_spend_times", "settlement_unknown", "idempotency", "spend_budget", "pool_allowance")
 CORRUPT = '{"truncated'
 
 
@@ -66,6 +66,36 @@ async def test_pool_gauge_clears_when_a_full_sync_lifts_the_pause(tmp_path, monk
             json.dump([], f)                       # the operator restores the file
         await mgr.sync_from_bee_node()
     assert _gauge("pool") == 0
+
+
+def test_pool_spend_times_unreadable_for_an_hour(tmp_path, monkeypatch):
+    """An unreadable hourly spend record pauses pool purchases for an hour; the
+    gauge shows it for that hour and then clears by itself, as the pause does."""
+    from datetime import datetime, timedelta, timezone
+    from app.services import stamp_pool
+    from app.services.stamp_pool import StampPoolManager
+    monkeypatch.setattr(settings, "STAMP_POOL_ENABLED", True)
+    (tmp_path / "pool_state_spend_times.json").write_text(CORRUPT)
+    mgr = StampPoolManager(state_file=str(tmp_path / "pool_state.json"))
+    monkeypatch.setattr(stamp_pool, "stamp_pool_manager", mgr)
+    assert mgr._spend_budget_remaining() == 0          # purchases are paused
+    assert _gauge("pool_spend_times") == 1
+    assert _gauge("pool") == 0                         # the pool state itself is fine
+
+    later = datetime.now(timezone.utc) + timedelta(hours=1, seconds=1)
+
+    class Later(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return later
+
+    monkeypatch.setattr(stamp_pool, "datetime", Later)
+    assert mgr._spend_budget_remaining() > 0           # the pause has lifted
+    assert _gauge("pool_spend_times") == 0
+
+    monkeypatch.setattr(stamp_pool, "stamp_pool_manager",
+                        StampPoolManager(state_file=str(tmp_path / "other" / "pool_state.json")))
+    assert _gauge("pool_spend_times") == 0
 
 
 def test_settlement_unknown_registry_unreadable(tmp_path, monkeypatch):

@@ -608,3 +608,126 @@ def test_late_201_carries_expires_at(env, monkeypatch):
     amount = int(first.json()["amount"])
     assert retry.json()["expires_at"] == swarm_api.expiry_from_amount(amount, 24000)
     assert retry.json()["expires_at"] is not None
+
+
+# --- round 2: every pending outcome settles the hold once (#468) ----------------
+
+def _uncertain():
+    from prometheus_client import REGISTRY
+    return REGISTRY.get_sample_value("gateway_spend_uncertain_bzz_total", {"operation": "stamp purchase"}) or 0.0
+
+
+def test_timeout_then_not_found_counts_the_hold_as_uncertain(env):
+    """Bee timed out after the payment and the background lookup found nothing:
+    the hold stays and is counted as uncertain, once."""
+    app, fac, buy, find = env
+    find.return_value = None
+    before, spent_before = _uncertain(), _spend_recorded()
+    first, retry = _run_pending(app, None, key="k-not-found-uncertain")
+    assert first.status_code == 202
+    assert retry.json()["code"] == "DELIVERY_FAILED_AFTER_PAYMENT"
+    assert _gateway_spent() > 0
+    assert _uncertain() - before == pytest.approx(_gateway_spent())
+    assert _spend_recorded() == spent_before
+
+
+def test_batch_taken_by_someone_else_counts_the_hold_as_uncertain(env):
+    app, fac, buy, find = env
+    stamp_ownership_manager._registry[BATCH] = {"owner": "0x" + "d4" * 20, "mode": "paid"}
+    before = _uncertain()
+    first, _ = _run_pending(app, None, key="k-taken-uncertain")
+    assert first.status_code == 202
+    assert _uncertain() - before == pytest.approx(_gateway_spent())
+    assert _gateway_spent() > 0
+
+
+def test_lookup_error_in_the_background_counts_the_hold_as_uncertain(env):
+    app, fac, buy, find = env
+    find.side_effect = [None, RuntimeError("node gone")]
+    before = _uncertain()
+    first, _ = _run_pending(app, None, key="k-lookup-error-uncertain")
+    assert first.status_code == 202
+    assert _uncertain() - before == pytest.approx(_gateway_spent())
+
+
+def _cancelled_request_then_background(app, key):
+    """A paid request cut off while Bee works; its background half finishes."""
+    from app.api.endpoints import stamps
+
+    async def run():
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t") as c:
+            h = {"X-PAYMENT": pay(), "Idempotency-Key": key}
+            req = asyncio.ensure_future(c.post("/api/v1/stamps/", json=BODY, headers=h))
+            for _ in range(200):           # until Bee's request is running
+                if stamps._PENDING_TASKS:
+                    break
+                await asyncio.sleep(0.005)
+            req.cancel()
+            await asyncio.gather(req, return_exceptions=True)
+            for _ in range(400):
+                if not stamps._PENDING_TASKS:
+                    break
+                await asyncio.sleep(0.01)
+            assert not stamps._PENDING_TASKS
+    asyncio.run(run())
+
+
+def test_cancelled_request_then_delivered_is_counted_once_as_spent(env, monkeypatch):
+    """The request is cut off after the hand-off: only the background half
+    settles the hold, so the cost is spent, never also uncertain."""
+    app, fac, buy, find = env
+    monkeypatch.setattr(settings, "SWARM_STAMP_PURCHASE_TIMEOUT_SECONDS", 30)
+    buy.side_effect = _slow_bee(BATCH, delay=0.1)
+    before, spent_before = _uncertain(), _spend_recorded()
+    _cancelled_request_then_background(app, "k-cancel-delivered")
+    assert stamp_ownership_manager.get_stamp_info(BATCH)["owner"] == PAYER
+    assert _spend_recorded() - spent_before == pytest.approx(_gateway_spent())
+    assert _uncertain() == before
+
+
+def test_cancelled_request_then_bee_4xx_releases_without_counting(env, monkeypatch):
+    app, fac, buy, find = env
+    monkeypatch.setattr(settings, "SWARM_STAMP_PURCHASE_TIMEOUT_SECONDS", 30)
+    req = httpx.Request("POST", "http://bee/stamps/1/17")
+    buy.side_effect = _slow_bee(httpx.HTTPStatusError(
+        "x", request=req, response=httpx.Response(400, request=req)), delay=0.1)
+    before = _uncertain()
+    _cancelled_request_then_background(app, "k-cancel-4xx")
+    assert _gateway_spent() == 0
+    assert _uncertain() == before
+
+
+def test_shutdown_during_the_late_expiry_read_still_stores_the_201(env, monkeypatch):
+    """A cancel while the late 201's price is read must not leave the 202 for
+    the Idempotency-Key: the 201 is stored, without expires_at."""
+    from app.api.endpoints import stamps
+    app, fac, buy, find = env
+    monkeypatch.setattr(settings, "SWARM_STAMP_PURCHASE_TIMEOUT_SECONDS", 0.05)
+    buy.side_effect = _slow_bee(BATCH)
+
+    async def chainstate():
+        # Only the background half reads the price after the batch is
+        # registered: that is the read to hang.
+        if stamp_ownership_manager.get_stamp_info(BATCH):
+            await asyncio.sleep(3600)
+        return {"currentPrice": "24000", "minimumValidityBlocks": 17280, "block": 180000}
+
+    async def run():
+        with patch("app.services.swarm_api.get_chainstate", new=chainstate):
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t") as c:
+                h = lambda: {"X-PAYMENT": pay(), "Idempotency-Key": "k-late-cancel"}
+                first = await c.post("/api/v1/stamps/", json=BODY, headers=h())
+                for _ in range(200):       # until the batch is registered
+                    if stamp_ownership_manager.get_stamp_info(BATCH):
+                        break
+                    await asyncio.sleep(0.01)
+                await asyncio.sleep(0.05)  # now waiting on the price read
+                for t in list(stamps._PENDING_TASKS):
+                    t.cancel()
+                await asyncio.gather(*list(stamps._PENDING_TASKS), return_exceptions=True)
+                retry = await c.post("/api/v1/stamps/", json=BODY, headers=h())
+                return first, retry
+    first, retry = asyncio.run(run())
+    assert first.status_code == 202
+    assert retry.status_code == 201, retry.text
+    assert retry.json()["batchID"] == BATCH and retry.json()["expires_at"] is None

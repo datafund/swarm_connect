@@ -204,7 +204,8 @@ def count_state_save_failure(file: str) -> None:
 
 # State files that fail closed while unreadable (#468). Each store keeps
 # running but refuses what it guards until an operator restores or moves the
-# file and restarts: the pool pauses its spending (#547), the x402
+# file and restarts: the pool pauses its spending (#547; for an unreadable
+# hourly spend record, pool_spend_times, for an hour by itself), the x402
 # settlement-unknown registry refuses every paid request, the idempotency store
 # refuses keyed paid requests, and the spend budget and pool allowance refuse
 # limited spending and free acquires until the next UTC day. 1 while unreadable,
@@ -214,7 +215,7 @@ def count_state_save_failure(file: str) -> None:
 state_file_unreadable = Gauge(
     "gateway_state_file_unreadable",
     "1 while a state file that fails closed cannot be read and what it guards is "
-    "refused (file=pool|settlement_unknown|idempotency|spend_budget|pool_allowance)",
+    "refused (file=pool|pool_spend_times|settlement_unknown|idempotency|spend_budget|pool_allowance)",
     ["file"],
 )
 
@@ -224,6 +225,13 @@ def _pool_state_unreadable() -> bool:
         return False
     from app.services.stamp_pool import stamp_pool_manager
     return stamp_pool_manager.state_file_unreadable()
+
+
+def _pool_spend_times_unreadable() -> bool:
+    if not settings.STAMP_POOL_ENABLED:
+        return False
+    from app.services.stamp_pool import stamp_pool_manager
+    return stamp_pool_manager.spend_times_unreadable()
 
 
 def _settlement_state_unreadable() -> bool:
@@ -248,6 +256,7 @@ def _pool_allowance_state_unreadable() -> bool:
 
 STATE_FILE_CHECKS = {
     "pool": _pool_state_unreadable,
+    "pool_spend_times": _pool_spend_times_unreadable,
     "settlement_unknown": _settlement_state_unreadable,
     "idempotency": _idempotency_state_unreadable,
     "spend_budget": _spend_budget_state_unreadable,
@@ -386,7 +395,8 @@ gateway_spend_uncertain_bzz_total = Counter(
     "gateway_spend_uncertain_bzz_total",
     "BZZ kept charged against the spending limits after a failure whose outcome "
     "was uncertain (timeout after sending, cancellation, 5xx); may or may not "
-    "have been spent (#363)",
+    "have been spent (#363). A paid purchase answered 202 is counted once, when "
+    "its background half ends without a batch or a definite refusal (#468)",
     ["operation"],
 )
 gateway_spend_ceiling_bzz = Gauge(

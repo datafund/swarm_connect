@@ -161,6 +161,10 @@ class StampPoolManager:
         # Timestamps of recent purchases, for the hourly ceiling. See
         # _spend_budget_remaining().
         self._spend_times: List[datetime] = []
+        # Until when pool spending is paused because the spend record could
+        # not be read at startup (see _load_spend_times); None when it was
+        # readable. Read by the gateway_state_file_unreadable gauge (#468).
+        self._spend_times_unreadable_until: Optional[datetime] = None
         # Refusals by the spending ceilings since the last maintenance run. Kept
         # apart from _errors, which each run replaces with its own results, so
         # a refusal from a purchase or top-up is not lost from /pool/status.
@@ -319,6 +323,15 @@ class StampPoolManager:
         reconciled the pool with it (#547), which is when the pause lifts.
         """
         return self._needs_reconcile
+
+    def spend_times_unreadable(self) -> bool:
+        """Whether pool spending is paused for an unreadable spend record (#468).
+
+        The pause fills the hourly ceiling with entries of the load time, so it
+        lifts by itself an hour later; so does this.
+        """
+        until = self._spend_times_unreadable_until
+        return until is not None and datetime.now(timezone.utc) < until
 
     def _mark_state_file_unreadable(self) -> None:
         """Pause pool spending because the state file cannot be read.
@@ -1630,7 +1643,9 @@ class StampPoolManager:
             # Unknown spending in the last hour: assume the ceiling was reached
             # rather than grant a fresh one. It clears on its own within the hour.
             logger.error(f"Unreadable pool spend record {path} ({e}); pausing pool spending for an hour")
-            return [datetime.now(timezone.utc)] * settings.STAMP_POOL_MAX_PURCHASES_PER_HOUR
+            now = datetime.now(timezone.utc)
+            self._spend_times_unreadable_until = now + timedelta(hours=1)
+            return [now] * settings.STAMP_POOL_MAX_PURCHASES_PER_HOUR
 
     def _reserve_gateway_spend(self, cost_bzz: float, what: str, operation: str):
         """Charge the gateway-wide daily ceiling for a pool spend (#363).
