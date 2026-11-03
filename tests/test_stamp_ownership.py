@@ -883,3 +883,57 @@ class TestBatchIdCase:
                           state_file + ".pre-558-20260101T000000Z-1"]
         assert open(copies[0]).read() == first
         assert open(copies[1]).read() == second
+
+    # --- refused saves are visible on /health -------------------------------------
+
+    def test_refused_saves_show_on_health_until_a_save_succeeds(self, state_file):
+        """Cleanup of #562: refused saves were visible only as an ERROR log line.
+
+        /health must carry a fixed warning (no path, no exception text) while
+        the pre-migration copy keeps failing, and drop it once a save succeeds.
+        """
+        from unittest.mock import AsyncMock
+        from app.main import app
+        from app.services.stamp_ownership import SAVES_REFUSED_WARNING
+
+        self._write(state_file, {self.UPPER: {"owner": self.OWNER, "mode": "paid"}})
+        mgr = StampOwnershipManager(state_file=state_file)
+        summary = {"network_availability": "Available", "healthy": True, "warnings": []}
+        client = TestClient(app)
+
+        def health():
+            with patch("app.services.stamp_ownership.stamp_ownership_manager", mgr), \
+                    patch("app.services.swarm_api.get_node_status_summary",
+                          new=AsyncMock(return_value=summary)):
+                r = client.get("/health")
+            assert r.status_code == 200
+            return r.json()
+
+        secret_error = "No space left on device: /secret/path"
+        with patch("app.services.stamp_ownership._keep_pre_migration_copy",
+                   side_effect=OSError(secret_error)):
+            mgr.load_on_startup()
+            mgr.register_stamp("cd" * 32, owner=self.OTHER, mode="paid", source="pool_acquire")
+            body = health()
+        assert body["state"]["warnings"] == [SAVES_REFUSED_WARNING]
+        assert body["status"] == "degraded"
+        text = json.dumps(body["state"])
+        assert state_file not in text and "secret" not in text and "No space" not in text
+
+        # Copying works again: the next save succeeds and the warning clears.
+        mgr.register_stamp("ef" * 32, owner=self.OWNER, mode="paid", source="pool_acquire")
+        assert set(self._read(state_file)) == {self.BATCH, "cd" * 32, "ef" * 32}
+        body = health()
+        assert body["state"]["warnings"] == []
+        assert body["status"] == "ok"
+
+    def test_one_owner_in_two_letter_cases_merges_without_a_fix(self, state_file):
+        """CLAUDE.md pre-deploy check: owners are compared after normalisation."""
+        self._write(state_file, {
+            self.BATCH: {"owner": "0x" + "AA" * 20, "mode": "paid"},
+            self.UPPER: {"owner": "aa" * 20, "mode": "paid"},
+        })
+        mgr = StampOwnershipManager(state_file=state_file)
+        mgr.load_on_startup()
+        assert mgr.get_stamp_info(self.BATCH)["owner"] == "0x" + "aa" * 20
+        assert set(self._read(state_file)) == {self.BATCH}

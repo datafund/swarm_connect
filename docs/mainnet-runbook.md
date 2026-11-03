@@ -157,6 +157,16 @@ Then check an upload to a known owned stamp.
 
 If a money-bearing state file (ownership, credit) is unreadable, the gateway **refuses to start** and keeps a `.corrupt-<timestamp>` copy next to the file *(requires #395)*. The container then restart-loops until the file is restored or deliberately moved away. That's intended: starting empty would lock owners out and wipe prepaid balances.
 
+**Ownership registry not saving** (#558). Before the gateway first rewrites an ownership registry from before #558 (batch ids in mixed case, or owner addresses not in lowercase), it copies the original to `stamp_owners.json.pre-558-<UTC timestamp>` in the same directory. If that copy cannot be written, the gateway refuses every save of the registry, so the original is never overwritten. It keeps running, and ownership changes stay in memory only. While this lasts:
+- `/health` reports `status: "degraded"` and this fixed text in `state.warnings`: `ownership registry changes are not being saved: the pre-migration copy of the registry file could not be written. Changes are kept in memory only and are lost on restart. See the ERROR log and docs/mainnet-runbook.md`.
+- Each refused save logs an ERROR: `Not saving ownership state to <file>: the pre-migration file could not be copied aside (<error>); the change is kept in memory only`. The error in brackets gives the cause, for example `No space left on device` or `Permission denied`.
+
+To recover:
+1. **Do not restart the gateway.** A restart loses every ownership change made since it started, and the buyers of those batches lose access. The original file is intact, and the next start migrates it again.
+2. Fix the cause from the log line: free disk space on the volume that holds the data directory, or fix permissions so the gateway user (uid 10001) can create files in that directory. The copy is written as a temporary file in the same directory and then renamed.
+3. Wait for the next ownership write: a stamp purchase, a pool acquire or a pool removal. It makes the copy first, then saves the whole registry from memory. There is no command to start a write.
+4. Check that `state.warnings` in `/health` is empty again, that the log has `Kept the pre-migration ownership registry at <file>.pre-558-<timestamp>`, and that the copy exists. Keep the copy: records merged from spellings of one batch id that differ only in case keep their `mode`, `acquired_at` and `source` only there.
+
 **Audit log size.** `data/x402_audit.jsonl` grows with every paid request. Rotate it with logrotate, using `copytruncate` because the gateway keeps it open for appends:
 
 ```

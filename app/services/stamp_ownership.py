@@ -36,6 +36,14 @@ _SPECIAL_OWNERS = ("shared", POOL_OWNER)
 
 _ADDRESS_RE = re.compile(r"^(0x)?[0-9a-fA-F]{40}$")
 
+# /health warning while saves are refused because the pre-migration copy fails
+# (#558). Fixed text on purpose: no path and no exception text, since /health
+# is public. The ERROR log line has the details.
+SAVES_REFUSED_WARNING = (
+    "ownership registry changes are not being saved: the pre-migration copy of the "
+    "registry file could not be written. Changes are kept in memory only and are "
+    "lost on restart. See the ERROR log and docs/mainnet-runbook.md")
+
 
 def normalize_address(address: Optional[str]) -> Optional[str]:
     """Return the address lowercased and 0x-prefixed, or None if it is not one.
@@ -165,6 +173,13 @@ class StampOwnershipManager:
         # but the original file has not been copied aside yet (#558). No save
         # may overwrite the original until that copy exists.
         self._migration_needs_copy = False
+        # True while saves are being refused because that copy failed; shown on
+        # /health so the refusal is not visible in the logs only.
+        self._saves_refused = False
+
+    def health_warnings(self) -> list:
+        """Return fixed-text warnings for /health; empty when saves work."""
+        return [SAVES_REFUSED_WARNING] if self._saves_refused else []
 
     def _get_state_file_path(self) -> str:
         """Get the state file path, using override or settings."""
@@ -183,8 +198,10 @@ class StampOwnershipManager:
             except Exception as e:
                 logger.error(f"Not saving ownership state to {state_file}: the pre-migration file "
                              f"could not be copied aside ({e}); the change is kept in memory only")
+                self._saves_refused = True
                 return
             self._migration_needs_copy = False
+            self._saves_refused = False
             logger.info(f"Kept the pre-migration ownership registry at {backup}")
         try:
             atomic_write_json(state_file, self._registry)
