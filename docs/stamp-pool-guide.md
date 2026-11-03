@@ -285,7 +285,10 @@ The background task runs every `STAMP_POOL_CHECK_INTERVAL_SECONDS`:
 While any stamp is held (bought, not usable yet), the task also re-runs the
 TTL check every `STAMP_POOL_HELD_RECHECK_SECONDS` (default 30) between full
 checks, so a held stamp becomes available soon after Bee lists it as usable.
-With nothing held, no extra Bee calls are made.
+While the same stamps stay held, the wait between re-checks doubles, up to
+`STAMP_POOL_CHECK_INTERVAL_SECONDS`. With nothing held, no extra Bee calls are
+made. A full check never skips because of a re-check: one that starts during
+a re-check waits for it, at most 60 seconds, and then runs.
 
 ### Stamp Release
 
@@ -421,11 +424,17 @@ The sync after a restart and each TTL check hold such a stamp in two cases:
   `pool_state_pending.json`, next to the state file, so this survives a
   restart. The stamp is held for `STAMP_POOL_UNLISTED_GRACE_SECONDS`
   (default 900) after the purchase. If Bee still does not list it then, it
-  is removed from the pool and from the ownership registry. A missing or
-  unreadable pending record loses only this grace period.
+  is removed from the pool and from the ownership registry. While the stamp
+  is held, the state file lists it too, so a later restart finds it there.
+  A missing pending record loses only this grace period. An unparseable one
+  is copied once to `pool_state_pending.json.corrupt-<timestamp>` and then
+  treated as empty. A purchase time with no time zone is read as UTC, and
+  one in the future is treated as now.
 
 Once Bee lists the stamp, the grace period no longer applies, and the first
-TTL check that sees it usable makes it available. Expired, expiring-soon and
+TTL check that sees it usable makes it available. A stamp held for longer
+than the grace period (one Bee keeps listing as not usable) is logged as a
+warning, at most once an hour. Expired, expiring-soon and
 full stamps are still removed, and so is any other stamp Bee no longer
 lists. A stamp added while a TTL check was waiting for Bee's listing is left
 for the next check, because that listing predates it.

@@ -1849,6 +1849,189 @@ class TestHeldBatchRecheck:
         assert listing.await_count == 0
 
 
+class TestHeldBatchFollowUps:
+    """Review follow-ups on held batches: persistence, re-check flag, pending file."""
+
+    BATCH = "ab12" * 16
+
+    @pytest.fixture
+    def state_file(self, tmp_path):
+        return str(tmp_path / "pool_state.json")
+
+    def _pending_file(self, state_file):
+        return state_file.replace(".json", "_pending.json")
+
+    def _write_pending(self, state_file, purchased_at):
+        with open(self._pending_file(state_file), "w") as f:
+            json.dump({self.BATCH: {"purchased_at": purchased_at, "depth": 17,
+                                    "amount": 1000000, "ttl": 86400, "label": "pool-17"}}, f)
+
+    def _listing(self, *recs):
+        return patch('app.services.stamp_pool.swarm_api.get_all_stamps_processed',
+                     new=AsyncMock(return_value=list(recs)))
+
+    def _rec(self, **over):
+        rec = {"batchID": self.BATCH, "depth": 17, "local": True, "usable": False,
+               "batchTTL": 86400, "unusableReason": None, "amount": "1000000", "label": ""}
+        rec.update(over)
+        return rec
+
+    @pytest.mark.asyncio
+    async def test_batch_known_only_from_the_pending_file_survives_two_restarts(self, state_file):
+        """Held from the pending record, then listed, then a second restart."""
+        with open(state_file, "w") as f:
+            json.dump([], f)  # e.g. a restored backup that predates the purchase
+        self._write_pending(state_file, datetime.now(timezone.utc).isoformat())
+
+        first = StampPoolManager(state_file=state_file)
+        with self._listing():
+            await first.sync_from_bee_node()
+        assert self.BATCH in first._pool
+        with open(state_file) as f:
+            assert self.BATCH in json.load(f), "a held pending batch was not written to the state file"
+
+        with self._listing(self._rec(usable=True)):
+            await first._update_stamp_ttls()
+        assert self.BATCH not in first._pending
+
+        second = StampPoolManager(state_file=state_file)
+        with self._listing(self._rec(usable=True)):
+            await second.sync_from_bee_node()
+        assert self.BATCH in second._pool, "the batch was stranded after the second restart"
+        assert second.get_available_stamp(17) is not None
+
+    @pytest.mark.asyncio
+    async def test_full_run_during_a_recheck_waits_and_runs(self, state_file):
+        manager = StampPoolManager(state_file=state_file)
+        manager._last_sync_ok = True
+        release = asyncio.Event()
+
+        async def slow_ttl_check():
+            await release.wait()
+
+        ran = AsyncMock(side_effect=lambda results: results)
+        with patch('app.services.stamp_pool.settings.STAMP_POOL_ENABLED', True), \
+             patch.object(manager, '_update_stamp_ttls', new=slow_ttl_check), \
+             patch.object(manager, '_check_and_replenish_locked', new=ran):
+            recheck = asyncio.ensure_future(manager._recheck_held())
+            await asyncio.sleep(0)
+            full = asyncio.ensure_future(manager.check_and_replenish())
+            await asyncio.sleep(0)
+            assert not ran.called, "the full run did not wait for the re-check"
+            release.set()
+            results = await full
+            await recheck
+
+        assert ran.await_count == 1
+        assert not results.get("skipped"), "a full run was skipped because of a re-check"
+
+    @pytest.mark.asyncio
+    async def test_full_run_waits_for_a_stuck_recheck_only_briefly(self, state_file):
+        manager = StampPoolManager(state_file=state_file)
+        manager._last_sync_ok = True
+        never = asyncio.Event()
+
+        async def stuck_ttl_check():
+            await never.wait()
+
+        ran = AsyncMock(side_effect=lambda results: results)
+        with patch('app.services.stamp_pool.settings.STAMP_POOL_ENABLED', True), \
+             patch('app.services.stamp_pool._RECHECK_WAIT_SECONDS', 0.01), \
+             patch.object(manager, '_update_stamp_ttls', new=stuck_ttl_check), \
+             patch.object(manager, '_check_and_replenish_locked', new=ran):
+            recheck = asyncio.ensure_future(manager._recheck_held())
+            await asyncio.sleep(0)
+            results = await manager.check_and_replenish()
+            recheck.cancel()
+        assert ran.await_count == 1 and not results.get("skipped")
+
+    @pytest.mark.asyncio
+    async def test_recheck_skips_while_a_full_run_is_in_progress(self, state_file):
+        manager = StampPoolManager(state_file=state_file)
+        manager._last_sync_ok = True
+        manager._replenishing = True
+        ttl = AsyncMock()
+        with patch.object(manager, '_update_stamp_ttls', new=ttl):
+            await manager._recheck_held()
+        assert not ttl.called
+
+    @pytest.mark.asyncio
+    async def test_naive_purchase_time_is_read_as_utc(self, state_file):
+        with open(state_file, "w") as f:
+            json.dump([self.BATCH], f)
+        naive = datetime.now(timezone.utc).replace(tzinfo=None).isoformat()
+        self._write_pending(state_file, naive)
+
+        manager = StampPoolManager(state_file=state_file)
+        with self._listing():
+            await manager.sync_from_bee_node()
+        assert manager._last_sync_ok, "a naive purchase time failed the sync"
+        assert manager._last_sync_failure is None
+        assert self.BATCH in manager._pool
+
+    def test_unparseable_pending_file_is_kept_as_a_corrupt_copy(self, state_file, tmp_path):
+        with open(self._pending_file(state_file), "w") as f:
+            f.write("{not json")
+        manager = StampPoolManager(state_file=state_file)
+        assert manager._pending == {}
+        copies = list(tmp_path.glob("pool_state_pending.json.corrupt-*"))
+        assert len(copies) == 1, "an unparseable pending file was not kept"
+        StampPoolManager(state_file=state_file)
+        assert len(list(tmp_path.glob("pool_state_pending.json.corrupt-*"))) == 1
+
+    def test_future_purchase_time_is_clamped_to_now(self, state_file):
+        self._write_pending(state_file, (datetime.now(timezone.utc) + timedelta(days=1)).isoformat())
+        manager = StampPoolManager(state_file=state_file)
+        bought = datetime.fromisoformat(manager._pending[self.BATCH]["purchased_at"])
+        assert bought <= datetime.now(timezone.utc), "a future purchase time extends the hold past the grace"
+
+    @pytest.mark.asyncio
+    async def test_recheck_backs_off_while_the_same_batches_stay_held(self, state_file):
+        manager = StampPoolManager(state_file=state_file)
+        manager._last_sync_ok = True
+        manager.add_stamp_to_pool(self.BATCH, 17, 1000000, 86400, usable=False)
+        sleeps = []
+
+        async def fake_sleep(seconds):
+            sleeps.append(seconds)
+            if len(sleeps) >= 8:
+                manager._running = False
+
+        manager._running = True
+        with patch('app.services.stamp_pool.settings.STAMP_POOL_CHECK_INTERVAL_SECONDS', 900), \
+             patch('app.services.stamp_pool.settings.STAMP_POOL_HELD_RECHECK_SECONDS', 30), \
+             patch('app.services.stamp_pool.asyncio.sleep', new=fake_sleep), \
+             patch.object(manager, 'check_and_replenish', new=AsyncMock()), \
+             self._listing(self._rec()):
+            manager._recheck_step = 30
+            await manager._background_loop()
+
+        # Doubles while the same batch stays held, capped at the full interval
+        # (the last steps are bounded by the time left until the full check).
+        assert sleeps[:6] == [30, 30, 60, 120, 240, 480], sleeps
+        assert all(899 < x <= 900 for x in sleeps[6:]), sleeps
+
+    @pytest.mark.asyncio
+    async def test_batches_held_past_the_grace_are_warned_about_hourly(self, state_file, caplog):
+        import logging
+        manager = StampPoolManager(state_file=state_file)
+        manager.add_stamp_to_pool(self.BATCH, 17, 1000000, 86400, usable=False)
+        manager._pool[self.BATCH].created_at -= timedelta(seconds=1000)
+
+        def warnings():
+            return [r for r in caplog.records if "held for more than" in r.getMessage()]
+
+        with patch('app.services.stamp_pool.settings.STAMP_POOL_UNLISTED_GRACE_SECONDS', 900), \
+             caplog.at_level(logging.WARNING, logger="app.services.stamp_pool"), \
+             self._listing(self._rec()):
+            await manager._update_stamp_ttls()
+            await manager._update_stamp_ttls()
+            assert len(warnings()) == 1
+            manager._overdue_held_logged_at -= timedelta(seconds=3601)
+            await manager._update_stamp_ttls()
+            assert len(warnings()) == 2
+
+
 class TestTopUpRespectsTheReserveConfig:
     """The pool must not pay to maintain depths it has stopped carrying.
 
