@@ -450,7 +450,7 @@ class TestFullPaymentFlow:
 
         mock_fac = MagicMock()
         mock_fac.verify = AsyncMock(return_value=VerifyResponse(
-            is_valid=False, invalid_reason="Insufficient balance", payer=None
+            is_valid=False, invalid_reason="insufficient_funds", payer=None
         ))
         mock_get_fac.return_value = mock_fac
 
@@ -461,7 +461,7 @@ class TestFullPaymentFlow:
         response = client.post("/api/v1/stamps/", headers={"X-PAYMENT": payment_header})
 
         assert response.status_code == 402
-        assert "Insufficient balance" in response.json()["detail"]["error"]
+        assert "insufficient_funds" in response.json()["detail"]["error"]
 
     # create=True: the balance gate is removed by the settlement-stack catch-up
     # (#371); this test must pass with or without it.

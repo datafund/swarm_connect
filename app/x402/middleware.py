@@ -600,9 +600,11 @@ class X402Middleware(BaseHTTPMiddleware):
                         return JSONResponse(status_code=refusal.status_code,
                                             content={"detail": d, "code": d["code"], "message": d["message"]},
                                             headers=refusal.headers)
+                # The full reason is in the log and the audit record (#576).
+                from app.x402.settlement import public_facilitator_reason
                 body = {
                     "code": "PAYMENT_SETTLEMENT_FAILED",
-                    "message": f"The payment could not be settled ({failure}).",
+                    "message": f"The payment could not be settled ({public_facilitator_reason(failure)}).",
                     "x402_status": "settlement_failed",
                 }
                 # Top level as first documented, and under `detail` like the rest.
