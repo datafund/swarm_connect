@@ -340,7 +340,9 @@ async def read_root():
       `reserve_size`, `reserve_size_within_radius`, `pullsync_rate`, `batch_commitment`),
       chain sync (`last_synced_block`, `chain_tip`, `chain_sync_lag_blocks`), plus a
       `healthy` flag, `api_reachable` (false when the Bee API answered nothing;
-      `status` is then `degraded`, #589) and advisory `warnings`
+      `status` is then `degraded`, #589) and advisory `warnings`. When the
+      snapshot is too old to trust, `healthy` is false, `api_reachable` is null
+      (unknown) and a warning says the Bee state is unknown
     - `snapshot`: the Bee node and wallet fields come from a snapshot refreshed at
       most every `max_age_seconds`; `age_seconds` is how old this one is, and
       `warnings` says when refreshes are failing. A failed refresh alone is
@@ -380,6 +382,8 @@ async def read_root():
 SNAPSHOT_NOT_READY = "health snapshot not ready yet: the gateway is starting or cannot reach its upstreams"
 SNAPSHOT_TOO_OLD = ("health snapshot too old to trust: its refreshes keep failing; "
                     "paid requests are refused until it is fresh again")
+BEE_STATE_UNKNOWN = ("Bee node state unknown: the health snapshot is too old to trust "
+                     "(its refreshes keep failing); the other fields are from the last one")
 BEE_SUMMARY_FAILED = "could not summarize the Bee node status; see the gateway log"
 
 
@@ -466,6 +470,18 @@ def build_health_response(snapshot) -> dict:
             response_data["status"] = "degraded"
         if node.get("network_availability") == "Unavailable" and response_data["status"] == "ok":
             response_data["status"] = "degraded"
+
+    # A snapshot too old to trust says nothing about the Bee node now (#589):
+    # its last bee_node.healthy, possibly true, would otherwise be served for
+    # as long as refreshes keep failing, and external probes read only that
+    # field (#586). A copy: the snapshot and the summary cache are shared.
+    if snapshot is not None and health_snapshot.too_old(snapshot):
+        stale = dict(response_data["bee_node"])
+        stale["healthy"] = False
+        stale["api_reachable"] = None
+        stale["warnings"] = list(stale.get("warnings") or []) + [BEE_STATE_UNKNOWN]
+        response_data["bee_node"] = stale
+        response_data["status"] = "degraded"
 
     # Gateway state files. A registry that cannot save loses every ownership
     # change on restart (#558). The warning is advisory and never changes

@@ -180,7 +180,34 @@ class TestHealthStatus:
         body = build_health_response(snap)
         assert body["status"] == "degraded"
         assert any("too old to trust" in w for w in body["snapshot"]["warnings"])
-        assert body["bee_node"]["healthy"] is True  # still the last answer
+        assert body["bee_node"]["healthy"] is False  # unknown, not the last answer
+
+    def test_too_old_snapshot_reports_bee_node_unhealthy_and_unknown(self, monkeypatch, x402_on):
+        # #586's probe reads only bee_node.healthy: a last good snapshot must
+        # not keep it true while refreshes keep failing.
+        from app.main import build_health_response
+        node = dict(NODE_OK)
+        snap = _install(node=node, gnosis=dict(GNOSIS_OK), age=health_snapshot.max_trusted_age() + 1)
+        monkeypatch.setattr(health_snapshot, "_last_failure", "refresh timed out")
+        body = build_health_response(snap)
+        assert body["bee_node"]["healthy"] is False
+        assert body["bee_node"]["api_reachable"] is None
+        assert any("state unknown" in w for w in body["bee_node"]["warnings"])
+        assert body["bee_node"]["connected_peers"] == 120  # the last values, labelled
+        assert body["status"] == "degraded"
+        # The snapshot itself is not changed.
+        assert snap.node["healthy"] is True and snap.node["warnings"] == []
+
+    def test_young_or_idle_snapshot_keeps_bee_node_healthy(self, monkeypatch, x402_on):
+        from app.main import build_health_response
+        snap = _install(node=dict(NODE_OK), gnosis=dict(GNOSIS_OK), age=20)
+        monkeypatch.setattr(health_snapshot, "_last_failure", "refresh timed out")
+        assert build_health_response(snap)["bee_node"]["healthy"] is True  # young, failed
+        monkeypatch.setattr(health_snapshot, "_last_failure", None)
+        snap = _install(node=dict(NODE_OK), gnosis=dict(GNOSIS_OK), age=3600)
+        body = build_health_response(snap)  # idle, no failure
+        assert body["bee_node"]["healthy"] is True
+        assert body["bee_node"]["api_reachable"] is True
 
     def test_failed_refresh_on_a_young_snapshot_stays_ok(self, monkeypatch, x402_on):
         from app.main import build_health_response

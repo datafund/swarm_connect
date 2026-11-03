@@ -364,7 +364,9 @@ curl http://localhost:8000/health | jq .
 
 An unreachable Bee node is `degraded` and not `critical` on purpose (#108, #589): the SDK
 treats `critical` as "gateway down", and a Bee outage is usually short. Monitors that
-must tell "gateway alive" from "Bee reachable" should read `bee_node.healthy`.
+must tell "gateway alive" from "Bee reachable" should read `bee_node.healthy`. It is also
+false when the health snapshot is too old to trust (its refreshes keep failing): the Bee
+state is then unknown, `bee_node.api_reachable` is null, and a warning says so.
 
 A low balance that could still be read is a warning only and does not change `status`.
 
