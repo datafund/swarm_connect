@@ -200,6 +200,12 @@ class StampOwnershipManager:
         # True while the last write of the registry file failed.
         self._save_failed = False
 
+    def changes_unsaved(self) -> bool:
+        """Whether a change is in memory only: the last write failed, or saves
+        are refused because the pre-migration copy failed (#506). Clears with
+        the next successful save."""
+        return self._save_failed or self._saves_refused
+
     def health_warnings(self) -> list:
         """Return fixed-text warnings for /health; empty once a save succeeds."""
         warnings = []

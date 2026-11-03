@@ -195,6 +195,10 @@ class StampPoolManager:
         # cannot put a sold batch back up for sale. _refused_logged is the last
         # batch list logged, so a long pause logs it once per change.
         self._state_dirty: bool = False
+        # True from a failed write of the state file until the next successful
+        # one (#506). Not _state_dirty: that is also set while saves are refused
+        # for an unreadable file, which is a different condition.
+        self._save_failed: bool = False
         self._removed_unsaved: Set[str] = set()
         self._refused_logged: Optional[List[str]] = None
         # Set when the state file was found unreadable, cleared only by a sync
@@ -302,15 +306,22 @@ class StampPoolManager:
             # Alerted on (#506): the file is now behind the in-memory pool.
             from app.services.metrics import count_state_save_failure
             count_state_save_failure("pool")
+            self._save_failed = True
             # The file does not match the pool; the next sync (or the next
             # save) writes it again. This does not pause anything: only an
             # unreadable file does (#547).
             self._state_dirty = True
             return False
         self._state_dirty = False
+        self._save_failed = False
         self._removed_unsaved.clear()
         self._refused_logged = None
         return True
+
+    def save_failed(self) -> bool:
+        """Whether the last write of the state file failed, so the file is behind
+        the in-memory pool until a write succeeds (#506)."""
+        return self._save_failed
 
     def _mark_state_file_unreadable(self) -> None:
         """Pause pool spending because the state file cannot be read.

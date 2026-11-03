@@ -194,6 +194,51 @@ for _file in STATE_SAVE_FILES:
     state_save_failures_total.labels(file=_file)
 
 
+# 1 while a state file is behind memory after a failed save, until a save
+# succeeds (#506). The counter above shows that a save failed; this shows that
+# the change is still unsaved, so the alert stays firing while it is. Nothing
+# retries a failed ownership save, and the pool retries only on its next sync,
+# so an increase() window alone would resolve while the change is still in
+# memory only. Read at scrape time from each store's own flag.
+state_unsaved = Gauge(
+    "gateway_state_unsaved",
+    "1 while a state file is behind the in-memory state after a failed save, "
+    "until a save succeeds (file=pool|ownership)",
+    ["file"],
+)
+
+
+def _pool_unsaved() -> bool:
+    if not settings.STAMP_POOL_ENABLED:
+        return False
+    from app.services.stamp_pool import stamp_pool_manager
+    return stamp_pool_manager.save_failed()
+
+
+def _ownership_unsaved() -> bool:
+    from app.services.stamp_ownership import stamp_ownership_manager
+    return stamp_ownership_manager.changes_unsaved()
+
+
+def _flag_reader(name: str, check):
+    """A scrape-time reader that can never fail the scrape: 0 on any error.
+
+    The stores are imported on first use, not here, so this module does not
+    import them at load time (app.x402.settlement imports this module).
+    """
+    def read() -> float:
+        try:
+            return 1.0 if check() else 0.0
+        except Exception as e:
+            logger.warning(f"Metrics: could not read the {name} flag: {e}")
+            return 0.0
+    return read
+
+
+for _file, _check in (("pool", _pool_unsaved), ("ownership", _ownership_unsaved)):
+    state_unsaved.labels(file=_file).set_function(_flag_reader(f"{_file} unsaved-state", _check))
+
+
 def count_state_save_failure(file: str) -> None:
     """Count one failed save; never raises, since the callers must not fail."""
     try:
