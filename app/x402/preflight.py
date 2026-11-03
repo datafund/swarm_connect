@@ -17,6 +17,7 @@ from typing import Dict, Any, List
 from app.core.config import settings
 from app.services.swarm_api import get_wallet_info, get_chequebook_balance, get_chequebook_info
 from app.services.bee_errors import error_cause
+from app.services.http_client import exc_text
 
 logger = logging.getLogger(__name__)
 
@@ -72,7 +73,7 @@ async def check_xbzz_balance() -> Dict[str, Any]:
         }
 
     except Exception as e:
-        logger.error(f"Failed to check xBZZ balance: {e}")
+        logger.error(f"Failed to check xBZZ balance: {exc_text(e)}")
         return {
             "ok": False,
             "balance_plur": 0,
@@ -128,7 +129,7 @@ async def check_xdai_balance() -> Dict[str, Any]:
         }
 
     except Exception as e:
-        logger.error(f"Failed to check xDAI balance: {e}")
+        logger.error(f"Failed to check xDAI balance: {exc_text(e)}")
         return {
             "ok": False,
             "balance_wei": 0,
@@ -198,7 +199,7 @@ async def check_chequebook_balance() -> Dict[str, Any]:
         }
 
     except Exception as e:
-        logger.error(f"Failed to check chequebook balance: {e}")
+        logger.error(f"Failed to check chequebook balance: {exc_text(e)}")
         return {
             "ok": False,
             "available_balance_plur": 0,

@@ -13,6 +13,7 @@ from app.x402.settlement import settle_payment
 from app.core.config import settings
 from app.services import swarm_api
 from app.services.bee_errors import error_cause, public_bee_text
+from app.services.http_client import exc_text
 from app.services.swarm_api import expiry_from_amount, get_batch_expiry, plur_to_bzz
 from app.services.stamp_ownership import normalize_address, stamp_ownership_manager
 from app.services.stamp_tracker import record_purchase
@@ -349,7 +350,7 @@ async def list_stamps(
         )
 
     except httpx.HTTPError as e:
-        logger.error(f"Failed to retrieve stamps from Swarm API: {e}")
+        logger.error(f"Failed to retrieve stamps from Swarm API: {exc_text(e)}")
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail="Could not fetch stamp data. The Bee node may be unavailable."

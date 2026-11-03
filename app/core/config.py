@@ -116,7 +116,7 @@ class Settings(BaseSettings):
     SWARM_STAMP_PURCHASE_TIMEOUT_SECONDS: float = 120.0
     STAMP_PURCHASE_BEE_TIMEOUT_SECONDS: float = 900.0
     # Paid purchases waiting on Bee at once. Each holds a connection of the
-    # shared Bee client (100) for up to STAMP_PURCHASE_BEE_TIMEOUT_SECONDS; the
+    # shared Bee client (BEE_HTTP_MAX_CONNECTIONS) for up to STAMP_PURCHASE_BEE_TIMEOUT_SECONDS; the
     # cap keeps a hung Bee from starving uploads and health checks. Checked
     # before the payment is settled: a caller refused here is not charged.
     STAMP_MAX_CONCURRENT_PAID_PURCHASES: int = 10
@@ -342,6 +342,25 @@ class Settings(BaseSettings):
     # Total time allowed for fetching one download from Bee. httpx timeouts
     # apply per read, so a slow trickle could otherwise hold the request open.
     DOWNLOAD_TIMEOUT_SECONDS: int = Field(120, ge=1)
+
+    # === Shared outbound HTTP client (Bee API, Base RPC) ===
+    # Connection limits of the shared httpx client (app/services/http_client.py).
+    # The defaults are httpx's own defaults, written out.
+    BEE_HTTP_MAX_CONNECTIONS: int = Field(100, ge=1)
+    BEE_HTTP_MAX_KEEPALIVE_CONNECTIONS: int = Field(20, ge=0)
+    BEE_HTTP_KEEPALIVE_EXPIRY_SECONDS: float = Field(5.0, ge=0, allow_inf_nan=False)
+    # Self-recovery of the shared client (#587). httpcore 1.0.9 keeps a
+    # connection slot forever when a request is cancelled right after the pool
+    # gives it a new connection, so cancellations under load can fill the pool
+    # with slots that hold no request, and every call then fails with
+    # PoolTimeout. The client is replaced only when all three hold: this many
+    # PoolTimeouts in a row, at least BEE_HTTP_POOL_STUCK_FRACTION of
+    # BEE_HTTP_MAX_CONNECTIONS held by such stuck connections, and a probe of
+    # Bee's /health on a new connection answering. Attempts are at least
+    # BEE_HTTP_POOL_RECOVERY_COOLDOWN_SECONDS apart.
+    BEE_HTTP_POOL_RECOVERY_THRESHOLD: int = Field(3, ge=1)
+    BEE_HTTP_POOL_STUCK_FRACTION: float = Field(0.25, gt=0, le=1, allow_inf_nan=False)
+    BEE_HTTP_POOL_RECOVERY_COOLDOWN_SECONDS: float = Field(60.0, ge=0, allow_inf_nan=False)
 
     # === Chunk Upload (stamped-chunk forwarding, Flow A) ===
     # When enabled, the gateway forwards a single client-supplied PRE-STAMPED chunk

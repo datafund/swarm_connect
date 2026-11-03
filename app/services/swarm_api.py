@@ -8,7 +8,7 @@ from typing import List, Dict, Any, Optional
 from urllib.parse import urljoin
 
 from app.core.config import settings
-from app.services.http_client import get_client
+from app.services.http_client import exc_text, get_client
 from app.services.stamp_ownership import POOL_OWNER, stamp_ownership_manager
 from app.services.metrics import bee_api_errors_total
 
@@ -84,12 +84,12 @@ async def get_all_stamps() -> List[Dict[str, Any]]:
 
     except httpx.HTTPError as e:
         _record_bee_error("batches")
-        logger.error(f"Error fetching stamps from Swarm API ({api_url}): {e}")
+        logger.error(f"Error fetching stamps from Swarm API ({api_url}): {exc_text(e)}")
         raise
 
     except Exception as e:
         # Catch other potential errors like JSON decoding
-        logger.error(f"An unexpected error occurred while processing Swarm API response: {e}")
+        logger.error(f"An unexpected error occurred while processing Swarm API response: {exc_text(e)}")
         raise
 
 
@@ -129,11 +129,11 @@ async def get_local_stamps() -> List[Dict[str, Any]]:
             return []
 
     except httpx.HTTPError as e:
-        logger.warning(f"Error fetching local stamps from Swarm API ({api_url}): {e}")
+        logger.warning(f"Error fetching local stamps from Swarm API ({api_url}): {exc_text(e)}")
         # Don't re-raise here - we want to continue even if local stamps fail
         return []
     except Exception as e:
-        logger.warning(f"An unexpected error occurred while processing local stamps response: {e}")
+        logger.warning(f"An unexpected error occurred while processing local stamps response: {exc_text(e)}")
         return []
 
 
@@ -184,10 +184,10 @@ async def purchase_postage_stamp(amount: int, depth: int, label: Optional[str] =
 
     except httpx.HTTPError as e:
         _record_bee_error("purchase")
-        logger.error(f"Error purchasing stamp from Swarm API ({api_url}): {e}")
+        logger.error(f"Error purchasing stamp from Swarm API ({api_url}): {exc_text(e)}")
         raise
     except (ValueError, KeyError) as e:
-        logger.error(f"Error parsing stamp purchase response: {e}")
+        logger.error(f"Error parsing stamp purchase response: {exc_text(e)}")
         raise ValueError(f"Could not parse stamp purchase response: {e}") from e
 
 
@@ -222,7 +222,7 @@ async def find_purchased_batch(label: str, depth: int, amount: int, is_known, mi
         try:
             found = [s["batchID"] for s in await get_local_stamps() if matches(s)]
         except Exception as e:
-            logger.warning(f"Lost purchase lookup: listing failed ({e}); retrying")
+            logger.warning(f"Lost purchase lookup: listing failed ({exc_text(e)}); retrying")
             found = []
         if len(found) == 1:
             return found[0]
@@ -271,10 +271,10 @@ async def extend_postage_stamp(stamp_id: str, amount: int) -> str:
         return batch_id
 
     except httpx.HTTPError as e:
-        logger.error(f"Error extending stamp {stamp_id} from Swarm API ({api_url}): {e}")
+        logger.error(f"Error extending stamp {stamp_id} from Swarm API ({api_url}): {exc_text(e)}")
         raise
     except (ValueError, KeyError) as e:
-        logger.error(f"Error parsing stamp extension response for {stamp_id}: {e}")
+        logger.error(f"Error parsing stamp extension response for {stamp_id}: {exc_text(e)}")
         raise ValueError(f"Could not parse stamp extension response: {e}") from e
 
 
@@ -346,7 +346,7 @@ def get_unusable_reason(stamp: Dict[str, Any],
         return None
 
     except (ValueError, TypeError) as e:
-        logger.warning(f"Error calculating usable status for stamp: {e}")
+        logger.warning(f"Error calculating usable status for stamp: {exc_text(e)}")
         return reason(UNUSABLE_UNREADABLE)
 
 
@@ -443,7 +443,7 @@ def calculate_utilization_percent(
         return round(percent, 2)
 
     except (ValueError, TypeError, OverflowError) as e:
-        logger.warning(f"Error calculating utilization percent: {e}")
+        logger.warning(f"Error calculating utilization percent: {exc_text(e)}")
         return None
 
 
@@ -676,7 +676,7 @@ async def get_all_stamps_processed() -> List[Dict[str, Any]]:
             processed_stamps.append(processed_stamp)
 
         except (ValueError, TypeError, KeyError) as e:
-            logger.warning(f"Skipping malformed stamp data: {e}")
+            logger.warning(f"Skipping malformed stamp data: {exc_text(e)}")
             continue
 
     return processed_stamps
@@ -805,10 +805,10 @@ async def upload_data_to_swarm(
 
     except httpx.HTTPError as e:
         _record_bee_error("upload")
-        logger.error(f"Error uploading data to Swarm API ({api_url}): {e}")
+        logger.error(f"Error uploading data to Swarm API ({api_url}): {exc_text(e)}")
         raise
     except (ValueError, KeyError) as e:
-        logger.error(f"Error parsing data upload response: {e}")
+        logger.error(f"Error parsing data upload response: {exc_text(e)}")
         raise ValueError(f"Could not parse data upload response: {e}") from e
 
 
@@ -862,10 +862,10 @@ async def upload_chunk_to_swarm(
 
     except httpx.HTTPError as e:
         _record_bee_error("chunk_upload")
-        logger.error(f"Error forwarding chunk to Swarm API ({api_url}): {e}")
+        logger.error(f"Error forwarding chunk to Swarm API ({api_url}): {exc_text(e)}")
         raise
     except (ValueError, KeyError) as e:
-        logger.error(f"Error parsing chunk upload response: {e}")
+        logger.error(f"Error parsing chunk upload response: {exc_text(e)}")
         raise ValueError(f"Could not parse chunk upload response: {e}") from e
 
 
@@ -927,7 +927,7 @@ async def download_data_from_swarm(reference: str) -> bytes:
 
     except httpx.HTTPError as e:
         _record_bee_error("download")
-        logger.error(f"Error downloading data from Swarm API ({api_url}): {e}")
+        logger.error(f"Error downloading data from Swarm API ({api_url}): {exc_text(e)}")
         raise
 
 
@@ -960,7 +960,7 @@ async def _fetch_bee_json(client, endpoint: str) -> Dict[str, Any]:
         data = resp.json()
         return data if isinstance(data, dict) else {}
     except Exception as e:
-        logger.debug(f"Bee diagnostic fetch failed ({endpoint}): {e}")
+        logger.debug(f"Bee diagnostic fetch failed ({endpoint}): {exc_text(e)}")
         return {}
 
 
@@ -995,7 +995,7 @@ async def get_node_status_summary(use_cache: bool = True) -> Dict[str, Any]:
             if isinstance(result, dict):
                 fetched[endpoint] = result
     except Exception as e:
-        logger.warning(f"Failed to fetch Bee node status: {e}")
+        logger.warning(f"Failed to fetch Bee node status: {exc_text(e)}")
 
     topo = fetched["topology"]
     status = fetched["status"]
@@ -1118,10 +1118,10 @@ async def get_wallet_info() -> Dict[str, Any]:
 
     except httpx.HTTPError as e:
         _record_bee_error("wallet")
-        logger.error(f"Error fetching wallet info from Swarm API ({api_url}): {e}")
+        logger.error(f"Error fetching wallet info from Swarm API ({api_url}): {exc_text(e)}")
         raise
     except (ValueError, KeyError) as e:
-        logger.error(f"Error parsing wallet response: {e}")
+        logger.error(f"Error parsing wallet response: {exc_text(e)}")
         raise ValueError(f"Could not parse wallet response: {e}") from e
 
 
@@ -1169,10 +1169,10 @@ async def get_chequebook_balance() -> Dict[str, Any]:
         return response_json
 
     except httpx.HTTPError as e:
-        logger.error(f"Error fetching chequebook balance from Swarm API ({api_url}): {e}")
+        logger.error(f"Error fetching chequebook balance from Swarm API ({api_url}): {exc_text(e)}")
         raise
     except (ValueError, KeyError) as e:
-        logger.error(f"Error parsing chequebook balance response: {e}")
+        logger.error(f"Error parsing chequebook balance response: {exc_text(e)}")
         raise ValueError(f"Could not parse chequebook balance response: {e}") from e
 
 
@@ -1213,10 +1213,10 @@ async def get_chequebook_info() -> Dict[str, Any]:
         return chequebook_info
 
     except httpx.HTTPError as e:
-        logger.error(f"Error fetching chequebook info from Swarm API: {e}")
+        logger.error(f"Error fetching chequebook info from Swarm API: {exc_text(e)}")
         raise
     except (ValueError, KeyError) as e:
-        logger.error(f"Error parsing chequebook info: {e}")
+        logger.error(f"Error parsing chequebook info: {exc_text(e)}")
         raise ValueError(f"Could not parse chequebook info: {e}") from e
 
 
@@ -1265,10 +1265,10 @@ async def get_chainstate() -> Dict[str, Any]:
         return response_json
 
     except httpx.HTTPError as e:
-        logger.error(f"Error fetching chainstate from Swarm API ({api_url}): {e}")
+        logger.error(f"Error fetching chainstate from Swarm API ({api_url}): {exc_text(e)}")
         raise
     except (ValueError, KeyError) as e:
-        logger.error(f"Error parsing chainstate response: {e}")
+        logger.error(f"Error parsing chainstate response: {exc_text(e)}")
         raise ValueError(f"Could not parse chainstate response: {e}") from e
 
 
@@ -1533,10 +1533,10 @@ async def upload_collection_to_swarm(
         return reference
 
     except httpx.HTTPError as e:
-        logger.error(f"Error uploading collection to Swarm API ({api_url}): {e}")
+        logger.error(f"Error uploading collection to Swarm API ({api_url}): {exc_text(e)}")
         raise
     except (ValueError, KeyError) as e:
-        logger.error(f"Error parsing collection upload response: {e}")
+        logger.error(f"Error parsing collection upload response: {exc_text(e)}")
         raise ValueError(f"Could not parse collection upload response: {e}") from e
 
 
@@ -1869,7 +1869,7 @@ async def check_upload_failure_reason(stamp_id: str, error_message: str) -> Opti
         return None
 
     except Exception as e:
-        logger.warning(f"Error checking upload failure reason: {e}")
+        logger.warning(f"Error checking upload failure reason: {exc_text(e)}")
         return None
 
 
@@ -1899,7 +1899,7 @@ async def get_stamp_health_check(stamp_id: str) -> Dict[str, Any]:
     try:
         all_stamps = await get_all_stamps_processed()
     except Exception as e:
-        logger.error(f"Failed to fetch stamps for health check: {e}")
+        logger.error(f"Failed to fetch stamps for health check: {exc_text(e)}")
         return {
             "stamp_id": stamp_id,
             "can_upload": False,

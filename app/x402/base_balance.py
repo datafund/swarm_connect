@@ -13,7 +13,7 @@ from typing import Dict, Any, Optional
 
 from app.core.config import settings
 from app.services.bee_errors import error_cause
-from app.services.http_client import get_client
+from app.services.http_client import exc_text, get_client
 
 logger = logging.getLogger(__name__)
 
@@ -178,7 +178,7 @@ async def check_base_eth_balance() -> Dict[str, Any]:
         }
 
     except Exception as e:
-        logger.error(f"Failed to check Base ETH balance: {e}")
+        logger.error(f"Failed to check Base ETH balance: {exc_text(e)}")
         return {
             "ok": False,
             "is_critical": True,  # Treat RPC errors as critical (can't verify)
