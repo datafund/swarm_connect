@@ -115,9 +115,10 @@ def _key_id(key: Tuple[str, str]) -> str:
 # disk would keep the process from exiting. A hung write never landed, so
 # nothing is lost by not waiting for it beyond the shutdown bound.
 _REGISTRY_IO_WORKERS = 2
-# Write-aheads are refused (503) while this many registry writes are queued
-# or running: a hung disk must not pile them up.
-MAX_PENDING_REGISTRY_IO = 8
+# Write-aheads are refused (503) when the oldest pending registry write has
+# waited longer than the write timeout (a hung disk), or when this many writes
+# are pending (far above any healthy burst). An ordinary burst just queues.
+MAX_PENDING_REGISTRY_IO = 64
 
 
 class _DaemonPool:
@@ -153,7 +154,7 @@ class _DaemonPool:
 
 
 _registry_io: Optional[_DaemonPool] = None
-_registry_io_pending: "set[concurrent.futures.Future]" = set()
+_registry_io_pending: "Dict[concurrent.futures.Future, float]" = {}   # future -> queued at (monotonic)
 _registry_io_lock = Lock()
 
 
@@ -169,7 +170,7 @@ def _submit_registry_io(fn, *args) -> concurrent.futures.Future:
     """Run fn(*args) on the registry pool; tracked so shutdown can wait for it."""
     fut = _registry_executor().submit(fn, *args)
     with _registry_io_lock:
-        _registry_io_pending.add(fut)
+        _registry_io_pending[fut] = time.monotonic()
     fut.add_done_callback(lambda f: _discard_pending(f))
     return fut
 
@@ -179,9 +180,17 @@ def _registry_io_backlog() -> int:
         return len(_registry_io_pending)
 
 
+def _registry_io_oldest_age() -> float:
+    """Seconds the oldest pending registry write has been queued or running."""
+    with _registry_io_lock:
+        if not _registry_io_pending:
+            return 0.0
+        return time.monotonic() - min(_registry_io_pending.values())
+
+
 def _discard_pending(fut) -> None:
     with _registry_io_lock:
-        _registry_io_pending.discard(fut)
+        _registry_io_pending.pop(fut, None)
 
 
 def shutdown_registry_io(timeout: float = 5.0) -> None:
@@ -279,9 +288,18 @@ class OutcomeUnknownRegistry:
         if self._write_error:
             self._retry_in_background()
             return self._write_error
+        if self._stalled:
+            # A probe write, so the stall clears even if nothing else writes:
+            # paid requests are refused meanwhile, so none would.
+            self._retry_in_background(only_if_idle=True)
         return self._stalled
 
-    def _retry_in_background(self) -> None:
+    def _retry_in_background(self, only_if_idle: bool = False) -> None:
+        """A write (retry or probe) in the background, at most every
+        WRITE_RETRY_SECONDS. only_if_idle: skip while other writes are pending,
+        whose completion clears a stall anyway."""
+        if only_if_idle and _registry_io_backlog():
+            return
         with self._lock:
             if self._retrying or time.monotonic() - self._last_write_attempt < WRITE_RETRY_SECONDS:
                 return
@@ -494,9 +512,14 @@ class OutcomeUnknownRegistry:
             self._gens[kid] = gen
             self._unasked[kid] = [gen, prior, False]
         if not self._persist():
-            self._rollback(kid, previous, evicted)
             with self._lock:
-                if self._gens.get(kid) == gen:
+                u = self._unasked.get(kid)
+                released_by_abandon = u is not None and u[0] == gen and u[2]
+                # Only while this write-ahead still owns the key: a newer one
+                # (possible only after an abandon) must not be undone.
+                owns = self._gens.get(kid) == gen
+                if owns:
+                    self._rollback(kid, previous, evicted)
                     if previous_gen is None:
                         self._gens.pop(kid, None)
                     else:
@@ -505,7 +528,12 @@ class OutcomeUnknownRegistry:
                         self._unasked.pop(kid, None)
                     else:
                         self._unasked[kid] = previous_unasked
-            self.release(key)
+                    if not released_by_abandon:
+                        n = self._inflight.get(kid, 0) - 1
+                        if n > 0:
+                            self._inflight[kid] = n
+                        else:
+                            self._inflight.pop(kid, None)
             return prior, False, None
         return prior, True, gen
 
@@ -623,6 +651,10 @@ class OutcomeUnknownRegistry:
         removed (generation-checked, in the background)."""
         if key is None:
             return None, True, None
+        timeout = settings.X402_SETTLEMENT_STATE_WRITE_TIMEOUT_SECONDS
+        if _registry_io_oldest_age() > timeout:
+            self.mark_stalled(f"a settlement-state write has been pending for over {timeout}s")
+            return None, False, None
         if _registry_io_backlog() >= MAX_PENDING_REGISTRY_IO:
             self.mark_stalled(f"{MAX_PENDING_REGISTRY_IO} settlement-state writes pending")
             return None, False, None
@@ -657,6 +689,10 @@ class OutcomeUnknownRegistry:
         prior, recorded, _ = fut.result()
         if not recorded:
             return
+        # Recorded means its write landed: the disk responds again, even if the
+        # timeout that marked the stall fired after that write completed.
+        with self._lock:
+            self._clear_stalled()
         _submit_registry_io(self.remove_abandoned, key, prior, gen)
 
     async def aresolve(self, key, prior, settled: bool, gen: Optional[int] = None,
@@ -795,7 +831,8 @@ def request_nonce(request) -> Optional[str]:
     return key[1] if key else None
 
 
-def settlement_in_progress_refusal(auth_key: Tuple[str, str], request: Optional[Request] = None) -> HTTPException:
+def settlement_in_progress_refusal(auth_key: Tuple[str, str], request: Optional[Request] = None,
+                                   work_ran: bool = False) -> HTTPException:
     """A parallel duplicate of a payment whose settlement this process is waiting on.
 
     Not an unknown outcome (an answer is coming), and not a 402 (an x402 client
@@ -814,7 +851,9 @@ def settlement_in_progress_refusal(auth_key: Tuple[str, str], request: Optional[
         detail={
             "code": "PAYMENT_SETTLEMENT_IN_PROGRESS",
             "message": ("Another request with this payment authorization is being processed. "
-                        "This request was not run and not charged. Do not resend this X-PAYMENT: "
+                        + ("This request's work ran, but its result is withheld and it was not charged. "
+                           if work_ran else "This request was not run and not charged. ")
+                        + "Do not resend this X-PAYMENT: "
                         "once that request has settled it is answered 402 \"already used\", and "
                         "paying from that would charge twice. Wait for that request's answer. If "
                         "that request was interrupted (it ended without a settled result, for "
@@ -851,8 +890,8 @@ def outcome_unknown_refusal(auth_key: Tuple[str, str], reason: Optional[str] = N
         logger.error(f"x402: could not audit an outcome-unknown retry: {e}")
     detail = {
         "code": "PAYMENT_AUTHORIZATION_OUTCOME_UNKNOWN",
-        "message": ("An earlier request with this payment authorization was sent for settlement "
-                    "and no answer came back, so that transfer may already have been collected. "
+        "message": ("An earlier request with this payment authorization ended without a settlement "
+                    "answer, so that transfer may already have been collected. "
                     + ("This request's work ran, but its result is withheld and it was not charged. "
                        if work_ran else "This request did nothing and was not charged. ")
                     + OUTCOME_UNKNOWN_ADVICE),

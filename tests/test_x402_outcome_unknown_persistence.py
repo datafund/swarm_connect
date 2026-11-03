@@ -1136,21 +1136,69 @@ def test_a_hung_write_shows_in_health(env, state, monkeypatch):
     assert _wait_until(lambda: st.outcome_unknown.public_cause() is None, timeout=5)
 
 
-def test_write_aheads_are_refused_while_too_many_writes_are_pending(env, state, monkeypatch):
+def test_a_hung_write_with_a_backlog_fails_closed(env, state, monkeypatch):
+    """#553 review 11: refused only when the oldest pending write is older than the
+    write timeout (a hung disk), not because writes are queued."""
+    import asyncio
+    import threading
+    from app.core.config import settings
+    monkeypatch.setattr(settings, "X402_SETTLEMENT_STATE_WRITE_TIMEOUT_SECONDS", 0.2)
+    gate = threading.Event()
+    blocker = st._submit_registry_io(gate.wait, 10)
+    time.sleep(0.3)                                  # older than the timeout
+    fac = _facilitator(ok())
+    try:
+        t0 = time.monotonic()
+        exc = asyncio.run(_settle_expecting(503, fac))
+        assert exc.detail["code"] == "PAYMENT_STATE_UNAVAILABLE"
+        assert time.monotonic() - t0 < 0.15 and fac.settle.await_count == 0
+    finally:
+        gate.set()
+        blocker.result(5)
+
+
+def test_a_very_large_backlog_fails_closed(env, state):
     import asyncio
     import threading
     gate = threading.Event()
     blockers = [st._submit_registry_io(gate.wait, 10) for _ in range(st.MAX_PENDING_REGISTRY_IO)]
     fac = _facilitator(ok())
     try:
-        t0 = time.monotonic()
-        exc = asyncio.run(_settle_expecting(503, fac))
-        assert exc.detail["code"] == "PAYMENT_STATE_UNAVAILABLE"
-        assert time.monotonic() - t0 < 1 and fac.settle.await_count == 0
+        asyncio.run(_settle_expecting(503, fac))
+        assert fac.settle.await_count == 0
     finally:
         gate.set()
         for b in blockers:
             b.result(5)
+
+
+def test_a_burst_of_write_aheads_on_a_healthy_disk_is_not_refused(env, state):
+    import asyncio
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock, patch
+    reg = st.outcome_unknown
+
+    def request(i):
+        req = MagicMock()
+        key = ("0x" + "%040x" % (i + 1), "0x" + "%064x" % (i + 1))
+        req.state = SimpleNamespace(x402_mode="paid", x402_payer=key[0], x402_payment=object(),
+                                    x402_requirements=object(), x402_auth_key=key,
+                                    x402_idempotency_id=None)
+        req.headers = {}
+        req.client = SimpleNamespace(host="127.0.0.1")
+        return req
+
+    fac = _facilitator(*([ok()] * 20))
+
+    async def go():
+        with patch("app.x402.dependency._get_facilitator_client", return_value=fac):
+            return await asyncio.gather(*[st.settle_payment(request(i)) for i in range(20)],
+                                        return_exceptions=True)
+
+    results = asyncio.run(go())
+    assert [r for r in results if isinstance(r, BaseException)] == []
+    assert fac.settle.await_count == 20
+    assert not reg.unavailable
 
 
 @pytest.mark.parametrize("value", ["0", "-1", "nan", "inf", "61"])
@@ -1179,3 +1227,79 @@ def test_a_process_with_a_hung_write_exits_within_the_bound():
                           timeout=20, capture_output=True)
     assert proc.returncode == 0, proc.stderr[-2000:]
     assert time.monotonic() - t0 < 10
+
+
+# --- #553 review 11 --------------------------------------------------------
+
+def test_the_stall_clears_when_the_abandoned_write_had_already_landed(tmp_path, monkeypatch):
+    """Measured interleaving: the write-ahead's write completes (and clears the stall)
+    before wait_for times out; the timeout then marks the registry stalled. The key had
+    a prior, so the abandoned removal does not write. The stall must still clear."""
+    import concurrent.futures
+    monkeypatch.setattr(st, "WRITE_RETRY_SECONDS", 0)
+    reg = st.OutcomeUnknownRegistry(state_file=str(tmp_path / "s.json"))
+    reg.add(KEY, st.BEFORE_WORK)                       # an earlier unknown outcome: a prior
+    gen = reg.next_generation()
+    result = reg.begin_settlement_ex(KEY, st.BEFORE_WORK, gen)    # the write lands
+    assert result[1] and result[0] == st.BEFORE_WORK
+    reg.mark_stalled("write-ahead did not finish in time")       # the late timeout
+    done = concurrent.futures.Future()
+    done.set_result(result)
+    reg._give_up(KEY, gen, done)
+    assert _wait_until(lambda: not reg.unavailable)
+    assert reg.contains(KEY)                            # the earlier unknown outcome stays
+
+
+def test_a_stall_with_no_pending_write_is_probed_in_the_background(tmp_path, monkeypatch):
+    monkeypatch.setattr(st, "WRITE_RETRY_SECONDS", 0)
+    reg = st.OutcomeUnknownRegistry(state_file=str(tmp_path / "s.json"))
+    reg.mark_stalled("test")
+    assert reg.unavailable                              # schedules a probe write
+    assert _wait_until(lambda: not reg.unavailable)
+
+
+def test_a_rollback_never_undoes_a_newer_write_ahead(tmp_path, monkeypatch):
+    """The write-ahead's write fails after a newer begin for the key took over (only
+    possible after an abandon): the rollback must leave the newer entry alone."""
+    import threading
+    reg = st.OutcomeUnknownRegistry(state_file=str(tmp_path / "s.json"))
+    real = st.atomic_write_json
+    first_write = threading.Event()
+    release = threading.Event()
+    calls = []
+
+    def write(path, data):
+        calls.append(1)
+        if len(calls) == 1:
+            first_write.set()
+            release.wait(5)
+            raise OSError("disk error")
+        real(path, data)
+
+    monkeypatch.setattr(st, "atomic_write_json", write)
+    old_gen = reg.next_generation()
+    t = threading.Thread(target=reg.begin_settlement_ex, args=(KEY, st.BEFORE_WORK, old_gen))
+    t.start()
+    first_write.wait(2)
+    reg.abandon(KEY, old_gen)                          # the caller gave up
+    new_gen = reg.next_generation()
+    with reg._lock:                                    # a newer write-ahead takes the key (asked, in flight)
+        kid = st._key_id(KEY)
+        reg._entries[kid] = {"expires": time.time() + 60, "kind": st.AFTER_WORK}
+        reg._gens[kid] = new_gen
+        reg._unasked.pop(kid, None)
+        reg._inflight[kid] = 1
+    release.set()
+    t.join(5)
+    assert reg.kind(KEY) == st.AFTER_WORK               # not rolled back
+    assert reg.in_flight(KEY)                           # and its in-flight mark not released
+
+
+def test_the_fallback_in_progress_answer_says_the_work_ran():
+    exc = st.settlement_in_progress_refusal(KEY, work_ran=True)
+    assert "not run" not in exc.detail["message"] and "withheld" in exc.detail["message"]
+
+
+def test_the_outcome_unknown_message_does_not_claim_the_attempt_was_sent():
+    exc = st.outcome_unknown_refusal(KEY, where="after_work")
+    assert "was sent for settlement" not in exc.detail["message"]

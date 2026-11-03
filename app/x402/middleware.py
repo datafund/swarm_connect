@@ -520,7 +520,7 @@ class X402Middleware(BaseHTTPMiddleware):
                 from app.x402.settlement import (payment_state_unavailable_detail,
                                                  settlement_in_progress_refusal)
                 if outcome_unknown.in_flight(auth_key):
-                    refusal = settlement_in_progress_refusal(auth_key, request)
+                    refusal = settlement_in_progress_refusal(auth_key, request, work_ran=True)
                     d = refusal.detail
                     return JSONResponse(status_code=409, headers=refusal.headers,
                                         content={"detail": d, "code": d["code"], "message": d["message"]})
