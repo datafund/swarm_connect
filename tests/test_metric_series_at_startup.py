@@ -248,7 +248,8 @@ class TestDashboardText:
 
     def test_notarized_share_warns_about_old_counts_in_the_window(self):
         description = self._panel(112)["description"]
-        assert "for up to 7 days after this change is deployed" in description
+        assert "for a week after that fix is deployed" in description
+        assert "after this change is deployed" not in description
 
     def test_ratio_panels_divide_only_by_a_positive_upload_count(self):
         # The upload series now start at 0, so a 7-day window with no uploads

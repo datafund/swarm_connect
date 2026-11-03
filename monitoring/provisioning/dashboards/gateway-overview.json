@@ -469,7 +469,7 @@
       },
       {
         "id": 112, "title": "Notarized Share (7 days)", "type": "stat",
-        "description": "Successful notary signatures divided by successful uploads, last 7 days, production. The share of stored data that got a provenance signature. A signature is counted only once the signed document is stored on Swarm, so a signed upload that then fails counts as neither, and the share cannot exceed 100%. Signatures counted under the old rule (before the upload, #518) stay in the 7-day window, so for up to 7 days after this change is deployed the share can still show above 100%. No data when there were no successful uploads in 7 days.",
+        "description": "Successful notary signatures divided by successful uploads, last 7 days, production. The share of stored data that got a provenance signature. A signature is counted only once the signed document is stored on Swarm, so a signed upload that then fails counts as neither, and the share cannot exceed 100%. Signatures counted before the notary-success fix (#518) can stay in the 7-day window for a week after that fix is deployed, so the share can briefly exceed 100%. No data when there were no successful uploads in 7 days.",
         "gridPos": { "h": 4, "w": 4, "x": 4, "y": 152 },
         "targets": [{ "expr": "sum(increase(gateway_notary_signatures_total{environment=\"main\",status=\"success\"}[7d])) / (sum(increase(gateway_uploads_total{environment=\"main\",status=\"success\"}[7d])) > 0)", "legendFormat": "notarized" }],
         "fieldConfig": { "defaults": { "unit": "percentunit", "decimals": 0, "thresholds": { "mode": "absolute", "steps": [{ "value": null, "color": "blue" }] } } }
