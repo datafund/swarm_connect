@@ -106,6 +106,24 @@ class PoolStamp:
     label: Optional[str] = None
     released_at: Optional[datetime] = None
     released_to: Optional[str] = None  # IP or identifier of recipient
+    # False while Bee lists the batch as not usable yet (just bought, still
+    # propagating). It is still the pool's and counts toward the reserve
+    # target, but it is never selected, reserved or released to a caller.
+    usable: bool = True
+
+
+def _not_yet_usable(stamp_data: Dict) -> bool:
+    """Whether Bee lists a batch as not usable only because it is not ready yet.
+
+    True when Bee says usable=false, the batch has TTL left, and no other
+    reason applies (not expired, not expiring soon, not full, depth valid):
+    a freshly bought batch waiting for Bee's usability delay. Such a batch is
+    kept, not dropped as expired, so a restart or TTL check inside that delay
+    does not strand a paid batch outside the pool.
+    """
+    return (not stamp_data.get("usable", False)
+            and coerce_int(stamp_data.get("batchTTL"), 0) > 0
+            and not stamp_data.get("unusableReason"))
 
 
 @dataclass
@@ -399,7 +417,7 @@ class StampPoolManager:
             available_stamps: Dict[int, List[str]] = {}
 
             for batch_id, stamp in self._pool.items():
-                if stamp.status == PoolStampStatus.AVAILABLE:
+                if stamp.status == PoolStampStatus.AVAILABLE and stamp.usable:
                     depth = stamp.depth
                     current_levels[depth] = current_levels.get(depth, 0) + 1
                     if depth not in available_stamps:
@@ -428,7 +446,8 @@ class StampPoolManager:
                 reserve_config=reserve_config,
                 current_levels=current_levels,
                 available_stamps=available_stamps,
-                total_stamps=len([s for s in self._pool.values() if s.status == PoolStampStatus.AVAILABLE]),
+                total_stamps=len([s for s in self._pool.values()
+                                  if s.status == PoolStampStatus.AVAILABLE and s.usable]),
                 low_reserve_warning=low_reserve_warning,
                 last_check=self._last_check,
                 next_check=next_check,
@@ -445,7 +464,7 @@ class StampPoolManager:
         with self._lock:
             for batch_id, stamp in self._pool.items():
                 if (stamp.depth == depth and stamp.status == PoolStampStatus.AVAILABLE
-                        and batch_id not in self._topup_in_flight):
+                        and stamp.usable and batch_id not in self._topup_in_flight):
                     return stamp
             return None
 
@@ -459,7 +478,7 @@ class StampPoolManager:
         with self._lock:
             available = [
                 s for s in self._pool.values()
-                if s.status == PoolStampStatus.AVAILABLE and s.depth >= min_depth
+                if s.status == PoolStampStatus.AVAILABLE and s.usable and s.depth >= min_depth
                 and s.batch_id not in self._topup_in_flight
             ]
             if not available:
@@ -489,7 +508,7 @@ class StampPoolManager:
         """
         with self._lock:
             stamp = self._pool.get(batch_id)
-            if not stamp or stamp.status != PoolStampStatus.AVAILABLE:
+            if not stamp or stamp.status != PoolStampStatus.AVAILABLE or not stamp.usable:
                 return None
             if batch_id in self._topup_in_flight:
                 return None
@@ -533,7 +552,7 @@ class StampPoolManager:
         """
         with self._lock:
             stamp = self._pool.get(batch_id)
-            if not stamp or stamp.status != PoolStampStatus.AVAILABLE:
+            if not stamp or stamp.status != PoolStampStatus.AVAILABLE or not stamp.usable:
                 return None
             if batch_id in self._topup_in_flight:
                 return None
@@ -684,7 +703,8 @@ class StampPoolManager:
                 else:
                     self._pending_replenishments[depth] = current_pending - 1
 
-    def add_stamp_to_pool(self, batch_id: str, depth: int, amount: int, ttl: int, label: Optional[str] = None) -> PoolStamp:
+    def add_stamp_to_pool(self, batch_id: str, depth: int, amount: int, ttl: int,
+                          label: Optional[str] = None, usable: bool = True) -> PoolStamp:
         """
         Add a newly purchased stamp to the pool.
 
@@ -694,6 +714,8 @@ class StampPoolManager:
             amount: Amount in PLUR
             ttl: TTL in seconds
             label: Optional label
+            usable: False while Bee does not list the batch as usable yet;
+                it is held but not handed out until a TTL check sees it usable
 
         Returns:
             The created PoolStamp
@@ -706,7 +728,8 @@ class StampPoolManager:
                 created_at=datetime.now(timezone.utc),
                 ttl_at_creation=ttl,
                 status=PoolStampStatus.AVAILABLE,
-                label=label or f"pool-{depth}-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}"
+                label=label or f"pool-{depth}-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}",
+                usable=usable,
             )
             self._pool[batch_id] = stamp
             logger.info(f"Added stamp {batch_id[:16]}... to pool (depth={depth})")
@@ -873,10 +896,16 @@ class StampPoolManager:
                         logger.info(f"Known stamp {batch_id[:16]}... no longer on Bee node, removing from state")
                         continue
 
-                    usable = stamp_data.get("usable", False)
+                    usable = bool(stamp_data.get("usable", False))
                     ttl = coerce_int(stamp_data.get("batchTTL"), 0)
+                    # Not usable YET (bought just before a restart, still in
+                    # Bee's usability delay) is not expired: import it as held
+                    # but not for sale, or the paid batch leaves the pool and
+                    # the state file while its ownership record still says
+                    # "pool", and nothing ever picks it up again.
+                    pending = _not_yet_usable(stamp_data)
 
-                    if not usable or ttl <= 0:
+                    if not (usable or pending) or ttl <= 0:
                         logger.info(f"Known stamp {batch_id[:16]}... is expired/unusable, removing from state")
                         continue
 
@@ -910,12 +939,14 @@ class StampPoolManager:
                         created_at=datetime.now(timezone.utc),
                         ttl_at_creation=ttl,
                         status=PoolStampStatus.AVAILABLE,
-                        label=label or f"synced-{depth}"
+                        label=label or f"synced-{depth}",
+                        usable=usable,
                     )
                     self._pool[batch_id] = stamp
                     valid_ids.add(batch_id)
                     synced_count += 1
-                    logger.info(f"Synced known stamp {batch_id[:16]}... to pool (depth={depth}, ttl={ttl}s)")
+                    logger.info(f"Synced known stamp {batch_id[:16]}... to pool (depth={depth}, ttl={ttl}s"
+                                + ("" if usable else ", not usable yet") + ")")
 
             # Save cleaned state (stamps still valid, plus any we could not read
             # this cycle — those are not in the pool but must not be forgotten).
@@ -1471,7 +1502,8 @@ class StampPoolManager:
                         )
                 else:
                     logger.warning(f"Stamp {batch_id[:16]}... purchased but not yet usable")
-                    # Add anyway, it will become usable soon
+                    # Add anyway, held but not for sale; the TTL check marks
+                    # it usable once Bee does.
             except asyncio.CancelledError:
                 # Cancelled (e.g. at shutdown) after Bee accepted the purchase.
                 # Add the batch as the not-usable path does, synchronously so
@@ -1486,7 +1518,8 @@ class StampPoolManager:
                     depth=depth,
                     amount=amount,
                     ttl=duration_hours * 3600,
-                    label=label
+                    label=label,
+                    usable=False,
                 )
                 raise
             self.add_stamp_to_pool(
@@ -1494,7 +1527,8 @@ class StampPoolManager:
                 depth=depth,
                 amount=amount,
                 ttl=ttl,
-                label=label
+                label=label,
+                usable=usable,
             )
             return batch_id
 
@@ -1567,12 +1601,19 @@ class StampPoolManager:
                         continue
                     stamp_data = stamp_map.get(batch_id)
                     if stamp_data:
-                        # Update TTL
-                        current_ttl = stamp_data.get("batchTTL", 0)
-                        usable = stamp_data.get("usable", False)
+                        current_ttl = coerce_int(stamp_data.get("batchTTL"), 0)
+                        usable = bool(stamp_data.get("usable", False))
 
-                        # Remove expired or unusable stamps
-                        if current_ttl <= 0 or not usable:
+                        if usable and current_ttl > 0:
+                            if not pool_stamp.usable:
+                                logger.info(f"Pool stamp {batch_id[:16]}... is usable now")
+                            pool_stamp.usable = True
+                        elif _not_yet_usable(stamp_data):
+                            # Still in Bee's usability delay: keep it, and
+                            # keep it out of acquire until Bee says usable.
+                            pool_stamp.usable = False
+                        else:
+                            # Remove expired or unusable stamps
                             logger.warning(f"Removing expired/unusable stamp {batch_id[:16]}... from pool")
                             to_remove.append(batch_id)
                     else:

@@ -265,7 +265,9 @@ When the gateway starts with `STAMP_POOL_ENABLED=true`:
 The background task runs every `STAMP_POOL_CHECK_INTERVAL_SECONDS`:
 
 1. **Sync**: Find existing stamps on Bee node that match pool criteria
-2. **Update TTLs**: Remove expired/unusable stamps from pool
+2. **Update TTLs**: Remove expired/unusable stamps from pool. A stamp Bee
+   lists as not usable yet (TTL left, no other reason) stays in the pool and
+   becomes available once Bee lists it as usable
 3. **Purchase**: Buy new stamps if below reserve levels
 4. **Top-up**: Extend stamps with TTL below `STAMP_POOL_MIN_TTL_HOURS`
 
@@ -384,6 +386,14 @@ This cost should be factored into service pricing (e.g., via x402 payments or su
 ### Stamps Not Becoming Usable
 
 New stamps take 30-90 seconds to propagate on the Swarm network. The pool manager waits for this automatically.
+
+A stamp that is not usable when that wait ends, or whose purchase was
+cancelled after Bee accepted it, is still added to the pool and its state
+file. It counts toward the reserve target, so no replacement is bought, but
+it is not counted as available and is never handed out. The sync after a
+restart and each TTL check keep it while Bee lists it with TTL left and no
+other reason to be unusable. The first TTL check that sees it usable makes
+it available. Expired, expiring-soon or full stamps are still removed.
 
 ### High Latency on Acquire
 
