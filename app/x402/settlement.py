@@ -28,7 +28,9 @@ import hashlib
 import json
 import logging
 import os
+import queue
 import re
+import threading
 import time
 from threading import Lock, RLock
 from typing import Dict, Optional, Tuple
@@ -108,18 +110,58 @@ def _key_id(key: Tuple[str, str]) -> str:
 # Registry disk I/O runs on its own small pool, not the default executor: that
 # one is shared with long blocking calls (an on-chain createBatch holds a
 # worker for minutes), which must not be able to stall every paid settlement.
+# Daemon threads, not a ThreadPoolExecutor: concurrent.futures joins its
+# workers at interpreter exit without a timeout, so one write hung on a dead
+# disk would keep the process from exiting. A hung write never landed, so
+# nothing is lost by not waiting for it beyond the shutdown bound.
 _REGISTRY_IO_WORKERS = 2
-_registry_io: Optional[concurrent.futures.ThreadPoolExecutor] = None
+# Write-aheads are refused (503) while this many registry writes are queued
+# or running: a hung disk must not pile them up.
+MAX_PENDING_REGISTRY_IO = 8
+
+
+class _DaemonPool:
+    def __init__(self, workers: int, name: str):
+        self._queue: "queue.SimpleQueue" = queue.SimpleQueue()
+        self._threads = [threading.Thread(target=self._run, name=f"{name}-{i}", daemon=True)
+                         for i in range(workers)]
+        for t in self._threads:
+            t.start()
+
+    def _run(self) -> None:
+        while True:
+            item = self._queue.get()
+            if item is None:
+                return
+            fut, fn, args = item
+            if not fut.set_running_or_notify_cancel():
+                continue
+            try:
+                fut.set_result(fn(*args))
+            except BaseException as e:      # delivered to the waiter, never lost
+                fut.set_exception(e)
+
+    def submit(self, fn, *args) -> concurrent.futures.Future:
+        fut: concurrent.futures.Future = concurrent.futures.Future()
+        self._queue.put((fut, fn, args))
+        return fut
+
+    def shutdown(self) -> None:
+        """Workers exit after the work queued before this; never waits."""
+        for _ in self._threads:
+            self._queue.put(None)
+
+
+_registry_io: Optional[_DaemonPool] = None
 _registry_io_pending: "set[concurrent.futures.Future]" = set()
 _registry_io_lock = Lock()
 
 
-def _registry_executor() -> concurrent.futures.ThreadPoolExecutor:
+def _registry_executor() -> _DaemonPool:
     global _registry_io
     with _registry_io_lock:
         if _registry_io is None:
-            _registry_io = concurrent.futures.ThreadPoolExecutor(
-                max_workers=_REGISTRY_IO_WORKERS, thread_name_prefix="x402-settlement-state")
+            _registry_io = _DaemonPool(_REGISTRY_IO_WORKERS, "x402-settlement-state")
         return _registry_io
 
 
@@ -132,6 +174,11 @@ def _submit_registry_io(fn, *args) -> concurrent.futures.Future:
     return fut
 
 
+def _registry_io_backlog() -> int:
+    with _registry_io_lock:
+        return len(_registry_io_pending)
+
+
 def _discard_pending(fut) -> None:
     with _registry_io_lock:
         _registry_io_pending.discard(fut)
@@ -140,7 +187,8 @@ def _discard_pending(fut) -> None:
 def shutdown_registry_io(timeout: float = 5.0) -> None:
     """At gateway shutdown: wait, at most `timeout` seconds, for pending registry
     writes (write-aheads, resolutions, background removals and retries), then
-    release the pool. A new one is created if used again (tests)."""
+    release the pool. Its daemon workers cannot hold up the process exit. A new
+    pool is created if used again (tests)."""
     global _registry_io
     with _registry_io_lock:
         pending = set(_registry_io_pending)
@@ -148,9 +196,10 @@ def shutdown_registry_io(timeout: float = 5.0) -> None:
     if pending:
         done, not_done = concurrent.futures.wait(pending, timeout=timeout)
         if not_done:
-            logger.error("x402: %d settlement-state writes still running at shutdown", len(not_done))
+            logger.error("x402: %d settlement-state writes still running at shutdown (hung disk?); "
+                         "exiting without them", len(not_done))
     if pool is not None:
-        pool.shutdown(wait=False)
+        pool.shutdown()
 
 
 class OutcomeUnknownRegistry:
@@ -199,6 +248,16 @@ class OutcomeUnknownRegistry:
         # only), so a late removal never takes a newer attempt's entry.
         self._gens: Dict[str, int] = {}
         self._gen_counter = 0
+        # key id -> [generation, own prior, abandoned] of a write-ahead whose
+        # facilitator call has not started (memory only). Such an entry is not an
+        # unknown outcome: reads report its own prior, and a later write-ahead
+        # inherits that prior rather than counting the entry as one.
+        self._unasked: Dict[str, list] = {}
+        # Generations whose caller gave up before their write-ahead started.
+        self._cancelled_gens: set = set()
+        # Set when a write did not finish in time (hung disk) or too many are
+        # pending; cleared when a write completes. Makes `unavailable` true.
+        self._stalled: Optional[str] = None
         # Why the file could not be read (never written then), or why the last
         # write failed (retried at most every WRITE_RETRY_SECONDS).
         self._unreadable: Optional[str] = None
@@ -219,7 +278,8 @@ class OutcomeUnknownRegistry:
             return self._unreadable
         if self._write_error:
             self._retry_in_background()
-        return self._write_error
+            return self._write_error
+        return self._stalled
 
     def _retry_in_background(self) -> None:
         with self._lock:
@@ -243,7 +303,8 @@ class OutcomeUnknownRegistry:
     def public_cause(self) -> Optional[str]:
         """Short and safe to publish (/health): the file's base name and whether it
         is unreadable or unwritable. Paths and error text stay in the log."""
-        cause = "unreadable" if self._unreadable else "unwritable" if self.unavailable else None
+        cause = ("unreadable" if self._unreadable else "unwritable" if self._write_error
+                 else "unresponsive" if self.unavailable else None)
         return f"{os.path.basename(self._path())} is {cause}" if cause else None
 
     def _load(self) -> None:
@@ -289,6 +350,7 @@ class OutcomeUnknownRegistry:
                 atomic_write_json(self._path(), {"entries": snapshot})
             except Exception as e:
                 with self._lock:
+                    self._clear_stalled()
                     if not self._write_error:
                         logger.error("x402: could not persist settlement-unknown state (%s); paid "
                                      "requests get 503 PAYMENT_STATE_UNAVAILABLE until a write "
@@ -299,6 +361,7 @@ class OutcomeUnknownRegistry:
                 return False
             self._written_seq = seq
             with self._lock:
+                self._clear_stalled()
                 # Only the latest snapshot proves memory and disk agree.
                 if seq == self._seq and self._write_error:
                     logger.warning("x402: settlement-unknown state written again; paid requests resume")
@@ -307,6 +370,19 @@ class OutcomeUnknownRegistry:
 
     def _persist(self) -> bool:
         return self._write(*self._snapshot())
+
+    def _clear_stalled(self) -> None:
+        """Call with `_lock` held: a write completed."""
+        if self._stalled:
+            logger.warning("x402: settlement-state write completed again; paid requests resume")
+            self._stalled = None
+
+    def mark_stalled(self, why: str) -> None:
+        with self._lock:
+            if not self._stalled:
+                logger.error("x402: settlement-state disk I/O is not responding (%s); paid requests "
+                             "get 503 PAYMENT_STATE_UNAVAILABLE until a write completes", why)
+            self._stalled = why
 
     # --- state --------------------------------------------------------------
 
@@ -374,29 +450,49 @@ class OutcomeUnknownRegistry:
         or written, the change is rolled back and recorded is False: the
         caller must not settle. Call release() when the facilitator call ends.
         """
-        prior, recorded, _ = self.begin_settlement_ex(key, kind)
+        prior, recorded, gen = self.begin_settlement_ex(key, kind)
+        if recorded:
+            self.mark_asked(key, gen)     # synchronous callers ask the facilitator next
         return prior, recorded
 
-    def begin_settlement_ex(self, key: Optional[Tuple[str, str]],
-                            kind: str) -> Tuple[Optional[str], bool, Optional[int]]:
+    def next_generation(self) -> int:
+        with self._lock:
+            self._gen_counter += 1
+            return self._gen_counter
+
+    def begin_settlement_ex(self, key: Optional[Tuple[str, str]], kind: str,
+                            gen: Optional[int] = None) -> Tuple[Optional[str], bool, Optional[int]]:
         """begin_settlement, also returning the generation of this write-ahead,
-        which resolve() and remove_abandoned() check."""
+        which resolve() and remove_abandoned() check. `gen` is allocated by the
+        async caller beforehand, so it can give up on it before this runs.
+
+        Refused (recorded False) when the key is already in flight, and when
+        the caller already gave up on `gen`. An abandoned, un-asked write-ahead
+        found for the key is not a prior unknown outcome: its own prior is
+        inherited instead."""
         if key is None:
             return None, True, None
         kid = _key_id(key)
         now = time.time()
         with self._lock:
+            if gen is None:
+                self._gen_counter += 1
+                gen = self._gen_counter
+            if gen in self._cancelled_gens:
+                self._cancelled_gens.discard(gen)
+                return None, False, None
+            if kid in self._inflight:
+                return self._kind_locked(kid, now), False, None
             self._prune(now)
-            current = self._entries.get(kid)
-            prior = current["kind"] if current is not None and current["expires"] > now else None
+            prior = self._kind_locked(kid, now)
+            previous_unasked = self._unasked.get(kid)
             kept, previous, evicted = self._insert(kid, kind, now)
             if not kept:
                 return prior, False, None
             self._inflight[kid] = self._inflight.get(kid, 0) + 1
-            self._gen_counter += 1
-            gen = self._gen_counter
             previous_gen = self._gens.get(kid)
             self._gens[kid] = gen
+            self._unasked[kid] = [gen, prior, False]
         if not self._persist():
             self._rollback(kid, previous, evicted)
             with self._lock:
@@ -405,9 +501,55 @@ class OutcomeUnknownRegistry:
                         self._gens.pop(kid, None)
                     else:
                         self._gens[kid] = previous_gen
+                    if previous_unasked is None:
+                        self._unasked.pop(kid, None)
+                    else:
+                        self._unasked[kid] = previous_unasked
             self.release(key)
             return prior, False, None
         return prior, True, gen
+
+    def mark_asked(self, key: Optional[Tuple[str, str]], gen: Optional[int]) -> None:
+        """The facilitator is about to be asked: from now on the entry is a real
+        settlement attempt, so an outcome that stays unknown is one."""
+        if key is None or gen is None:
+            return
+        kid = _key_id(key)
+        with self._lock:
+            u = self._unasked.get(kid)
+            if u is not None and u[0] == gen:
+                del self._unasked[kid]
+
+    def abandon(self, key: Optional[Tuple[str, str]], gen: Optional[int]) -> None:
+        """The caller gave up (timeout or cancellation) before asking the
+        facilitator. At once, on the caller's thread: the key is no longer in
+        flight, and its entry no longer reads as an unknown outcome. The entry
+        itself is removed once the write-ahead's write has finished."""
+        if key is None or gen is None:
+            return
+        kid = _key_id(key)
+        with self._lock:
+            u = self._unasked.get(kid)
+            if u is not None and u[0] == gen:
+                if not u[2]:
+                    u[2] = True
+                    n = self._inflight.get(kid, 0) - 1
+                    if n > 0:
+                        self._inflight[kid] = n
+                    else:
+                        self._inflight.pop(kid, None)
+            elif self._gens.get(kid) != gen:
+                # Not started yet (or already rolled back): never start it.
+                self._cancelled_gens.add(gen)
+
+    def _kind_locked(self, kid: str, now: float) -> Optional[str]:
+        """Kind as a prior unknown outcome; an un-asked write-ahead reports its
+        own prior. Call with `_lock` held."""
+        u = self._unasked.get(kid)
+        if u is not None:
+            return u[1]
+        entry = self._entries.get(kid)
+        return entry["kind"] if entry is not None and entry["expires"] > now else None
 
     def release(self, key: Optional[Tuple[str, str]]) -> None:
         """The facilitator call that begin_settlement announced has ended."""
@@ -437,6 +579,9 @@ class OutcomeUnknownRegistry:
                 return      # a newer write-ahead owns the entry now
             if require_idle and kid in self._inflight:
                 return
+            u = self._unasked.get(kid)
+            if u is not None and (gen is None or u[0] == gen):
+                del self._unasked[kid]
             removed = self._entries.pop(kid, None) is not None
             self._gens.pop(kid, None)
         if removed:
@@ -454,38 +599,64 @@ class OutcomeUnknownRegistry:
         facilitator (cancelled or timed out): only if it is still that write-ahead's
         entry (same generation) and no settlement of the key is in flight. Kept
         if an earlier unknown outcome existed (`prior`). Blocking."""
-        if gen is None:
+        if gen is None or key is None:
             return
+        kid = _key_id(key)
+        with self._lock:
+            u = self._unasked.get(kid)
+            if u is not None and u[0] == gen:
+                prior = u[1]       # the write-ahead's own prior
+                if prior is not None:
+                    del self._unasked[kid]     # the earlier unknown outcome stays, as itself
+                    return
         self._remove(key, prior, settled=False, gen=gen, require_idle=True)
 
     async def abegin_settlement(self, key, kind):
         """begin_settlement off the event loop, on the registry pool. Returns
-        (prior, recorded, gen). Waits at most X402_SETTLEMENT_STATE_WRITE_TIMEOUT_SECONDS:
-        a hung disk then fails closed (recorded False, so 503) instead of hanging
-        the request. If the caller is cancelled or gives up, the write still
-        finishes; then, since the facilitator was never asked, the entry is
-        released and removed again (generation-checked, in the background)."""
-        cfut = _submit_registry_io(self.begin_settlement_ex, key, kind)
+        (prior, recorded, gen); on success the entry counts as asked. Refused at
+        once (recorded False, so 503) while too many registry writes are pending.
+        Waits at most X402_SETTLEMENT_STATE_WRITE_TIMEOUT_SECONDS: a hung disk
+        then fails closed instead of hanging the request, the registry is marked
+        unavailable (stalled) until a write completes, and the key is released
+        at once. If the caller is cancelled or gives up, the write still
+        finishes; since the facilitator was never asked, the entry is then
+        removed (generation-checked, in the background)."""
+        if key is None:
+            return None, True, None
+        if _registry_io_backlog() >= MAX_PENDING_REGISTRY_IO:
+            self.mark_stalled(f"{MAX_PENDING_REGISTRY_IO} settlement-state writes pending")
+            return None, False, None
+        gen = self.next_generation()
+        cfut = _submit_registry_io(self.begin_settlement_ex, key, kind, gen)
         inner = asyncio.wrap_future(cfut)
         try:
-            return await asyncio.wait_for(asyncio.shield(inner),
-                                          timeout=settings.X402_SETTLEMENT_STATE_WRITE_TIMEOUT_SECONDS)
+            prior, recorded, got = await asyncio.wait_for(
+                asyncio.shield(inner), timeout=settings.X402_SETTLEMENT_STATE_WRITE_TIMEOUT_SECONDS)
         except asyncio.TimeoutError:
-            logger.error("x402: settlement-state write-ahead did not finish in time; refusing to settle")
-            # On the thread future, so it runs even if the event loop is gone.
-            cfut.add_done_callback(lambda f: self._abandon_begin(key, f))
+            self.mark_stalled("write-ahead did not finish in "
+                              f"{settings.X402_SETTLEMENT_STATE_WRITE_TIMEOUT_SECONDS}s")
+            self._give_up(key, gen, cfut)
             return None, False, None
         except asyncio.CancelledError:
-            cfut.add_done_callback(lambda f: self._abandon_begin(key, f))
+            self._give_up(key, gen, cfut)
             raise
+        if recorded:
+            self.mark_asked(key, got)
+        return prior, recorded, got
 
-    def _abandon_begin(self, key, fut) -> None:
+    def _give_up(self, key, gen: int, cfut) -> None:
+        self.abandon(key, gen)
+        # On the thread future, so it runs even if the event loop is gone.
+        cfut.add_done_callback(lambda f: self._abandon_begin(key, gen, f))
+
+    def _abandon_begin(self, key, gen: int, fut) -> None:
+        with self._lock:
+            self._cancelled_gens.discard(gen)
         if fut.cancelled() or fut.exception() is not None:
             return
-        prior, recorded, gen = fut.result()
+        prior, recorded, _ = fut.result()
         if not recorded:
             return
-        self.release(key)
         _submit_registry_io(self.remove_abandoned, key, prior, gen)
 
     async def aresolve(self, key, prior, settled: bool, gen: Optional[int] = None,
@@ -512,9 +683,7 @@ class OutcomeUnknownRegistry:
             return False, None
         kid = _key_id(key)
         with self._lock:
-            entry = self._entries.get(kid)
-            kind = entry["kind"] if entry is not None and entry["expires"] > time.time() else None
-            return kid in self._inflight, kind
+            return kid in self._inflight, self._kind_locked(kid, time.time())
 
     def in_flight(self, key: Optional[Tuple[str, str]]) -> bool:
         """Whether this process is waiting on the facilitator for `key` right now."""
@@ -528,10 +697,7 @@ class OutcomeUnknownRegistry:
         if key is None:
             return None
         with self._lock:
-            entry = self._entries.get(_key_id(key))
-            if entry is None or entry["expires"] <= time.time():
-                return None
-            return entry["kind"]
+            return self._kind_locked(_key_id(key), time.time())
 
     def contains(self, key: Optional[Tuple[str, str]]) -> bool:
         return self.kind(key) is not None
@@ -549,6 +715,9 @@ class OutcomeUnknownRegistry:
         with self._lock:
             self._entries.clear()
             self._inflight.clear()
+            self._unasked.clear()
+            self._cancelled_gens.clear()
+            self._stalled = None
             self._unreadable = None
             self._write_error = None
             self._last_write_attempt = 0.0
@@ -749,6 +918,8 @@ async def settle_payment(request: Request) -> None:
     # waiting leaves an unknown outcome behind, not nothing (#553).
     prior, recorded, gen = await outcome_unknown.abegin_settlement(auth_key, BEFORE_WORK)
     if not recorded:
+        if outcome_unknown.in_flight(auth_key):
+            raise settlement_in_progress_refusal(auth_key, request)
         raise HTTPException(status_code=503, headers={"Retry-After": "60"},
                             detail=payment_state_unavailable_detail())
     record_settling(request)

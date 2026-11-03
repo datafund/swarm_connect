@@ -517,7 +517,13 @@ class X402Middleware(BaseHTTPMiddleware):
             # and the authorization released for a retry.
             prior, recorded, gen = await outcome_unknown.abegin_settlement(auth_key, AFTER_WORK)
             if not recorded:
-                from app.x402.settlement import payment_state_unavailable_detail
+                from app.x402.settlement import (payment_state_unavailable_detail,
+                                                 settlement_in_progress_refusal)
+                if outcome_unknown.in_flight(auth_key):
+                    refusal = settlement_in_progress_refusal(auth_key, request)
+                    d = refusal.detail
+                    return JSONResponse(status_code=409, headers=refusal.headers,
+                                        content={"detail": d, "code": d["code"], "message": d["message"]})
                 replay_guard.release(auth_key)
                 detail = payment_state_unavailable_detail(work_ran=True)
                 return JSONResponse(status_code=503, content={"detail": detail, **detail},

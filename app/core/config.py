@@ -154,7 +154,9 @@ class Settings(BaseSettings):
     X402_SETTLEMENT_UNKNOWN_STATE_FILE: str = "data/x402_settlement_unknown.json"
     # Longest wait for a write of that file on the request path. A write-ahead
     # that takes longer (a hung disk) refuses the payment with 503, unsettled.
-    X402_SETTLEMENT_STATE_WRITE_TIMEOUT_SECONDS: float = 5.0
+    # Validated: > 0, at most 60, finite (nan would break the event loop's
+    # timeout handling); anything else stops the gateway at startup.
+    X402_SETTLEMENT_STATE_WRITE_TIMEOUT_SECONDS: float = Field(5.0, gt=0, le=60, allow_inf_nan=False)
 
     # === Base Chain Settings (for monitoring USDC receipts) ===
     BASE_RPC_URL: str = "https://sepolia.base.org"

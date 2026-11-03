@@ -855,9 +855,11 @@ def test_a_stale_abandon_never_removes_a_newer_write_ahead(tmp_path):
     reg = st.OutcomeUnknownRegistry(state_file=str(tmp_path / "s.json"))
     old_prior, old_recorded, old_gen = reg.begin_settlement_ex(KEY, st.BEFORE_WORK)
     assert old_recorded
+    reg.mark_asked(KEY, old_gen)
     reg.release(KEY)                                     # the cancelled caller's release
     new_prior, new_recorded, new_gen = reg.begin_settlement_ex(KEY, st.BEFORE_WORK)
     assert new_recorded and new_gen != old_gen
+    reg.mark_asked(KEY, new_gen)                         # B asks the facilitator (review 10)
     reg.remove_abandoned(KEY, old_prior, old_gen)        # the stale background removal
     assert reg.contains(KEY) and reg.in_flight(KEY)
     reg.release(KEY)                                     # newer settle errors: entry stays
@@ -1027,3 +1029,153 @@ def test_a_duplicate_reserved_out_after_a_write_ahead_ran_is_in_progress(env, st
     r = _run(_facilitator(ok()))
     assert r.status_code == 409
     assert r.json()["detail"]["code"] == "PAYMENT_SETTLEMENT_IN_PROGRESS"
+
+
+# --- #553 review 10 --------------------------------------------------------
+
+def _gated_writes(monkeypatch, gate):
+    """Writes block until `gate` is set (a hung disk that later recovers)."""
+    import threading
+    real = st.atomic_write_json
+    started = threading.Event()
+
+    def gated(path, data):
+        started.set()
+        gate.wait(10)
+        real(path, data)
+
+    monkeypatch.setattr(st, "atomic_write_json", gated)
+    return started
+
+
+async def _settle_expecting(status, fac):
+    from unittest.mock import patch
+    from fastapi import HTTPException
+    with patch("app.x402.dependency._get_facilitator_client", return_value=fac):
+        with pytest.raises(HTTPException) as exc:
+            await st.settle_payment(_fake_request())
+    assert exc.value.status_code == status, exc.value.detail
+    return exc.value
+
+
+def test_overlapping_abandoned_write_aheads_do_not_poison_prior(env, state, monkeypatch):
+    """The measured sequence: A times out (503), its retry B times out too, the disk
+    recovers. Neither was ever sent to the facilitator, so nothing may stay behind,
+    and a later definite refusal must be an ordinary 402."""
+    import asyncio
+    import threading
+    from app.core.config import settings
+    monkeypatch.setattr(settings, "X402_SETTLEMENT_STATE_WRITE_TIMEOUT_SECONDS", 0.2)
+    reg = st.outcome_unknown
+    gate = threading.Event()
+    _gated_writes(monkeypatch, gate)
+    fac = _facilitator(refused("insufficient_funds"))
+
+    async def go():
+        await _settle_expecting(503, fac)        # A
+        assert not reg.in_flight(KEY)            # released at once: retry is not "in progress"
+        await _settle_expecting(503, fac)        # B, the recommended retry
+        assert reg.unavailable                   # the hang is visible
+    asyncio.run(go())
+    assert fac.settle.await_count == 0
+    gate.set()                                   # the disk recovers; both writes land
+    assert _wait_until(lambda: not reg.contains(KEY) and not reg.in_flight(KEY), timeout=5)
+    assert _wait_until(lambda: not reg.unavailable, timeout=5)
+    assert _wait_until(lambda: json.load(open(state))["entries"] == {}, timeout=5)
+    monkeypatch.undo()
+    _restart(monkeypatch, state)                 # reload from disk
+    assert not st.outcome_unknown.contains(KEY)
+    asyncio.run(_settle_expecting(402, _facilitator(refused("insufficient_funds"))))
+
+
+def test_an_abandoned_write_ahead_is_not_an_unknown_outcome_before_its_removal(env, state, monkeypatch):
+    """Plain cancellation: between the release and the queued removal, the abandoned
+    write-ahead must not read as an unknown outcome, and a new attempt that the
+    facilitator refuses gets an ordinary 402."""
+    import asyncio
+    import threading
+    from unittest.mock import patch
+    reg = st.outcome_unknown
+    gate = threading.Event()
+    started = _gated_writes(monkeypatch, gate)
+    fac = _facilitator(ok())
+
+    async def go():
+        with patch("app.x402.dependency._get_facilitator_client", return_value=fac):
+            task = asyncio.ensure_future(st.settle_payment(_fake_request()))
+            await asyncio.to_thread(started.wait, 2)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        # The window: released, removal not yet run (the write is still hung).
+        assert reg.state(KEY) == (False, None)
+        assert not reg.contains(KEY)
+    asyncio.run(go())
+    gate.set()
+    asyncio.run(_settle_expecting(402, _facilitator(refused("insufficient_funds"))))
+    assert _wait_until(lambda: not reg.contains(KEY), timeout=5)
+
+
+def test_a_begin_for_a_key_in_flight_is_refused(tmp_path):
+    reg = st.OutcomeUnknownRegistry(state_file=str(tmp_path / "s.json"))
+    assert reg.begin_settlement(KEY, st.BEFORE_WORK)[1]
+    prior, recorded = reg.begin_settlement(KEY, st.BEFORE_WORK)
+    assert not recorded and reg.in_flight(KEY)
+
+
+def test_a_hung_write_shows_in_health(env, state, monkeypatch):
+    import asyncio
+    import threading
+    from app.core.config import settings
+    monkeypatch.setattr(settings, "X402_SETTLEMENT_STATE_WRITE_TIMEOUT_SECONDS", 0.2)
+    gate = threading.Event()
+    _gated_writes(monkeypatch, gate)
+    asyncio.run(_settle_expecting(503, _facilitator(ok())))
+    assert st.outcome_unknown.public_cause() == "x402_settlement_unknown.json is unresponsive"
+    gate.set()
+    assert _wait_until(lambda: st.outcome_unknown.public_cause() is None, timeout=5)
+
+
+def test_write_aheads_are_refused_while_too_many_writes_are_pending(env, state, monkeypatch):
+    import asyncio
+    import threading
+    gate = threading.Event()
+    blockers = [st._submit_registry_io(gate.wait, 10) for _ in range(st.MAX_PENDING_REGISTRY_IO)]
+    fac = _facilitator(ok())
+    try:
+        t0 = time.monotonic()
+        exc = asyncio.run(_settle_expecting(503, fac))
+        assert exc.detail["code"] == "PAYMENT_STATE_UNAVAILABLE"
+        assert time.monotonic() - t0 < 1 and fac.settle.await_count == 0
+    finally:
+        gate.set()
+        for b in blockers:
+            b.result(5)
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "nan", "inf", "61"])
+def test_the_write_timeout_setting_is_validated(value):
+    from pydantic import ValidationError
+    from app.core.config import Settings
+    with pytest.raises(ValidationError):
+        Settings(X402_SETTLEMENT_STATE_WRITE_TIMEOUT_SECONDS=value)
+
+
+def test_the_write_timeout_setting_accepts_sane_values():
+    from app.core.config import Settings
+    assert Settings(X402_SETTLEMENT_STATE_WRITE_TIMEOUT_SECONDS="2.5").X402_SETTLEMENT_STATE_WRITE_TIMEOUT_SECONDS == 2.5
+
+
+def test_a_process_with_a_hung_write_exits_within_the_bound():
+    import subprocess
+    import sys
+    script = (
+        "import threading, app.x402.settlement as st\n"
+        "st._submit_registry_io(threading.Event().wait)\n"
+        "st.shutdown_registry_io(timeout=0.2)\n"
+    )
+    t0 = time.monotonic()
+    proc = subprocess.run([sys.executable, "-c", script], cwd=os.path.dirname(os.path.dirname(__file__)),
+                          timeout=20, capture_output=True)
+    assert proc.returncode == 0, proc.stderr[-2000:]
+    assert time.monotonic() - t0 < 10
