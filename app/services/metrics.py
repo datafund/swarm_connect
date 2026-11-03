@@ -328,6 +328,74 @@ for _file, _check in STATE_FILE_CHECKS.items():
     state_file_unreadable.labels(file=_file).set_function(_state_file_reader(_file, _check))
 
 
+# Payment-state writes that fail or stall (#585). While a write of the x402
+# settlement-unknown registry fails or does not finish in time, every paid
+# request gets 503 PAYMENT_STATE_UNAVAILABLE, unpaid; for the idempotency store,
+# paid requests with an Idempotency-Key get 503 IDEMPOTENCY_UNAVAILABLE. A file
+# that could not be read at startup is gateway_state_file_unreadable instead.
+# reason=failed: the last write raised (disk full, permissions); it clears when
+# a write of the latest state succeeds. reason=stalled: a write did not finish
+# in time, or the store's write lane has a write pending longer than the write
+# timeout (or, for the registry, too many pending), so the next paid request
+# would be refused; it clears when a write completes. Read at scrape time from
+# the stores' flags and lane bookkeeping only: reading never starts a write
+# (app/x402/state_retry.py retries in the background). All four series exist
+# from startup; with x402 off nothing is refused and they read 0.
+state_write_blocked = Gauge(
+    "gateway_state_write_blocked",
+    "1 while paid requests are refused because a payment-state write failed or "
+    "stalled (file=settlement_unknown|idempotency, reason=failed|stalled)",
+    ["file", "reason"],
+)
+STATE_WRITE_FILES = ("settlement_unknown", "idempotency")
+STATE_WRITE_REASONS = ("failed", "stalled")
+
+
+def _settlement_write_failed() -> bool:
+    if not settings.X402_ENABLED:
+        return False
+    from app.x402.settlement import outcome_unknown
+    return outcome_unknown.write_failed()
+
+
+def _settlement_write_stalled() -> bool:
+    if not settings.X402_ENABLED:
+        return False
+    from app.x402 import settlement
+    # The same checks abegin_settlement makes before refusing a request.
+    return (settlement.outcome_unknown.write_stalled()
+            or settlement._registry_io_oldest_age() > settings.X402_SETTLEMENT_STATE_WRITE_TIMEOUT_SECONDS
+            or settlement._registry_io_backlog() >= settlement.MAX_PENDING_REGISTRY_IO)
+
+
+def _idempotency_write_failed() -> bool:
+    if not settings.X402_ENABLED:
+        return False
+    from app.x402.idempotency import idempotency_store
+    return idempotency_store.write_failed()
+
+
+def _idempotency_write_stalled() -> bool:
+    if not settings.X402_ENABLED:
+        return False
+    from app.x402 import idempotency
+    # The same check arecord_settling makes before refusing a keyed request.
+    return (idempotency.idempotency_store.write_stalled()
+            or idempotency._idempotency_io.oldest_age() > settings.X402_SETTLEMENT_STATE_WRITE_TIMEOUT_SECONDS)
+
+
+STATE_WRITE_CHECKS = {
+    ("settlement_unknown", "failed"): _settlement_write_failed,
+    ("settlement_unknown", "stalled"): _settlement_write_stalled,
+    ("idempotency", "failed"): _idempotency_write_failed,
+    ("idempotency", "stalled"): _idempotency_write_stalled,
+}
+
+for (_file, _reason), _check in STATE_WRITE_CHECKS.items():
+    state_write_blocked.labels(file=_file, reason=_reason).set_function(
+        _flag_reader(f"{_file} write-{_reason}", _check))
+
+
 x402_settlements_total = Counter(
     "gateway_x402_settlements_total",
     "x402 settlement outcomes (#375): settled, refused (nothing delivered), error "
