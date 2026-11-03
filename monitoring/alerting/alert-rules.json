@@ -1154,5 +1154,159 @@
     "noDataState": "OK",
     "ruleGroup": "warning",
     "title": "Bee HTTP pool slots stuck"
+  },
+  {
+    "annotations": {
+      "summary": "{{ $labels.environment }}: Bee calls are being refused by the gateway's call gate",
+      "description": "More than 25 Bee calls or paid requests in 5 minutes were refused by the gateway's Bee call gate, continuously for 10 minutes (#588). The gate allows at most BEE_MAX_CONCURRENT_CALLS Bee calls at once; the request lanes are full, so requests answer 503 BEE_BUSY with Retry-After. Why 25 per 5 minutes for 10 minutes: one burst (a client retrying, a short load spike) stays in the 5-minute window for 5 minutes, shorter than the 10-minute hold, so it cannot fire this; only refusals that keep coming, about 5 a minute or more for at least 15 minutes, do. Where to look: gateway_bee_calls_in_flight{lane} (which lane is full: user, transfer, committed, background), gateway_bee_call_rejections_total{lane} (admission = paid requests refused before payment; committed or background refusals mean even paid or maintenance work waited 30 s in vain), gateway_top_caller_requests{rank} and the 'Top callers' WARNING log line (a single caller flooding: block it with X402_BLACKLIST_IPS), and Bee's own latency (slow Bee answers hold slots longer). What to tune: BEE_MAX_CONCURRENT_CALLS, BEE_RESERVED_BACKGROUND_CALLS and BEE_MAX_CONCURRENT_TRANSFERS (by default 64%, 8% and 24% of BEE_HTTP_MAX_CONNECTIONS; the cap must stay below it), and BEE_CALL_SLOT_WAIT_SECONDS. The sizes are a judgement, not measured. See docs/mainnet-runbook.md section 5."
+    },
+    "condition": "C",
+    "data": [
+      {
+        "datasourceUid": "grafanacloud-prom",
+        "model": {
+          "expr": "sum by (environment, host) (increase(gateway_bee_call_rejections_total[5m]))",
+          "instant": true,
+          "intervalMs": 1000,
+          "maxDataPoints": 43200,
+          "refId": "A"
+        },
+        "queryType": "",
+        "refId": "A",
+        "relativeTimeRange": {
+          "from": 600,
+          "to": 0
+        }
+      },
+      {
+        "datasourceUid": "__expr__",
+        "model": {
+          "expression": "A",
+          "intervalMs": 1000,
+          "maxDataPoints": 43200,
+          "reducer": "last",
+          "refId": "B",
+          "type": "reduce"
+        },
+        "queryType": "",
+        "refId": "B",
+        "relativeTimeRange": {
+          "from": 0,
+          "to": 0
+        }
+      },
+      {
+        "datasourceUid": "__expr__",
+        "model": {
+          "conditions": [
+            {
+              "evaluator": {
+                "params": [
+                  25
+                ],
+                "type": "gt"
+              }
+            }
+          ],
+          "expression": "B",
+          "intervalMs": 1000,
+          "maxDataPoints": 43200,
+          "refId": "C",
+          "type": "threshold"
+        },
+        "queryType": "",
+        "refId": "C",
+        "relativeTimeRange": {
+          "from": 0,
+          "to": 0
+        }
+      }
+    ],
+    "execErrState": "Error",
+    "for": "10m",
+    "isPaused": false,
+    "labels": {
+      "severity": "warning"
+    },
+    "noDataState": "OK",
+    "ruleGroup": "warning",
+    "title": "Bee calls refused by the gate"
+  },
+  {
+    "annotations": {
+      "summary": "{{ $labels.environment }}: /health is answering from a snapshot more than 2 minutes old",
+      "description": "The /health snapshot (Bee node summary and wallet balances, #588) is more than 120 seconds old, for 5 minutes. With refreshes working it is at most about HEALTH_SNAPSHOT_TTL_SECONDS (15) plus the time to the next /health or / request (Docker's healthcheck asks / every 30 s) plus one refresh (at most HEALTH_SNAPSHOT_REFRESH_TIMEOUT_SECONDS, 20) old: about 65 s. So the refreshes are failing or hanging, and /health, the SDK's health() and the external probe of bee_node.healthy see old Bee and wallet data. Check: gateway_health_snapshot_refreshes_total{result} (timeout or error rising), 'Health snapshot refresh' WARNING lines in the gateway log, snapshot.warnings in /health, and Bee itself (is it answering? gateway_bee_calls_in_flight{lane=\"background\"} stuck at its reserve means background calls are waiting for slots). On a deployment with no Docker healthcheck and no /health traffic the age also grows with nothing wrong. See docs/mainnet-runbook.md section 5."
+    },
+    "condition": "C",
+    "data": [
+      {
+        "datasourceUid": "grafanacloud-prom",
+        "model": {
+          "expr": "max by (environment, host) (gateway_health_snapshot_age_seconds)",
+          "instant": true,
+          "intervalMs": 1000,
+          "maxDataPoints": 43200,
+          "refId": "A"
+        },
+        "queryType": "",
+        "refId": "A",
+        "relativeTimeRange": {
+          "from": 600,
+          "to": 0
+        }
+      },
+      {
+        "datasourceUid": "__expr__",
+        "model": {
+          "expression": "A",
+          "intervalMs": 1000,
+          "maxDataPoints": 43200,
+          "reducer": "last",
+          "refId": "B",
+          "type": "reduce"
+        },
+        "queryType": "",
+        "refId": "B",
+        "relativeTimeRange": {
+          "from": 0,
+          "to": 0
+        }
+      },
+      {
+        "datasourceUid": "__expr__",
+        "model": {
+          "conditions": [
+            {
+              "evaluator": {
+                "params": [
+                  120
+                ],
+                "type": "gt"
+              }
+            }
+          ],
+          "expression": "B",
+          "intervalMs": 1000,
+          "maxDataPoints": 43200,
+          "refId": "C",
+          "type": "threshold"
+        },
+        "queryType": "",
+        "refId": "C",
+        "relativeTimeRange": {
+          "from": 0,
+          "to": 0
+        }
+      }
+    ],
+    "execErrState": "Error",
+    "for": "5m",
+    "isPaused": false,
+    "labels": {
+      "severity": "warning"
+    },
+    "noDataState": "OK",
+    "ruleGroup": "warning",
+    "title": "Health snapshot stale"
   }
 ]
