@@ -1,10 +1,59 @@
-# Literal error messages from Bee's pkg/api (github.com/ethersphere/bee, non-test .go files,
-# jsonhttp.<Status>(w, "...") calls), one per line, plus the HTTP status texts Bee sends
-# when a handler passes no message. Public Bee source text, copied for #549.
+# Fixed error messages a Bee pkg/api handler can send, one per line (#549).
+# Public text from github.com/ethersphere/bee. Regenerate with:
+#   python tests/fixtures/extract_bee_api_messages.py <bee-checkout> \
+#       > tests/fixtures/bee_api_messages.txt
+# The method is described in that script.
+BZZ token address unavailable
+Bad Gateway
+Bad Request
+Cannot get accounting info
+Cannot get balance
+Cannot get balances
+Chain is disabled. This endpoint is unavailable.
+Chequebook is disabled. This endpoint is unavailable.
+Conflict
+Either 'Swarm-Postage-Stamp' or 'Swarm-Postage-Batch-Id' header must be set in the request
+Expectation Failed
+Forbidden
+Gateway Timeout
+Gone
+HTTP Version Not Supported
+I'm a teapot
+Internal Server Error
+Length Required
+Method Not Allowed
+No balance for peer
+Node is syncing. This endpoint is unavailable. Try again later.
+Not Acceptable
+Not Found
+Not Implemented
+Payment Required
+Precondition Failed
+Precondition Required
+Proxy Authentication Required
+Request Entity Too Large
+Request Header Fields Too Large
+Request Timeout
+Request URI Too Long
+Requested Range Not Satisfiable
+Service Unavailable
+Stamp deserialization failure
+Storage incentives are disabled. This endpoint is unavailable.
+Swap is disabled. This endpoint is unavailable.
+Too Many Requests
+Unauthorized
+Unavailable For Legal Reasons
+Unprocessable Entity
+Unsupported Media Type
+Upgrade Required
+act download failed
 act or history entry not found
+act upload failed
 add file failed
+add manifest entry failed
 add metadata failed
 address not found or incorrect
+already imported
 batch is overissued
 batch not found
 batch not usable
@@ -14,24 +63,39 @@ batch with id not found
 block number unavailable
 bzz download: feed is not a legacy payload
 bzz download: feed pointing to the wrapped chunk not found
-BZZ token address unavailable
+can not get settlements
+can not get settlements for peer
+can't resend transaction
+cannot cash cheque
 cannot create batch
 cannot create tag
+cannot deposit
 cannot dilute batch
+cannot get cashout status
+cannot get chequebook balance
+cannot get last cheque for all peers
+cannot get last cheque for peer
 cannot get or create tag
 cannot get tag
+cannot get transaction
 cannot migrate stake
+cannot read chunk data
 cannot read request
 cannot stake
 cannot topup batch
 cannot update label
+cannot withdraw
 cannot withdraw stake
-Chain is disabled. This endpoint is unavailable.
-Chequebook is disabled. This endpoint is unavailable.
+chunk data error
 chunk is not a single owner chunk
 chunk not found
+chunk write error
 contract is not paused
 could not parse headers
+could not store directory
+could not store file
+could not validate request
+create chunk error
 create manifest failed
 debug storage info not available
 done split act failed
@@ -44,6 +108,7 @@ error unmarshaling request body
 failed making sample with proofs
 failed to calculate if node has enough funds to play
 failed to create history
+failed to create or update grantee list
 failed to get redistribution status
 failed to read request body
 failed to save stamp issuer
@@ -51,18 +116,33 @@ feed not found
 feed type not found
 get blocklisted peers failed
 get issuer failed
+get putter failed
 get staked amount failed
 granteelist not found
 insufficient amount for 24h minimum validity
+insufficient data length
+insufficient funds
 insufficient stake amount
 insufficient stake to migrate
 insufficient stake to withdraw
 invalid add list
+invalid address
 invalid batch id
+invalid body params
+invalid chunk
+invalid content-type
 invalid depth
 invalid filename in tar archive
 invalid grantee list
+invalid header params
+invalid manifest type
+invalid name or bzz address
+invalid or empty path
+invalid path or mantaray path is empty
+invalid path params
+invalid postage batch id
 invalid public key
+invalid query params
 invalid request body
 invalid revoke list
 invalid swarm-tag query parameter
@@ -81,14 +161,20 @@ marshal next index failed
 minimum validity blocks unavailable
 new lookup failed
 no chain backend
+no files in root directory
+no prior cashout
+no prior cheque
+no resolver connected
 no update found
-Node is syncing. This endpoint is unavailable. Try again later.
 not enough balance
 not implemented
+odd length hex string
 ok
 only BZZ or NativeToken options are accepted
+operation is supported only in full mode
 out of funds
 path address not found
+payload too large
 peer not found
 pin collection failed
 pin root hash: checking of tracking pin
@@ -103,13 +189,16 @@ re-upload failed
 read chunk failed
 remove from empty grantee list
 requested chunk cannot be retrieved
+service unavailable
+short chunk data
 signer ethereum address
 simultaneous on-chain operations not supported
 simultaneous operations not supported
 soc address cannot be created
+split write all failed
+stamp signature is invalid
 stamping failed
-Storage incentives are disabled. This endpoint is unavailable.
-Swap is disabled. This endpoint is unavailable.
+store manifest failed
 syncing failed
 syncing in progress
 tag not found
@@ -126,13 +215,7 @@ unable to iterate all batches
 unable to save stamper data
 unable to transfer
 unable to transfer amount
+unknown transaction
 unpin root hash: deletion of pin failed
 upgrade failed
 wrapped chunk cannot be retrieved
-Bad Request
-Unauthorized
-Forbidden
-Not Found
-Internal Server Error
-Not Implemented
-Service Unavailable

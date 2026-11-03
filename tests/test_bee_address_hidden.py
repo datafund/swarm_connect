@@ -728,13 +728,24 @@ BEE_MESSAGES = [
 ]
 
 
-def test_fixture_holds_all_bee_api_messages():
-    assert len(BEE_MESSAGES) == 135  # 128 pkg/api literals + 7 status texts
-    assert "syncing in progress" in BEE_MESSAGES
+def test_fixture_holds_bee_fixed_messages():
+    """The fixture holds the fixed messages extracted from Bee's pkg/api by
+    tests/fixtures/extract_bee_api_messages.py: literals, constants,
+    errors.New values, mapStructure texts and status texts. Handlers that
+    pass a Go error through have dynamic text and are not in it."""
+    assert len(BEE_MESSAGES) == len(set(BEE_MESSAGES)) == 216
+    for expected in ("syncing in progress", "out of funds", "can not get settlements",
+                     "insufficient funds", "Cannot get balances", "invalid postage batch id",
+                     "batch not usable", "Stamp deserialization failure", "get putter failed",
+                     "invalid path params", "service unavailable", "Method Not Allowed",
+                     "Too Many Requests", "Conflict",
+                     "Either 'Swarm-Postage-Stamp' or 'Swarm-Postage-Batch-Id' header must be "
+                     "set in the request"):
+        assert expected in BEE_MESSAGES, expected
 
 
 @pytest.mark.parametrize("message", BEE_MESSAGES)
-def test_every_bee_api_message_is_shown_unchanged(message):
+def test_every_fixed_bee_message_is_shown_unchanged(message):
     assert public_bee_text(message) == message
 
 
@@ -787,7 +798,10 @@ class TestRoundSix:
         assert public_bee_text(text) == text
 
 
-_SEEDS = [int(x) for x in os.environ.get("BEE_SCRUB_SEEDS", "549").split(",") if x]
+# An empty or unset BEE_SCRUB_SEEDS falls back to the default seed, so the
+# test never silently runs zero cases.
+_SEEDS = [int(x) for x in (os.environ.get("BEE_SCRUB_SEEDS") or "549").split(",") if x.strip()]
+assert _SEEDS, "BEE_SCRUB_SEEDS holds no seed"
 
 
 @pytest.mark.parametrize("seed", _SEEDS)
@@ -809,13 +823,21 @@ def test_random_planted_addresses_never_shown(seed):
     configured = ["0123abcdKEY4567", "QUERYKEY123", "hunter22"]
 
     def label():
-        return "".join(rng.choice(letters + "0123456789") for _ in range(rng.randint(3, 8)))
+        # "q" keeps a random label from matching one of the words above, so a
+        # label fragment found in the output is a real leak.
+        return "q" + "".join(rng.choice(letters + "0123456789") for _ in range(rng.randint(2, 7)))
+
+    def octet():
+        return rng.choice([0, 255, rng.randint(1, 254), rng.randint(1, 254)])
 
     for _ in range(400):
-        octets = [rng.randint(1, 254) for _ in range(4)]
+        octets = [rng.randint(1, 254)] + [octet() for _ in range(3)]
         ip = ".".join(map(str, octets))
-        host = label() + rng.choice([".internal", ".example.com", ".corp.example", ".svc",
-                                     ".cluster.local", "." + label() + ".net"])
+        labels = [label(), label()]
+        host = labels[0] + rng.choice([".internal", ".example.com", ".corp.example", ".svc",
+                                       ".cluster.local", "." + labels[1] + ".net"])
+        if rng.random() < 0.3:
+            host = host.upper()
         name = "zz" + label()  # an unconfigured dotless host name
         password = "".join(rng.choice(mixed) for _ in range(12))
         port = str(rng.randint(1024, 65535))
@@ -826,6 +848,9 @@ def test_random_planted_addresses_never_shown(seed):
         as_hex = f"0x{int(ipaddress.IPv4Address(ip)):08x}"
         spaced = " ".join(map(str, octets))
         dashed = "ip-" + "-".join(map(str, octets))
+        separated = rng.choice([",", "_", "/", ". ", " .", ", "]).join(map(str, octets))
+        encoded = ip.replace(".", rng.choice(["%2E", "%2e"]))
+        compressed = f"fd00::{rng.randint(1, 65535):x}:{rng.randint(1, 65535):x}"
         planted, secrets = rng.choice([
             (ip, [ip]), (f"{ip}:{port}", [ip, port]),
             (f"[fd00::{rng.randint(1, 9999):x}]:{port}", [port]), (host, [host]),
@@ -837,7 +862,9 @@ def test_random_planted_addresses_never_shown(seed):
             (v6, [v6, v6[:9]]), (f"lookup {name}: no such host", [name]),
             (f"lookup {name} on {ip}:53", [name, ip]), (full_width, [full_width, port]),
             (zero_width, [zero_width]), (as_int, [as_int]), (as_hex, [as_hex]),
-            (spaced, [spaced]), (dashed, [dashed[3:]]),
+            (spaced, [spaced]), (dashed, [dashed[3:]]), (separated, [separated]),
+            (encoded, [ip, encoded]), (compressed, [compressed]),
+            (f"{compressed} unreachable", [compressed]),
         ])
         parts = [rng.choice(words) for _ in range(rng.randint(0, 6))]
         parts.insert(rng.randint(0, len(parts)), rng.choice(glue) + planted + rng.choice(glue))
@@ -845,5 +872,41 @@ def test_random_planted_addresses_never_shown(seed):
         shown = public_bee_text(text)
         if shown is None:
             continue
+        lowered = shown.lower()
         for secret in secrets:
-            assert secret not in shown, (seed, text, shown)
+            assert secret.lower() not in lowered, (seed, text, shown)
+        # No fragment of a planted host either: its random labels never show.
+        if host in planted or host.lower() in planted.lower():
+            for fragment in labels:
+                assert fragment not in lowered, (seed, text, shown)
+
+
+
+class TestRoundSeven:
+
+    @pytest.mark.parametrize("text", [
+        # IPv4 with other separators, and an 8-hex-digit form.
+        "dial 10,0,0,1 refused", "ip_10_0_0_1", "10/0/0/1", "10. 0. 0. 1", "10.0.0 .1",
+        "peer 0a000001 gone",
+        # Go's "address X: missing port" and "dial tcp X: unknown port".
+        "address nethermind: missing port in address",
+        "dial tcp nethermind: unknown port",
+        # A configured secret in another letter case, glued into a word.
+        "auth HUNTER22ip failed",
+        # Control characters: multi-line text is hidden.
+        "out of funds\nat line two",
+    ])
+    def test_gate_refuses(self, text):
+        assert public_bee_text(text) is None
+
+    @pytest.mark.parametrize("text", [
+        # inet_aton short forms cannot be told from versions; a documented limit.
+        "10.0.1", "127.1",
+        # Hex words without digits, and short mixed tokens.
+        "deadbeef", "a1b2c3d", "dial tcp <address>: connect: refused",
+    ])
+    def test_gate_passes(self, text):
+        assert public_bee_text(text) == text
+
+    def test_configured_secret_any_case_is_scrubbed(self):
+        assert without_addresses("bad key 0123ABCDkey4567") == "bad key <secret>"
