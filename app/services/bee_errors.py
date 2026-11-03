@@ -14,21 +14,28 @@ without_addresses() and caps it for a response.
 
 without_addresses() replaces, in this order:
 
-1. Secrets of the configured URLs -> <secret>: every path segment and query
-   value of 8 or more characters that is not a plain lowercase word (so the
-   route "facilitator" stays), and every userinfo password of 4 or more,
-   in SWARM_BEE_API_URL, GNOSIS_RPC_URL, BASE_RPC_URL, X402_FACILITATOR_URL
-   and X402_BZZ_PRICE_FEED_URL ("invalid project id SECRETKEY"). Matched
-   case-sensitively as whole tokens.
+1. Secrets of the configured URLs (SWARM_BEE_API_URL, GNOSIS_RPC_URL,
+   BASE_RPC_URL, X402_FACILITATOR_URL, X402_BZZ_PRICE_FEED_URL) -> <secret>,
+   matched case-sensitively as whole tokens wherever they appear ("invalid
+   project id 0123abcdKEY4567"): a userinfo password of 8 or more
+   characters, and a path segment, query value or username-only key
+   (https://KEY@host) that holds a run of 8+ letters and digits mixing two
+   of lowercase, uppercase and digits (not counting its first character).
+   Routes and names such as "facilitator", "Transaction", "mainnet-v2" and
+   "gnosis-mainnet" are not collected, and neither is a key of one letter
+   case only ("abcdefghijklmnop"), which cannot be told from a word.
 2. URLs with a scheme -> <url>.
 3. libp2p multiaddrs: the address after /ip4/ or /ip6/ -> <address>, the
    name after /dns/, /dns4/, /dns6/ or /dnsaddr/ -> <host>, and a /tcp/ or
    /udp/ port right after it -> <port>. The peer id is kept.
-4. user:password@ before a host -> removed (up to the last "@"; the password
-   may hold "/" and "@"); a configured host right after it -> <host>, or
-   <address> with a port.
+4. user:password@ before a host -> removed (username up to 256 characters,
+   password up to 1024, which may hold "/", "@", "(" and ")"; up to the last
+   "@"). The username stops at "=", "&", "?", ";" and ",", so a key name
+   stays: "token=u:pass@x" -> "token=x". A configured host right after it
+   -> <host>, or <address> with a port.
 5. The names in Go's x509 "certificate is valid for A, B, not C" and
-   "wanted to match C" -> <host>.
+   "wanted to match C" -> <host>, each name taken whole up to a space, ","
+   or ";" ("not my-bee-gw"), giving back trailing sentence punctuation.
 6. IPv6 addresses -> <address>, bracketed or bare, with any port and path.
    A bare one must parse, and either have 3 or more groups (fd00::1:2,
    ::ffff:10.0.0.1, which takes a :port as well) or have groups on both
@@ -36,6 +43,10 @@ without_addresses() replaces, in this order:
 7. IPv4 addresses -> <address>, with any port (even an invalid one) and
    path: four dot-separated groups of 1-3 digits, each at most 255, leading
    zeros allowed. Three groups (2.8.1) or a group over 255 (1.2.300.4) stay.
+   An address is found right after a letter, "_" or any non-ASCII text
+   ("ip10.0.0.1", "日10.0.0.1"); only a digit, or a "." after a digit,
+   before it makes it part of a longer number. IPv6 likewise, except after
+   a hex digit or ":".
 8. The name after "lookup" -> <host> when it is dotted, is a configured
    host, or is followed by " on " (Go's resolver error).
 9. Hosts this gateway is configured with (the URLs in step 1; a value
@@ -45,7 +56,9 @@ without_addresses() replaces, in this order:
    service name, already public in docker-compose.yml, and "bee" is also a
    word in Bee's own text, so it is replaced only with a :port, a /path
    that does not start with a digit, or a ?query/#fragment after it
-   ("bee:1633", "BEE/stamps" -> <address>), or in steps 3, 4 and 8.
+   ("bee:1633", "BEE/stamps" -> <address>), or in steps 3, 4 and 8, but
+   not right after "/", where it is a path segment
+   (github.com/ethersphere/bee/v2).
    "bee/2.8.1" (a user agent) and "Bee is syncing" stay.
 10. A dotted name with a port -> <address> (bee.internal:1633), with any
     path, query or fragment after it; "main.go:123" is a Go source position
@@ -53,10 +66,17 @@ without_addresses() replaces, in this order:
 11. A dotted name ending in a letters-only label and followed by a path,
     query or fragment -> <address> (rpc.example.com/v2/KEY,
     gnosis.example.com?apikey=KEY). Not after "/", so a file path such as
-    app/services/x.py/ stays.
+    app/services/x.py/ stays. Two exclusions: a path ending in a Go source
+    position (github.com/ethersphere/bee/v2/pkg/api.go:42), and public code
+    and docs hosts -- github.com, gitlab.com, golang.org, go.dev and
+    ethswarm.org, with their subdomains (pkg.go.dev, docs.ethswarm.org) --
+    unless the gateway is configured with that host.
 12. Internal-only names -> <host>: any name ending in .internal or .svc,
     and names with at least two labels before .local, .lan or .home
     (bee.cluster.local). "file.local" and "my.home" stay.
+
+Names are bounded by ASCII word characters only, so a host glued to
+non-ASCII text ("host.internal日") is still found.
 
 A host is found after "<", "@" or "/" as well ("<bee.internal:1633>",
 "admin@gnosis.example.com/v2/KEY"): replacements are written as private-use
@@ -64,11 +84,17 @@ placeholder characters while scrubbing and turned into <url>, <address>,
 <host>, <port> and <secret> at the end, so a "<" in the text is not taken for
 an earlier replacement.
 
-Percent-encoded text is decoded (printable ASCII only, twice at most) and the
-decoded form is used when it has something to replace, and at least as much
-as the encoded form; otherwise the text keeps its encoding ("100%ff",
-"50%25"). When the decoded form is used, the whole text is shown decoded. RFC 3339 timestamps
-are kept.
+Percent-encoded text is decoded (printable ASCII only, twice at most). If
+the decoded form has anything to replace, it is shown, decoded and
+scrubbed; otherwise the text keeps its encoding ("100%ff", "50%25"). RFC
+3339 timestamps are kept.
+
+public_bee_text() scrubs at most 2 KB (SCRUB_CAP), then cuts to 200
+characters. At either cut a word the cut lands inside is dropped and "…"
+added; if no whitespace comes before the cut, the message is replaced by
+"(Bee message omitted: no safe cut point)". Known limit: text past the 2 KB
+pre-cut is not seen, so a "lookup X" whose " on " falls past it loses that
+context and an unconfigured dotless X stays, as such names do anyway.
 
 Kept by design, because they cannot be told apart from ordinary text or
 belong to no gateway setting: a dotless host that is not configured
@@ -80,6 +106,7 @@ and "key:number" fields such as "timeout:30" or "chain-id:100".
 Every pattern is anchored by a lookbehind or a literal and has bounded
 repetition, so scrubbing takes linear time.
 """
+import bisect
 import functools
 import ipaddress
 import re
@@ -108,7 +135,8 @@ _FINAL = str.maketrans({_URL: "<url>", _ADDR: "<address>", _HOST: "<host>",
 
 # An address may end a sentence: a following "." is allowed when no word
 # character comes after it ("refused by 10.0.0.1." -> "refused by <address>.").
-_END = r"(?!\w|\.\w)"
+_W = "A-Za-z0-9_"  # ASCII word characters: "日" or "é" next to a host is not part of it
+_END = rf"(?![{_W}]|\.[{_W}])"
 # A path, query or fragment can carry an API key; it ends before ).,;:
 _TAIL = r"(?:[^\s\"'<>]{0,2048}[^\s\"'<>).,;:])?"
 _PATH = r"(?:[/?#]" + _TAIL + r")?"
@@ -116,7 +144,7 @@ _LABEL = r"[A-Za-z0-9-]{1,63}"
 _DOTTED = rf"(?:{_LABEL}\.){{1,16}}{_LABEL}"
 # A host may follow "<", "@", "/" or a placeholder, but not a word character,
 # "." or "-", which would make it part of a longer name.
-_HOST_START = r"(?<![\w.-])"
+_HOST_START = rf"(?<![{_W}.-])"
 
 _PCT_RE = re.compile(r"%([2-7][0-9A-Fa-f])")
 _RFC3339_RE = re.compile(
@@ -125,27 +153,38 @@ _URL_RE = re.compile(r"(?<![a-z0-9+.-])[a-z][a-z0-9+.-]{0,31}://" + _TAIL, re.IG
 _MULTIADDR_RE = re.compile(
     r"(?<![\w/])/(ip4|ip6|dns|dns4|dns6|dnsaddr)/([^/\s]{1,253})(?:/(tcp|udp)/\d{1,5})?",
     re.IGNORECASE)
-_USERINFO_RE = re.compile(
-    r"(?<![\w.:@-])[^\s:@/\"'<>()]{1,64}:[^\s\"'<>()]{0,128}@(?=[\w\[])"
-    r"([A-Za-z0-9-]{1,63}(?![\w.-]))?(:\d{1,10})?")
+# user:password@host. Found from each "@" backwards (see _remove_userinfo)
+# rather than by a regex from every start, which would be quadratic with
+# JWT-sized bounds: username up to 256 characters, password up to 1024.
+_USER_MAX, _PASSWORD_MAX = 256, 1024
+_AT_RE = re.compile(r"@(?=[\w\[])")
+_AFTER_AT_RE = re.compile(r"([A-Za-z0-9-]{1,63}(?![\w.-]))?(:\d{1,10})?")
+# Neither part holds these; the username also stops at a key separator, so
+# "token=u:pass@x" keeps its key name ("token=x").
+_CRED_STOP_RE = re.compile(r"[\s\"'<>]")
+_USER_STOP_RE = re.compile(r"[\s\"'<>()=&?;,/:@]")
 _X509_RE = re.compile(
     r"\b(certificate is valid for )((?:[^\s,]{1,253}, ){0,32}?[^\s,]{1,253})(, not )"
-    r"([^\s,;]{1,253}?)" + _END
-    + r"|\b(wanted to match )([^\s,;]{1,253}?)" + _END,
+    r"([^\s,;]{1,253})"
+    r"|\b(wanted to match )([^\s,;]{1,253})",
     re.IGNORECASE)
 _BRACKETED_V6_RE = re.compile(
     r"\[([0-9A-Fa-f:.]{2,45})(?:%[\w.-]{1,32})?\](?::\d{1,5})?" + _PATH)
 _BARE_V6_RE = re.compile(
-    r"(?<![\w:.])((?:[0-9A-Fa-f]{0,4}:){2,7}(?:(\d{1,3}(?:\.\d{1,3}){3})|[0-9A-Fa-f]{0,4}))"
+    r"(?<![0-9A-Fa-f:])(?<!\d\.)((?:[0-9A-Fa-f]{0,4}:){2,7}(?:(\d{1,3}(?:\.\d{1,3}){3})|[0-9A-Fa-f]{0,4}))"
     r"(%[\w.-]{1,32})?((?<=\d):\d{1,5}(?!\d))?")
 _IPV4_RE = re.compile(
-    r"(?<![\w.])(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})(?![A-Za-z0-9]|\.\d)"
+    r"(?<!\d)(?<!\d\.)(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})(?![A-Za-z0-9]|\.\d)"
     r"(?::\d{1,10})?" + _PATH)
 _LOOKUP_RE = re.compile(r"\b(lookup\s{1,8})(?![" + _SENTINELS + r"])([^\s:]{1,253})",
                         re.IGNORECASE)
 _HOST_PORT_RE = re.compile(rf"{_HOST_START}({_DOTTED}):\d{{1,10}}" + _PATH)
 _HOST_PATH_RE = re.compile(
-    rf"(?<![\w./-])(?:{_LABEL}\.){{1,16}}[A-Za-z]{{2,63}}(?:/|[?#](?=\S))" + _TAIL)
+    rf"(?<![{_W}./-])((?:{_LABEL}\.){{1,16}}[A-Za-z]{{2,63}})(?:/|[?#](?=\S))" + _TAIL)
+# Public code and docs hosts: a link to them in Bee's text reveals nothing,
+# unless the gateway itself is configured with one.
+_PUBLIC_HOSTS = ("github.com", "gitlab.com", "golang.org", "go.dev", "ethswarm.org")
+_SOURCE_POSITION_RE = re.compile(r"\.go:\d+$")
 _INTERNAL_NAME_RE = re.compile(
     rf"{_HOST_START}(?:(?:{_LABEL}\.){{1,16}}(?:internal|svc)"
     rf"|(?:{_LABEL}\.){{2,16}}(?:local|lan|home))" + _END,
@@ -163,10 +202,27 @@ def _split_url(value):
     return parts
 
 
+_ALNUM_RUN_RE = re.compile(r"[A-Za-z0-9]{8,}")
+
+
 def _looks_secret(value):
-    # 8 or more characters, and not a plain lowercase word: "facilitator" in
-    # https://x402.org/facilitator is a route, not a key.
-    return len(value) >= 8 and not re.fullmatch(r"[a-z]+", value)
+    """A key-like token: a run of 8+ letters and digits that mixes at least two
+    of lowercase, uppercase and digits, not counting its first character.
+
+    API keys are long random runs that mix classes ("0123abcdKEY4567").
+    Routes, networks and words are single-case words, often hyphenated:
+    "facilitator", "Transaction" (a capital only at the start),
+    "mainnet-v2", "gnosis-mainnet". An all-lowercase or all-uppercase key
+    ("abcdefghijklmnop") is therefore not collected; it cannot be told apart
+    from a word, and a key that is only letters of one case is rare.
+    """
+    for run in _ALNUM_RUN_RE.findall(value):
+        rest = run[1:]
+        classes = (any(c.islower() for c in rest) + any(c.isupper() for c in rest)
+                   + any(c.isdigit() for c in rest))
+        if classes >= 2:
+            return True
+    return False
 
 
 def _configured():
@@ -174,10 +230,10 @@ def _configured():
     hosts, secrets = set(), set()
     for name in _HOST_SETTINGS:
         value = getattr(settings, name, None)
-        if not value:
+        if not value or not str(value).strip():
             continue
         try:
-            parts = _split_url(str(value))
+            parts = _split_url(str(value).strip())
             host = parts.hostname
         except ValueError:
             continue
@@ -190,8 +246,11 @@ def _configured():
         for _, query_value in parse_qsl(parts.query, keep_blank_values=False):
             if _looks_secret(query_value):
                 secrets.add(query_value)
-        if parts.password and len(parts.password) >= 4:
+        if parts.password and len(parts.password) >= 8:
             secrets.add(unquote(parts.password))
+        # https://KEY@host or https://KEY:@host: a key in the username.
+        if parts.username and not parts.password and _looks_secret(unquote(parts.username)):
+            secrets.add(unquote(parts.username))
     by_length = lambda s: (-len(s), s)  # noqa: E731
     return tuple(sorted(hosts, key=by_length)), tuple(sorted(secrets, key=by_length))
 
@@ -210,7 +269,8 @@ def _configured_res(hosts, secrets):
         forms.append(rf"(?:{dotted})(?::\d{{1,10}})?{_PATH}")
     if dotless:
         # A port, a path that is not a version ("bee/2.8.1"), or a query.
-        forms.append(rf"(?:{dotless})(?::\d{{1,10}}{_PATH}|/(?!\d)" + _TAIL
+        # Not after "/": there it is a path segment (github.com/ethersphere/bee/v2).
+        forms.append(rf"(?<!/)(?:{dotless})(?::\d{{1,10}}{_PATH}|/(?!\d)" + _TAIL
                      + r"|[?#](?=\S)" + _TAIL + ")")
     if forms:
         host_re = re.compile(rf"{_HOST_START}(?:{'|'.join(forms)}){_END}", re.IGNORECASE)
@@ -226,10 +286,20 @@ def _multiaddr(match):
     return out
 
 
+def _trailing_punctuation(name):
+    """Split sentence punctuation off a name: 'bee.example.' -> ('bee.example', '.')."""
+    bare = name.rstrip(".,;:)")
+    return bare, name[len(bare):]
+
+
 def _x509(match):
+    # The last name is taken whole, hyphens included ("not my-bee-gw"), and
+    # gives back trailing sentence punctuation.
     if match.group(1):
-        return f"{match.group(1)}{_HOST}{match.group(3)}{_HOST}"
-    return f"{match.group(5)}{_HOST}"
+        _, tail = _trailing_punctuation(match.group(4))
+        return f"{match.group(1)}{_HOST}{match.group(3)}{_HOST}{tail}"
+    _, tail = _trailing_punctuation(match.group(6))
+    return f"{match.group(5)}{_HOST}{tail}"
 
 
 def _bracketed_v6(match):
@@ -265,7 +335,8 @@ def _bare_v6(match):
         if zone or port or not candidate.endswith(":"):
             return match.group(0)  # e.g. a time such as 12:34:56
         candidate, rest = candidate[:-1], ":" + rest
-    if not rest and not port and re.match(r"\w|\.\w", match.string[match.end():match.end() + 2]):
+    if not rest and not port and re.match(rf"[{_W}]|\.[{_W}]",
+                                          match.string[match.end():match.end() + 2]):
         return match.group(0)
     return _ADDR + rest
 
@@ -283,6 +354,46 @@ def _host_port(match):
     return _ADDR
 
 
+def _last_before(positions, limit):
+    """The largest position < limit in a sorted list, or -1."""
+    i = bisect.bisect_left(positions, limit)
+    return positions[i - 1] if i else -1
+
+
+def _remove_userinfo(text, hosts):
+    ats = [m.start() for m in _AT_RE.finditer(text)]
+    if not ats:
+        return text
+    # Positions of the stop characters, found once, so each "@" is resolved
+    # by bisection rather than by walking back over up to 1281 characters.
+    cred_stops = [m.start() for m in _CRED_STOP_RE.finditer(text)]
+    user_stops = [m.start() for m in _USER_STOP_RE.finditer(text)]
+    # Right to left, so a password holding "@" is removed up to the last "@".
+    out, end = [], len(text)
+    for at in reversed(ats):
+        if at >= end:
+            continue  # inside credentials already removed
+        lo = max(_last_before(cred_stops, at) + 1, at - _USER_MAX - _PASSWORD_MAX - 1, 0)
+        colon = text.find(":", lo, at)
+        if colon < 0 or at - colon - 1 > _PASSWORD_MAX:
+            continue
+        start = max(_last_before(user_stops, colon) + 1, lo)
+        if not 1 <= colon - start <= _USER_MAX:
+            continue
+        # A configured host right after the credentials goes too, since a
+        # dotless one would otherwise be left as a bare word.
+        after = _AFTER_AT_RE.match(text, at + 1)
+        host, port = after.group(1) or "", after.group(2) or ""
+        if host and host.lower() in hosts:
+            out.append(text[after.end():end])
+            out.append(_ADDR if port else _HOST)
+        else:
+            out.append(text[at + 1:end])
+        end = start
+    out.append(text[:end])
+    return "".join(reversed(out))
+
+
 def _scrub(text, hosts, secrets):
     secret_re, host_re = _configured_res(hosts, secrets)
     if secret_re is not None:
@@ -290,15 +401,7 @@ def _scrub(text, hosts, secrets):
     text = _URL_RE.sub(_URL, text)
     text = _MULTIADDR_RE.sub(_multiaddr, text)
 
-    def userinfo(match):
-        # Credentials go; a configured host right after them goes too, since
-        # a dotless one would otherwise be left as a bare word.
-        host, port = match.group(1) or "", match.group(2) or ""
-        if host.lower() in hosts:
-            return _ADDR if port else _HOST
-        return host + port
-
-    text = _USERINFO_RE.sub(userinfo, text)
+    text = _remove_userinfo(text, hosts)
     text = _X509_RE.sub(_x509, text)
     text = _BRACKETED_V6_RE.sub(_bracketed_v6, text)
     text = _BARE_V6_RE.sub(_bare_v6, text)
@@ -316,7 +419,15 @@ def _scrub(text, hosts, secrets):
     if host_re is not None:
         text = host_re.sub(lambda m: _HOST if m.group(0).lower() in hosts else _ADDR, text)
     text = _HOST_PORT_RE.sub(_host_port, text)
-    text = _HOST_PATH_RE.sub(_ADDR, text)
+    def host_path(match):
+        host = match.group(1).lower()
+        if _SOURCE_POSITION_RE.search(match.group(0)):
+            return match.group(0)  # .../pkg/api.go:42, a Go source position
+        if host in hosts or not any(host == p or host.endswith("." + p) for p in _PUBLIC_HOSTS):
+            return _ADDR
+        return match.group(0)  # a public code or docs link
+
+    text = _HOST_PATH_RE.sub(host_path, text)
     return _INTERNAL_NAME_RE.sub(_HOST, text)
 
 
@@ -348,12 +459,11 @@ def without_addresses(text: str) -> str:
             break
         decoded = _decode(decoded)
     if decoded != text:
-        # Use the decoded form when it has something to replace, and at least
-        # as much as the encoded one ("bee%2Einternal%3A1633"); otherwise keep
-        # the text's own encoding ("100%ff", "50%25").
+        # Decoding revealed text to scrub: show the decoded form, scrubbed
+        # ("bee%2Einternal%3A1633"). Otherwise keep the text's own encoding
+        # ("100%ff", "50%25").
         decoded_scrubbed = _scrub_all(decoded, hosts, secrets)
-        found = _replacements(decoded_scrubbed)
-        if found and found >= _replacements(scrubbed):
+        if _replacements(decoded_scrubbed):
             scrubbed = decoded_scrubbed
     return scrubbed.translate(_FINAL)
 
@@ -374,14 +484,24 @@ def public_bee_text(text: str, limit: int = 200) -> str:
     text = str(text)
     if len(text) > SCRUB_CAP:
         text = _drop_partial(text[:SCRUB_CAP], text[SCRUB_CAP])
+        if text is None:
+            return NO_SAFE_CUT
     scrubbed = without_addresses(text)
     if len(scrubbed) <= limit:
         return scrubbed
-    return _drop_partial(scrubbed[:limit], scrubbed[limit])
+    return _drop_partial(scrubbed[:limit], scrubbed[limit]) or NO_SAFE_CUT
 
 
-def _drop_partial(cut: str, next_char: str) -> str:
+# Shown when a message has no whitespace before the cut: dropping the word
+# the cut lands inside would leave nothing.
+NO_SAFE_CUT = "(Bee message omitted: no safe cut point)"
+
+
+def _drop_partial(cut: str, next_char: str):
+    """Cut text ending in "…", without a word the cut lands inside; None if
+    nothing would be left."""
     if not next_char.isspace() and cut and not cut[-1].isspace():
         head = cut.rsplit(None, 1)
         cut = head[0] if len(head) == 2 else ""
-    return cut.rstrip() + "…"
+    cut = cut.rstrip()
+    return cut + "…" if cut else None

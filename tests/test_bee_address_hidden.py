@@ -20,7 +20,7 @@ from fastapi.testclient import TestClient
 
 from app.core.config import settings
 from app.main import app
-from app.services.bee_errors import public_bee_text, without_addresses
+from app.services.bee_errors import NO_SAFE_CUT, public_bee_text, without_addresses
 
 BEE = "http://bee.internal:1633"
 SECRETS = ("bee.internal", "1633", "10.0.0.1", "192.0.2.7", "127.0.0.11",
@@ -35,7 +35,7 @@ client = TestClient(app)
 CONFIGURED = {
     "SWARM_BEE_API_URL": "http://bee:1633",
     "X402_BZZ_PRICE_FEED_URL": "http://bee-dev:1633/",
-    "GNOSIS_RPC_URL": "https://gnosis.rpc.example.com/v2/SECRETKEY",
+    "GNOSIS_RPC_URL": "https://gnosis.rpc.example.com/v2/0123abcdKEY4567",
     "BASE_RPC_URL": "https://user:hunter22@rpc.internal/v2/not-a-real-key?apikey=QUERYKEY123",
     "X402_FACILITATOR_URL": "https://bee.internal/facilitator",
 }
@@ -443,6 +443,7 @@ class TestWithoutAddresses:
         "/ip4/", "lookup a.", "certificate is valid for a, ", "[1:", "a.a:1",
         "bee:", "a.internal.", "::ffff:1.1.1.1:",
         "<a.b:1", "@a.b/", "%3Ca", "a:/@", "bee/", "SECRETKEY",
+        "(a:", "a:(", "[", "@a", ":@a", "a:a:a@b", "x=a:", "日1.",
     ])
     def test_100kb_adversarial_input_is_fast(self, unit):
         import time
@@ -474,8 +475,7 @@ class TestRoundThree:
         ("10.0.0.1:8545?key=SECRET", "<address>"),
         ("call rpc.example.org#frag failed", "call <address> failed"),
         # Secrets of the configured URLs, wherever they appear.
-        ("invalid project id SECRETKEY", "invalid project id <secret>"),
-        ("bad key not-a-real-key", "bad key <secret>"),
+        ("invalid project id 0123abcdKEY4567", "invalid project id <secret>"),
         ("apikey QUERYKEY123 expired", "apikey <secret> expired"),
         ("auth hunter22 rejected", "auth <secret> rejected"),
         # A password holding "/".
@@ -496,8 +496,11 @@ class TestRoundThree:
         # Percent signs that are not an encoded address.
         "100%ff",
         "50%25 done",
-        # The facilitator route is a lowercase word, not a secret.
+        # The facilitator route is a lowercase word, not a secret; nor are
+        # single-case or hyphenated words in a configured URL's path.
         "facilitator refused",
+        "invalid project id SECRETKEY",
+        "bad key not-a-real-key",
         # Kept by design: unconfigured dotless hosts, bare dotted names,
         # short IPv6 forms.
         "nethermind:8545",
@@ -525,7 +528,8 @@ class TestRoundThree:
         ("x" * 195 + " fd00:1234:5678::1 end", "x" * 195 + "…"),
         ("y" * 190 + " dial tcp rpc.internal.example.com:8545 refused",
          "y" * 190 + " dial tcp…"),
-        ("z" * 199 + "a" * 10, "…"),
+        # No whitespace before the cut: a fixed text, not a bare "…".
+        ("z" * 199 + "a" * 10, NO_SAFE_CUT),
     ])
     def test_public_bee_text_cut(self, text, expected):
         assert public_bee_text(text) == expected
@@ -536,3 +540,90 @@ class TestRoundThree:
         long = "w " * 1020 + "10.0.0.1:8545 end"  # the address straddles 2048
         shown = public_bee_text(long, limit=5000)
         assert "10.0" not in shown and shown.endswith("…"), shown[-40:]
+
+
+# --------------------------------------------------------------------------- #
+# Round 4
+# --------------------------------------------------------------------------- #
+class TestRoundFour:
+
+    @pytest.mark.parametrize("text, expected", [
+        # x509 names are taken whole, hyphens included.
+        ("x509: certificate is valid for a.example, not my-bee-gw",
+         "x509: certificate is valid for <host>, not <host>"),
+        ("x509: certificate is not valid for any names, but wanted to match rpc-gw-01.corp.",
+         "x509: certificate is not valid for any names, but wanted to match <host>."),
+        ("x509: certificate is valid for a.example, not my-bee-gw; retry",
+         "x509: certificate is valid for <host>, not <host>; retry"),
+        # Decoding reveals more: the decoded form is used, even when it has
+        # fewer replacements in all (three IPs become one URL when decoded).
+        ("a%3A//10.0.0.1, then 10%2E0%2E0%2E3", "<url>, then <address>"),
+        ("a%3A//10.0.0.1,10.0.0.2,10.0.0.4 then 10%2E0%2E0%2E3", "<url> then <address>"),
+        # Credentials: JWT-sized, parentheses, a key name before them.
+        ("Post u:" + "J" * 900 + "@bee:1633 x", "Post <address> x"),
+        ("dial u:p(a)ss@rpc.example.com:8545", "dial <address>"),
+        ("token=u:pass@x", "token=x"),
+        ("a=1&token=u:pass@x", "a=1&token=x"),
+        # Addresses glued to letters, "_" or non-ASCII text.
+        ("_10.0.0.1", "_<address>"),
+        ("ip10.0.0.1", "ip<address>"),
+        ("é10.0.0.1", "é<address>"),
+        ("日10.0.0.1", "日<address>"),
+        ("ab.10.0.0.1", "ab.<address>"),
+        ("ipfd00::1 down", "ip<address> down"),
+        ("host.internal日", "<host>日"),
+        ("日bee.internal:1633", "日<address>"),
+        ("rpc.internal日", "<host>日"),
+    ])
+    def test_replaces(self, text, expected):
+        assert without_addresses(text) == expected
+
+    def test_configured_hyphenated_host_after_not(self):
+        with patch.object(settings, "GNOSIS_RPC_URL", "https://gnosis-rpc.corp.example/v2/x"):
+            assert without_addresses(
+                "x509: certificate is valid for a.example, not gnosis-rpc.corp.example."
+            ) == "x509: certificate is valid for <host>, not <host>."
+
+    @pytest.mark.parametrize("text", [
+        # Numbers glued to an address-like run are not addresses.
+        "11.2.3.4.5",
+        "build 1.2.3.4.5",
+        # Go source positions under a module path, and public docs links.
+        "panic at github.com/ethersphere/bee/v2/pkg/api.go:42",
+        "see docs.ethswarm.org/api for details",
+        "see pkg.go.dev/github.com/ethersphere/bee",
+        "fork gitlab.com/a/b",
+    ])
+    def test_keeps(self, text):
+        assert without_addresses(text) == text
+
+    def test_public_host_is_replaced_when_configured(self):
+        with patch.object(settings, "X402_BZZ_PRICE_FEED_URL", "https://docs.ethswarm.org/feed"):
+            assert without_addresses("GET docs.ethswarm.org/api") == "GET <address>"
+
+    def test_secret_rule(self):
+        configured = {
+            "GNOSIS_RPC_URL": ("https://admin:admin@rpc.example.net/Transaction/mainnet-v2"
+                               "?network=gnosis-mainnet&project=0123abcdKEY4567"),
+            "BASE_RPC_URL": "https://Ab12Cd34Ef56Gh78@base.example.net",
+            "X402_BZZ_PRICE_FEED_URL": "https://Zx98Yw76Vu54:@feed.example.net/x",
+            "SWARM_BEE_API_URL": "https://user:longpassword1@bee.example.net",
+            "X402_FACILITATOR_URL": "   ",
+        }
+        with patch.multiple(settings, **configured):
+            # Collected: a mixed key in the query, username-only keys, and a
+            # password of 8 or more characters.
+            assert without_addresses("bad key 0123abcdKEY4567") == "bad key <secret>"
+            assert without_addresses("bad key Ab12Cd34Ef56Gh78") == "bad key <secret>"
+            assert without_addresses("bad key Zx98Yw76Vu54") == "bad key <secret>"
+            assert without_addresses("auth longpassword1 refused") == "auth <secret> refused"
+            # Not collected: a short password, words and network names, and a
+            # key of one letter case.
+            for text in ("user admin rejected", "Transaction failed", "on mainnet-v2",
+                         "network gnosis-mainnet", "invalid key abcdefghijklmnop"):
+                assert without_addresses(text) == text
+
+    def test_no_safe_cut_point(self):
+        assert public_bee_text("x" * 300) == NO_SAFE_CUT
+        assert public_bee_text("y" * 3000) == NO_SAFE_CUT
+        assert public_bee_text("short word " + "y" * 3000) == "short word…"
