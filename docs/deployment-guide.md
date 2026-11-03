@@ -171,16 +171,24 @@ into load on Bee:
   that the process answers. It never tested Bee: `/health` answers 200 whatever
   Bee's state. Bee reachability is watched by the external probe of
   `bee_node.healthy`.
-- At most `BEE_MAX_CONCURRENT_CALLS` (default 64) Bee calls are in flight at
-  once, below `BEE_HTTP_MAX_CONNECTIONS` (100); the gateway refuses to start
-  otherwise. `BEE_RESERVED_BACKGROUND_CALLS` (8) of them are kept for work
-  outside requests (snapshot refresh, stamp pool, metrics poller), so a flood
-  cannot starve it. Uploads and downloads made by requests hold at most
-  `BEE_MAX_CONCURRENT_TRANSFERS` (24). A request's Bee call that gets no slot
-  within `BEE_CALL_SLOT_WAIT_SECONDS` (2) makes the request answer
-  `503 BEE_BUSY` with `Retry-After: BEE_BUSY_RETRY_AFTER_SECONDS` (5).
-  Bee work of a request whose payment has settled waits up to
-  `BEE_BACKGROUND_SLOT_WAIT_SECONDS` (30) instead. Watch
+- At most `BEE_MAX_CONCURRENT_CALLS` Bee calls are in flight at once.
+  `BEE_RESERVED_BACKGROUND_CALLS` of them are kept for work outside requests
+  (snapshot refresh, stamp pool, metrics poller), so a flood cannot starve it.
+  Uploads and downloads made by requests hold at most
+  `BEE_MAX_CONCURRENT_TRANSFERS`. Left unset, the three are 64%, 8% and 24% of
+  `BEE_HTTP_MAX_CONNECTIONS`: 64/8/24 for the default 100, 26/3/10 for 40. So
+  lowering the pool keeps a working gate. Set explicitly, the cap must be below
+  `BEE_HTTP_MAX_CONNECTIONS`, the reserve below the cap, and transfers at most
+  the cap minus the reserve; the gateway refuses to start otherwise. A request's
+  Bee call that gets no slot within `BEE_CALL_SLOT_WAIT_SECONDS` (2) makes the
+  request answer `503 BEE_BUSY` with `Retry-After: BEE_BUSY_RETRY_AFTER_SECONDS`
+  (5). That answer says nothing was charged, so it is never given to a request
+  that carries a payment, or once its settlement has started; such a request
+  keeps its own answer, with its payment headers and code. Bee work of a
+  request whose payment has settled waits up to
+  `BEE_BACKGROUND_SLOT_WAIT_SECONDS` (30) instead; if it is still refused, the
+  call never reached Bee, and the purchase is recorded for a refund, not looked
+  for on-chain. Watch
   `gateway_bee_calls_in_flight{lane}` and
   `gateway_bee_call_rejections_total{lane}`. A refusal is not a Bee error: it
   is not counted in `gateway_bee_api_errors_total` or as a pool timeout. These
