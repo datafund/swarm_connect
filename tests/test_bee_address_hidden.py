@@ -20,7 +20,7 @@ from fastapi.testclient import TestClient
 
 from app.core.config import settings
 from app.main import app
-from app.services.bee_errors import without_addresses
+from app.services.bee_errors import public_bee_text, without_addresses
 
 BEE = "http://bee.internal:1633"
 SECRETS = ("bee.internal", "1633", "10.0.0.1", "192.0.2.7", "127.0.0.11",
@@ -34,8 +34,9 @@ client = TestClient(app)
 # these, so "timeout:30" and "chain-id:100" stay (#549).
 CONFIGURED = {
     "SWARM_BEE_API_URL": "http://bee:1633",
-    "GNOSIS_RPC_URL": "http://bee-dev:1633/",
-    "BASE_RPC_URL": "https://rpc.internal/v2/not-a-real-key",
+    "X402_BZZ_PRICE_FEED_URL": "http://bee-dev:1633/",
+    "GNOSIS_RPC_URL": "https://gnosis.rpc.example.com/v2/SECRETKEY",
+    "BASE_RPC_URL": "https://user:hunter22@rpc.internal/v2/not-a-real-key?apikey=QUERYKEY123",
     "X402_FACILITATOR_URL": "https://bee.internal/facilitator",
 }
 
@@ -202,19 +203,36 @@ class TestStampErrorsHideBeeAddress:
         assert "lookup <host> on <address>: no such host" in detail, detail
 
     def test_long_bee_message_is_capped_and_fast(self, call, verb):
-        # Bee's text is untrusted and of any length; it is capped at 200
-        # characters before scrubbing, so a 100 KB message cannot stall the
-        # request (#549, round-2 review).
+        # Bee's text is untrusted and of any length; it is scrubbed at 2 KB
+        # and cut to 200 characters, so a 100 KB message cannot stall the
+        # request (#549, round-2 and round-3 review).
         import time
         exc = _status_error("stamps/100/17", 400, method="POST",
-                            json={"code": 400, "message": "a" * 100_000})
+                            json={"code": 400, "message": "out of funds " * 8000})
         start = time.perf_counter()
         response = call(exc)
         assert time.perf_counter() - start < 1.0
 
         assert response.status_code == 400, response.text
         detail = response.json()["detail"]
-        assert detail == f"Bee rejected the stamp {verb}: " + "a" * 200
+        prefix = f"Bee rejected the stamp {verb}: "
+        assert detail.startswith(prefix + "out of funds out of funds"), detail
+        assert detail.endswith("…") and len(detail) <= len(prefix) + 201, detail
+
+    # The address starts at character filler + 10; these fillers put the
+    # 200-character cut inside each address.
+    @pytest.mark.parametrize("filler", [172, 176, 180, 183])
+    def test_address_at_the_cut_is_not_shown_in_part(self, call, verb, filler):
+        # Measured in round 3: cutting before scrubbing showed
+        # "rpc.internal.example.com" without its port, or "10.0.0.".
+        for address in ("rpc.internal.example.com:8545", "10.0.0.1:8545",
+                        "fd00:1234:5678::1"):
+            message = "x" * filler + " dial tcp " + address + " refused"
+            exc = _status_error("stamps/100/17", 400, method="POST",
+                                json={"code": 400, "message": message})
+            detail = call(exc).json()["detail"]
+            for part in ("rpc.internal", "example.com", "10.0.0", "fd00", "1234:5678"):
+                assert part not in detail, (address, detail)
 
     def test_bee_message_kept_as_is(self, call, verb):
         exc = _status_error("stamps/100/17", 400, method="POST",
@@ -242,6 +260,8 @@ class TestPoolStatusHidesAddresses:
         ("dial tcp [fd00::1]:1633: i/o timeout; peer 192.0.2.7 gone", "i/o timeout"),
         ("upstream bee.internal:1633 failed", "upstream <address> failed"),
         ("could not reach bee:1633. tried rpc.internal:8545/v2/KEY.", "could not reach <address>."),
+        # An address across the 200-character cut is not shown in part.
+        ("y" * 190 + " dial tcp 10.0.0.1:8545 refused", "…"),
     ])
     @pytest.mark.asyncio
     async def test_purchase_error_hides_bare_addresses(self, tmp_path, message, kept):
@@ -422,6 +442,7 @@ class TestWithoutAddresses:
         "a@", "a:a@", "::", "a::", "/", "a.b/", "http://", "a://", "%25",
         "/ip4/", "lookup a.", "certificate is valid for a, ", "[1:", "a.a:1",
         "bee:", "a.internal.", "::ffff:1.1.1.1:",
+        "<a.b:1", "@a.b/", "%3Ca", "a:/@", "bee/", "SECRETKEY",
     ])
     def test_100kb_adversarial_input_is_fast(self, unit):
         import time
@@ -429,3 +450,89 @@ class TestWithoutAddresses:
         start = time.perf_counter()
         without_addresses(text)
         assert time.perf_counter() - start < 0.5, f"slow on {unit!r} x 100 KB"
+
+
+# --------------------------------------------------------------------------- #
+# Round 3: hosts after "<", "@" and "/", queries, configured secrets, the cut
+# --------------------------------------------------------------------------- #
+class TestRoundThree:
+
+    @pytest.mark.parametrize("text, expected", [
+        # A host directly after "<", "@" or "/".
+        ("<gnosis.rpc.example.com/v2/SECRETKEY>", "<<address>>"),
+        ("admin@gnosis.rpc.example.com/v2/SECRETKEY", "admin@<address>"),
+        ("<bee.internal:1633>", "<<address>>"),
+        ("/bee.internal:1633", "/<address>"),
+        ("admin@bee.internal:1633", "admin@<address>"),
+        ("<host.docker.internal>", "<<host>>"),
+        ("%3Cbee.internal:1633%3E", "<<address>>"),
+        # The multiaddr form is unchanged.
+        ("/dns4/bee.example.com/tcp/1634", "/dns4/<host>/tcp/<port>"),
+        # A query or fragment after a schemeless host.
+        ("bee.internal:1633?token=SECRET", "<address>"),
+        ("gnosis.rpc.example.com?apikey=SECRET", "<address>"),
+        ("10.0.0.1:8545?key=SECRET", "<address>"),
+        ("call rpc.example.org#frag failed", "call <address> failed"),
+        # Secrets of the configured URLs, wherever they appear.
+        ("invalid project id SECRETKEY", "invalid project id <secret>"),
+        ("bad key not-a-real-key", "bad key <secret>"),
+        ("apikey QUERYKEY123 expired", "apikey <secret> expired"),
+        ("auth hunter22 rejected", "auth <secret> rejected"),
+        # A password holding "/".
+        ("Post user:pa/ss@bee:1633 x", "Post <address> x"),
+        # A dotless configured host followed by a path that is not a version.
+        ("GET BEE/stamps failed", "GET <address> failed"),
+        ("GET bee?x=1 failed", "GET <address> failed"),
+    ])
+    def test_replaces(self, text, expected):
+        assert without_addresses(text) == expected
+
+    @pytest.mark.parametrize("text", [
+        # User agents and versions after a dotless configured host.
+        "bee/2.8.1-abcdef",
+        "Bee/2.8.1 user agent",
+        # A question about bee is not a query.
+        "is it bee? yes",
+        # Percent signs that are not an encoded address.
+        "100%ff",
+        "50%25 done",
+        # The facilitator route is a lowercase word, not a secret.
+        "facilitator refused",
+        # Kept by design: unconfigured dotless hosts, bare dotted names,
+        # short IPv6 forms.
+        "nethermind:8545",
+        "localhost:8545",
+        "rpc.example.com",
+        "::1",
+        "2001:db8::",
+    ])
+    def test_keeps(self, text):
+        assert without_addresses(text) == text
+
+    def test_schemeless_setting_is_a_configured_host(self):
+        with patch.object(settings, "X402_BZZ_PRICE_FEED_URL", "pricefeed:8080"):
+            assert without_addresses("dial pricefeed:8080 failed") == "dial <address> failed"
+            assert without_addresses("GET pricefeed/v1 failed") == "GET <address> failed"
+
+    def test_placeholder_characters_in_input_are_dropped(self):
+        assert without_addresses("a\ue001b 10.0.0.1") == "ab <address>"
+
+    @pytest.mark.parametrize("text, expected", [
+        ("short", "short"),
+        # Longer than 200 before scrubbing, within 200 after it: kept whole.
+        ("x" * 185 + " fd00:1234:5678::1 end", "x" * 185 + " <address> end"),
+        # The cut lands inside the placeholder: the word is dropped.
+        ("x" * 195 + " fd00:1234:5678::1 end", "x" * 195 + "…"),
+        ("y" * 190 + " dial tcp rpc.internal.example.com:8545 refused",
+         "y" * 190 + " dial tcp…"),
+        ("z" * 199 + "a" * 10, "…"),
+    ])
+    def test_public_bee_text_cut(self, text, expected):
+        assert public_bee_text(text) == expected
+
+    def test_address_at_the_2kb_scrub_cap_is_dropped(self):
+        text = "<url> " + "http://" + "a" * 2030 + "/x 10.0.0.1:8545 more"
+        assert "10.0" not in public_bee_text(text)
+        long = "w " * 1020 + "10.0.0.1:8545 end"  # the address straddles 2048
+        shown = public_bee_text(long, limit=5000)
+        assert "10.0" not in shown and shown.endswith("…"), shown[-40:]

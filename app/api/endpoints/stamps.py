@@ -12,7 +12,7 @@ import secrets
 from app.x402.settlement import settle_payment
 from app.core.config import settings
 from app.services import swarm_api
-from app.services.bee_errors import error_cause, without_addresses
+from app.services.bee_errors import error_cause, public_bee_text
 from app.services.swarm_api import expiry_from_amount, get_batch_expiry, plur_to_bzz
 from app.services.stamp_ownership import stamp_ownership_manager
 from app.services.stamp_tracker import record_purchase
@@ -224,8 +224,8 @@ def _bee_error_detail(exc: httpx.HTTPError):
         pass
     if not message:
         message = (response.text or "").strip() or error_cause(exc)
-    # Capped before scrubbing: Bee's text is untrusted and of any length.
-    return response.status_code, without_addresses(str(message)[:200])
+    # Scrubbed at a 2 KB cap, then cut to 200 without a partial word (#549).
+    return response.status_code, public_bee_text(message)
 
 
 def _is_owned_by(batch_id: str, wallet: str) -> bool:

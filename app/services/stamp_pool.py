@@ -27,18 +27,20 @@ from threading import Lock
 from app.core.atomic_io import StateLoadError, atomic_write_json, unreadable_state
 from app.core.config import settings
 from app.services import swarm_api
-from app.services.bee_errors import error_cause, without_addresses
+from app.services.bee_errors import SCRUB_CAP, error_cause, public_bee_text
 from app.services.swarm_api import coerce_int
 from app.services.stamp_ownership import POOL_OWNER, stamp_ownership_manager
 
 logger = logging.getLogger(__name__)
 
 
-def _bee_error_message(exc) -> Optional[str]:
+def _bee_error_message(exc, limit: int = 200) -> Optional[str]:
     """Extract Bee's own error text from a failed request, if there is one.
 
     Bee reports refusals as JSON like {"code":400,"message":"out of funds"}.
     That message names the problem exactly; the exception string does not.
+    Cut to `limit` characters; /pool/status asks for more and lets
+    public_bee_text scrub before cutting (#549).
     """
     response = getattr(exc, "response", None)
     if response is None:
@@ -48,11 +50,11 @@ def _bee_error_message(exc) -> Optional[str]:
         if isinstance(body, dict):
             message = body.get("message") or body.get("detail")
             if message:
-                return str(message)[:200]
+                return str(message)[:limit]
     except Exception:
         pass
     text = (getattr(response, "text", "") or "").strip()
-    return text[:200] or None
+    return text[:limit] or None
 
 
 
@@ -936,10 +938,12 @@ class StampPoolManager:
                             said = f" — Bee said: {detail}" if detail else ""
                             logger.error(f"Failed to purchase depth-{depth} stamp: {e}{said}")
                             # Bee's own message, not str(e): that names the Bee URL (#534).
-                            # Addresses in Bee's text are replaced too (#549).
+                            # Scrubbed at 2 KB, then cut to 200 (#549).
+                            shown = _bee_error_message(e, SCRUB_CAP + 1)
+                            shown = f" — Bee said: {public_bee_text(shown)}" if shown else ""
                             results["errors"].append(
                                 f"Failed to purchase depth-{depth} stamp: "
-                                f"{error_cause(e)}{without_addresses(said)}")
+                                f"{error_cause(e)}{shown}")
                             # Back off this depth. Without this the next check
                             # tries again immediately and keeps failing: an
                             # underfunded pool retried an unaffordable purchase
