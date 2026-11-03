@@ -746,3 +746,64 @@ class TestBatchIdCase:
         assert repr(self.BATCH) in str(err.value)
         assert repr(middle) in str(err.value)
         assert self.OWNER in str(err.value) and self.OTHER in str(err.value)
+
+    # --- pre-migration copy, exact ids and ERROR on refusal ----------------------
+
+    def test_migration_keeps_one_pre_migration_copy_with_dropped_records(self, state_file):
+        import glob
+        original = {
+            self.BATCH: {"owner": self.OWNER, "mode": "paid", "acquired_at": "2026-01-01T00:00:00+00:00",
+                         "source": "pool_acquire"},
+            self.UPPER: {"owner": "shared", "mode": "free", "acquired_at": "2025-06-01T00:00:00+00:00",
+                         "source": "direct_purchase"},
+        }
+        self._write(state_file, original)
+        before = open(state_file).read()
+
+        # The first start cannot save; the second start migrates the same file again.
+        with patch("app.services.stamp_ownership.atomic_write_json", side_effect=OSError("disk full")):
+            StampOwnershipManager(state_file=state_file).load_on_startup()
+        StampOwnershipManager(state_file=state_file).load_on_startup()
+
+        copies = glob.glob(state_file + ".pre-558-*")
+        assert len(copies) == 1
+        assert open(copies[0]).read() == before
+        # The dropped record's fields survive only in the copy.
+        assert json.load(open(copies[0]))[self.UPPER]["source"] == "direct_purchase"
+        assert self._read(state_file) == {self.BATCH: original[self.BATCH]}
+
+    def test_no_pre_migration_copy_for_a_clean_file(self, state_file):
+        import glob
+        self._write(state_file, {self.BATCH: {"owner": self.OWNER, "mode": "paid"}})
+        StampOwnershipManager(state_file=state_file).load_on_startup()
+        assert glob.glob(state_file + ".pre-558-*") == []
+
+    def test_failed_pre_migration_copy_skips_the_save(self, state_file, caplog):
+        self._write(state_file, {self.UPPER: {"owner": self.OWNER, "mode": "paid"}})
+        before = open(state_file).read()
+        mgr = StampOwnershipManager(state_file=state_file)
+        with patch("app.services.stamp_ownership.shutil.copy2", side_effect=OSError("read-only")), \
+                patch("app.services.stamp_ownership.atomic_write_json") as write, \
+                caplog.at_level("ERROR", logger="app.services.stamp_ownership"):
+            mgr.load_on_startup()
+        write.assert_not_called()
+        assert open(state_file).read() == before
+        assert mgr.get_stamp_info(self.BATCH)["owner"] == self.OWNER
+        assert any("not saving the migration" in r.message for r in caplog.records)
+
+    def test_refusal_prints_exact_ids_and_logs_error(self, state_file, caplog):
+        from app.core.atomic_io import StateLoadError
+        # Two spellings that differ in the head AND the middle: their shortened
+        # forms would be distinct but would not show the exact keys.
+        a = "AB" * 6 + "ab" * 26
+        b = "AB" * 6 + "ab" * 4 + "AB" + "ab" * 21
+        self._write(state_file, {
+            a: {"owner": self.OWNER, "mode": "paid"},
+            b: {"owner": self.OTHER, "mode": "paid"},
+        })
+        with caplog.at_level("ERROR", logger="app.services.stamp_ownership"), \
+                pytest.raises(StateLoadError) as err:
+            StampOwnershipManager(state_file=state_file).load_on_startup()
+        assert repr(a) in str(err.value) and repr(b) in str(err.value)
+        errors = [r.message for r in caplog.records if r.levelname == "ERROR"]
+        assert any(repr(a) in m and repr(b) in m and self.OTHER in m for m in errors)
