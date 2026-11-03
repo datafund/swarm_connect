@@ -183,10 +183,14 @@ class TestFirstSnapshot:
         assert body["x402"]["bee_gnosis_wallet"]["can_accept"] is None
 
     @pytest.mark.asyncio
-    async def test_node_summary_failure_omits_bee_node_as_before(self, upstreams, gw):
+    async def test_node_summary_failure_reports_bee_node_unhealthy(self, upstreams, gw):
+        # Before #589 bee_node was left out here; #586's probe reads
+        # bee_node.healthy, so it is now reported, and status is degraded.
         upstreams.fail_node = True
         body = (await gw.get("/health")).json()
-        assert "bee_node" not in body
+        assert body["bee_node"]["healthy"] is False
+        assert body["bee_node"]["api_reachable"] is False
+        assert body["status"] == "degraded"
         assert body["x402"]["bee_gnosis_wallet"]["can_accept"] is True
 
 

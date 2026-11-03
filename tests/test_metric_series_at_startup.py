@@ -46,6 +46,8 @@ EXPECTED_SERIES = (
     + [f'gateway_health_snapshot_refreshes_total{{result="{r}"}}' for r in ("ok", "error", "timeout")]
     + [f'gateway_top_caller_requests{{rank="{n}"}}' for n in range(1, 6)]
     + ["gateway_top_callers_distinct", "gateway_top_callers_untracked_total"]
+    # Paid requests refused before payment while payments are unavailable (#589)
+    + ['gateway_x402_payments_total{mode="unavailable"}']
 )
 
 

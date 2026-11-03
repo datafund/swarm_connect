@@ -393,6 +393,10 @@ class Settings(BaseSettings):
     HEALTH_SNAPSHOT_TTL_SECONDS: float = Field(15.0, gt=0, le=3600, allow_inf_nan=False)
     HEALTH_SNAPSHOT_REFRESH_TIMEOUT_SECONDS: float = Field(20.0, gt=0, le=600, allow_inf_nan=False)
     HEALTH_SNAPSHOT_FIRST_WAIT_SECONDS: float = Field(5.0, ge=0, le=60, allow_inf_nan=False)
+    # A snapshot whose last refresh failed and that is older than this is too
+    # old to trust (#589): /health reports `degraded` and paid requests are
+    # refused before payment. Never less than TTL + refresh timeout.
+    HEALTH_SNAPSHOT_MAX_TRUSTED_AGE_SECONDS: float = Field(60.0, gt=0, le=86400, allow_inf_nan=False)
     # Heaviest callers, per window, without exposing who they are: callers are
     # keyed by a keyed hash of their grouped address (IPv6 by /64). Metrics carry
     # only ranks; the WARNING log line carries the hash tag. The hash key is

@@ -987,7 +987,8 @@ async def get_node_status_summary(use_cache: bool = True) -> Dict[str, Any]:
     chain-sync position (`last_synced_block`, `chain_tip`, `chain_sync_lag_blocks`),
     so an operator can diagnose the node without LAN access to its API.
 
-    Returns a dict with a `healthy` boolean and human-readable `warnings`. Never raises.
+    Returns a dict with a `healthy` boolean, an `api_reachable` boolean (#589) and
+    human-readable `warnings`. Never raises.
     """
     now = time.time()
     if use_cache and _node_status_cache["data"] is not None and (now - _node_status_cache["ts"]) < NODE_STATUS_TTL_SECONDS:
@@ -1092,6 +1093,11 @@ async def get_node_status_summary(use_cache: bool = True) -> Dict[str, Any]:
         # healthchecks stay stable.
         summary["healthy"] = (na == "Available") and not bool(warming)
     summary["warnings"] = warnings
+    # Whether the Bee API answered at all (#589). False only when none of
+    # /health, /addresses, /topology and /status answered: the node cannot be
+    # reached, which /health reports as `degraded`. A node that is still
+    # starting up answers /health and /addresses, so it counts as reachable.
+    summary["api_reachable"] = bool(topo or status or bee_status or summary.get("overlay"))
 
     _node_status_cache["data"] = summary
     _node_status_cache["ts"] = now

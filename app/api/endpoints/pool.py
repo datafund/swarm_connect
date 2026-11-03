@@ -211,6 +211,12 @@ async def _refuse_allowance(
     detail = dict(detail)
     offer_payment = settings.X402_ENABLED and settings.paid_bypass_is_honoured()
     if offer_payment:
+        # Not while the gateway cannot accept payments (#589): a paid acquire
+        # would get 503 PAYMENTS_UNAVAILABLE, so answer the 429 instead.
+        from app.x402.accept_gate import payments_refusal
+        if payments_refusal() is not None:
+            offer_payment = False
+    if offer_payment:
         message += (
             "To continue now, pay with x402: send an X-PAYMENT header with "
             "this same request and you get a pooled stamp immediately, "
