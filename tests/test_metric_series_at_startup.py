@@ -76,6 +76,21 @@ class TestSeriesExistAtStartup:
         missing = [s for s in EXPECTED_SERIES if s not in served]
         assert not missing, f"not on /metrics: {missing}"
 
+    def test_bee_error_series_exist_at_zero_for_every_counted_endpoint(self):
+        """The "Bee calls failing" alert reads increase() of this counter (#586).
+
+        The endpoints are read from swarm_api's source, so a new
+        _record_bee_error("...") call without a matching startup series fails here.
+        """
+        import re
+        with open(os.path.join(REPO_ROOT, "app", "services", "swarm_api.py")) as f:
+            endpoints = set(re.findall(r'_record_bee_error\("([^"]+)"\)', f.read()))
+        assert endpoints, "no _record_bee_error calls found; the pattern is out of date"
+        lines = _fresh_process_exposition().splitlines()
+        missing = [e for e in sorted(endpoints)
+                   if f'gateway_bee_api_errors_total{{endpoint="{e}"}} 0.0' not in lines]
+        assert not missing, f"Bee error series not created at 0 at startup: {missing}"
+
     def test_stamp_purchase_series_are_not_precreated(self):
         # Direct purchases take any depth, so the size label can be depth-N and
         # has no bounded set to create in advance.
