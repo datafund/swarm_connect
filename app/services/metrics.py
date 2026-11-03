@@ -479,6 +479,109 @@ for _state in ("active", "idle", "stuck"):
     bee_http_pool_connections.labels(state=_state).set_function(_pool_reader(_state))
 bee_http_pool_requests.set_function(_pool_reader("requests"))
 
+# ── Flood resilience (#588) ─────────────────────────────────────────────────
+#
+# Bee calls in flight through the gate (app/services/bee_gate.py), by slot
+# class, and calls it refused. lane is one of a fixed set, so the series are
+# bounded and all exist from startup.
+BEE_GATE_LANES = ("user", "transfer", "committed", "background")
+bee_calls_in_flight = Gauge(
+    "gateway_bee_calls_in_flight",
+    "Bee calls holding a gate slot (lane=user|transfer|committed|background)",
+    ["lane"],
+)
+bee_call_rejections_total = Counter(
+    "gateway_bee_call_rejections_total",
+    "Bee calls or requests refused because no Bee call slot was free "
+    "(lane=user|transfer|committed|background, or admission: a paid route "
+    "refused before payment)",
+    ["lane"],
+)
+
+
+def _gate_reader(lane: str):
+    def read() -> float:
+        try:
+            from app.services.bee_gate import bee_call_gate
+            return float(bee_call_gate.held.get(lane, 0))
+        except Exception:
+            return float("nan")
+    return read
+
+
+for _lane in BEE_GATE_LANES:
+    bee_calls_in_flight.labels(lane=_lane).set_function(_gate_reader(_lane))
+for _lane in BEE_GATE_LANES + ("admission",):
+    bee_call_rejections_total.labels(lane=_lane)
+
+# The /health snapshot: how old the one being served is (-1 before the first),
+# and how its refreshes end.
+health_snapshot_age_seconds = Gauge(
+    "gateway_health_snapshot_age_seconds",
+    "Age of the /health snapshot being served; -1 before the first one",
+)
+HEALTH_SNAPSHOT_RESULTS = ("ok", "error", "timeout")
+health_snapshot_refreshes_total = Counter(
+    "gateway_health_snapshot_refreshes_total",
+    "Refreshes of the /health snapshot by result (ok|error|timeout)",
+    ["result"],
+)
+for _result in HEALTH_SNAPSHOT_RESULTS:
+    health_snapshot_refreshes_total.labels(result=_result)
+
+
+def _snapshot_age() -> float:
+    try:
+        from app.services.health_snapshot import snapshot_age
+        age = snapshot_age()
+        return -1.0 if age is None else float(age)
+    except Exception:
+        return float("nan")
+
+
+health_snapshot_age_seconds.set_function(_snapshot_age)
+
+# Heaviest callers in the last complete window. The label is the RANK, never
+# the caller: who they are appears only as a keyed hash tag in the log line.
+# TOP_CALLERS_N series, all present from startup at 0.
+top_caller_requests = Gauge(
+    "gateway_top_caller_requests",
+    "Requests by the rank-th heaviest caller in the last complete window",
+    ["rank"],
+)
+top_callers_distinct = Gauge(
+    "gateway_top_callers_distinct",
+    "Distinct callers in the last complete window (up to TOP_CALLERS_MAX_TRACKED)",
+)
+top_callers_untracked_total = Counter(
+    "gateway_top_callers_untracked_total",
+    "Requests not attributed to a caller because the window already tracked "
+    "TOP_CALLERS_MAX_TRACKED callers",
+)
+
+
+def _top_caller_reader(rank: int):
+    def read() -> float:
+        try:
+            from app.services.top_callers import top_caller_tracker
+            return float(top_caller_tracker.ranked_count(rank))
+        except Exception:
+            return float("nan")
+    return read
+
+
+def _top_callers_distinct() -> float:
+    try:
+        from app.services.top_callers import top_caller_tracker
+        return float(top_caller_tracker.last_distinct())
+    except Exception:
+        return float("nan")
+
+
+for _rank in range(1, settings.TOP_CALLERS_N + 1):
+    top_caller_requests.labels(rank=str(_rank)).set_function(_top_caller_reader(_rank))
+top_callers_distinct.set_function(_top_callers_distinct)
+
 # Every endpoint swarm_api counts errors for exists from startup (#586). The
 # "Bee calls failing" alert reads increase() of this counter, and a series
 # first seen at 1 gives increase() 0 for that error. The gateway restarts on

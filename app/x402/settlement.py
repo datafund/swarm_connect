@@ -921,6 +921,11 @@ async def settle_payment(request: Request) -> None:
     payer = getattr(request.state, "x402_payer", None)
     client_ip = get_client_ip(request)
 
+    # The Bee call gate must never answer for this request with "nothing was
+    # charged" from here on (#588).
+    from app.services.bee_gate import mark_payment_attempted
+    mark_payment_attempted()
+
     # For an Idempotency-Key: from here until the facilitator answers, the
     # outcome is unknown, and a retry must not be charged on the assumption
     # that nothing happened (idempotency.py).
@@ -1014,6 +1019,10 @@ async def settle_payment(request: Request) -> None:
         raise HTTPException(status_code=402, detail=detail)
 
     request.state.x402_settlement = result
+    # The rest of this request's Bee work waits for a slot rather than being
+    # refused: refusing it now would only start a refund (#588).
+    from app.services.bee_gate import mark_committed
+    mark_committed()
     # From here on a retry with the same Idempotency-Key must not pay again,
     # whatever happens to this request (#359).
     record_settlement(request, result)

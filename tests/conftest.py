@@ -124,3 +124,19 @@ def _isolate_ownership_registry():
     stamp_ownership_manager._registry = registry
     registry.clear()
     registry.update(snapshot)
+
+
+@pytest.fixture(autouse=True)
+def _reset_health_snapshot_and_gate():
+    """Each test starts with no /health snapshot and no Bee call slots held.
+
+    The snapshot is process-wide by design (#588): without this, a /health
+    answer built from one test's mocks would be served to the next test.
+    """
+    from app.services import health_snapshot
+    from app.services.bee_gate import bee_call_gate
+    health_snapshot.reset()
+    bee_call_gate.reset()
+    yield
+    health_snapshot.reset()
+    bee_call_gate.reset()

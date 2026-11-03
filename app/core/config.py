@@ -2,7 +2,7 @@
 import os
 from typing import Optional, List
 from pydantic_settings import BaseSettings, SettingsConfigDict
-from pydantic import Field, AnyHttpUrl, field_validator
+from pydantic import Field, AnyHttpUrl, field_validator, model_validator
 from functools import lru_cache
 from dotenv import load_dotenv
 
@@ -362,6 +362,54 @@ class Settings(BaseSettings):
     BEE_HTTP_POOL_STUCK_FRACTION: float = Field(0.25, gt=0, le=1, allow_inf_nan=False)
     BEE_HTTP_POOL_RECOVERY_COOLDOWN_SECONDS: float = Field(60.0, ge=0, allow_inf_nan=False)
 
+    # === Flood resilience (#588) ===
+    # Cap on Bee calls in flight at once through the shared client
+    # (app/services/bee_gate.py). Only calls to SWARM_BEE_API_URL are counted;
+    # Base RPC is not. A call made while serving a request waits at most
+    # BEE_CALL_SLOT_WAIT_SECONDS for a slot, then the request gets
+    # 503 BEE_BUSY with Retry-After instead of queueing behind the pool.
+    # BEE_RESERVED_BACKGROUND_CALLS slots are kept for work outside requests
+    # (the /health snapshot, stamp pool, metrics poller), so a flood cannot
+    # starve it. Uploads and downloads (bzz, bytes, chunks) made by requests
+    # hold at most BEE_MAX_CONCURRENT_TRANSFERS slots, so long transfers cannot
+    # starve short calls. Bee work of a request whose payment has settled waits
+    # up to BEE_BACKGROUND_SLOT_WAIT_SECONDS, like background work.
+    # Left unset, the three sizes follow BEE_HTTP_MAX_CONNECTIONS at 64%, 8%
+    # and 24% of it (64/8/24 of the default 100; 26/3/10 of 40), so lowering
+    # the pool keeps a valid gate. Set explicitly, they are used as given. The
+    # resulting cap must be below BEE_HTTP_MAX_CONNECTIONS; the gateway refuses
+    # to start otherwise (a pool of 1 leaves no room for a gate: turn it off).
+    # The proportions are a judgement, not measured.
+    BEE_CALL_GATE_ENABLED: bool = True
+    BEE_MAX_CONCURRENT_CALLS: Optional[int] = Field(None, ge=1)
+    BEE_RESERVED_BACKGROUND_CALLS: Optional[int] = Field(None, ge=0)
+    BEE_MAX_CONCURRENT_TRANSFERS: Optional[int] = Field(None, ge=1)
+    BEE_CALL_SLOT_WAIT_SECONDS: float = Field(2.0, ge=0, le=60, allow_inf_nan=False)
+    BEE_BACKGROUND_SLOT_WAIT_SECONDS: float = Field(30.0, ge=0, le=600, allow_inf_nan=False)
+    BEE_BUSY_RETRY_AFTER_SECONDS: int = Field(5, ge=1, le=3600)
+    # /health and / are served from a snapshot of the Bee node summary and the
+    # wallet balances, rebuilt at most once per HEALTH_SNAPSHOT_TTL_SECONDS by a
+    # single background refresh. A stale snapshot is served while it refreshes.
+    # A refresh is abandoned after HEALTH_SNAPSHOT_REFRESH_TIMEOUT_SECONDS. With
+    # no snapshot yet (just after startup) a request waits at most
+    # HEALTH_SNAPSHOT_FIRST_WAIT_SECONDS for the first one; keep this below the
+    # Docker healthcheck timeout (10 s).
+    HEALTH_SNAPSHOT_TTL_SECONDS: float = Field(15.0, gt=0, le=3600, allow_inf_nan=False)
+    HEALTH_SNAPSHOT_REFRESH_TIMEOUT_SECONDS: float = Field(20.0, gt=0, le=600, allow_inf_nan=False)
+    HEALTH_SNAPSHOT_FIRST_WAIT_SECONDS: float = Field(5.0, ge=0, le=60, allow_inf_nan=False)
+    # Heaviest callers, per window, without exposing who they are: callers are
+    # keyed by a keyed hash of their grouped address (IPv6 by /64). Metrics carry
+    # only ranks; the WARNING log line carries the hash tag. The hash key is
+    # random per process unless TOP_CALLERS_HASH_KEY is set (a secret: set it in
+    # the environment only), in which case an operator can compute the tag of a
+    # suspected address and tags stay the same across restarts.
+    TOP_CALLERS_ENABLED: bool = True
+    TOP_CALLERS_WINDOW_SECONDS: int = Field(60, ge=5, le=3600)
+    TOP_CALLERS_N: int = Field(5, ge=1, le=20)
+    TOP_CALLERS_MAX_TRACKED: int = Field(10000, ge=10, le=1000000)
+    TOP_CALLERS_LOG_MIN_REQUESTS: int = Field(300, ge=1)
+    TOP_CALLERS_HASH_KEY: str = ""
+
     # === Chunk Upload (stamped-chunk forwarding, Flow A) ===
     # When enabled, the gateway forwards a single client-supplied PRE-STAMPED chunk
     # to the Bee node's POST /chunks endpoint using the Swarm-Postage-Stamp header.
@@ -440,6 +488,36 @@ class Settings(BaseSettings):
         same value: a trailing space passed validation and then broke every
         payment with a KeyError (#370)."""
         return v.strip() if isinstance(v, str) else v
+
+    @model_validator(mode="after")
+    def check_bee_call_gate(self):
+        """The Bee call cap must sit below the client's connection limit (#588).
+
+        At or above it, a flood fills the pool before the gate refuses
+        anything, which is the PoolTimeout the gate exists to replace.
+        """
+        pool = self.BEE_HTTP_MAX_CONNECTIONS
+        if self.BEE_MAX_CONCURRENT_CALLS is None:
+            self.BEE_MAX_CONCURRENT_CALLS = max(1, min(pool - 1, round(pool * 0.64)))
+        calls = self.BEE_MAX_CONCURRENT_CALLS
+        if self.BEE_RESERVED_BACKGROUND_CALLS is None:
+            self.BEE_RESERVED_BACKGROUND_CALLS = min(calls - 1, max(1, round(pool * 0.08)))
+        reserved = self.BEE_RESERVED_BACKGROUND_CALLS
+        if self.BEE_MAX_CONCURRENT_TRANSFERS is None:
+            self.BEE_MAX_CONCURRENT_TRANSFERS = max(1, min(calls - reserved, round(pool * 0.24)))
+        if not self.BEE_CALL_GATE_ENABLED:
+            return self
+        problems = []
+        if self.BEE_MAX_CONCURRENT_CALLS >= self.BEE_HTTP_MAX_CONNECTIONS:
+            problems.append("BEE_MAX_CONCURRENT_CALLS must be below BEE_HTTP_MAX_CONNECTIONS")
+        if self.BEE_RESERVED_BACKGROUND_CALLS >= self.BEE_MAX_CONCURRENT_CALLS:
+            problems.append("BEE_RESERVED_BACKGROUND_CALLS must be below BEE_MAX_CONCURRENT_CALLS")
+        elif self.BEE_MAX_CONCURRENT_TRANSFERS > self.BEE_MAX_CONCURRENT_CALLS - self.BEE_RESERVED_BACKGROUND_CALLS:
+            problems.append("BEE_MAX_CONCURRENT_TRANSFERS must be at most "
+                            "BEE_MAX_CONCURRENT_CALLS - BEE_RESERVED_BACKGROUND_CALLS")
+        if problems:
+            raise ValueError("; ".join(problems))
+        return self
 
     @field_validator("X402_BLACKLIST_IPS", "X402_WHITELIST_IPS", mode="before")
     @classmethod

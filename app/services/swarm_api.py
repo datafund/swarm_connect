@@ -4,6 +4,7 @@ import datetime
 import time
 import httpx
 import logging
+import sys
 from typing import List, Dict, Any, Optional
 from urllib.parse import urljoin
 
@@ -42,7 +43,15 @@ def coerce_int(value, default: int = 0) -> int:
 
 
 def _record_bee_error(endpoint: str):
-    """Increment Bee API error counter for the given endpoint."""
+    """Increment Bee API error counter for the given endpoint.
+
+    Called from `except` blocks. A call the gateway's own Bee call gate refused
+    (#588) never reached Bee, so it is not counted as a Bee error; the gate
+    counts it in gateway_bee_call_rejections_total.
+    """
+    from app.services.bee_gate import BeeBusyError
+    if isinstance(sys.exc_info()[1], BeeBusyError):
+        return
     try:
         bee_api_errors_total.labels(endpoint=endpoint).inc()
     except Exception:
