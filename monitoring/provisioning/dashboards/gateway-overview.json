@@ -471,42 +471,42 @@
         "id": 111, "title": "Records Stored (7 days)", "type": "stat",
         "description": "Primary KPI (dataprovenance-app#34): successful uploads in the last 7 days. Production only — this row ignores the Environment dropdown, so dev and test traffic never inflates a product number. Counts every client that calls the production gateway (CLI, MCP, SDK). Only app builds from its main branch call the production gateway. Development builds call the dev gateway and are not counted here. A manifest (collection) upload counts as one record, however many files it holds.",
         "gridPos": { "h": 4, "w": 4, "x": 0, "y": 152 },
-        "targets": [{ "expr": "sum(increase(gateway_uploads_total{environment=\"main\",status=\"success\"}[7d])) or vector(0)", "legendFormat": "uploads" }],
+        "targets": [{ "expr": "sum(increase(gateway_uploads_total{environment=\"main\",status=\"success\"}[7d])) or vector(0)", "legendFormat": "uploads", "instant": true, "range": false }],
         "fieldConfig": { "defaults": { "unit": "short", "decimals": 0, "thresholds": { "mode": "absolute", "steps": [{ "value": null, "color": "purple" }] } } }
       },
       {
         "id": 112, "title": "Notarized Share (7 days)", "type": "stat",
         "description": "Successful notary signatures divided by successful uploads, last 7 days, production. The share of stored data that got a provenance signature. A signature is counted only once the signed document is stored on Swarm, so a signed upload that then fails counts as neither, and the share cannot exceed 100%. Signatures counted before the notary-success fix (#518) can stay in the 7-day window for a week after that fix is deployed, so the share can briefly exceed 100%. No data when there were no successful uploads in 7 days.",
         "gridPos": { "h": 4, "w": 4, "x": 4, "y": 152 },
-        "targets": [{ "expr": "sum(increase(gateway_notary_signatures_total{environment=\"main\",status=\"success\"}[7d])) / (sum(increase(gateway_uploads_total{environment=\"main\",status=\"success\"}[7d])) > 0)", "legendFormat": "notarized" }],
+        "targets": [{ "expr": "sum(increase(gateway_notary_signatures_total{environment=\"main\",status=\"success\"}[7d])) / (sum(increase(gateway_uploads_total{environment=\"main\",status=\"success\"}[7d])) > 0)", "legendFormat": "notarized", "instant": true, "range": false }],
         "fieldConfig": { "defaults": { "unit": "percentunit", "decimals": 0, "thresholds": { "mode": "absolute", "steps": [{ "value": null, "color": "blue" }] } } }
       },
       {
         "id": 113, "title": "Downloads (7 days)", "type": "stat",
         "description": "Successful downloads in the last 7 days, production. Shows whether stored data is being read back.",
         "gridPos": { "h": 4, "w": 4, "x": 8, "y": 152 },
-        "targets": [{ "expr": "sum(increase(gateway_downloads_total{environment=\"main\",status=\"success\"}[7d])) or vector(0)", "legendFormat": "downloads" }],
+        "targets": [{ "expr": "sum(increase(gateway_downloads_total{environment=\"main\",status=\"success\"}[7d])) or vector(0)", "legendFormat": "downloads", "instant": true, "range": false }],
         "fieldConfig": { "defaults": { "unit": "short", "decimals": 0, "thresholds": { "mode": "absolute", "steps": [{ "value": null, "color": "purple" }] } } }
       },
       {
         "id": 114, "title": "Read-back Ratio (7 days)", "type": "stat",
         "description": "Successful downloads divided by successful uploads, last 7 days, production. Above 1 means stored data is retrieved, not only written. No data when there were no successful uploads in 7 days.",
         "gridPos": { "h": 4, "w": 4, "x": 12, "y": 152 },
-        "targets": [{ "expr": "sum(increase(gateway_downloads_total{environment=\"main\",status=\"success\"}[7d])) / (sum(increase(gateway_uploads_total{environment=\"main\",status=\"success\"}[7d])) > 0)", "legendFormat": "read-back" }],
+        "targets": [{ "expr": "sum(increase(gateway_downloads_total{environment=\"main\",status=\"success\"}[7d])) / (sum(increase(gateway_uploads_total{environment=\"main\",status=\"success\"}[7d])) > 0)", "legendFormat": "read-back", "instant": true, "range": false }],
         "fieldConfig": { "defaults": { "unit": "none", "decimals": 2, "thresholds": { "mode": "absolute", "steps": [{ "value": null, "color": "blue" }] } } }
       },
       {
         "id": 115, "title": "Pool Stamp Acquires (7 days)", "type": "stat",
         "description": "Successful pool stamp acquisitions in the last 7 days, production. Shows how often users get as far as needing their own storage. Each acquisition counts, so one user can count more than once.",
         "gridPos": { "h": 4, "w": 4, "x": 16, "y": 152 },
-        "targets": [{ "expr": "sum(increase(gateway_pool_acquires_total{environment=\"main\",status=\"success\"}[7d])) or vector(0)", "legendFormat": "acquires" }],
+        "targets": [{ "expr": "sum(increase(gateway_pool_acquires_total{environment=\"main\",status=\"success\"}[7d])) or vector(0)", "legendFormat": "acquires", "instant": true, "range": false }],
         "fieldConfig": { "defaults": { "unit": "short", "decimals": 0, "thresholds": { "mode": "absolute", "steps": [{ "value": null, "color": "purple" }] } } }
       },
       {
         "id": 116, "title": "Distinct Callers Today", "type": "stat",
         "description": "Separate callers seen since midnight UTC, production. A count only, no identities. Resets daily and on every restart, so after a deploy it undercounts the day.",
         "gridPos": { "h": 4, "w": 4, "x": 20, "y": 152 },
-        "targets": [{ "expr": "sum(gateway_distinct_callers{environment=\"main\"}) or vector(0)", "legendFormat": "callers" }],
+        "targets": [{ "expr": "sum(gateway_distinct_callers{environment=\"main\"}) or vector(0)", "legendFormat": "callers", "instant": true, "range": false }],
         "fieldConfig": { "defaults": { "unit": "short", "decimals": 0, "thresholds": { "mode": "absolute", "steps": [{ "value": null, "color": "purple" }] } } }
       },
       {
