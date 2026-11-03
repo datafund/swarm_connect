@@ -439,15 +439,25 @@ def test_a_failed_write_ahead_on_the_fallback_withholds_the_result_unpaid(env, s
 
 
 def test_inner_cancel_on_the_fallback_is_a_structured_502(env, state):
+    """From Python 3.11, an inner CancelledError (this task not being cancelled) gets the
+    structured 502. Python 3.10 cannot tell it from a real cancellation of the task, so
+    there it is re-raised (the safe choice) and the client gets no settlement answer; the
+    unknown outcome is recorded either way, and nothing says "not charged"."""
     import asyncio
+    import sys
     fac = _facilitator(asyncio.CancelledError())
     r = _run(fac, path="/api/v1/data/manifest")
+    assert st.outcome_unknown.kind(KEY) == st.AFTER_WORK
+    assert "not charged" not in r.text and "accepts" not in r.text and '"ok"' not in r.text
+    if sys.version_info < (3, 11):
+        assert r.status_code == 500
+        return
     assert r.status_code == 502
     body = r.json()
     assert body["code"] == "PAYMENT_SETTLEMENT_UNKNOWN" and body["detail"]["code"] == "PAYMENT_SETTLEMENT_UNKNOWN"
     assert body["nonce"] == KEY[1]
     assert r.headers["X-Payment-Status"] == "settlement_unknown"
-    assert "not charged" not in r.text and "ok" not in body
+    assert "ok" not in body
 
 
 def test_outcome_unknown_message_says_whether_the_work_ran(env, state):
