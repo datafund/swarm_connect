@@ -420,16 +420,21 @@ The gateway exposes a `/metrics` endpoint (Prometheus text format) when `METRICS
 - `gateway_x402_payments_total{mode}` (paid/free/rejected)
 - `gateway_x402_settlements_total{result}`: `settled`, `refused` (nothing delivered or collected), `error` (outcome unknown, including a settlement interrupted by a shutdown or disconnect), `settled_not_delivered` (refund needed), `refused_after_unknown` (a retry of an authorization whose earlier settlement got no answer was refused, at verify or at settle, so the earlier transfer probably went through). All exist from startup; the "x402 settlement problems" alert fires on any `result!="settled"`
 - `gateway_rate_limit_hits_total`
+- `gateway_bee_api_errors_total{endpoint}` — failed calls from the gateway to its Bee node (`endpoint` = `batches`/`purchase`/`upload`/`chunk_upload`/`download`/`wallet`). All six exist from startup (#586). The "Bee calls failing" alert fires on more than 20 in 5 minutes, for 5 minutes: the process can keep answering `/metrics` (so `up` stays 1) while every Bee call fails
+- `gateway_bee_poll_total{status}` — balance polls; `error` when any of the Bee node wallet reads (xBZZ, xDAI, chequebook) failed. Before #586 it counted `success` unless an exception escaped, which the check functions never let happen
 - `gateway_state_save_failures_total{file}` — failed saves of a state file (#506): `file` = `pool` (stamp pool state) or `ownership` (ownership registry, including a save refused because the pre-migration copy failed, #558). The save logs at ERROR and the change stays in memory only; a restart loses it. The "State file save failures" alert fires on any increase, and stays active while `gateway_state_unsaved` is 1. A pool save refused during a #547 pause (unreadable file) is not counted here
 - `gateway_state_unsaved{file}` — 1 while a state file is behind memory after a failed save, until a save succeeds (#506): `file=ownership` while the registry's last write failed or saves are refused (#558); `file=pool` after a failed write of the pool state (a dedicated flag, not the #547 pause; 0 while the pool is disabled). Read at scrape time; both series exist from startup. Nothing retries a failed ownership save and the pool retries only on its next sync, so this, not the counter's 15-minute window, keeps the alert active while the change is unsaved
 - `gateway_chunk_uploads_total{status, mode}` (mode = paid/free/none), `gateway_chunk_upload_bytes_total`
 - `gateway_bandwidth_topups_total{status}`, `gateway_bandwidth_topup_bytes_total`
 
-**Series created at 0 at startup (#518):** `gateway_uploads_total{status=success|error}`, `gateway_downloads_total{status=success|error|too_large}`, `gateway_notary_signatures_total{status=success|error}`, `gateway_pool_acquires_total{size=small|medium|large, status=success|error|settled_not_delivered}`, `gateway_pool_allowance_refusals_total{size=small|medium|large|other, scope=origin|client, response=402|429|409}`, `gateway_x402_settlements_total{result}` and `gateway_state_save_failures_total{file=pool|ownership}`. A series created on its first event first appears at 1, and `rate()`/`increase()` have no earlier sample, so they count that event as 0; a rare event such as `settled_not_delivered` would be missed by a rate panel. A fresh gateway also shows 0 instead of "No data". A restart does not cause an undercount for a series that already existed: Prometheus treats the drop as a counter reset and counts the first event after it. Only bounded label values known at startup are created; `gateway_stamp_purchases_total` is not, because direct purchases take any depth, so its `size` can be `depth-N`.
+**Series created at 0 at startup (#518):** `gateway_uploads_total{status=success|error}`, `gateway_downloads_total{status=success|error|too_large}`, `gateway_notary_signatures_total{status=success|error}`, `gateway_pool_acquires_total{size=small|medium|large, status=success|error|settled_not_delivered}`, `gateway_pool_allowance_refusals_total{size=small|medium|large|other, scope=origin|client, response=402|429|409}`, `gateway_x402_settlements_total{result}`, `gateway_state_save_failures_total{file=pool|ownership}` and `gateway_bee_api_errors_total{endpoint}` (#586; a test reads the endpoints from `swarm_api.py`). A series created on its first event first appears at 1, and `rate()`/`increase()` have no earlier sample, so they count that event as 0; a rare event such as `settled_not_delivered` would be missed by a rate panel. A fresh gateway also shows 0 instead of "No data". A restart does not cause an undercount for a series that already existed: Prometheus treats the drop as a counter reset and counts the first event after it. Only bounded label values known at startup are created; `gateway_stamp_purchases_total` is not, because direct purchases take any depth, so its `size` can be `depth-N`.
 
 **Custom gauges** (polled every `METRICS_BALANCE_POLL_SECONDS`):
 - `gateway_wallet_bzz_balance`, `gateway_wallet_xdai_balance`
 - `gateway_chequebook_available_balance`, `gateway_base_eth_balance`
+  - These keep their **last value** when a read fails, so a Bee or RPC hiccup does not page as an empty wallet. So a balance gauge alone cannot say whether its value is current. On 2026-11-03 every wallet read failed for over 30 minutes and the gauges kept the last good balance. The chequebook gauge read a key the check never returns, so it stayed at 0 until #586 fixed it.
+- `gateway_balance_check_ok{check}` — 1 when the last poll read that balance, 0 when the read failed and the balance gauge shows an older value (#586). A balance read successfully but below threshold is 1. `check` = `xbzz`/`xdai`/`chequebook` (always), `base_eth` (when `X402_ENABLED`), `gnosis_signer` (when `STAMP_PURCHASE_FOR_OTHERS_ENABLED` and a signer is configured). The enabled checks exist from startup at 0
+- `gateway_balance_last_success_timestamp_seconds{check}` — Unix time of the last successful read, 0 until there is one; catches a poll loop that stopped altogether. The "Balance check failing" alert fires when a check is 0 or none succeeded for 15 minutes, for 15 minutes
 - `gateway_stamp_pool_available{size}`, `gateway_stamps_total`
 - `gateway_stamp_min_ttl_seconds`, `gateway_uptime_seconds`
 - `gateway_bandwidth_credit_accounts`, `gateway_bandwidth_credit_bytes_total` (when `CHUNK_UPLOAD_ENABLED`)
@@ -457,6 +462,8 @@ Per-caller detail stays in the logs, where retention is short and access is cont
 - `bee_eth_backend_calls_*` — per JSON-RPC method (`filter_logs`, `send_transaction`, `eth_call`, `balance`, …), each its own counter rather than a label
 - `bee_eth_backend_average_block_time_seconds` — block time as the node observes it
 
+**Public /health probe** (#586, `job="swarm_connect/health_probe"`, labels `environment`, `host`, `instance` = the URL): Alloy's blackbox exporter calls each environment's public `/health` every 60 s through DNS, TLS and the reverse proxy, with an 8 s timeout, and requires status 200 and `bee_node.healthy` true in the body. Only `probe_success`, `probe_http_status_code` (0 on a timeout or connection failure), `probe_duration_seconds` and `probe_failed_due_to_regex` (1 = answered 200 but Bee not healthy) are kept. The stack also holds Synthetic Monitoring `probe_*` series for other sites, so always select on the job.
+
 > Alloy keeps only `bee_eth_backend_*` and `up` from Bee's `/metrics`. Bee exposes 874 series per node; forwarding all of them would multiply Grafana Cloud ingest for no benefit. The API port is not published, so this is reachable only on the compose network.
 
 > New metrics are scraped by Grafana Alloy and remote-written to Grafana Cloud automatically once deployed (no extra wiring). Adding them as **panels** on `monitoring/provisioning/dashboards/gateway-overview.json` is a separate, deliberate step (tracked in its own issue).
@@ -467,7 +474,8 @@ Per-caller detail stays in the logs, where retention is short and access is cont
 Gateway containers ──/metrics──> Alloy ──remote write──> Grafana Cloud Prometheus
   (port 8000)          └─logs──>   │   ──push──────────> Grafana Cloud Loki
 Bee nodes ────────/metrics────────┘                      (dashboards + alerts)
-  (port 1633, bee_eth_backend_* only)
+  (port 1633, bee_eth_backend_* only)                  │
+Public /health URLs <──blackbox probe── Alloy ─────────┘
 ```
 
 **How it works:**
@@ -477,6 +485,9 @@ Bee nodes ────────/metrics────────┘           
 - Alloy also **tails both gateway containers' logs** via the Docker API and pushes them to Grafana Cloud Loki
 - Grafana Cloud stores metrics (14-day retention) and hosts dashboards
 - Environment labels: `development` (dev branch) and `main` (main branch)
+- Alloy also **probes each environment's public `/health`** every 60 s (#586). `up` only says Alloy could scrape `/metrics`, which never calls Bee: on 2026-11-03 staging kept answering `/metrics` for over 30 minutes while every Bee call failed and users got 502s, and nothing alerted
+
+**Docker `unhealthy` is alerted on, not acted on (#586).** The container healthcheck (`curl -f http://localhost:8000/`, 10 s timeout, 3 retries) calls the same handler as `/health`. The probe calls it with a stricter 8 s timeout, so whenever Docker marks the container unhealthy, the probe fails too and "Public health check failing" fires. Nothing restarts the container automatically, on purpose: a restart can lose changes that are not saved yet (see "State file save failures", #506). The probe runs on the gateway host itself, so it does not see the host or its network going away; `monitoring/alerting/README.md` describes Grafana Synthetic Monitoring as the option for a truly external check.
 
 **Logs (#190).** Metrics say how many errors there were; they never say what the error was. Reading one meant SSH to the host and `docker logs` per container — how every investigation in this repository has started, including #299, where the answer was a single line in the reverse proxy's log.
 
@@ -503,7 +514,8 @@ If the two Loki secrets are absent the log pipeline reports unhealthy and drops 
 **Dashboard:** `datafund.grafana.net/d/gateway-overview`
 
 **Key files:**
-- `monitoring/alloy/config.alloy` — Alloy scrape + remote write config
+- `monitoring/alloy/config.alloy` — Alloy scrape, public /health probe, log shipping and remote write config
+- `monitoring/alerting/alert-rules.json` — alert rules (applied with `scripts/apply_grafana.py`)
 - `monitoring/provisioning/dashboards/gateway-overview.json` — dashboard JSON (pushed to Grafana Cloud via API)
 
 ### Local Monitoring Stack
