@@ -14,10 +14,12 @@ keeps the connection, in the CONNECTING state with no socket. It is never idle,
 closed or expired, so nothing removes it, and it holds a max_connections slot
 for good. Enough of them and every call times out waiting for the pool.
 
-These two tests describe upstream behaviour, so they pass either way: they
-assert that the leak reproduces exactly as described, or that the pool stays
-usable (an httpcore release that fixed it), and record which. The recovery
-tests further down do not depend on the leak still existing.
+On httpcore 1.0.9 and older, the deterministic test requires the leak, so a
+reproduction that silently stops triggering fails. On a newer httpcore it
+accepts either the leak exactly as described or a usable pool (a release that
+fixed it, with a warning), and records which. The load test, which depends on
+timing, always accepts either and records which. The recovery tests further down
+do not depend on the leak still existing.
 """
 import asyncio
 import contextlib
@@ -27,9 +29,11 @@ import warnings
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import anyio
+import httpcore
 import httpx
 import pytest
 import pytest_asyncio
+from packaging.version import Version
 from prometheus_client import REGISTRY
 
 import app.services.http_client as hc
@@ -105,8 +109,67 @@ async def bee():
         await stub.stop()
 
 
+# The last httpcore release known to leak (#587). On it and older ones the
+# reproduction must reproduce; a newer release may have fixed the leak, so
+# there a usable pool is accepted, with a warning.
+LAST_KNOWN_LEAKING_HTTPCORE = Version("1.0.9")
+HTTPCORE_KNOWN_TO_LEAK = Version(httpcore.__version__) <= LAST_KNOWN_LEAKING_HTTPCORE
+
+
 def raw_pool(client: httpx.AsyncClient):
     return client._transport._pool
+
+
+class RecordingBackend:
+    """httpcore's network backend, keeping every stream it opens.
+
+    A request cancelled under load can drop a socket without closing it: a
+    connection that leaves the pool unclosed, or a connect cancelled after
+    the socket was made. client.aclose() reaches neither. Each connect runs in
+    its own task, so a cancellation of the request still reaches httpcore at
+    once (the same CancelledError, at the same await) while the connect
+    finishes and its stream is recorded. Teardown closes everything recorded,
+    so the test leaves no socket for the garbage collector to warn about.
+    """
+
+    def __init__(self, inner):
+        self._inner = inner
+        self.streams = []
+        self._connects = set()
+
+    async def connect_tcp(self, *args, **kwargs):
+        task = asyncio.ensure_future(self._inner.connect_tcp(*args, **kwargs))
+        self._connects.add(task)
+        task.add_done_callback(self._record)
+        return await asyncio.shield(task)
+
+    def _record(self, task):
+        self._connects.discard(task)
+        if not task.cancelled() and task.exception() is None:
+            self.streams.append(task.result())
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
+
+    async def aclose_all(self):
+        if self._connects:
+            await asyncio.gather(*self._connects, return_exceptions=True)
+        for stream in self.streams:
+            with contextlib.suppress(Exception):
+                await stream.aclose()
+
+
+def recording_client(**kwargs):
+    """A plain httpx client whose sockets the test can close in teardown."""
+    client = httpx.AsyncClient(**kwargs)
+    pool = raw_pool(client)
+    pool._network_backend = RecordingBackend(pool._network_backend)
+    return client
+
+
+async def close_recording_client(client):
+    await client.aclose()
+    await raw_pool(client)._network_backend.aclose_all()
 
 
 def stuck_connections(pool):
@@ -155,8 +218,8 @@ class TestReproduction:
     async def test_cancelled_request_keeps_a_slot_without_socket(self, bee, record_property):
         """Deterministic: each cancelled queued request costs one slot for good."""
         max_connections = 3
-        client = httpx.AsyncClient(limits=httpx.Limits(max_connections=max_connections),
-                                   timeout=httpx.Timeout(5.0, pool=0.3))
+        client = recording_client(limits=httpx.Limits(max_connections=max_connections),
+                                  timeout=httpx.Timeout(5.0, pool=0.3))
         try:
             pool = raw_pool(client)
             await leak_slots(client, pool, bee.url("/close"), max_connections, max_connections)
@@ -168,6 +231,10 @@ class TestReproduction:
                 later = e
                 outcome = "leak"
             record_property("httpcore_587_outcome", outcome)
+            if HTTPCORE_KNOWN_TO_LEAK:
+                assert outcome == "leak", (
+                    f"httpcore {httpcore.__version__} is known to leak (#587), but the "
+                    "deterministic reproduction did not trigger it: the reproduction is broken")
 
             if outcome == "leak":
                 # The pool counts itself full ...
@@ -186,7 +253,7 @@ class TestReproduction:
                 assert later.status_code == 200
                 assert not stuck
         finally:
-            await client.aclose()
+            await close_recording_client(client)
 
     @pytest.mark.asyncio
     async def test_bee_errors_and_cancellations_under_load(self, bee, record_property):
@@ -195,8 +262,8 @@ class TestReproduction:
         Runs until a call on the shared client gets PoolTimeout or 20 s pass.
         """
         max_connections = 4
-        client = httpx.AsyncClient(limits=httpx.Limits(max_connections=max_connections),
-                                   timeout=httpx.Timeout(10.0, connect=5.0, pool=0.5))
+        client = recording_client(limits=httpx.Limits(max_connections=max_connections),
+                                  timeout=httpx.Timeout(10.0, connect=5.0, pool=0.5))
         rng = random.Random(5870)
         pool = raw_pool(client)
 
@@ -228,6 +295,11 @@ class TestReproduction:
                 except httpx.HTTPError:
                     pass
             record_property("httpcore_587_load_outcome", outcome)
+            # Not pinned to "leak" on the known version, unlike the deterministic
+            # test above: whether random load hits the window depends on timing.
+            # Measured: it leaks within about 2 s in a normal run on Python 3.10
+            # and 3.13, but never in 120 s under tracemalloc, which slows every
+            # allocation. Pinning it would make a slow CI runner fail.
             await asyncio.sleep(0.1)
             if outcome == "leak":
                 stuck = stuck_connections(pool)
@@ -240,7 +312,7 @@ class TestReproduction:
                 warnings.warn("No PoolTimeout within 20 s of load (#587): httpcore may have fixed the leak")
                 assert (await client.get(bee.url("/ok"))).status_code == 200
         finally:
-            await client.aclose()
+            await close_recording_client(client)
 
 
 # --------------------------------------------------------------------------
@@ -559,3 +631,88 @@ class TestExceptionText:
             await preflight.check_xbzz_balance()
         assert any(r.getMessage() == "Failed to check xBZZ balance: PoolTimeout" for r in caplog.records), \
             [r.getMessage() for r in caplog.records]
+
+    def test_data_download_logs_the_type_of_an_empty_error(self, caplog):
+        from fastapi.testclient import TestClient
+        from app.main import app
+        with patch("app.api.endpoints.data.download_data_from_swarm",
+                   AsyncMock(side_effect=httpx.PoolTimeout(""))), \
+             caplog.at_level("ERROR", logger="app.api.endpoints.data"):
+            response = TestClient(app).get("/api/v1/data/" + "a" * 64)
+        assert response.status_code == 502
+        # The response text is unchanged; only the log names the type.
+        assert response.json()["detail"] == \
+            "Failed to download data from Swarm. The Bee node may be unavailable."
+        assert any(r.getMessage() == "Swarm API error during download: PoolTimeout"
+                   for r in caplog.records), [r.getMessage() for r in caplog.records]
+
+    def test_debug_proxy_logs_the_type_of_an_empty_error(self, caplog):
+        import time as _time
+        from eth_account import Account
+        from eth_account.messages import encode_defunct
+        from fastapi.testclient import TestClient
+        from app.main import app
+        key = "0x" + "22" * 32
+        debug_settings = MagicMock()
+        debug_settings.get_debug_allowed_addresses.return_value = [Account.from_key(key).address.lower()]
+        debug_settings.DEBUG_SIG_MAX_AGE_SECONDS = 300
+        debug_settings.SWARM_BEE_API_URL = "http://bee.test/"
+        ts = int(_time.time())
+        signed = Account.sign_message(encode_defunct(text=f"swarm-connect-debug:{ts}"), private_key=key)
+        headers = {"X-Debug-Timestamp": str(ts), "X-Debug-Signature": "0x" + bytes(signed.signature).hex()}
+        bee_client = MagicMock()
+        bee_client.get = AsyncMock(side_effect=httpx.PoolTimeout(""))
+        with patch("app.api.endpoints.debug.settings", debug_settings), \
+             patch("app.api.endpoints.debug.get_client", return_value=bee_client), \
+             caplog.at_level("WARNING", logger="app.api.endpoints.debug"):
+            response = TestClient(app).get("/api/v1/debug/bee/topology", headers=headers)
+        assert response.status_code == 502
+        assert response.json()["detail"] == "Bee node request failed"
+        assert any(r.getMessage().endswith("): PoolTimeout") for r in caplog.records), \
+            [r.getMessage() for r in caplog.records]
+
+    def test_stamp_health_check_logs_the_type_of_an_empty_error(self, caplog):
+        from fastapi.testclient import TestClient
+        from app.main import app
+        with patch("app.services.swarm_api.get_stamp_health_check",
+                   AsyncMock(side_effect=httpx.PoolTimeout(""))), \
+             caplog.at_level("ERROR", logger="app.api.endpoints.stamps"):
+            response = TestClient(app).get(f"/api/v1/stamps/{'a' * 64}/check")
+        assert response.status_code == 502
+        assert response.json()["detail"] == "Could not fetch stamp data. The Bee node may be unavailable."
+        assert any(r.getMessage() == "Failed to check stamp health from Swarm API: PoolTimeout"
+                   for r in caplog.records), [r.getMessage() for r in caplog.records]
+
+    @pytest.mark.asyncio
+    async def test_stamp_pool_replenish_logs_the_type_of_an_empty_error(self, caplog, tmp_path):
+        from app.services.stamp_pool import StampPoolManager
+        manager = StampPoolManager(state_file=str(tmp_path / "pool_state.json"))
+        with patch.object(manager, "_immediate_replenish_paused", return_value=False), \
+             patch.object(manager, "_purchase_stamp", AsyncMock(side_effect=httpx.PoolTimeout(""))), \
+             caplog.at_level("ERROR", logger="app.services.stamp_pool"):
+            await manager._async_replenish_one(17)
+        assert any(r.getMessage() == "Immediate replenishment failed for depth 17: PoolTimeout"
+                   for r in caplog.records), [r.getMessage() for r in caplog.records]
+
+
+class TestProxyEnvironment:
+    """Bee is reached directly, whatever proxy the environment names."""
+
+    PROXY_ENV = {"HTTP_PROXY": "http://127.0.0.1:9", "HTTPS_PROXY": "http://127.0.0.1:9",
+                 "ALL_PROXY": "http://127.0.0.1:9", "NO_PROXY": ""}
+
+    @pytest.mark.asyncio
+    async def test_shared_client_and_probe_ignore_proxy_variables(self, shared, monkeypatch):
+        for name, value in self.PROXY_ENV.items():
+            monkeypatch.setenv(name, value)
+            monkeypatch.setenv(name.lower(), value)
+        # Control: a default client does go to the (closed) proxy and fails.
+        async with httpx.AsyncClient(timeout=2.0) as proxied:
+            with pytest.raises(httpx.HTTPError):
+                await proxied.get(shared.url("/ok"))
+        # The shared client, rebuilt with the variables set, and the probe go direct.
+        await hc.close_client()
+        await hc.init_client()
+        response = await hc.get_client().get(shared.url("/ok"), timeout=SHORT_POOL_WAIT)
+        assert response.status_code == 200
+        assert await hc.probe_bee() is True

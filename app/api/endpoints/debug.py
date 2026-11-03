@@ -26,7 +26,7 @@ from fastapi import APIRouter, Header, HTTPException, Request, status
 from fastapi.responses import Response
 
 from app.core.config import settings
-from app.services.http_client import get_client
+from app.services.http_client import exc_text, get_client
 from app.services.signed_auth import DEBUG_PREFIX, authorize_signed_request
 
 logger = logging.getLogger(__name__)
@@ -90,7 +90,7 @@ async def debug_bee(
         client = get_client()
         resp = await client.get(url, timeout=15)
     except httpx.HTTPError as e:
-        logger.warning(f"debug proxy: Bee request failed ({url}): {e}")
+        logger.warning(f"debug proxy: Bee request failed ({url}): {exc_text(e)}")
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="Bee node request failed")
 
     return Response(
