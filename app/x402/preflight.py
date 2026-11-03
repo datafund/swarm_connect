@@ -45,6 +45,7 @@ async def check_xbzz_balance() -> Dict[str, Any]:
         - threshold_bzz: float - warning threshold in BZZ
         - wallet_address: str or None - Bee node wallet address on Gnosis
         - warning: str or None - warning message if below threshold
+        - read_failed: bool - the balance could not be read (#589)
     """
     try:
         wallet_info = await get_wallet_info()
@@ -71,7 +72,8 @@ async def check_xbzz_balance() -> Dict[str, Any]:
             "balance_bzz": balance_bzz,
             "threshold_bzz": threshold_bzz,
             "wallet_address": wallet_address,
-            "warning": warning
+            "warning": warning,
+            "read_failed": False,
         }
 
     except Exception as e:
@@ -86,7 +88,10 @@ async def check_xbzz_balance() -> Dict[str, Any]:
             # /health is unauthenticated and str(e) names the Bee API URL for an
             # httpx error (#549); the full text is logged above.
             "warning": (f"Failed to fetch xBZZ balance from the Bee node "
-                        f"({error_cause(e)}); see the gateway log for details.")
+                        f"({error_cause(e)}); see the gateway log for details."),
+            # The balance could not be read at all (#589), as opposed to read
+            # and found low.
+            "read_failed": True,
         }
 
 
@@ -104,6 +109,7 @@ async def check_xdai_balance() -> Dict[str, Any]:
         - threshold_xdai: float - warning threshold in xDAI
         - wallet_address: str or None - Bee node wallet address on Gnosis
         - warning: str or None - warning message if below threshold
+        - read_failed: bool - the balance could not be read (#589)
     """
     try:
         wallet_info = await get_wallet_info()
@@ -130,7 +136,8 @@ async def check_xdai_balance() -> Dict[str, Any]:
             "balance_xdai": balance_xdai,
             "threshold_xdai": threshold_xdai,
             "wallet_address": wallet_address,
-            "warning": warning
+            "warning": warning,
+            "read_failed": False,
         }
 
     except Exception as e:
@@ -145,7 +152,10 @@ async def check_xdai_balance() -> Dict[str, Any]:
             # /health is unauthenticated and str(e) names the Bee API URL for an
             # httpx error (#549); the full text is logged above.
             "warning": (f"Failed to fetch xDAI balance from the Bee node "
-                        f"({error_cause(e)}); see the gateway log for details.")
+                        f"({error_cause(e)}); see the gateway log for details."),
+            # The balance could not be read at all (#589), as opposed to read
+            # and found low.
+            "read_failed": True,
         }
 
 
@@ -165,6 +175,7 @@ async def check_chequebook_balance() -> Dict[str, Any]:
         - threshold_bzz: float - warning threshold in BZZ
         - chequebook_address: str or None - chequebook contract address
         - warning: str or None - warning message if below threshold
+        - read_failed: bool - the balance could not be read (#589)
     """
     try:
         # Try to get both address and balance via get_chequebook_info.
@@ -203,7 +214,8 @@ async def check_chequebook_balance() -> Dict[str, Any]:
             "total_balance_bzz": total_bzz,
             "threshold_bzz": threshold_bzz,
             "chequebook_address": chequebook_address,
-            "warning": warning
+            "warning": warning,
+            "read_failed": False,
         }
 
     except Exception as e:
@@ -220,7 +232,10 @@ async def check_chequebook_balance() -> Dict[str, Any]:
             # /health is unauthenticated and str(e) names the Bee API URL for an
             # httpx error (#549); the full text is logged above.
             "warning": (f"Failed to fetch chequebook balance from the Bee node "
-                        f"({error_cause(e)}); see the gateway log for details.")
+                        f"({error_cause(e)}); see the gateway log for details."),
+            # The balance could not be read at all (#589), as opposed to read
+            # and found low.
+            "read_failed": True,
         }
 
 
@@ -233,7 +248,8 @@ async def check_preflight_balances() -> Dict[str, Any]:
 
     Returns:
         Dict containing:
-        - can_accept: bool - whether gateway can accept new payments
+        - can_accept: bool - whether gateway can accept new payments; false
+          when the xBZZ or xDAI balance could not be read (#589)
         - xbzz_ok: bool - xBZZ balance above threshold
         - xdai_ok: bool - xDAI balance above threshold
         - chequebook_ok: bool - chequebook balance above threshold
@@ -241,8 +257,8 @@ async def check_preflight_balances() -> Dict[str, Any]:
         - warnings: list - non-blocking warnings
         - errors: list - blocking errors
 
-    The gateway can still accept payments if there are warnings,
-    but not if there are errors.
+    The gateway can still accept payments if there are warnings, but not if
+    there are errors or the xBZZ or xDAI balance could not be read.
     """
     warnings: List[str] = []
     errors: List[str] = []
@@ -279,14 +295,26 @@ async def check_preflight_balances() -> Dict[str, Any]:
     if chequebook_result["available_balance_bzz"] == 0.0 and "Failed to fetch" in str(chequebook_result.get("warning", "")):
         warnings.append("Cannot verify chequebook balance - Bee node may be unreachable")
 
-    # Can accept payments unless there are blocking errors.
-    # Low balances and Bee node connectivity issues are warnings (degraded),
-    # not blocking errors.
-    can_accept = len(errors) == 0
+    # Can accept payments unless there are blocking errors, or the xBZZ or
+    # xDAI balance could not be read (#589). A balance that cannot be read is
+    # not a balance that is OK: in practice the Bee node's wallet API is
+    # failing, and a paid stamp purchase would fail after its payment settled.
+    # Paid requests are then refused before payment (app/x402/accept_gate.py).
+    #
+    # Neither is a blocking error: `errors` makes /health `critical`, which the
+    # SDK reads as "gateway down" (#108 kept Bee connectivity out of it). So
+    # /health reads `degraded`. A low balance that was read, and a chequebook
+    # that could not be read, stay warnings.
+    balances_unreadable = bool(xbzz_result.get("read_failed")) or bool(xdai_result.get("read_failed"))
+    if balances_unreadable:
+        warnings.append("Paid requests are refused: the xBZZ or xDAI balance could not be read "
+                        "from the Bee node")
+    can_accept = len(errors) == 0 and not balances_unreadable
 
     logger.info(
         f"Pre-flight check complete: can_accept={can_accept}, "
         f"xbzz_ok={xbzz_ok}, xdai_ok={xdai_ok}, chequebook_ok={chequebook_ok}, "
+        f"balances_unreadable={balances_unreadable}, "
         f"warnings={len(warnings)}, errors={len(errors)}"
     )
 

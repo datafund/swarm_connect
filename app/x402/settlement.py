@@ -70,6 +70,14 @@ class PaymentReplayGuard:
             self._reserved[key] = now + REPLAY_WINDOW_SECONDS
             return True
 
+    def is_reserved(self, key: Optional[Tuple[str, str]]) -> bool:
+        """Whether `key` is reserved and not expired. Read-only (#589)."""
+        if key is None:
+            return False
+        with self._lock:
+            until = self._reserved.get(key)
+            return until is not None and until > time.monotonic()
+
     def release(self, key: Optional[Tuple[str, str]]) -> None:
         """Release an authorization that was not settled, so it can be retried."""
         if key is None:

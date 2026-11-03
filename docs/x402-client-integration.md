@@ -674,6 +674,7 @@ If the gateway cannot read or write its record of these authorizations, every pa
 | 422 `IDEMPOTENCY_KEY_REUSED` | Same `Idempotency-Key` for a different request | Use a new key |
 | 409 `IDEMPOTENCY_KEY_SETTLED_PENDING` | The first request was paid but produced no stored result | Contact the operator with the `transaction` |
 | 503 `IDEMPOTENCY_UNAVAILABLE` | The gateway's idempotency store is unreadable, unwritable or not responding | Retry later; not charged |
+| 503 `PAYMENTS_UNAVAILABLE` | The gateway cannot accept payments right now (its Bee node is unreachable or its wallet cannot be read). Returned instead of the `402` and before any payment is verified | This request was not charged; retry after `Retry-After`, or use the free tier. A retry of an earlier charged request (same `Idempotency-Key` with a stored result, or an authorization whose settlement is in progress or whose work already ran) is not refused by this check, but it is still priced before verification, so while the gateway cannot price (Bee down) it can get `503` "Failed to calculate price" or `BEE_BUSY` instead of its stored result or `409`; retry it later unchanged |
 
 ## References
 

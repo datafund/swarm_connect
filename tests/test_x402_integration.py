@@ -695,7 +695,11 @@ class TestHealthEndpointWithX402:
             "warnings": [], "errors": []
         }
         from app.main import read_root
-        response = await read_root()
+        # A reachable, healthy Bee node: this test is about the pay-to wallet,
+        # and an unreachable node makes /health degraded (#589).
+        with patch("app.services.swarm_api.get_node_status_summary",
+                   new=AsyncMock(return_value={"healthy": True, "network_availability": "Available", "warnings": []})):
+            response = await read_root()
         # The pay-to balance is informational (#371): a low one is reported but
         # does not degrade the gateway.
         assert response["status"] == "ok"
@@ -724,7 +728,11 @@ class TestHealthEndpointWithX402:
             "warnings": [], "errors": []
         }
         from app.main import read_root
-        response = await read_root()
+        # A reachable, healthy Bee node: this test is about the pay-to wallet,
+        # and an unreachable node makes /health degraded (#589).
+        with patch("app.services.swarm_api.get_node_status_summary",
+                   new=AsyncMock(return_value={"healthy": True, "network_availability": "Available", "warnings": []})):
+            response = await read_root()
         # A (near-)empty pay-to wallet is correct for a cold mainnet address (#371).
         assert response["status"] == "ok"
         assert response["x402"]["base_wallet"]["is_critical"] is True

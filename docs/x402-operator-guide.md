@@ -358,9 +358,17 @@ curl http://localhost:8000/health | jq .
 **Status Values:**
 | Status | Meaning | HTTP Code |
 |--------|---------|-----------|
-| `ok` | All wallets healthy | 200 |
-| `degraded` | Low balance warnings, still operating | 200 |
-| `critical` | Cannot process payments | 200 |
+| `ok` | Bee node reachable and payments accepted | 200 |
+| `degraded` | Something needs attention. Paid requests may be refused. Causes: the Bee node API cannot be reached (`bee_node.api_reachable: false`), the node reports `network_availability: Unavailable`, the xBZZ or xDAI balance cannot be read (`x402.bee_gnosis_wallet.can_accept: false`, paid requests get `503 PAYMENTS_UNAVAILABLE`), payment state cannot be written, there is no snapshot yet (just after startup), or the snapshot is too old to trust | 200 |
+| `critical` | A blocking error in `x402.errors`. Nothing sets one today; the SDK's `health()` reports false only for this value | 200 |
+
+An unreachable Bee node is `degraded` and not `critical` on purpose (#108, #589): the SDK
+treats `critical` as "gateway down", and a Bee outage is usually short. Monitors that
+must tell "gateway alive" from "Bee reachable" should read `bee_node.healthy`. It is also
+false when the health snapshot is too old to trust (its refreshes keep failing): the Bee
+state is then unknown, `bee_node.api_reachable` is null, and a warning says so.
+
+A low balance that could still be read is a warning only and does not change `status`.
 
 ### Pre-flight Checks
 
@@ -375,8 +383,32 @@ The gateway performs pre-flight checks before accepting payments:
 4. **ETH Balance**: Does facilitator have gas for USDC transfers?
 
 **Threshold Behavior:**
-- **Below warning threshold**: Log warning, accept payments, status = `degraded`
-- **Below critical threshold**: Block paid requests via middleware, status = `critical`
+- **Below warning threshold**: Log warning, accept payments. `status` does not change.
+- **Balance cannot be read** (xBZZ or xDAI; #589): `can_accept` is false, `status` is
+  `degraded`, and every paid request (and every request that would be offered a 402)
+  gets `503 PAYMENTS_UNAVAILABLE` before payment, so that request is not charged. A
+  retry of an attempt that may have been charged, answered from stored state (a stored
+  result or a 409), is not refused by this check, though its pricing can still fail while
+  Bee is down. Free-tier
+  requests still run. An unreadable chequebook balance alone is a warning only.
+- **Snapshot too old to trust**: the checks come from the `/health` snapshot (#588). When
+  its refreshes keep failing and it is older than `HEALTH_SNAPSHOT_MAX_TRUSTED_AGE_SECONDS`
+  (default 60, never less than TTL + refresh timeout), paid requests are refused the same
+  way and `status` is `degraded`.
+
+The check reads the cached snapshot, so it adds no Bee call per request. It can lag by
+up to `HEALTH_SNAPSHOT_TTL_SECONDS` (15 s): just after Bee recovers, paid requests can
+still be refused for that long. Just after Bee fails, a paid request can still pass and
+fail after settlement, which leads to the usual refund path. If Bee fails by not
+answering at all, refreshes take until their timeout to fail, so this window can last
+until the snapshot is too old to trust: up to `HEALTH_SNAPSHOT_MAX_TRUSTED_AGE_SECONDS`
+(60 s), not only one TTL.
+
+**Edge case:** the gate keys on Bee's `/wallet` endpoint. If `/wallet` fails while the rest
+of Bee still works (uploads succeed), every paid route is refused, including paid uploads
+that do not spend xBZZ. `/health` shows it as `can_accept: false` with a "Failed to fetch
+xBZZ balance" warning while `bee_node.api_reachable` is true. Check the Bee node's wallet
+API (`curl <bee>/wallet` from the gateway host); free-tier uploads keep working meanwhile.
 
 ### Check Gateway Status
 
@@ -420,10 +452,12 @@ Since there's no automatic bridging, you need to manually manage:
 
 ## Troubleshooting
 
-### Health endpoint shows `critical` status
+### Health endpoint shows `degraded` or `critical` status
 
-Gateway wallet is below critical thresholds. The health endpoint always returns HTTP 200
-so the gateway stays reachable — check the `status` field in the JSON response.
+The health endpoint always returns HTTP 200 so the gateway stays reachable — check the
+`status` field in the JSON response, then `bee_node.api_reachable`, `bee_node.healthy`,
+`snapshot.warnings` and `x402.bee_gnosis_wallet.can_accept`. If `can_accept` is false,
+paid requests are getting `503 PAYMENTS_UNAVAILABLE` until the Bee wallet can be read again.
 
 1. Check health endpoint: `curl http://localhost:8000/health | jq .`
 2. Look at `x402.base_wallet.is_critical` and `x402.bee_gnosis_wallet.can_accept`

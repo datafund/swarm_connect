@@ -412,6 +412,9 @@ for _result in ("settled", "refused", "error", "settled_not_delivered", "refused
 x402_payments_total = Counter(
     "gateway_x402_payments_total", "x402 payment mode breakdown", ["mode"]
 )
+# Paid requests refused before payment while the gateway cannot accept them
+# (#589): a rare event, so the series exists from startup.
+x402_payments_total.labels(mode="unavailable")
 rate_limit_hits_total = Counter(
     "gateway_rate_limit_hits_total", "Rate limit rejections"
 )

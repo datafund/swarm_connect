@@ -76,6 +76,45 @@ def last_failure() -> Optional[str]:
     return _last_failure
 
 
+def max_trusted_age() -> float:
+    """Seconds after which a snapshot whose refresh has failed is not trusted (#589).
+
+    Never less than one TTL plus one refresh timeout: a snapshot is that old
+    in normal operation just before a slow refresh lands.
+    """
+    return max(settings.HEALTH_SNAPSHOT_MAX_TRUSTED_AGE_SECONDS,
+               settings.HEALTH_SNAPSHOT_TTL_SECONDS + settings.HEALTH_SNAPSHOT_REFRESH_TIMEOUT_SECONDS)
+
+
+def too_old(snapshot: Optional["HealthSnapshot"]) -> bool:
+    """The snapshot is too old to trust (#589).
+
+    True when the last refresh failed and the snapshot is older than
+    max_trusted_age(). An old snapshot whose refreshes did not fail is not too
+    old: refreshes are started by requests, so on an idle gateway the first
+    request finds an old snapshot and starts the refresh itself.
+    """
+    if snapshot is None or _last_failure is None:
+        return False
+    return snapshot.age() > max_trusted_age()
+
+
+def peek(x402: bool) -> Optional["HealthSnapshot"]:
+    """The current snapshot without waiting, or None if there is none (#589).
+
+    For per-request checks: never waits and never calls Bee. A stale snapshot
+    starts the single-flight refresh in the background, as get_snapshot does.
+    With none at all it starts nothing: startup and /health build the first.
+    """
+    snap = _current if (_current is not None and _current.x402 == x402) else None
+    if snap is not None and snap.age() >= settings.HEALTH_SNAPSHOT_TTL_SECONDS:
+        try:
+            _start_refresh(x402)
+        except RuntimeError:  # no running event loop
+            pass
+    return snap
+
+
 def _count(result: str) -> None:
     try:
         from app.services.metrics import health_snapshot_refreshes_total
