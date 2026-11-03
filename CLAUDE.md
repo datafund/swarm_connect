@@ -153,7 +153,7 @@ CORS (browser access):
 
 **Stamp list query parameters**:
 - `global` (bool): If true, return all stamps including non-local (old behavior)
-- `wallet` (string): Filter to stamps accessible by this wallet address (requires x402 enabled)
+- `wallet` (string): Filter to stamps accessible by this wallet address (requires x402 enabled). Case-insensitive (#491): canonicalised with `normalize_address`, as the ownership registry stores owners, so a checksummed, uppercase or unprefixed address finds its own stamps. Where the filter applies (x402 enabled, `global` not true), an invalid address is `422` instead of an empty list; where it is ignored it is not checked. Validated before the handler's `try`, whose `except Exception` would make it a 500.
 - `exclusive` (bool): When used with `wallet`, return only stamps purchased by this wallet (excludes shared/free and untracked)
 
 **Propagation timing fields** (included in all stamp responses):

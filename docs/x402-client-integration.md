@@ -633,7 +633,7 @@ What to know about the retry's payment:
 
 ## 202 Accepted from a paid stamp purchase
 
-If the Bee node has not confirmed a paid purchase within the gateway's deadline (120 s by default), the gateway, having already collected the payment, answers `202` with `code: PURCHASE_PENDING`, the payment `transaction`, and the batch `label`. The batch is registered to the paying wallet as soon as the node reports it: list `GET /api/v1/stamps/?wallet=<your address>` and look for that label, or retry with the same `Idempotency-Key`, which returns the `201` with the `batchID` once it is found (or, if it is never found within 15 minutes, `500 DELIVERY_FAILED_AFTER_PAYMENT` with the transaction for a refund). Do not pay again. A `202` is not a failure. A `503` with `code: PURCHASE_CAPACITY` means too many purchases are waiting on the node; nothing was charged, retry shortly.
+If the Bee node has not confirmed a paid purchase within the gateway's deadline (120 s by default), the gateway, having already collected the payment, answers `202` with `code: PURCHASE_PENDING`, the payment `transaction`, and the batch `label`. The batch is registered to the paying wallet as soon as the node reports it: list `GET /api/v1/stamps/?wallet=<your address>` (any casing; an invalid address is `422`) and look for that label, or retry with the same `Idempotency-Key`, which returns the `201` with the `batchID` once it is found (or, if it is never found within 15 minutes, `500 DELIVERY_FAILED_AFTER_PAYMENT` with the transaction for a refund). Do not pay again. A `202` is not a failure. A `503` with `code: PURCHASE_CAPACITY` means too many purchases are waiting on the node; nothing was charged, retry shortly.
 
 ## Payment settlement errors
 
