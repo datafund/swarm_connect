@@ -164,7 +164,7 @@ Then check an upload to a known owned stamp.
 | `file` | What is refused | Clears |
 |---|---|---|
 | `pool` (`pool_state.json`) | Pool purchases and top-ups (spending paused, #547) | On the first full sync after the file is readable again; no restart needed |
-| `pool_spend_times` (`pool_state_spend_times.json`, beside the pool state) | Pool purchases: the hourly purchase ceiling is treated as reached. No `.corrupt-` copy is kept for this file | By itself an hour after the start that found it unreadable; the next pool purchase then rewrites the file. A restart while it is still unreadable starts another hour |
+| `pool_spend_times` (`pool_state_spend_times.json`, beside the pool state) | Pool purchases and top-ups: the hourly ceiling they share is treated as reached. No `.corrupt-` copy is kept for this file | By itself an hour after the start that found it unreadable; the next pool purchase or top-up then rewrites the file. A restart while it is still unreadable starts another hour |
 | `settlement_unknown` (`x402_settlement_unknown.json`) | Every paid request: `503 PAYMENT_STATE_UNAVAILABLE` | After a restart |
 | `idempotency` (`x402_idempotency.json`) | Paid requests with an Idempotency-Key: `503 IDEMPOTENCY_UNAVAILABLE` | After a restart |
 | `spend_budget` (`stamp_spend_budget.json`) | Every stamp purchase, extension and for-owner batch whose spending limit is set: `503 SPEND_BUDGET_UNAVAILABLE`. Pool purchases and top-ups are internal: they are refused (logged, shown on `/pool/status`) with no response code | After a restart, or at the next UTC day |

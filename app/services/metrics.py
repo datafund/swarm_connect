@@ -250,7 +250,7 @@ def count_state_save_failure(file: str) -> None:
 # State files that fail closed while unreadable (#468). Each store keeps
 # running but refuses what it guards until an operator restores or moves the
 # file and restarts: the pool pauses its spending (#547; for an unreadable
-# hourly spend record, pool_spend_times, for an hour by itself), the x402
+# hourly spend record, pool_spend_times, purchases and top-ups for an hour by itself), the x402
 # settlement-unknown registry refuses every paid request, the idempotency store
 # refuses keyed paid requests, and the spend budget and pool allowance refuse
 # limited spending and free acquires until the next UTC day. 1 while unreadable,

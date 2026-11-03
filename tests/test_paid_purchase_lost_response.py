@@ -731,3 +731,95 @@ def test_shutdown_during_the_late_expiry_read_still_stores_the_201(env, monkeypa
     assert first.status_code == 202
     assert retry.status_code == 201, retry.text
     assert retry.json()["batchID"] == BATCH and retry.json()["expires_at"] is None
+
+
+# --- round 3: the cancellation paths keep the hold and count it once (#468) -------
+
+def test_background_cancelled_at_shutdown_counts_the_hold_once(env):
+    """The background search is cancelled at shutdown: the hold stays and is
+    counted as uncertain exactly once, by the background half."""
+    from app.api.endpoints import stamps
+    app, fac, buy, find = env
+    calls = []
+
+    async def lookup(*a, **kw):
+        calls.append(1)
+        if len(calls) > 1:              # the background search: still looking at shutdown
+            await asyncio.sleep(3600)
+        return None
+    find.side_effect = lookup
+    before, spent_before = _uncertain(), _spend_recorded()
+
+    async def run():
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t") as c:
+            r = await c.post("/api/v1/stamps/", json=BODY, headers={"X-PAYMENT": pay()})
+            for _ in range(200):
+                if len(calls) > 1:
+                    break
+                await asyncio.sleep(0.01)
+            assert len(calls) > 1, "the background search is running"
+            await stamps.drain_pending_purchases(0)
+            return r
+    assert asyncio.run(run()).status_code == 202
+    assert "interrupted" in _audit("payment_failed")[0]["data"]["reason"]
+    assert _gateway_spent() > 0                                   # the hold is kept
+    assert _uncertain() - before == pytest.approx(_gateway_spent())   # counted once
+    assert _spend_recorded() == spent_before
+
+
+def _cancel_request_while(app, started):
+    """Start a paid request, cancel it once `started()` is true, and return
+    whether a background half was left running."""
+    from app.api.endpoints import stamps
+
+    async def run():
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t") as c:
+            req = asyncio.ensure_future(c.post("/api/v1/stamps/", json=BODY, headers={"X-PAYMENT": pay()}))
+            for _ in range(400):
+                if started():
+                    break
+                await asyncio.sleep(0.005)
+            assert started(), "the request reached the point to cancel at"
+            req.cancel()
+            await asyncio.gather(req, return_exceptions=True)
+            await asyncio.sleep(0.05)    # anything left behind would run now
+            return bool(stamps._PENDING_TASKS)
+    return asyncio.run(run())
+
+
+def test_request_cancelled_during_the_in_handler_lookup_counts_the_hold_once(env):
+    """Cancelled before any hand-off, while the handler itself looks for the
+    batch: the handler keeps the hold and counts it once; nothing else does."""
+    app, fac, buy, find = env
+    looking = []
+
+    async def lookup(*a, **kw):
+        looking.append(1)
+        await asyncio.sleep(3600)
+    find.side_effect = lookup
+    before, spent_before = _uncertain(), _spend_recorded()
+    left_running = _cancel_request_while(app, lambda: bool(looking))
+    assert not left_running                                      # nothing handed off
+    assert len(looking) == 1
+    assert _gateway_spent() > 0                                   # the hold is kept
+    assert _uncertain() - before == pytest.approx(_gateway_spent())   # counted once
+    assert _spend_recorded() == spent_before
+
+
+def test_request_cancelled_during_settlement_counts_the_hold_once(env):
+    """Cancelled while the payment is settling: the outcome is unknown, so the
+    hold is kept and counted once, in the handler."""
+    app, fac, buy, find = env
+    settling = []
+
+    async def settle(*a, **kw):
+        settling.append(1)
+        await asyncio.sleep(3600)
+    fac.settle.side_effect = settle
+    before, spent_before = _uncertain(), _spend_recorded()
+    left_running = _cancel_request_while(app, lambda: bool(settling))
+    assert not left_running
+    buy.assert_not_called()
+    assert _gateway_spent() > 0
+    assert _uncertain() - before == pytest.approx(_gateway_spent())
+    assert _spend_recorded() == spent_before
