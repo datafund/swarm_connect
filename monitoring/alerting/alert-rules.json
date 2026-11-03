@@ -1080,6 +1080,83 @@
   },
   {
     "annotations": {
+      "summary": "{{ $labels.environment }}: {{ $labels.file }} state writes failing or stalled; paid requests refused",
+      "description": "A write of a payment state file failed or did not finish in time, and the gateway refuses paid requests, unpaid, until a write succeeds (gateway_state_write_blocked, for 1 minute). file=settlement_unknown: every paid request gets 503 PAYMENT_STATE_UNAVAILABLE. file=idempotency: paid requests with an Idempotency-Key get 503 IDEMPOTENCY_UNAVAILABLE; paid requests without one still work. The reason label on the \"State File Health\" panel says which: reason=failed means the last write raised (usually disk full, or permissions on the data directory for uid 10001); reason=stalled means a hung or very slow volume, in any of three forms: a request's write did not finish within X402_SETTLEMENT_STATE_WRITE_TIMEOUT_SECONDS, which sets the store's stalled flag until a write completes; a write is still pending past that timeout, even before a request has been refused; or, for settlement_unknown only, 64 registry writes are pending at once. Read the ERROR log line (\"could not persist settlement-unknown state\", \"Could not persist idempotency state\" or \"disk I/O is not responding\") and fix the cause. It then clears by itself: the gateway retries the write about every 5 to 10 seconds, also with no paid traffic, and the alert resolves at the next evaluation. A restart is not needed and does not fix the disk. It is safe for payments: a settlement write-ahead that fails is taken back and its request is not settled, and an idempotency key's settling record is on disk before its payment settles. It can cost replays: a keyed request that settled after the writes began to fail answers a retry with 409 instead of the stored result, for up to 24 hours. A restart IS needed when reason=stalled stays after the disk responds again: a write stuck in the kernel keeps its worker, and nothing else clears it. A file that cannot be read after the restart shows as \"State file unreadable\". See docs/mainnet-runbook.md section 5."
+    },
+    "condition": "C",
+    "data": [
+      {
+        "datasourceUid": "grafanacloud-prom",
+        "model": {
+          "expr": "max by (environment, host, file) (gateway_state_write_blocked)",
+          "instant": true,
+          "intervalMs": 1000,
+          "maxDataPoints": 43200,
+          "refId": "A"
+        },
+        "queryType": "",
+        "refId": "A",
+        "relativeTimeRange": {
+          "from": 300,
+          "to": 0
+        }
+      },
+      {
+        "datasourceUid": "__expr__",
+        "model": {
+          "expression": "A",
+          "intervalMs": 1000,
+          "maxDataPoints": 43200,
+          "reducer": "last",
+          "refId": "B",
+          "type": "reduce"
+        },
+        "queryType": "",
+        "refId": "B",
+        "relativeTimeRange": {
+          "from": 0,
+          "to": 0
+        }
+      },
+      {
+        "datasourceUid": "__expr__",
+        "model": {
+          "conditions": [
+            {
+              "evaluator": {
+                "params": [
+                  0
+                ],
+                "type": "gt"
+              }
+            }
+          ],
+          "expression": "B",
+          "intervalMs": 1000,
+          "maxDataPoints": 43200,
+          "refId": "C",
+          "type": "threshold"
+        },
+        "queryType": "",
+        "refId": "C",
+        "relativeTimeRange": {
+          "from": 0,
+          "to": 0
+        }
+      }
+    ],
+    "execErrState": "Error",
+    "for": "1m",
+    "isPaused": false,
+    "labels": {
+      "severity": "critical"
+    },
+    "noDataState": "OK",
+    "ruleGroup": "critical",
+    "title": "State file writes blocked"
+  },
+  {
+    "annotations": {
       "summary": "{{ $labels.environment }}: {{ printf \"%.0f\" $values.B.Value }} failed Bee calls in 5 min",
       "description": "The gateway's calls to its Bee node are failing at a sustained rate (gateway_bee_api_errors_total, over 20 in 5 minutes for 5 minutes). The process can stay up and keep answering /metrics, so \"Gateway Down\" stays quiet while uploads, downloads, stamp purchases and wallet reads fail. Normal is about 2 per 5 minutes; the 2026-11-03 staging incident reached 619.\n\nWhat to check, in order:\n1. Which calls fail: the \"Bee API Errors\" panel, by endpoint.\n2. Whether Bee itself is fine: \"Bee Node Not Scraped\" and bee_up, and the Bee node's own log.\n3. The gateway log (Loki, level=ERROR) for the exception. PoolTimeout while Bee answers a fresh request means the gateway's shared HTTP client is stuck (swarm_connect#587); only a restart of the gateway container clears it today.\nDo NOT restart blindly: first check the \"State file save failures\" alert and gateway_state_unsaved. A restart loses changes that are not saved yet. See docs/mainnet-runbook.md section 5.\n\nFull status: {{ if eq $labels.environment \"main\" }}https://provenance-gateway.datafund.io/health{{ else if eq $labels.environment \"development\" }}https://provenance-gateway.dev.datafund.io/health{{ else }}https://provenance-gateway.datafund.io/health (or the .dev. host \u2014 environment label was \"{{ $labels.environment }}\"){{ end }}"
     },
