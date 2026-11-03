@@ -142,20 +142,20 @@ class TestGatewayHealth:
     """Basic gateway connectivity tests."""
 
     @live_test
-    def test_gateway_is_running(self):
-        """Verify the gateway is reachable."""
+    def test_gateway_is_running(self, gateway_x402):
+        """Verify the gateway is reachable (skips via gateway_x402 when it is not)."""
         config = get_test_config()
-        response = requests.get(f"{config['gateway_url']}/")
+        response = requests.get(f"{config['gateway_url']}/", timeout=15)
         assert response.status_code == 200
 
     @live_test
-    def test_health_endpoint(self):
-        """Verify health endpoint works."""
+    def test_health_endpoint(self, gateway_x402):
+        """Verify health endpoint works (skips via gateway_x402 when unreachable)."""
         config = get_test_config()
         # Try common health endpoint paths
         for path in ["/health", "/api/v1/health", "/"]:
             try:
-                response = requests.get(f"{config['gateway_url']}{path}")
+                response = requests.get(f"{config['gateway_url']}{path}", timeout=15)
                 if response.status_code == 200:
                     print(f"Health check OK at {path}")
                     return

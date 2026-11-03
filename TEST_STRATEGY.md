@@ -34,7 +34,7 @@ python -m pytest tests/test_stamp_pool.py -v    # one area
 `pytest tests/` is hermetic. Nothing in it reaches a live gateway unless you say so.
 
 `tests/test_integration_gateway.py` and `tests/test_x402_live.py` both require an
-explicit opt-in, on three separate switches:
+explicit opt-in, on separate switches:
 
 | variable | effect | default |
 |---|---|---|
