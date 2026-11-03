@@ -107,9 +107,7 @@ async def _calculate_price_for_request(request: Request) -> dict:
     if _request_method(request) == "PATCH" and path.rstrip("/").endswith("/extend"):
         # Stamp top-up (#350). Priced from the SAME model the endpoint parses and
         # the depth of the batch it will top up, so the quote and the spend
-        # cannot describe different things (the #260/#261 lesson). A batch that
-        # does not exist is refused by the endpoint with 404, so it is never
-        # charged; price it at the smallest depth.
+        # cannot describe different things (the #260/#261 lesson).
         from app.api.models.stamp import StampExtensionRequest
         from app.services import swarm_api
         try:
@@ -123,11 +121,23 @@ async def _calculate_price_for_request(request: Request) -> dict:
         # Case-insensitive, like the endpoint (#542): an uppercase ID priced at
         # the default depth would be topped up at the batch's real depth.
         batch_id = path.rstrip("/").split("/")[-2].lower()
-        depth = 17
+        # The listing is fetched live (it is not cached), so a batch bought a
+        # moment ago is found as soon as Bee lists it. If Bee cannot be reached
+        # this raises, and require_x402_payment answers 503 as for any pricing
+        # failure: an outage is not reported as "no such batch".
+        depth = None
         for stamp in await swarm_api.get_all_stamps_processed():
             if str(stamp.get("batchID", "")).lower() == batch_id:
                 depth = int(stamp.get("depth", 17))
                 break
+        if depth is None:
+            # A batch the node does not list gets the route's own 404 now,
+            # before a 402 offer, a free-tier slot or a payment verification
+            # (#572). It used to be quoted at depth 17, so a client signed a
+            # payment for a request that could never succeed. Reuses this
+            # lookup: no second Bee call.
+            from app.api.endpoints.stamps import stamp_not_found
+            raise stamp_not_found(batch_id)
         quote = await get_price_quote(
             operation="stamp_extension", depth=depth,
             duration_hours=parsed.duration_hours, amount=parsed.amount,
@@ -546,6 +556,10 @@ async def require_x402_payment(request: Request) -> None:
         price_quote = await _calculate_price_for_request(request)
         price_usd = price_quote["price_usd"]
         description = price_quote.get("description", "Gateway operation")
+    except HTTPException:
+        # A refusal decided while pricing (an extend of a batch the node does
+        # not have: 404, #572) is the answer, not a pricing failure.
+        raise
     except Exception as e:
         logger.error(f"x402: Failed to calculate price: {e}")
         raise HTTPException(

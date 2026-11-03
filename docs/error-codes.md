@@ -119,6 +119,17 @@ None of these responses charges the new payment.
 
 ## Stamps
 
+`PATCH /stamps/{id}/extend` of a batch the Bee node does not list answers
+`404` (`code` `HTTP_404`, `message` "Stamp batch with ID '<id>' not found on
+the connected Swarm node."). With x402 enabled this comes after the request's
+`422` validation and before anything else: no `402` offer, no payment verified
+or charged, and the free-tier request is not counted against the rate limit.
+If the gateway cannot reach the Bee node to look the batch up, the answer is
+`503` (`HTTP_503`, `message` "Service temporarily unavailable", `detail.detail`
+"Failed to calculate price for this operation.") rather than `404`, also
+before any offer, payment or free-tier count; retry later. With x402 disabled
+the route answers the same `404`, and a Bee outage there is a `502`.
+
 | Code | Status | Meaning | What to do |
 |---|---|---|---|
 | `STAMP_COST_EXCEEDS_LIMIT` | 400 | The requested batch would cost more than the gateway allows per purchase. | Ask for a smaller size or a shorter duration. |

@@ -993,6 +993,18 @@ async def purchase_stamp(
         )
 
 
+def stamp_not_found(stamp_id: str) -> HTTPException:
+    """The 404 for an extend of a batch the Bee node does not list.
+
+    Raised by extend_stamp and, when x402 is enabled, by the payment dependency
+    before it quotes a price (#572), so both give the same body.
+    """
+    return HTTPException(
+        status_code=status.HTTP_404_NOT_FOUND,
+        detail=f"Stamp batch with ID '{stamp_id}' not found on the connected Swarm node."
+    )
+
+
 @router.patch(
     "/{stamp_id}/extend",
     response_model=StampExtensionResponse,
@@ -1048,10 +1060,7 @@ async def extend_stamp(
                 break
 
         if not found_stamp:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"Stamp batch with ID '{stamp_id}' not found on the connected Swarm node."
-            )
+            raise stamp_not_found(stamp_id)
 
         stamp_depth = found_stamp.get("depth", 17)
 

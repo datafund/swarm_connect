@@ -43,6 +43,13 @@ These endpoints require payment (when x402 is enabled and free tier exhausted):
 | POST | `/api/v1/stamps/` | Purchase postage stamps |
 | POST | `/api/v1/data/` | Upload data to Swarm |
 | POST | `/api/v1/data/manifest` | Upload TAR as manifest |
+| PATCH | `/api/v1/stamps/{id}/extend` | Top up an existing batch, priced at the batch's own depth |
+
+An extend of a batch the gateway's Bee node does not list gets `404` before
+any `402`: there is nothing to sign, and an `X-PAYMENT` or
+`X-Payment-Mode: free` sent with it is neither verified nor counted. If the
+gateway cannot reach its Bee node for that lookup, it answers `503` (not
+`404`, since it cannot tell) before any offer; retry later.
 
 **Free endpoints** (never require payment):
 - `GET /api/v1/stamps/` - List stamps
@@ -657,6 +664,7 @@ If the gateway cannot read or write its record of these authorizations, every pa
 |-------|-------|------------|
 | 402 Payment Required | No payment or free tier exhausted | Make x402 payment |
 | 429 Too Many Requests | Free tier rate limit | Wait or make payment |
+| 404 on `PATCH /stamps/{id}/extend` | The batch is not on the gateway's Bee node | Check the batch ID; do not pay. Nothing was charged or counted |
 | "Insufficient balance" | Wallet lacks USDC | Fund wallet |
 | "Invalid signature" | Wrong private key or network | Check configuration |
 | "Payment verification failed" | Facilitator rejected | Check payment amount |
