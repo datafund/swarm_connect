@@ -279,7 +279,8 @@ The background task runs every `STAMP_POOL_CHECK_INTERVAL_SECONDS`:
 2. **Update TTLs**: Remove expired/unusable stamps from pool. Stamps that
    are not usable yet are held instead (see
    [Stamps Not Becoming Usable](#stamps-not-becoming-usable))
-3. **Purchase**: Buy new stamps if below reserve levels
+3. **Purchase**: Buy new stamps if below reserve levels (see
+   [Purchases in flight](#purchases-in-flight))
 4. **Top-up**: Extend stamps with TTL below `STAMP_POOL_MIN_TTL_HOURS`
 
 While any stamp is held (bought, not usable yet), the task also re-runs the
@@ -298,7 +299,25 @@ When a client acquires a stamp (within its allowance, or paid):
 1. Stamp is immediately returned
 2. Stamp is removed from pool tracking and registered to the caller (`shared` if free, the payer's wallet if paid)
 3. Client is now responsible for the stamp
-4. Background task will eventually replenish the reserve
+4. If the reserve is now below target, a replacement is bought right away in
+   the background (`STAMP_POOL_IMMEDIATE_REPLENISH`); otherwise the background
+   task replenishes it
+
+### Purchases in flight
+
+A purchase counts toward the reserve target from the moment it starts, not
+only once its batch is in the pool. Both ways the pool buys, the immediate
+replacement after a release and the scheduled check, compare the target
+with the batches the pool holds (available or reserved) plus the purchases
+either of them has in flight for that depth. So a scheduled check that starts
+while a replacement is still buying does not buy the same batch again, and a
+release during a scheduled purchase does not start a second one for the same
+gap. The scheduled check also counts again before each purchase after the
+first, so a replacement that started while it waited is counted too.
+
+A purchase stops counting as in flight in the same step that adds its batch
+to the pool, so a landed batch is counted once. A purchase that fails stops
+counting as well, and the next check buys the batch it did not.
 
 ## Post-Release Handling
 
