@@ -355,3 +355,164 @@ class TestPool:
         assert r.status_code == 429, r.text
         assert "accepts" not in r.json() and "accepts" not in r.json()["detail"]
         assert "X-PAYMENT" not in r.json()["detail"]["message"]
+
+
+# --------------------------------------------------------------------------- #
+# Retries of attempts that may have been charged pass the gate (review round 1)
+# --------------------------------------------------------------------------- #
+class TestRetriesOfPossiblyChargedRequests:
+    """While payments are refused, a retry still gets its stored outcome.
+
+    Uses the real dependency, settlement and middleware from the idempotency
+    suite. The gate is closed only after the first attempt.
+    """
+
+    @pytest.fixture
+    def fac(self, monkeypatch):
+        import secrets as _secrets
+        from x402.types import SettleResponse, VerifyResponse
+        from app.x402.ratelimit import reset_rate_limiter
+        monkeypatch.setattr(settings, "X402_ENABLED", True)
+        monkeypatch.setattr(settings, "X402_PAY_TO_ADDRESS", "0xpayee")
+        monkeypatch.setattr(settings, "X402_NETWORK", "base-sepolia")
+        monkeypatch.setattr(settings, "HEALTH_SNAPSHOT_TTL_SECONDS", 15.0)
+        reset_rate_limiter()
+        f = MagicMock()
+        f.verify = AsyncMock(side_effect=lambda payment, **kw: VerifyResponse(
+            isValid=True, payer=payment.payload.authorization.from_))
+        f.settle = AsyncMock(side_effect=lambda **kw: SettleResponse(
+            success=True, transaction="0x" + _secrets.token_hex(32)))
+        with patch("app.x402.dependency._get_facilitator_client", return_value=f), \
+             patch("app.x402.dependency._calculate_price_for_request",
+                   new=AsyncMock(return_value={"price_usd": 0.02, "description": "t"})):
+            yield f
+        reset_rate_limiter()
+
+    @staticmethod
+    def _client(fac):
+        import secrets as _secrets
+        from fastapi import Request
+        from app.x402.middleware import X402Middleware
+        from app.x402.settlement import settle_payment
+        router = APIRouter()
+        bought = []
+
+        @router.post("/", status_code=201)
+        async def buy(request: Request, body: dict):
+            await settle_payment(request)
+            bought.append(_secrets.token_hex(32))
+            return {"batchID": bought[-1]}
+
+        app = FastAPI()
+        app.include_router(router, prefix="/api/v1/stamps", dependencies=[Depends(require_payment())])
+        app.add_middleware(X402Middleware, facilitator_client=fac)
+        return TestClient(app), bought
+
+    def test_stored_result_is_replayed_while_payments_are_refused(self, fac):
+        c, bought = self._client(fac)
+        first = c.post("/api/v1/stamps/", json={"depth": 17},
+                       headers={"X-PAYMENT": pay(), "Idempotency-Key": "k1"})
+        assert first.status_code == 201
+        _closed()
+        retry = c.post("/api/v1/stamps/", json={"depth": 17},
+                       headers={"X-PAYMENT": pay(), "Idempotency-Key": "k1"})
+        assert retry.status_code == 201
+        assert retry.json() == first.json()
+        assert retry.headers["Idempotent-Replayed"] == "true"
+        assert fac.settle.await_count == 1 and len(bought) == 1
+
+    def test_settling_key_gets_its_409_while_payments_are_refused(self, fac):
+        from x402.types import SettleResponse
+        c, bought = self._client(fac)
+        fac.settle.side_effect = httpx.ReadTimeout("facilitator slow")
+        r = c.post("/api/v1/stamps/", json={"depth": 17},
+                   headers={"X-PAYMENT": pay(), "Idempotency-Key": "k1"})
+        assert r.status_code == 502
+        fac.settle.side_effect = lambda **kw: SettleResponse(success=True, transaction="0x" + "cd" * 32)
+        _closed()
+        retry = c.post("/api/v1/stamps/", json={"depth": 17},
+                       headers={"X-PAYMENT": pay(), "Idempotency-Key": "k1"})
+        assert retry.status_code == 409
+        assert retry.json()["detail"]["code"] == "IDEMPOTENCY_KEY_SETTLEMENT_UNKNOWN"
+        assert fac.settle.await_count == 1 and not bought
+
+    def test_unknown_outcome_authorization_gets_its_409_while_payments_are_refused(self, fac):
+        from app.x402.settlement import AFTER_WORK, outcome_unknown
+        c, bought = self._client(fac)
+        nonce = "0x" + "5e" * 32
+        outcome_unknown.add((ALICE.lower(), nonce), AFTER_WORK)
+        _closed()
+        r = c.post("/api/v1/stamps/", json={"depth": 17}, headers={"X-PAYMENT": pay(nonce=nonce)})
+        assert r.status_code == 409
+        assert r.json()["detail"]["code"] == "PAYMENT_AUTHORIZATION_OUTCOME_UNKNOWN"
+        fac.settle.assert_not_called()
+        assert not bought
+
+    def test_a_fresh_payment_is_still_refused(self, fac):
+        c, bought = self._client(fac)
+        _closed()
+        for headers in ({"X-PAYMENT": pay()}, {"X-PAYMENT": pay(), "Idempotency-Key": "new-key"}):
+            r = c.post("/api/v1/stamps/", json={"depth": 17}, headers=headers)
+            assert r.status_code == 503
+            assert r.json()["detail"]["code"] == "PAYMENTS_UNAVAILABLE"
+            assert "This request was not charged" in r.json()["detail"]["message"]
+        fac.verify.assert_not_called()
+        fac.settle.assert_not_called()
+
+    def test_another_payers_key_does_not_open_the_gate(self, fac):
+        c, _ = self._client(fac)
+        assert c.post("/api/v1/stamps/", json={"depth": 17},
+                      headers={"X-PAYMENT": pay(), "Idempotency-Key": "k1"}).status_code == 201
+        _closed()
+        r = c.post("/api/v1/stamps/", json={"depth": 17},
+                   headers={"X-PAYMENT": pay(MALLORY), "Idempotency-Key": "k1"})
+        assert r.status_code == 503
+
+
+ALICE = "0x" + "a1" * 20
+MALLORY = "0x" + "b2" * 20
+
+
+def pay(payer=ALICE, nonce=None):
+    """A payment header with a fresh nonce, as a retrying client would send."""
+    import base64
+    import json
+    import secrets as _secrets
+    payload = {"x402Version": 1, "scheme": "exact", "network": "base-sepolia", "payload": {
+        "signature": "0x" + "ab" * 65,
+        "authorization": {"from": payer, "to": "0xpayee", "value": "100000", "validAfter": "0",
+                          "validBefore": "9999999999", "nonce": nonce or "0x" + _secrets.token_hex(32)}}}
+    return base64.b64encode(json.dumps(payload).encode()).decode()
+
+
+def require_payment():
+    from app.x402.dependency import require_x402_payment
+    return require_x402_payment
+
+
+class TestPoolRefusalWhilePaymentsAreRefused:
+
+    def test_429_says_retry_later_and_does_not_send_callers_to_paid_routes(
+            self, monkeypatch, tmp_path, x402_on):
+        from app.main import app
+        from app.services import pool_allowance
+        from app.services.pool_allowance import PoolAllowanceTracker
+        import app.api.endpoints.pool as pool_ep
+        # A testnet, where the refusal would otherwise send callers to POST /stamps/.
+        monkeypatch.setattr(settings, "STAMP_POOL_ENABLED", True)
+        monkeypatch.setattr(settings, "POOL_DAILY_ALLOWANCES", "")
+        monkeypatch.setattr(settings, "POOL_DEFAULT_DAILY_ALLOWANCE", 0)
+        tracker = PoolAllowanceTracker(state_file=str(tmp_path / "a.json"))
+        monkeypatch.setattr(pool_allowance, "pool_allowance_tracker", tracker)
+        monkeypatch.setattr(pool_ep, "pool_allowance_tracker", tracker)
+        monkeypatch.setattr(pool_ep.stamp_pool_manager, "get_available_stamp",
+                            lambda d: type("S", (), {"depth": 17})())
+        _closed()
+        r = TestClient(app).post("/api/v1/pool/acquire", json={"size": "small"})
+        assert r.status_code == 429, r.text
+        assert r.headers["Retry-After"] == "15"
+        d = r.json()["detail"]
+        assert "/api/v1/stamps/" not in d["message"]
+        assert "temporarily refused" in d["message"]
+        assert d["alternative"]["retry_after_seconds"] == 15
+        assert "endpoint" not in d["alternative"]

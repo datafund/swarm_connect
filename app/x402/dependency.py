@@ -555,12 +555,13 @@ async def require_x402_payment(request: Request) -> None:
     # While the gateway cannot accept payments (its Bee wallet balances cannot
     # be read, or its /health snapshot is too old to trust), a request that
     # would pay or be offered a 402 gets 503 here, before it is priced,
-    # verified or settled (#589). Free-tier requests are not affected. Reads
-    # the cached snapshot only: no Bee call.
+    # verified or settled (#589). Free-tier requests are not affected, nor is
+    # a retry of an attempt that may have been charged: it goes on to its
+    # stored result or 409 below. Reads memory only: no Bee call.
     if not (is_free_tier_opt_in(request) and settings.X402_FREE_TIER_ENABLED):
-        from app.x402.accept_gate import payments_refusal, refusal
+        from app.x402.accept_gate import is_retry_of_possibly_charged, payments_refusal, refusal
         reason = payments_refusal()
-        if reason is not None:
+        if reason is not None and not is_retry_of_possibly_charged(request):
             logger.warning(f"x402: refusing {request.method} {request.url.path} from {client_ip} "
                            f"before payment: payments unavailable ({reason})")
             x402_payments_total.labels(mode="unavailable").inc()

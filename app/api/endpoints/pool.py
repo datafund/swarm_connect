@@ -209,14 +209,28 @@ async def _refuse_allowance(
     caller is refused again (#480).
     """
     detail = dict(detail)
-    offer_payment = settings.X402_ENABLED and settings.paid_bypass_is_honoured()
-    if offer_payment:
-        # Not while the gateway cannot accept payments (#589): a paid acquire
-        # would get 503 PAYMENTS_UNAVAILABLE, so answer the 429 instead.
-        from app.x402.accept_gate import payments_refusal
-        if payments_refusal() is not None:
-            offer_payment = False
-    if offer_payment:
+    # While the gateway cannot accept payments (#589), a paid acquire or a paid
+    # direct purchase would get 503 PAYMENTS_UNAVAILABLE: offer neither, and
+    # answer the 429 with when to retry.
+    payments_refused = False
+    if settings.X402_ENABLED:
+        from app.x402.accept_gate import payments_refusal, retry_after_seconds
+        payments_refused = payments_refusal() is not None
+    offer_payment = (settings.X402_ENABLED and settings.paid_bypass_is_honoured()
+                     and not payments_refused)
+    headers = None
+    if payments_refused:
+        retry_after = retry_after_seconds()
+        message += (
+            "Paid routes are temporarily refused: the gateway cannot accept payments "
+            f"right now. Retry later (after {retry_after} s at the earliest)."
+        )
+        detail["alternative"] = {
+            "retry_after_seconds": retry_after,
+            "note": "Paid routes are temporarily refused; retry this request later.",
+        }
+        headers = {"Retry-After": str(retry_after)}
+    elif offer_payment:
         message += (
             "To continue now, pay with x402: send an X-PAYMENT header with "
             "this same request and you get a pooled stamp immediately, "
@@ -264,7 +278,7 @@ async def _refuse_allowance(
             raise HTTPException(status_code=status.HTTP_402_PAYMENT_REQUIRED, detail=payment_required)
 
     count_pool_allowance_refusal(size, scope, "429")
-    raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail=detail)
+    raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail=detail, headers=headers)
 
 
 @router.post(

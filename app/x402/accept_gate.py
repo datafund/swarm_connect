@@ -10,6 +10,10 @@ the refund or outcome-unknown paths. So while the snapshot says so, or is too
 old to trust, a request that would pay (or be offered a 402) is answered
 503 PAYMENTS_UNAVAILABLE before it is priced, verified or settled.
 
+A retry of an attempt that may have been charged (a stored Idempotency-Key
+entry, or an authorization already in use or with an unknown settlement
+outcome) is let through to its existing replay or 409 answer.
+
 The check reads the snapshot in memory only: it adds no Bee call per request.
 With no snapshot yet (startup) it lets requests through, as before.
 """
@@ -26,10 +30,10 @@ logger = logging.getLogger(__name__)
 _MESSAGES = {
     "balances_unreadable": (
         "The gateway cannot accept payments right now: it cannot read its Bee node's "
-        "wallet balances. Nothing was charged. Retry later."),
+        "wallet balances. This request was not charged. Retry later."),
     "snapshot_too_old": (
         "The gateway cannot accept payments right now: it has not been able to check its "
-        "Bee node recently. Nothing was charged. Retry later."),
+        "Bee node recently. This request was not charged. Retry later."),
 }
 
 
@@ -53,9 +57,56 @@ def payments_refusal() -> Optional[str]:
     return None
 
 
+def retry_after_seconds() -> int:
+    """How long to wait before retrying: one snapshot TTL."""
+    return max(1, math.ceil(settings.HEALTH_SNAPSHOT_TTL_SECONDS))
+
+
+def is_retry_of_possibly_charged(request) -> bool:
+    """The request may be a retry of an earlier attempt that was charged.
+
+    Such a request is let through the gate to its existing answer: the stored
+    result of its Idempotency-Key (a 201 replay, or a 409 naming the
+    settlement), or the 409 for an authorization whose settlement outcome is
+    unknown, or the 402/409 of an authorization already in use. Refusing it
+    with "not charged" would be wrong for a client whose first attempt was,
+    and would delay its recovery.
+
+    True when the request carries an X-PAYMENT whose authorization is in the
+    outcome-unknown registry or the replay guard, or an Idempotency-Key with a
+    stored entry for that authorization's payer on this route. Read-only
+    lookups in memory: no Bee call, no write. The payer here is the one the
+    authorization claims; the normal path then verifies it before anything is
+    replayed.
+    """
+    from app.x402.middleware import X_PAYMENT_HEADER, decode_payment_header
+    header = request.headers.get(X_PAYMENT_HEADER)
+    if not header:
+        return False
+    try:
+        payload = decode_payment_header(header)
+    except Exception:
+        return False
+    if payload is None:
+        return False
+    from app.x402.settlement import authorization_key, outcome_unknown, replay_guard
+    auth_key = authorization_key(payload)
+    if auth_key is None:
+        return False
+    in_flight, kind = outcome_unknown.state(auth_key)
+    if in_flight or kind is not None or replay_guard.is_reserved(auth_key):
+        return True
+    from app.x402.idempotency import IDEMPOTENCY_HEADER, MAX_KEY_LENGTH, entry_id, idempotency_store
+    key = request.headers.get(IDEMPOTENCY_HEADER)
+    if key is None or not (0 < len(key) <= MAX_KEY_LENGTH):
+        return False
+    eid = entry_id(auth_key[0], request.method, request.url.path, key)
+    return idempotency_store.peek(eid) is not None
+
+
 def refusal(reason: str) -> HTTPException:
     """503 PAYMENTS_UNAVAILABLE with Retry-After of one snapshot TTL."""
-    retry_after = max(1, math.ceil(settings.HEALTH_SNAPSHOT_TTL_SECONDS))
+    retry_after = retry_after_seconds()
     return HTTPException(
         status_code=503,
         headers={"Retry-After": str(retry_after)},

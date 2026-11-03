@@ -384,7 +384,8 @@ The gateway performs pre-flight checks before accepting payments:
 - **Below warning threshold**: Log warning, accept payments. `status` does not change.
 - **Balance cannot be read** (xBZZ or xDAI; #589): `can_accept` is false, `status` is
   `degraded`, and every paid request (and every request that would be offered a 402)
-  gets `503 PAYMENTS_UNAVAILABLE` before payment, so nothing is charged. Free-tier
+  gets `503 PAYMENTS_UNAVAILABLE` before payment, so that request is not charged. A
+  retry of an attempt that may have been charged still gets its stored result or 409. Free-tier
   requests still run. An unreadable chequebook balance alone is a warning only.
 - **Snapshot too old to trust**: the checks come from the `/health` snapshot (#588). When
   its refreshes keep failing and it is older than `HEALTH_SNAPSHOT_MAX_TRUSTED_AGE_SECONDS`
