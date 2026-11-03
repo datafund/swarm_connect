@@ -45,6 +45,10 @@ base_eth_balance = Gauge(
 stamp_pool_available = Gauge(
     "gateway_stamp_pool_available", "Available stamps in pool by size", ["size"]
 )
+stamp_pool_pending = Gauge(
+    "gateway_stamp_pool_pending",
+    "Pool stamps bought but not usable yet (held, not handed out) by size", ["size"]
+)
 stamp_pool_target = Gauge(
     "gateway_stamp_pool_target", "Target reserve by size", ["size"]
 )
@@ -434,6 +438,9 @@ async def _poll_balances():
                             status.current_levels.get(int(depth), 0)
                         )
                         stamp_pool_target.labels(size=size_name).set(target)
+                        stamp_pool_pending.labels(size=size_name).set(
+                            status.pending_stamps.get(int(depth), 0)
+                        )
 
                     # Pool stamp min TTL — check TTL of all available pool stamps
                     pool_min_ttl = float("inf")

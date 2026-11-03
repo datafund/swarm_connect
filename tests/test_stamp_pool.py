@@ -1632,6 +1632,223 @@ class TestNotYetUsableBatchIsKept:
         assert self.BATCH in manager._pool
 
 
+class TestUnlistedPurchaseIsHeld:
+    """A paid batch Bee has not listed yet is held for a bounded time.
+
+    Bee lists a batch only after its chain listener has processed BatchCreated,
+    some blocks behind the tip. Sync after a restart and the TTL check used to
+    treat an unlisted batch as gone, so a cancel at shutdown followed by a quick
+    restart, or a usable wait that timed out, dropped the paid batch (and the
+    TTL check its ownership record). The purchase is now recorded as pending in
+    a file beside the state file and held while unlisted for
+    STAMP_POOL_UNLISTED_GRACE_SECONDS.
+    """
+
+    BATCH = "ef" * 32
+
+    @pytest.fixture
+    def state_file(self, tmp_path):
+        return str(tmp_path / "pool_state.json")
+
+    async def _buy_not_usable(self, manager):
+        async def fake_buy(amount, depth, label):
+            return self.BATCH
+
+        with patch('app.services.stamp_pool.swarm_api.get_chainstate',
+                   return_value={"currentPrice": "24000"}), \
+             patch('app.services.stamp_pool.swarm_api.purchase_postage_stamp', side_effect=fake_buy), \
+             patch.object(manager, '_wait_for_stamp_usable', new=AsyncMock(return_value=False)):
+            assert await manager._purchase_stamp(17) == self.BATCH
+
+    def _listing(self, *recs):
+        return patch('app.services.stamp_pool.swarm_api.get_all_stamps_processed',
+                     new=AsyncMock(return_value=list(recs)))
+
+    def _rec(self, **over):
+        rec = {"batchID": self.BATCH, "depth": 17, "local": True, "usable": False,
+               "batchTTL": 86400, "unusableReason": None, "amount": "1000000", "label": ""}
+        rec.update(over)
+        return rec
+
+    def _age_purchase(self, state_file, seconds):
+        """Move the recorded purchase time into the past, on disk."""
+        path = state_file.replace(".json", "_pending.json")
+        with open(path) as f:
+            pending = json.load(f)
+        bought = datetime.now(timezone.utc) - timedelta(seconds=seconds)
+        pending[self.BATCH]["purchased_at"] = bought.isoformat()
+        with open(path, "w") as f:
+            json.dump(pending, f)
+
+    def _owner(self):
+        from app.services.stamp_ownership import stamp_ownership_manager
+        record = stamp_ownership_manager.get_stamp_info(self.BATCH)
+        return record and record["owner"]
+
+    @pytest.mark.asyncio
+    async def test_restart_sync_holds_an_unlisted_purchase(self, state_file):
+        await self._buy_not_usable(StampPoolManager(state_file=state_file))
+
+        restarted = StampPoolManager(state_file=state_file)
+        with self._listing():
+            await restarted.sync_from_bee_node()
+
+        assert self.BATCH in restarted._pool, "an unlisted paid batch was dropped at the restart sync"
+        assert restarted._pool[self.BATCH].usable is False
+        assert restarted.get_available_stamp(17) is None
+        with open(state_file) as f:
+            assert self.BATCH in json.load(f)
+
+    @pytest.mark.asyncio
+    async def test_ttl_check_holds_an_unlisted_purchase_within_the_grace(self, state_file, caplog):
+        import logging
+        from app.services.stamp_ownership import POOL_OWNER
+        manager = StampPoolManager(state_file=state_file)
+        await self._buy_not_usable(manager)
+
+        with self._listing(), caplog.at_level(logging.INFO, logger="app.services.stamp_pool"):
+            await manager._update_stamp_ttls()
+
+        assert self.BATCH in manager._pool, "the TTL check dropped an unlisted paid batch"
+        assert self._owner() == POOL_OWNER
+        assert manager.get_status().pending_stamps == {17: 1}
+        assert any("Holding 1 pool batch" in r.getMessage() for r in caplog.records)
+
+    @pytest.mark.asyncio
+    async def test_ttl_check_drops_an_unlisted_purchase_after_the_grace(self, state_file):
+        await self._buy_not_usable(StampPoolManager(state_file=state_file))
+        self._age_purchase(state_file, 901)
+        manager = StampPoolManager(state_file=state_file)
+        manager.add_stamp_to_pool(self.BATCH, 17, 1000000, 86400)  # held from before
+
+        with patch('app.services.stamp_pool.settings.STAMP_POOL_UNLISTED_GRACE_SECONDS', 900), \
+             self._listing():
+            await manager._update_stamp_ttls()
+
+        assert self.BATCH not in manager._pool
+        assert self._owner() is None
+        assert self.BATCH not in manager._pending
+
+    @pytest.mark.asyncio
+    async def test_restart_sync_drops_an_unlisted_purchase_after_the_grace(self, state_file):
+        await self._buy_not_usable(StampPoolManager(state_file=state_file))
+        self._age_purchase(state_file, 901)
+
+        restarted = StampPoolManager(state_file=state_file)
+        with patch('app.services.stamp_pool.settings.STAMP_POOL_UNLISTED_GRACE_SECONDS', 900), \
+             self._listing():
+            await restarted.sync_from_bee_node()
+
+        assert self.BATCH not in restarted._pool
+        assert self._owner() is None
+        with open(state_file) as f:
+            assert self.BATCH not in json.load(f)
+        with open(state_file.replace(".json", "_pending.json")) as f:
+            assert self.BATCH not in json.load(f)
+
+    @pytest.mark.asyncio
+    async def test_once_listed_it_follows_the_not_usable_then_usable_path(self, state_file):
+        manager = StampPoolManager(state_file=state_file)
+        await self._buy_not_usable(manager)
+
+        with self._listing(self._rec()):
+            await manager._update_stamp_ttls()
+        assert self.BATCH in manager._pool and manager._pool[self.BATCH].usable is False
+        assert self.BATCH not in manager._pending, "a listed batch is still on the grace clock"
+
+        with self._listing(self._rec(usable=True)):
+            await manager._update_stamp_ttls()
+        assert manager.get_available_stamp(17) is not None
+        assert manager.get_status().pending_stamps == {}
+
+    @pytest.mark.asyncio
+    async def test_ttl_check_keeps_a_batch_added_while_the_listing_was_fetched(self, state_file):
+        """The listing predates a batch bought during the fetch; it says nothing about it."""
+        manager = StampPoolManager(state_file=state_file)
+
+        async def listing_fetched_before_the_purchase_completed():
+            manager.add_stamp_to_pool(self.BATCH, 17, 1000000, 86400)
+            return []
+
+        with patch('app.services.stamp_pool.swarm_api.get_all_stamps_processed',
+                   new=AsyncMock(side_effect=listing_fetched_before_the_purchase_completed)):
+            await manager._update_stamp_ttls()
+
+        assert self.BATCH in manager._pool, "a batch bought during the TTL fetch was removed"
+        assert self._owner() is not None
+
+    @pytest.mark.asyncio
+    async def test_pool_status_reports_held_batches(self, state_file):
+        from app.api.endpoints import pool as pool_endpoint
+        manager = StampPoolManager(state_file=state_file)
+        await self._buy_not_usable(manager)
+        with patch.object(pool_endpoint, "stamp_pool_manager", manager):
+            response = await pool_endpoint.get_pool_status()
+        assert response.pending_stamps == {17: 1}
+        assert response.total_stamps == 0
+
+    @pytest.mark.parametrize("name", ["STAMP_POOL_UNLISTED_GRACE_SECONDS",
+                                      "STAMP_POOL_HELD_RECHECK_SECONDS"])
+    def test_hold_settings_must_be_positive(self, name, monkeypatch):
+        from pydantic import ValidationError
+        from app.core.config import Settings
+        monkeypatch.setenv(name, "0")
+        with pytest.raises(ValidationError):
+            Settings()
+
+
+class TestHeldBatchRecheck:
+    """While a batch is held, the TTL check runs every STAMP_POOL_HELD_RECHECK_SECONDS.
+
+    Otherwise a held batch became available only at the next full check, up to
+    STAMP_POOL_CHECK_INTERVAL_SECONDS later.
+    """
+
+    BATCH = "fa" * 32
+
+    async def _run_loop(self, manager, steps):
+        sleeps = []
+
+        async def fake_sleep(seconds):
+            sleeps.append(seconds)
+            if len(sleeps) >= steps:
+                manager._running = False
+
+        manager._running = True
+        with patch('app.services.stamp_pool.settings.STAMP_POOL_CHECK_INTERVAL_SECONDS', 900), \
+             patch('app.services.stamp_pool.settings.STAMP_POOL_HELD_RECHECK_SECONDS', 30), \
+             patch('app.services.stamp_pool.asyncio.sleep', new=fake_sleep), \
+             patch.object(manager, 'check_and_replenish', new=AsyncMock()):
+            await manager._background_loop()
+        return sleeps
+
+    @pytest.mark.asyncio
+    async def test_held_batch_is_rechecked_and_offered_soon(self, tmp_path):
+        manager = StampPoolManager(state_file=str(tmp_path / "pool_state.json"))
+        manager._last_sync_ok = True
+        manager.add_stamp_to_pool(self.BATCH, 17, 1000000, 86400, usable=False)
+        listings = [
+            [{"batchID": self.BATCH, "depth": 17, "usable": False, "batchTTL": 86400, "unusableReason": None}],
+            [{"batchID": self.BATCH, "depth": 17, "usable": True, "batchTTL": 86400, "unusableReason": None}],
+        ]
+        with patch('app.services.stamp_pool.swarm_api.get_all_stamps_processed',
+                   new=AsyncMock(side_effect=listings)) as listing:
+            sleeps = await self._run_loop(manager, steps=4)
+
+        assert sleeps and max(sleeps) <= 30, f"the loop slept {sleeps} with a batch held"
+        assert listing.await_count == 2, "the held batch was not re-checked, or re-checked after it was offered"
+        assert manager.get_available_stamp(17) is not None
+
+    @pytest.mark.asyncio
+    async def test_nothing_held_means_no_extra_bee_calls(self, tmp_path):
+        manager = StampPoolManager(state_file=str(tmp_path / "pool_state.json"))
+        manager._last_sync_ok = True
+        with patch('app.services.stamp_pool.swarm_api.get_all_stamps_processed',
+                   new=AsyncMock(return_value=[])) as listing:
+            await self._run_loop(manager, steps=4)
+        assert listing.await_count == 0
+
+
 class TestTopUpRespectsTheReserveConfig:
     """The pool must not pay to maintain depths it has stopped carrying.
 

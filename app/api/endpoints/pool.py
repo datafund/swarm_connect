@@ -38,6 +38,11 @@ class PoolStatusResponse(BaseModel):
     current_levels: Dict[int, int] = Field(..., description="Current stamp counts by depth")
     available_stamps: Dict[int, List[str]] = Field(..., description="Available batch IDs by depth")
     total_stamps: int = Field(..., description="Total available stamps in pool")
+    pending_stamps: Dict[int, int] = Field(
+        default_factory=dict,
+        description="Stamps bought but not usable yet, by depth: held for the pool, "
+                    "counted toward the reserve target, not handed out until Bee lists them usable",
+    )
     low_reserve_warning: bool = Field(..., description="True if any depth is below threshold")
     last_check: Optional[str] = Field(None, description="Last maintenance check timestamp (ISO format)")
     next_check: Optional[str] = Field(None, description="Next scheduled check timestamp (ISO format)")
@@ -51,6 +56,7 @@ class PoolStatusResponse(BaseModel):
                 "current_levels": {17: 1, 20: 0},
                 "available_stamps": {17: ["abc123..."]},
                 "total_stamps": 1,
+                "pending_stamps": {20: 1},
                 "low_reserve_warning": True,
                 "last_check": "2026-01-21T10:00:00Z",
                 "next_check": "2026-01-21T10:15:00Z",
@@ -178,6 +184,7 @@ async def get_pool_status():
         current_levels=status.current_levels,
         available_stamps=status.available_stamps,
         total_stamps=status.total_stamps,
+        pending_stamps=status.pending_stamps,
         low_reserve_warning=status.low_reserve_warning,
         last_check=status.last_check.isoformat() if status.last_check else None,
         next_check=status.next_check.isoformat() if status.next_check else None,
