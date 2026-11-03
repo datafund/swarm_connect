@@ -18,7 +18,6 @@ import asyncio
 import json
 import os
 import logging
-import re
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -29,17 +28,20 @@ from threading import Lock
 from app.core.atomic_io import StateLoadError, atomic_write_json, keep_corrupt_copy, unreadable_state
 from app.core.config import settings
 from app.services import swarm_api
+from app.services.bee_errors import SCRUB_CAP, error_cause, public_bee_text
 from app.services.swarm_api import coerce_int
 from app.services.stamp_ownership import POOL_OWNER, stamp_ownership_manager
 
 logger = logging.getLogger(__name__)
 
 
-def _bee_error_message(exc) -> Optional[str]:
+def _bee_error_message(exc, limit: int = 200) -> Optional[str]:
     """Extract Bee's own error text from a failed request, if there is one.
 
     Bee reports refusals as JSON like {"code":400,"message":"out of funds"}.
     That message names the problem exactly; the exception string does not.
+    Cut to `limit` characters; /pool/status asks for more and lets
+    public_bee_text scrub before cutting (#549).
     """
     response = getattr(exc, "response", None)
     if response is None:
@@ -49,38 +51,11 @@ def _bee_error_message(exc) -> Optional[str]:
         if isinstance(body, dict):
             message = body.get("message") or body.get("detail")
             if message:
-                return str(message)[:200]
+                return str(message)[:limit]
     except Exception:
         pass
     text = (getattr(response, "text", "") or "").strip()
-    return text[:200] or None
-
-
-def _error_cause(exc) -> str:
-    """Name a failure for /pool/status without quoting its text (#534).
-
-    /pool/status is unauthenticated, and httpx's HTTPStatusError text names
-    the request URL, which is the internal Bee API address. The entry there
-    gets the HTTP status, or the exception class when there is no response;
-    the caller logs the full text.
-    """
-    status = getattr(getattr(exc, "response", None), "status_code", None)
-    if status is not None:
-        return f"HTTP {status}"
-    return type(exc).__name__
-
-
-_URL_RE = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*://[^\s\"'<>]+")
-
-
-def _without_urls(text: str) -> str:
-    """Replace URL-shaped substrings with <url> for /pool/status (#534).
-
-    Bee's own message is worth showing, but it is response text: a proxy's
-    HTML error page or a Bee message quoting its RPC endpoint can name an
-    internal address. The log keeps the original.
-    """
-    return _URL_RE.sub("<url>", text)
+    return text[:limit] or None
 
 
 
@@ -733,7 +708,7 @@ class StampPoolManager:
         except Exception as e:
             logger.error(f"Immediate replenishment failed for depth {depth}: {e}")
             self._errors.append(f"Immediate replenishment failed (depth {depth}): "
-                                f"{_error_cause(e)}; see the gateway log for details.")
+                                f"{error_cause(e)}; see the gateway log for details.")
         finally:
             # Remove from pending count
             with self._lock:
@@ -1101,7 +1076,7 @@ class StampPoolManager:
             # in HTTPStatusError). It goes to the log only (#534).
             logger.error(f"Error syncing stamps from Bee node: {e}")
             self._last_sync_error = (f"Sync error: could not read stamps from the Bee node "
-                                     f"({_error_cause(e)}); see the gateway log for details.")
+                                     f"({error_cause(e)}); see the gateway log for details.")
             self._errors.append(self._last_sync_error)
             self._last_sync_failure = "bee"
             # The pool's contents are now UNKNOWN, not known-to-be-empty. Record
@@ -1277,9 +1252,14 @@ class StampPoolManager:
                             said = f" — Bee said: {detail}" if detail else ""
                             logger.error(f"Failed to purchase depth-{depth} stamp: {e}{said}")
                             # Bee's own message, not str(e): that names the Bee URL (#534).
+                            # Scrubbed at 2 KB, cut to 200, and shown only if the
+                            # safety gate passes it (#549).
+                            shown = _bee_error_message(e, SCRUB_CAP + 1)
+                            shown = public_bee_text(shown) if shown else None
+                            shown = f" — Bee said: {shown}" if shown else ""
                             results["errors"].append(
                                 f"Failed to purchase depth-{depth} stamp: "
-                                f"{_error_cause(e)}{_without_urls(said)}")
+                                f"{error_cause(e)}{shown}")
                             # Back off this depth. Without this the next check
                             # tries again immediately and keeps failing: an
                             # underfunded pool retried an unaffordable purchase
@@ -1358,7 +1338,7 @@ class StampPoolManager:
                         logger.error(f"Failed to top up stamp {stamp.batch_id[:16]}...: {e}")
                         results["errors"].append(
                             f"Failed to top up stamp {stamp.batch_id[:16]}...: "
-                            f"{_error_cause(e)}; see the gateway log for details.")
+                            f"{error_cause(e)}; see the gateway log for details.")
                         debug["result"] = f"error: {e}"
                 elif current_ttl is None:
                     debug["result"] = "skipped: ttl_lookup_returned_none"
@@ -1372,7 +1352,7 @@ class StampPoolManager:
 
         except Exception as e:
             logger.error(f"Pool check failed: {e}")
-            error_msg = f"Pool check failed: {_error_cause(e)}; see the gateway log for details."
+            error_msg = f"Pool check failed: {error_cause(e)}; see the gateway log for details."
             results["errors"].append(error_msg)
             self._errors = [error_msg]
 

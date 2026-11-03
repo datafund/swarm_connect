@@ -12,6 +12,7 @@ import time
 from typing import Dict, Any, Optional
 
 from app.core.config import settings
+from app.services.bee_errors import error_cause
 from app.services.http_client import get_client
 
 logger = logging.getLogger(__name__)
@@ -186,5 +187,8 @@ async def check_base_eth_balance() -> Dict[str, Any]:
             "threshold_eth": warn_threshold,
             "critical_eth": critical_threshold,
             "address": address,
-            "warning": f"Failed to fetch Base ETH balance: {str(e)}"
+            # str(e) names BASE_RPC_URL, which can carry an API key (#549);
+            # the full text is logged above.
+            "warning": (f"Failed to fetch Base ETH balance "
+                        f"({error_cause(e)}); see the gateway log for details.")
         }
