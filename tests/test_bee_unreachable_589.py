@@ -354,7 +354,9 @@ class TestPool:
         r = TestClient(app).post("/api/v1/pool/acquire", json={"size": "small"})
         assert r.status_code == 429, r.text
         assert "accepts" not in r.json() and "accepts" not in r.json()["detail"]
-        assert "X-PAYMENT" not in r.json()["detail"]["message"]
+        # Named only as temporarily refused, not offered (review round 2).
+        assert "header" not in r.json()["detail"]["alternative"]
+        assert "temporarily refused" in r.json()["detail"]["message"]
 
 
 # --------------------------------------------------------------------------- #
@@ -448,6 +450,66 @@ class TestRetriesOfPossiblyChargedRequests:
         fac.settle.assert_not_called()
         assert not bought
 
+    def test_before_work_authorization_is_refused_like_a_new_payment(self, fac):
+        # Its retry would be settled again, possibly for the first time.
+        from app.x402.settlement import BEFORE_WORK, outcome_unknown
+        c, bought = self._client(fac)
+        nonce = "0x" + "6f" * 32
+        outcome_unknown.add((ALICE.lower(), nonce), BEFORE_WORK)
+        _closed()
+        r = c.post("/api/v1/stamps/", json={"depth": 17}, headers={"X-PAYMENT": pay(nonce=nonce)})
+        assert r.status_code == 503
+        assert r.json()["detail"]["code"] == "PAYMENTS_UNAVAILABLE"
+        fac.verify.assert_not_called()
+        fac.settle.assert_not_called()
+        assert not bought
+
+    def test_live_reservation_passes_and_gets_its_existing_answer(self, fac):
+        from app.x402.settlement import replay_guard
+        c, bought = self._client(fac)
+        nonce = "0x" + "7a" * 32
+        assert replay_guard.reserve((ALICE.lower(), nonce))  # a request with it is in progress
+        _closed()
+        r = c.post("/api/v1/stamps/", json={"depth": 17}, headers={"X-PAYMENT": pay(nonce=nonce)})
+        assert r.status_code == 402
+        assert "already been used" in r.json()["detail"]["error"]
+        fac.settle.assert_not_called()
+        assert not bought
+
+    def test_expired_reservation_is_refused(self, fac):
+        import time as _time
+        from app.x402.settlement import replay_guard
+        c, bought = self._client(fac)
+        nonce = "0x" + "7b" * 32
+        replay_guard._reserved[(ALICE.lower(), nonce)] = _time.monotonic() - 1
+        _closed()
+        r = c.post("/api/v1/stamps/", json={"depth": 17}, headers={"X-PAYMENT": pay(nonce=nonce)})
+        assert r.status_code == 503
+        fac.verify.assert_not_called()
+
+    def test_exempted_retry_that_would_settle_anew_is_refused_before_settling(self, fac):
+        # The reservation that exempted it is released while it is verified
+        # (the earlier request ended unsettled): it would now settle anew.
+        from app.x402.settlement import replay_guard
+        c, bought = self._client(fac)
+        nonce = "0x" + "7c" * 32
+        key = (ALICE.lower(), nonce)
+        assert replay_guard.reserve(key)
+        verify = fac.verify.side_effect
+
+        def release_then_verify(payment, **kw):
+            replay_guard.release(key)
+            return verify(payment, **kw)
+        fac.verify.side_effect = release_then_verify
+        _closed()
+        r = c.post("/api/v1/stamps/", json={"depth": 17},
+                   headers={"X-PAYMENT": pay(nonce=nonce), "Idempotency-Key": "k-race"})
+        assert r.status_code == 503
+        assert r.json()["detail"]["code"] == "PAYMENTS_UNAVAILABLE"
+        fac.settle.assert_not_called()
+        assert not bought
+        assert not replay_guard.is_reserved(key)  # released: retry later with it
+
     def test_a_fresh_payment_is_still_refused(self, fac):
         c, bought = self._client(fac)
         _closed()
@@ -510,9 +572,12 @@ class TestPoolRefusalWhilePaymentsAreRefused:
         _closed()
         r = TestClient(app).post("/api/v1/pool/acquire", json={"size": "small"})
         assert r.status_code == 429, r.text
-        assert r.headers["Retry-After"] == "15"
+        # No Retry-After: the allowance stays spent until resets_at, so a client
+        # honouring it would loop on the unpaid acquire.
+        assert "Retry-After" not in r.headers
         d = r.json()["detail"]
         assert "/api/v1/stamps/" not in d["message"]
+        assert "paid acquire (X-PAYMENT" in d["message"]
         assert "temporarily refused" in d["message"]
-        assert d["alternative"]["retry_after_seconds"] == 15
+        assert d["resets_at"]
         assert "endpoint" not in d["alternative"]

@@ -211,25 +211,25 @@ async def _refuse_allowance(
     detail = dict(detail)
     # While the gateway cannot accept payments (#589), a paid acquire or a paid
     # direct purchase would get 503 PAYMENTS_UNAVAILABLE: offer neither, and
-    # answer the 429 with when to retry.
+    # answer the 429 saying the paid acquire is temporarily refused.
     payments_refused = False
     if settings.X402_ENABLED:
-        from app.x402.accept_gate import payments_refusal, retry_after_seconds
+        from app.x402.accept_gate import payments_refusal
         payments_refused = payments_refusal() is not None
     offer_payment = (settings.X402_ENABLED and settings.paid_bypass_is_honoured()
                      and not payments_refused)
-    headers = None
     if payments_refused:
-        retry_after = retry_after_seconds()
+        # No Retry-After: the free allowance stays spent until resets_at, so a
+        # client that honours it would loop on the unpaid acquire.
         message += (
-            "Paid routes are temporarily refused: the gateway cannot accept payments "
-            f"right now. Retry later (after {retry_after} s at the earliest)."
+            "The paid acquire (X-PAYMENT on this same request) is temporarily refused: "
+            "the gateway cannot accept payments right now. Retry it later, or wait for "
+            "the allowance to reset (resets_at)."
         )
         detail["alternative"] = {
-            "retry_after_seconds": retry_after,
-            "note": "Paid routes are temporarily refused; retry this request later.",
+            "note": ("The paid acquire (X-PAYMENT) is temporarily refused while the gateway "
+                     "cannot accept payments; retry it later."),
         }
-        headers = {"Retry-After": str(retry_after)}
     elif offer_payment:
         message += (
             "To continue now, pay with x402: send an X-PAYMENT header with "
@@ -278,7 +278,7 @@ async def _refuse_allowance(
             raise HTTPException(status_code=status.HTTP_402_PAYMENT_REQUIRED, detail=payment_required)
 
     count_pool_allowance_refusal(size, scope, "429")
-    raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail=detail, headers=headers)
+    raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail=detail)
 
 
 @router.post(

@@ -558,10 +558,15 @@ async def require_x402_payment(request: Request) -> None:
     # verified or settled (#589). Free-tier requests are not affected, nor is
     # a retry of an attempt that may have been charged: it goes on to its
     # stored result or 409 below. Reads memory only: no Bee call.
+    # An exempted retry is noted, so that if it still reaches a new settlement
+    # (its state changed in the meantime) it is refused below, before that.
+    gate_reason = None
     if not (is_free_tier_opt_in(request) and settings.X402_FREE_TIER_ENABLED):
         from app.x402.accept_gate import is_retry_of_possibly_charged, payments_refusal, refusal
         reason = payments_refusal()
-        if reason is not None and not is_retry_of_possibly_charged(request):
+        if reason is not None and is_retry_of_possibly_charged(request):
+            gate_reason = reason
+        elif reason is not None:
             logger.warning(f"x402: refusing {request.method} {request.url.path} from {client_ip} "
                            f"before payment: payments unavailable ({reason})")
             x402_payments_total.labels(mode="unavailable").inc()
@@ -827,6 +832,20 @@ async def require_x402_payment(request: Request) -> None:
     except BaseException:
         replay_guard.release(auth_key)
         raise
+
+    # A retry let past the payment gate (#589) was expected to be answered
+    # from stored state above. Reaching here, it would be settled anew while
+    # payments are refused: refuse it as the gate would have, unpaid.
+    if gate_reason is not None:
+        replay_guard.release(auth_key)
+        if idempotency_id is not None:
+            from app.x402.idempotency import idempotency_store
+            idempotency_store.abandon(*idempotency_id)
+        logger.warning(f"x402: refusing a retry from {client_ip} that would settle anew "
+                       f"while payments are unavailable ({gate_reason})")
+        x402_payments_total.labels(mode="unavailable").inc()
+        from app.x402.accept_gate import refusal
+        raise refusal(gate_reason)
 
     logger.info(f"x402: Payment verified for payer {verify_response.payer}")
     x402_payments_total.labels(mode="paid").inc()

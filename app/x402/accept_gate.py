@@ -10,9 +10,9 @@ the refund or outcome-unknown paths. So while the snapshot says so, or is too
 old to trust, a request that would pay (or be offered a 402) is answered
 503 PAYMENTS_UNAVAILABLE before it is priced, verified or settled.
 
-A retry of an attempt that may have been charged (a stored Idempotency-Key
-entry, or an authorization already in use or with an unknown settlement
-outcome) is let through to its existing replay or 409 answer.
+A retry of an attempt that may have been charged, whose existing answer comes
+from stored state without a new settlement, is not refused here (see
+is_retry_of_possibly_charged); it may still fail at pricing while Bee is down.
 
 The check reads the snapshot in memory only: it adds no Bee call per request.
 With no snapshot yet (startup) it lets requests through, as before.
@@ -63,21 +63,40 @@ def retry_after_seconds() -> int:
 
 
 def is_retry_of_possibly_charged(request) -> bool:
-    """The request may be a retry of an earlier attempt that was charged.
+    """The request retries an attempt that may have been charged, and its
+    existing answer comes from stored state, without a new settlement.
 
-    Such a request is let through the gate to its existing answer: the stored
-    result of its Idempotency-Key (a 201 replay, or a 409 naming the
-    settlement), or the 409 for an authorization whose settlement outcome is
-    unknown, or the 402/409 of an authorization already in use. Refusing it
-    with "not charged" would be wrong for a client whose first attempt was,
-    and would delay its recovery.
+    Such a request is not refused by the gate. It goes on to its existing
+    answer, read from stored state: the stored result of its Idempotency-Key
+    (a 201 replay, or a 409 naming the settlement), the 409 for an
+    authorization whose settlement is in progress or whose work already ran
+    with an unknown outcome, or the 402/409 of an authorization already in
+    use. Refusing it with "not charged" would be wrong for a client whose
+    first attempt was, and would delay its recovery.
 
-    True when the request carries an X-PAYMENT whose authorization is in the
-    outcome-unknown registry or the replay guard, or an Idempotency-Key with a
-    stored entry for that authorization's payer on this route. Read-only
-    lookups in memory: no Bee call, no write. The payer here is the one the
-    authorization claims; the normal path then verifies it before anything is
-    replayed.
+    True when the request carries an X-PAYMENT whose authorization is:
+    - in the outcome-unknown registry and in flight (409 in progress), or
+      remembered as AFTER_WORK (409 outcome unknown, refused before any work);
+    - reserved, unexpired, in the replay guard (409, or 402 "already used");
+    or an Idempotency-Key with a stored entry for that authorization's payer
+    on this route (a replay or a 409).
+
+    Not exempt: a BEFORE_WORK authorization. Its retry is settled again by
+    settle_payment, which could settle it for the first time while payments
+    are refused, so the gate refuses it like a new payment. As a backstop,
+    require_x402_payment refuses an exempted request that would still go on
+    to settle (its state changed after this check), before the settlement.
+
+    What is guaranteed is only that the gate does not refuse it. The request
+    is still priced before it is verified, and pricing can call Bee: while
+    Bee cannot price, such a retry can get 503 "Failed to calculate price"
+    (or BEE_BUSY) instead of its stored result or 409. Retrying later, with
+    the same Idempotency-Key and the same authorization, gets that answer
+    once Bee prices again.
+
+    Read-only lookups in memory: no Bee call, no write. The payer here is the
+    one the authorization claims; the normal path verifies it before
+    anything is replayed.
     """
     from app.x402.middleware import X_PAYMENT_HEADER, decode_payment_header
     header = request.headers.get(X_PAYMENT_HEADER)
@@ -89,12 +108,12 @@ def is_retry_of_possibly_charged(request) -> bool:
         return False
     if payload is None:
         return False
-    from app.x402.settlement import authorization_key, outcome_unknown, replay_guard
+    from app.x402.settlement import AFTER_WORK, authorization_key, outcome_unknown, replay_guard
     auth_key = authorization_key(payload)
     if auth_key is None:
         return False
     in_flight, kind = outcome_unknown.state(auth_key)
-    if in_flight or kind is not None or replay_guard.is_reserved(auth_key):
+    if in_flight or kind == AFTER_WORK or replay_guard.is_reserved(auth_key):
         return True
     from app.x402.idempotency import IDEMPOTENCY_HEADER, MAX_KEY_LENGTH, entry_id, idempotency_store
     key = request.headers.get(IDEMPOTENCY_HEADER)
