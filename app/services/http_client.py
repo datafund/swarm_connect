@@ -299,6 +299,8 @@ async def recover_pool(generation: int) -> str:
     """
     global _client, _transport, _last_recovery_attempt, _replace_lock
     from app.core.config import settings
+    from app.services import bee_gate  # started from a request, runs outside it (#588)
+    bee_gate.enter_background()
     if _replace_lock is None:
         _replace_lock = asyncio.Lock()
     async with _replace_lock:

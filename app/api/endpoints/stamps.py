@@ -611,7 +611,13 @@ def _outcome_unknown(e: httpx.HTTPError) -> bool:
 
     A timeout or dropped connection, or a 502/504 from a proxy, says nothing
     about whether Bee bought the batch. Any other status is Bee's own answer.
+
+    A refusal by the gateway's own Bee call gate (#588) is not unknown: the
+    request was never sent to Bee, so nothing was bought.
     """
+    from app.services.bee_gate import BeeBusyError
+    if isinstance(e, BeeBusyError):
+        return False
     if isinstance(e, httpx.TransportError):
         return True
     return isinstance(e, httpx.HTTPStatusError) and e.response.status_code in (502, 504)
@@ -762,7 +768,11 @@ async def _finish_pending_purchase(request: Request, label: str, depth: int, amo
                         except Exception as release_error:
                             logger.error(f"Could not release the spend hold of a refused purchase "
                                          f"(label {label}): {release_error}", exc_info=True)
-                    refund_needed(f"refused by Bee ({_bee_error_detail(e)[1] or type(e).__name__})")
+                    from app.services.bee_gate import BeeBusyError
+                    if isinstance(e, BeeBusyError):
+                        refund_needed("not sent to Bee: no Bee call slot was free (#588)")
+                    else:
+                        refund_needed(f"refused by Bee ({_bee_error_detail(e)[1] or type(e).__name__})")
                     return
                 logger.error(f"Bee gave no answer to a paid purchase ({type(e).__name__}); looking for the batch")
         if batch_id is None:

@@ -24,7 +24,8 @@ Each call takes a slot of one class:
 
 A request's call that gets no slot within BEE_CALL_SLOT_WAIT_SECONDS raises
 BeeBusyError, and BeeGateMiddleware turns that request's error response into a
-503 BEE_BUSY with Retry-After.
+503 BEE_BUSY with Retry-After, except where a payment is involved (see
+app/middleware/bee_gate.py). A BeeBusyError means the call never reached Bee.
 
 A slot is held from the start of the request to Bee until its response body is
 closed, so a streamed download holds it for the whole transfer. It is released
@@ -61,11 +62,14 @@ class BeeBusyError(httpx.TransportError):
 class RequestGateState:
     """Per-request gate state, shared with tasks the request starts."""
 
-    __slots__ = ("refused", "committed")
+    __slots__ = ("refused", "committed", "payment_attempted")
 
     def __init__(self) -> None:
         self.refused = False      # one of this request's Bee calls was refused
         self.committed = False    # this request's payment has settled
+        # Settlement of this request's payment was started: from here on its
+        # outcome may be unknown, so its answer must never be replaced.
+        self.payment_attempted = False
 
 
 _request_state: contextvars.ContextVar[Optional[RequestGateState]] = contextvars.ContextVar(
@@ -90,6 +94,17 @@ def mark_committed() -> None:
     state = _request_state.get()
     if state is not None:
         state.committed = True
+
+
+def mark_payment_attempted() -> None:
+    """Settlement of the current request's payment is about to start.
+
+    Called immediately before every facilitator settle call. The 503 BEE_BUSY
+    rewrite says nothing was charged, which is no longer known to be true.
+    """
+    state = _request_state.get()
+    if state is not None:
+        state.payment_attempted = True
 
 
 def current_request_state() -> Optional[RequestGateState]:

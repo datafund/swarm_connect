@@ -722,6 +722,10 @@ class StampPoolManager:
 
         This is fire-and-forget - errors are logged but don't affect the caller.
         """
+        # Started from a request (pool acquire), but runs outside it: its Bee
+        # calls are background work for the Bee call gate (#588).
+        from app.services import bee_gate
+        bee_gate.enter_background()
         try:
             # Checked again here: a sync can fail between spawning this task
             # and the task running.

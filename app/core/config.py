@@ -374,12 +374,16 @@ class Settings(BaseSettings):
     # hold at most BEE_MAX_CONCURRENT_TRANSFERS slots, so long transfers cannot
     # starve short calls. Bee work of a request whose payment has settled waits
     # up to BEE_BACKGROUND_SLOT_WAIT_SECONDS, like background work.
-    # The cap must be below BEE_HTTP_MAX_CONNECTIONS; the gateway refuses to
-    # start otherwise. The defaults are a judgement, not measured.
+    # Left unset, the three sizes follow BEE_HTTP_MAX_CONNECTIONS at 64%, 8%
+    # and 24% of it (64/8/24 of the default 100; 26/3/10 of 40), so lowering
+    # the pool keeps a valid gate. Set explicitly, they are used as given. The
+    # resulting cap must be below BEE_HTTP_MAX_CONNECTIONS; the gateway refuses
+    # to start otherwise (a pool of 1 leaves no room for a gate: turn it off).
+    # The proportions are a judgement, not measured.
     BEE_CALL_GATE_ENABLED: bool = True
-    BEE_MAX_CONCURRENT_CALLS: int = Field(64, ge=1)
-    BEE_RESERVED_BACKGROUND_CALLS: int = Field(8, ge=0)
-    BEE_MAX_CONCURRENT_TRANSFERS: int = Field(24, ge=1)
+    BEE_MAX_CONCURRENT_CALLS: Optional[int] = Field(None, ge=1)
+    BEE_RESERVED_BACKGROUND_CALLS: Optional[int] = Field(None, ge=0)
+    BEE_MAX_CONCURRENT_TRANSFERS: Optional[int] = Field(None, ge=1)
     BEE_CALL_SLOT_WAIT_SECONDS: float = Field(2.0, ge=0, le=60, allow_inf_nan=False)
     BEE_BACKGROUND_SLOT_WAIT_SECONDS: float = Field(30.0, ge=0, le=600, allow_inf_nan=False)
     BEE_BUSY_RETRY_AFTER_SECONDS: int = Field(5, ge=1, le=3600)
@@ -492,6 +496,15 @@ class Settings(BaseSettings):
         At or above it, a flood fills the pool before the gate refuses
         anything, which is the PoolTimeout the gate exists to replace.
         """
+        pool = self.BEE_HTTP_MAX_CONNECTIONS
+        if self.BEE_MAX_CONCURRENT_CALLS is None:
+            self.BEE_MAX_CONCURRENT_CALLS = max(1, min(pool - 1, round(pool * 0.64)))
+        calls = self.BEE_MAX_CONCURRENT_CALLS
+        if self.BEE_RESERVED_BACKGROUND_CALLS is None:
+            self.BEE_RESERVED_BACKGROUND_CALLS = min(calls - 1, max(1, round(pool * 0.08)))
+        reserved = self.BEE_RESERVED_BACKGROUND_CALLS
+        if self.BEE_MAX_CONCURRENT_TRANSFERS is None:
+            self.BEE_MAX_CONCURRENT_TRANSFERS = max(1, min(calls - reserved, round(pool * 0.24)))
         if not self.BEE_CALL_GATE_ENABLED:
             return self
         problems = []
