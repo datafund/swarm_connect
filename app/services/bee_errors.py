@@ -21,7 +21,8 @@ What it replaces, in this order:
 4. libp2p multiaddrs: the address after /ip4/ or /ip6/ -> <address>, the
    name after /dns/, /dns4/, /dns6/ or /dnsaddr/ -> <host>, and a /tcp/ or
    /udp/ port right after it -> <port>. The peer id is kept.
-5. user:password@ before a host -> removed (up to the last "@").
+5. user:password@ before a host -> removed (up to the last "@"); a
+   configured host right after it -> <host>, or <address> with a port.
 6. The names in Go's x509 "certificate is valid for A, B, not C" and
    "wanted to match C" -> <host>.
 7. IPv6 addresses -> <address>, bracketed or bare, with any port and path.
@@ -35,15 +36,19 @@ What it replaces, in this order:
 9. The name after "lookup" -> <host> when it is dotted, is a configured
    host, or is followed by " on " (Go's resolver error). "lookup failed"
    stays.
-10. Hosts this gateway is configured with -> <host>, or <address> with a
-    port or path: the host names in SWARM_BEE_API_URL, GNOSIS_RPC_URL,
-    BASE_RPC_URL, X402_FACILITATOR_URL and X402_BZZ_PRICE_FEED_URL, read at
-    call time, matched as whole tokens in any case. This is the only rule
-    that replaces a bare word or a hyphenated word without a dot
-    ("bee:1633", "dial bee-dev"): a field such as "timeout:30",
-    "gasLimit:21000" or "chain-id:100" cannot be told apart from a host by
-    its shape, so only names known to be hosts are taken. The cost: with
-    the Bee host named "bee", the word "bee" in Bee's text is replaced too.
+10. Hosts this gateway is configured with: the host names in
+    SWARM_BEE_API_URL, GNOSIS_RPC_URL, BASE_RPC_URL, X402_FACILITATOR_URL
+    and X402_BZZ_PRICE_FEED_URL, read at call time, matched as whole tokens
+    in any case. A dotted one is replaced anywhere -> <host>, or <address>
+    with a port or path. A dotless one ("bee", "bee-dev") is a compose
+    service name, already public in docker-compose.yml, and "bee" is also a
+    word in Bee's own text, so it is replaced only with a :port or /path
+    after it ("bee:1633", "BEE:1633/x" -> <address>), after user:pass@
+    (step 5), after "lookup" (step 9) or in a multiaddr (step 4); a bare
+    "bee" or "Bee is syncing" stays. This is the only rule that replaces a
+    word without a dot: a field such as "timeout:30", "gasLimit:21000" or
+    "chain-id:100" cannot be told apart from a host by its shape, so only
+    names known to be hosts are taken.
 11. A dotted name with a port -> <address> (bee.internal:1633), with any
     path after it; "main.go:123" is a Go source position and stays.
 12. A dotted name ending in a letters-only label and followed by a path ->
@@ -98,7 +103,8 @@ _MULTIADDR_RE = re.compile(
     r"(?<![\w/])/(ip4|ip6|dns|dns4|dns6|dnsaddr)/([^/\s]{1,253})(?:/(tcp|udp)/\d{1,5})?",
     re.IGNORECASE)
 _USERINFO_RE = re.compile(
-    r"(?<![\w.:@-])[^\s:@/\"'<>()]{1,64}:[^\s/\"'<>()]{0,128}@(?=[\w\[])")
+    r"(?<![\w.:@-])[^\s:@/\"'<>()]{1,64}:[^\s/\"'<>()]{0,128}@(?=[\w\[])"
+    r"([A-Za-z0-9-]{1,63}(?![\w.-]))?(:\d{1,10})?")
 _X509_RE = re.compile(
     r"\b(certificate is valid for )((?:[^\s,]{1,253}, ){0,32}?[^\s,]{1,253})(, not )"
     r"([^\s,;]{1,253}?)" + _END
@@ -143,9 +149,19 @@ def _configured_hosts():
 
 @functools.lru_cache(maxsize=8)
 def _configured_host_re(hosts):
-    names = "|".join(re.escape(h) for h in hosts)
-    return re.compile(rf"(?<![\w.<@/-])(?:{names})(?::\d{{1,10}}|(?=/))?{_PATH}{_END}",
-                      re.IGNORECASE)
+    # A dotted host (an RPC or facilitator host name) is replaced anywhere,
+    # with or without a port. A dotless one ("bee", "bee-dev") is a compose
+    # service name, already public in docker-compose.yml, and also an
+    # ordinary word in Bee's text ("Bee is syncing"): it is replaced only
+    # with a :port or /path after it.
+    dotted = "|".join(re.escape(h) for h in hosts if "." in h)
+    dotless = "|".join(re.escape(h) for h in hosts if "." not in h)
+    forms = []
+    if dotted:
+        forms.append(rf"(?:{dotted})(?::\d{{1,10}}|(?=/))?")
+    if dotless:
+        forms.append(rf"(?:{dotless})(?::\d{{1,10}}|(?=/))")
+    return re.compile(rf"(?<![\w.<@/-])(?:{'|'.join(forms)}){_PATH}{_END}", re.IGNORECASE)
 
 
 def _multiaddr(match):
@@ -217,7 +233,16 @@ def _host_port(match):
 def _scrub(text, hosts):
     text = _URL_RE.sub("<url>", text)
     text = _MULTIADDR_RE.sub(_multiaddr, text)
-    text = _USERINFO_RE.sub("", text)
+
+    def userinfo(match):
+        # Credentials go; a configured host right after them goes too, since
+        # a dotless one would otherwise be left as a bare word.
+        host, port = match.group(1) or "", match.group(2) or ""
+        if host.lower() in hosts:
+            return "<address>" if port else "<host>"
+        return host + port
+
+    text = _USERINFO_RE.sub(userinfo, text)
     text = _X509_RE.sub(_x509, text)
     text = _BRACKETED_V6_RE.sub(_bracketed_v6, text)
     text = _BARE_V6_RE.sub(_bare_v6, text)

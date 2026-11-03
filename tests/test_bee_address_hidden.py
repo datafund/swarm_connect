@@ -323,9 +323,17 @@ class TestWithoutAddresses:
         ("bee:99999", "<address>"),
         ("address bee:99999: invalid port", "address <address>: invalid port"),
         ("lookup bee-dev.", "lookup <host>."),
-        # The cost of matching configured names as whole words in any case:
-        # with the Bee host named "bee", the word itself is replaced too.
-        ("Bee is syncing", "<host> is syncing"),
+        # A dotless configured host with a port, in a URL, after "lookup",
+        # after credentials, or in a multiaddr.
+        ("dial tcp bee:1633", "dial tcp <address>"),
+        ("Get http://BEE:1633/x", "Get <url>"),
+        ("lookup bee on 127.0.0.11:53", "lookup <host> on <address>"),
+        ("Post user:pass@bee:1633 x", "Post <address> x"),
+        ("Post user:pass@bee x", "Post <host> x"),
+        ("fetch BEE/stamps failed", "fetch <address> failed"),
+        ("/dns4/bee/tcp/1634", "/dns4/<host>/tcp/<port>"),
+        # A dotted configured host is replaced even without a port.
+        ("reached rpc.internal then failed", "reached <host> then failed"),
         ("dial BEE-DEV:1633 failed", "dial <address> failed"),
         ("lookup x on 10.0.0.1:53", "lookup <host> on <address>"),
         # Invalid ports, dotted host with a path, '@' in a password.
@@ -363,7 +371,11 @@ class TestWithoutAddresses:
         # Numbers that look like addresses but are not.
         "at 12:34:56",
         "slice [0:10]",
-        "node version 2.8.1",
+        "bee version 2.8.1",
+        # A dotless configured host as a plain word: a compose service name
+        # (public in docker-compose.yml) and a word in Bee's own text.
+        "Bee is syncing",
+        "bee node not ready, retry",
         "x 1.2.300.4",
         "batch 0xabc: not found",
         "HTTP 400",
