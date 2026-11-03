@@ -14,6 +14,8 @@ For each HTTP request:
    which tells the client nothing was charged. Never when that may be untrue
    or hide what the client needs about a payment:
    - the request carries X-PAYMENT;
+   - a state-changing Bee call (any method but GET and HEAD) of this request
+     got a slot and was sent, whatever its outcome;
    - settlement of its payment was started (marked immediately before every
      facilitator settle call) or completed;
    - the response carries a payment header (X-Payment-Status,
@@ -46,16 +48,26 @@ def busy_body() -> bytes:
     return json.dumps({"detail": detail, "code": detail["code"], "message": BEE_BUSY_MESSAGE}).encode()
 
 
-async def send_busy(send: Send) -> None:
+# Headers of the replaced response that still hold for the 503: the caller's
+# rate-limit state. Every other header of the replaced response is dropped
+# (CORS headers are added outside this middleware, so they are kept).
+_KEPT_HEADER_PREFIXES = (b"x-ratelimit-",)
+
+
+async def send_busy(send: Send, replaced: Message = None) -> None:
     body = busy_body()
+    headers = [
+        (b"content-type", b"application/json"),
+        (b"content-length", str(len(body)).encode()),
+        (b"retry-after", str(settings.BEE_BUSY_RETRY_AFTER_SECONDS).encode()),
+    ]
+    if replaced is not None:
+        headers += [(k, v) for k, v in replaced.get("headers", [])
+                    if k.lower().startswith(_KEPT_HEADER_PREFIXES)]
     await send({
         "type": "http.response.start",
         "status": 503,
-        "headers": [
-            (b"content-type", b"application/json"),
-            (b"content-length", str(len(body)).encode()),
-            (b"retry-after", str(settings.BEE_BUSY_RETRY_AFTER_SECONDS).encode()),
-        ],
+        "headers": headers,
     })
     await send({"type": "http.response.body", "body": body})
 
@@ -98,7 +110,10 @@ class BeeGateMiddleware:
             # charged, and its own answer (an outcome-unknown 502 with its
             # X-Payment-Status header, a settled-not-delivered error, a 409)
             # is what the client needs to avoid paying twice.
-            return (state.refused and not offers_payment
+            # Nor once a state-changing Bee call (not GET or HEAD) was sent:
+            # it may have spent the gateway's BZZ even if it failed, and the
+            # refusal was not what made the request fail.
+            return (state.refused and not offers_payment and not state.change_sent
                     and not state.committed and not state.payment_attempted)
 
         sent = {"start": False}
@@ -123,7 +138,7 @@ class BeeGateMiddleware:
                     await send(start)
                     await send({"type": "http.response.body", "body": body})
                 else:
-                    await send_busy(send)
+                    await send_busy(send, replaced=start)
                 return
             await send(message)
 

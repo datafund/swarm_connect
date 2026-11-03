@@ -184,7 +184,13 @@ into load on Bee:
   request answer `503 BEE_BUSY` with `Retry-After: BEE_BUSY_RETRY_AFTER_SECONDS`
   (5). That answer says nothing was charged, so it is never given to a request
   that carries a payment, or once its settlement has started; such a request
-  keeps its own answer, with its payment headers and code. Bee work of a
+  keeps its own answer, with its payment headers and code. Nor is it given once
+  the request has sent Bee a call that can change state (any method but GET
+  and HEAD: a purchase, a top-up, an upload), whatever that call's outcome:
+  the gateway's BZZ may have been spent. The 503 replaces the handler's
+  response entirely: its `X-RateLimit-*` headers are kept and the CORS headers
+  are added as usual, but every other header of the replaced response is
+  dropped. Bee work of a
   request whose payment has settled waits up to
   `BEE_BACKGROUND_SLOT_WAIT_SECONDS` (30) instead; if it is still refused, the
   call never reached Bee, and the purchase is recorded for a refund, not looked
