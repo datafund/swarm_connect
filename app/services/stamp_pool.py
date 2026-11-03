@@ -313,7 +313,13 @@ class StampPoolManager:
         logger.info(f"Pool state file ({name}) readable again; pause lifted, wrote {n} batch ids")
 
     def _sync_succeeded(self, flush: bool = True) -> None:
-        """Lift any pause, and write state that was refused during it (#547).
+        """Lift any pause, and write the pool if state is waiting to be saved (#547).
+
+        State is waiting once the file has been found unreadable
+        (_mark_state_file_unreadable marks it), whether or not a save was
+        refused since, so the sync that ends a state-file pause always writes
+        the reconciled pool. It stays waiting until a write succeeds. When
+        nothing is waiting, this writes nothing.
 
         `flush` is False when the caller has just attempted that save itself,
         so a failing write is not tried and logged twice.
@@ -1443,30 +1449,37 @@ class StampPoolManager:
             # Wait for stamp to become usable (up to 90 seconds)
             usable = await self._wait_for_stamp_usable(batch_id, timeout=90)
 
+            # The batch is paid for, so it enters the pool and its state file
+            # whatever happens next. The listing below only refines the TTL.
+            # Before, a usable batch missing from that listing (or a listing
+            # that raised) was never added: the pool lost a batch it had paid
+            # for, and a later run bought another to fill the gap.
+            ttl = duration_hours * 3600
             if usable:
-                # Get stamp info and add to pool
-                stamps = await swarm_api.get_all_stamps_processed()
-                stamp_data = next((s for s in stamps if s.get("batchID") == batch_id), None)
+                try:
+                    stamps = await swarm_api.get_all_stamps_processed()
+                    stamp_data = next((s for s in stamps if s.get("batchID") == batch_id), None)
+                except Exception as e:
+                    stamp_data = None
+                    logger.warning(f"Could not list stamps after buying {batch_id[:16]}...: {e}")
                 if stamp_data:
-                    self.add_stamp_to_pool(
-                        batch_id=batch_id,
-                        depth=depth,
-                        amount=amount,
-                        ttl=stamp_data.get("batchTTL", duration_hours * 3600),
-                        label=label
+                    ttl = coerce_int(stamp_data.get("batchTTL"), ttl)
+                else:
+                    logger.warning(
+                        f"Stamp {batch_id[:16]}... is usable but missing from the stamp listing; "
+                        f"adding it with the purchased TTL ({ttl}s)"
                     )
-                    return batch_id
             else:
                 logger.warning(f"Stamp {batch_id[:16]}... purchased but not yet usable")
                 # Add anyway, it will become usable soon
-                self.add_stamp_to_pool(
-                    batch_id=batch_id,
-                    depth=depth,
-                    amount=amount,
-                    ttl=duration_hours * 3600,
-                    label=label
-                )
-                return batch_id
+            self.add_stamp_to_pool(
+                batch_id=batch_id,
+                depth=depth,
+                amount=amount,
+                ttl=ttl,
+                label=label
+            )
+            return batch_id
 
         except BaseException as e:
             # Surface Bee's own message. httpx's str(e) is only the status line

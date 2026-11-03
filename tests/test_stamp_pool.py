@@ -1412,6 +1412,68 @@ class TestPurchaseCeiling:
             assert manager._spend_budget_remaining() == 0
 
 
+class TestPaidBatchAlwaysEntersThePool:
+    """A batch the pool has paid for enters the pool and its state file.
+
+    After a purchase, the pool waits for the batch to become usable and then
+    lists Bee's stamps to read its TTL. If that listing did not include the
+    batch, or raised, the batch was never added: the money was spent, the pool
+    did not hold it, the state file did not list it, and a later run bought
+    another one to fill the gap.
+    """
+
+    BATCH = "ab" * 32
+
+    @pytest.fixture
+    def state_file(self, tmp_path):
+        return str(tmp_path / "pool_state.json")
+
+    async def _buy(self, manager, listing):
+        async def fake_buy(amount, depth, label):
+            return self.BATCH
+
+        with patch('app.services.stamp_pool.swarm_api.get_chainstate',
+                   return_value={"currentPrice": "24000"}), \
+             patch('app.services.stamp_pool.swarm_api.purchase_postage_stamp',
+                   side_effect=fake_buy), \
+             patch('app.services.stamp_pool.swarm_api.get_all_stamps_processed',
+                   new=AsyncMock(side_effect=listing)), \
+             patch.object(manager, '_wait_for_stamp_usable',
+                          new=AsyncMock(return_value=True)):
+            return await manager._purchase_stamp(17)
+
+    def _assert_held_and_saved(self, manager, state_file, result):
+        from app.core.config import settings
+        assert result == self.BATCH, "a paid purchase reported nothing bought"
+        assert self.BATCH in manager._pool, "a paid batch never entered the pool"
+        stamp = manager._pool[self.BATCH]
+        assert stamp.depth == 17
+        assert stamp.amount > 0
+        assert stamp.ttl_at_creation == (settings.STAMP_POOL_DEFAULT_DURATION_HOURS + 1) * 3600
+        with open(state_file) as f:
+            assert self.BATCH in json.load(f), "a paid batch is missing from the state file"
+
+    @pytest.mark.asyncio
+    async def test_usable_batch_missing_from_the_listing_is_added(self, state_file):
+        manager = StampPoolManager(state_file=state_file)
+        result = await self._buy(manager, [[]])
+        self._assert_held_and_saved(manager, state_file, result)
+
+    @pytest.mark.asyncio
+    async def test_usable_batch_is_added_when_the_listing_fails(self, state_file):
+        manager = StampPoolManager(state_file=state_file)
+        result = await self._buy(manager, RuntimeError("Bee unavailable"))
+        self._assert_held_and_saved(manager, state_file, result)
+
+    @pytest.mark.asyncio
+    async def test_listed_ttl_is_used_when_the_listing_has_the_batch(self, state_file):
+        manager = StampPoolManager(state_file=state_file)
+        listing = [[{"batchID": self.BATCH, "depth": 17, "usable": True, "batchTTL": "12345"}]]
+        result = await self._buy(manager, listing)
+        assert result == self.BATCH
+        assert manager._pool[self.BATCH].ttl_at_creation == 12345
+
+
 class TestTopUpRespectsTheReserveConfig:
     """The pool must not pay to maintain depths it has stopped carrying.
 
