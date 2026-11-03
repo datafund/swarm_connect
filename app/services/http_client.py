@@ -164,6 +164,13 @@ def _limits():
 
 
 def _new_client() -> "tuple[httpx.AsyncClient, ObservedTransport]":
+    """A new shared client and its transport.
+
+    Passing transport= means httpx does not apply proxies from the
+    HTTP_PROXY, HTTPS_PROXY or ALL_PROXY environment variables to this
+    client. That is intended: Bee is on the compose network and must be
+    reached directly.
+    """
     global _generation
     _generation += 1
     transport = ObservedTransport(_limits(), _generation)
@@ -270,7 +277,10 @@ async def probe_bee() -> bool:
     from app.core.config import settings
     url = urljoin(str(settings.SWARM_BEE_API_URL), "health")
     try:
-        async with httpx.AsyncClient(timeout=httpx.Timeout(PROBE_TIMEOUT_SECONDS)) as probe:
+        # trust_env=False: no proxy from HTTP(S)_PROXY/ALL_PROXY, the same
+        # path as the shared client, whose explicit transport ignores them.
+        async with httpx.AsyncClient(timeout=httpx.Timeout(PROBE_TIMEOUT_SECONDS),
+                                     trust_env=False) as probe:
             response = await probe.get(url)
         return response.status_code < 500
     except Exception as e:
@@ -289,6 +299,8 @@ async def recover_pool(generation: int) -> str:
     """
     global _client, _transport, _last_recovery_attempt, _replace_lock
     from app.core.config import settings
+    from app.services import bee_gate  # started from a request, runs outside it (#588)
+    bee_gate.enter_background()
     if _replace_lock is None:
         _replace_lock = asyncio.Lock()
     async with _replace_lock:

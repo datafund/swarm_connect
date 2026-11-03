@@ -512,6 +512,10 @@ class X402Middleware(BaseHTTPMiddleware):
             payment_requirements = getattr(request.state, "x402_requirements", None)
             unknown_outcome = False
             auth_key = getattr(request.state, "x402_auth_key", None)
+            # The Bee call gate must never answer for this request with
+            # "nothing was charged" from here on (#588).
+            from app.services.bee_gate import mark_payment_attempted
+            mark_payment_attempted()
             # Write-ahead, AFTER_WORK: the work has run (#553). If it cannot be
             # written, do not settle: the result is withheld, nothing charged,
             # and the authorization released for a retry.

@@ -7,7 +7,7 @@ shared client, so the gate is exercised where it sits: in front of the
 client's transport.
 """
 import asyncio
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import httpx
 import pytest
@@ -242,6 +242,39 @@ class TestRelease:
         # And the full capacity is usable again.
         results = await asyncio.gather(*[client.get(url("wallet")) for _ in range(4)])
         assert all(r.status_code == 200 for r in results)
+
+
+    @pytest.mark.asyncio
+    async def test_replaced_clients_calls_keep_their_slots_until_closed(self, shared, monkeypatch):
+        """#587 replaces the shared client; the gate is not per client, so calls
+        still streaming on the old one keep their slots until their bodies close,
+        and the new client's calls count against the same cap."""
+        old_client = hc.get_client()
+        streams = []
+        for _ in range(4):  # every slot, on the old client
+            cm = old_client.stream("GET", url("bzz/" + "ab" * 32))
+            streams.append((cm, await cm.__aenter__()))
+        assert sum(bee_call_gate.held.values()) == 4
+
+        monkeypatch.setattr(hc, "probe_bee", AsyncMock(return_value=True))
+        monkeypatch.setattr(hc, "pool_snapshot", lambda t: None)
+        assert await hc.recover_pool(hc._transport.generation) == "replaced_unverified"
+        new_client = hc.get_client()
+        assert new_client is not old_client
+        assert sum(bee_call_gate.held.values()) == 4  # replacement freed nothing
+
+        # The new client's call waits for a slot the old client's streams hold.
+        call = asyncio.create_task(new_client.get(url("wallet")))
+        await asyncio.sleep(0.2)
+        assert not call.done()
+        for cm, response in streams[:1]:
+            await response.aread()
+            await cm.__aexit__(None, None, None)
+        assert (await call).status_code == 200
+        for cm, response in streams[1:]:
+            await response.aread()
+            await cm.__aexit__(None, None, None)
+        assert sum(bee_call_gate.held.values()) == 0
 
 
 # --------------------------------------------------------------------------
@@ -508,6 +541,48 @@ class TestSettings:
         with pytest.raises(ValidationError) as exc:
             self._settings(**kw)
         assert text in str(exc.value)
+
+    @pytest.mark.parametrize("pool, sizes", [(100, (64, 8, 24)), (40, (26, 3, 10)), (10, (6, 1, 2)),
+                                             (2, (1, 0, 1))])
+    def test_sizes_follow_a_lowered_pool_when_not_set(self, pool, sizes):
+        """A deployment that lowers BEE_HTTP_MAX_CONNECTIONS still starts (#591 sets 40)."""
+        s = self._settings(BEE_HTTP_MAX_CONNECTIONS=pool)
+        got = (s.BEE_MAX_CONCURRENT_CALLS, s.BEE_RESERVED_BACKGROUND_CALLS, s.BEE_MAX_CONCURRENT_TRANSFERS)
+        assert got == sizes
+        assert got[0] < pool and got[1] < got[0] and got[2] <= got[0] - got[1]
+
+    def test_explicit_sizes_are_kept(self):
+        s = self._settings(BEE_HTTP_MAX_CONNECTIONS=40, BEE_MAX_CONCURRENT_CALLS=30,
+                           BEE_RESERVED_BACKGROUND_CALLS=5, BEE_MAX_CONCURRENT_TRANSFERS=12)
+        assert (s.BEE_MAX_CONCURRENT_CALLS, s.BEE_RESERVED_BACKGROUND_CALLS,
+                s.BEE_MAX_CONCURRENT_TRANSFERS) == (30, 5, 12)
+
+    @pytest.mark.parametrize("kw, text", [
+        ({"BEE_HTTP_MAX_CONNECTIONS": 40, "BEE_MAX_CONCURRENT_CALLS": 64}, "below BEE_HTTP_MAX_CONNECTIONS"),
+        ({"BEE_HTTP_MAX_CONNECTIONS": 40, "BEE_MAX_CONCURRENT_TRANSFERS": 30}, "BEE_MAX_CONCURRENT_TRANSFERS"),
+        ({"BEE_HTTP_MAX_CONNECTIONS": 40, "BEE_RESERVED_BACKGROUND_CALLS": 26}, "BEE_RESERVED_BACKGROUND_CALLS"),
+        ({"BEE_HTTP_MAX_CONNECTIONS": 1}, "below BEE_HTTP_MAX_CONNECTIONS"),
+    ])
+    def test_explicit_invalid_sizes_with_a_lowered_pool_refuse_to_start(self, kw, text):
+        with pytest.raises(ValidationError) as exc:
+            self._settings(**kw)
+        assert text in str(exc.value)
+
+    def test_the_40_connection_pool_starts_the_app(self):
+        """The same check as #591's alert test, at the settings level and in a new process."""
+        import os
+        import subprocess
+        import sys
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        code = ("from app.core.config import settings as s; "
+                "print(s.BEE_MAX_CONCURRENT_CALLS, s.BEE_RESERVED_BACKGROUND_CALLS, s.BEE_MAX_CONCURRENT_TRANSFERS)")
+        env = dict(os.environ, BEE_HTTP_MAX_CONNECTIONS="40")
+        for k in ("BEE_MAX_CONCURRENT_CALLS", "BEE_RESERVED_BACKGROUND_CALLS", "BEE_MAX_CONCURRENT_TRANSFERS"):
+            env.pop(k, None)
+        out = subprocess.run([sys.executable, "-c", code], cwd=root, env=env,
+                             capture_output=True, text=True, timeout=60)
+        assert out.returncode == 0, out.stderr
+        assert out.stdout.split() == ["26", "3", "10"]
 
     def test_disabled_gate_skips_the_size_checks(self):
         s = self._settings(BEE_CALL_GATE_ENABLED=False, BEE_MAX_CONCURRENT_CALLS=500)

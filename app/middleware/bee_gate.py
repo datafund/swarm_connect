@@ -9,12 +9,19 @@ For each HTTP request:
    an X-PAYMENT header with 503 BEE_BUSY before anything runs, payment
    included, when no request slot is free at that moment. A request without
    a payment cannot be charged, so it goes on and gets its usual answer.
-3. If one of THIS request's own Bee calls was refused by the gate, and its
-   payment has not settled, replaces an error response (status 400 or above)
-   with 503 BEE_BUSY and Retry-After. A response below 400 passes through
-   unchanged, as does every response of a request none of whose Bee calls was
-   refused. A request whose payment settled keeps its own response, which
-   carries what the client needs about the payment.
+3. If one of THIS request's own Bee calls was refused by the gate, replaces
+   an error response (status 400 or above) with 503 BEE_BUSY and Retry-After,
+   which tells the client nothing was charged. Never when that may be untrue
+   or hide what the client needs about a payment:
+   - the request carries X-PAYMENT;
+   - settlement of its payment was started (marked immediately before every
+     facilitator settle call) or completed;
+   - the response carries a payment header (X-Payment-Status,
+     X-PAYMENT-RESPONSE, X-Payment-Transaction, X-Payment-Mode paid/failed);
+   - its body has a payment, idempotency, delivery or purchase code, or x402
+     fields.
+   A response below 400 passes through unchanged, as does every response of a
+   request none of whose Bee calls was refused.
 
 Plain ASGI, not BaseHTTPMiddleware (see ClientMetricsMiddleware for why).
 With BEE_CALL_GATE_ENABLED false it passes everything through untouched.
@@ -83,18 +90,41 @@ class BeeGateMiddleware:
             await send_busy(send)
             return
 
-        started = {"replaced": False, "sent": False}
+        offers_payment = _offers_payment(scope)
+
+        def may_replace() -> bool:
+            # Never for a request that carries a payment, or whose payment
+            # settlement was started or completed: the 503 says nothing was
+            # charged, and its own answer (an outcome-unknown 502 with its
+            # X-Payment-Status header, a settled-not-delivered error, a 409)
+            # is what the client needs to avoid paying twice.
+            return (state.refused and not offers_payment
+                    and not state.committed and not state.payment_attempted)
+
+        sent = {"start": False}
+        held: dict = {"start": None, "body": []}
 
         async def send_wrapper(message: Message) -> None:
             if message["type"] == "http.response.start":
-                if state.refused and not state.committed and message["status"] >= 400:
-                    started["replaced"] = True
-                    started["sent"] = True
-                    await send_busy(send)
+                sent["start"] = True
+                if message["status"] >= 400 and may_replace() and not _has_payment_header(message):
+                    # Hold it until the body shows whether it is about a payment.
+                    held["start"] = message
                     return
-                started["sent"] = True
-            elif message["type"] == "http.response.body" and started["replaced"]:
-                return  # the replaced response's body
+                await send(message)
+                return
+            if message["type"] == "http.response.body" and held["start"] is not None:
+                held["body"].append(message.get("body", b""))
+                if message.get("more_body", False):
+                    return
+                start, body = held["start"], b"".join(held["body"])
+                held["start"] = None
+                if _is_payment_body(body) or not may_replace():
+                    await send(start)
+                    await send({"type": "http.response.body", "body": body})
+                else:
+                    await send_busy(send)
+                return
             await send(message)
 
         try:
@@ -102,8 +132,43 @@ class BeeGateMiddleware:
         except Exception:
             # Unhandled, so it would become a 500. If this request's own Bee
             # call was refused and nothing was sent yet, answer 503 instead.
-            if state.refused and not state.committed and not started["sent"]:
+            if may_replace() and not sent["start"]:
                 logger.debug("Bee call refused by the gate; answering 503 BEE_BUSY")
                 await send_busy(send)
                 return
             raise
+
+
+# Response headers the x402 code sets on answers about a payment.
+_PAYMENT_HEADERS = (b"x-payment-status", b"x-payment-response", b"x-payment-transaction")
+# Codes of answers about a payment or its delivery (docs/error-codes.md).
+_PAYMENT_CODE_PREFIXES = ("PAYMENT_", "IDEMPOTENCY_", "DELIVERY_", "PURCHASE_")
+
+
+def _has_payment_header(start: Message) -> bool:
+    for name, value in start.get("headers", []):
+        name = name.lower()
+        if name in _PAYMENT_HEADERS:
+            return True
+        if name == b"x-payment-mode" and value.lower() in (b"paid", b"failed"):
+            return True
+    return False
+
+
+def _is_payment_body(body: bytes) -> bool:
+    """The error body is about a payment: a payment or settlement code, or x402 fields."""
+    try:
+        data = json.loads(body)
+    except ValueError:
+        return False
+    if not isinstance(data, dict):
+        return False
+    for part in (data, data.get("detail")):
+        if not isinstance(part, dict):
+            continue
+        code = part.get("code")
+        if isinstance(code, str) and code.startswith(_PAYMENT_CODE_PREFIXES):
+            return True
+        if any(k in part for k in ("x402_status", "x402Version", "transaction")):
+            return True
+    return False

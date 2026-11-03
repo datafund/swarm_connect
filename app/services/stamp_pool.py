@@ -722,6 +722,10 @@ class StampPoolManager:
 
         This is fire-and-forget - errors are logged but don't affect the caller.
         """
+        # Started from a request (pool acquire), but runs outside it: its Bee
+        # calls are background work for the Bee call gate (#588).
+        from app.services import bee_gate
+        bee_gate.enter_background()
         try:
             # Checked again here: a sync can fail between spawning this task
             # and the task running.
@@ -736,7 +740,7 @@ class StampPoolManager:
                 # already, by _spending_paused_for_state_file.
                 logger.warning(f"Immediate replenishment: purchase returned no batch_id for depth {depth}")
         except Exception as e:
-            logger.error(f"Immediate replenishment failed for depth {depth}: {e}")
+            logger.error(f"Immediate replenishment failed for depth {depth}: {exc_text(e)}")
             self._errors.append(f"Immediate replenishment failed (depth {depth}): "
                                 f"{error_cause(e)}; see the gateway log for details.")
         finally:
@@ -1408,7 +1412,7 @@ class StampPoolManager:
                         else:
                             debug["result"] = "refused by a spending ceiling"
                     except Exception as e:
-                        logger.error(f"Failed to top up stamp {stamp.batch_id[:16]}...: {e}")
+                        logger.error(f"Failed to top up stamp {stamp.batch_id[:16]}...: {exc_text(e)}")
                         results["errors"].append(
                             f"Failed to top up stamp {stamp.batch_id[:16]}...: "
                             f"{error_cause(e)}; see the gateway log for details.")
@@ -2102,7 +2106,7 @@ class StampPoolManager:
                 # Failed before the top-up call (e.g. the price lookup, or a
                 # cancellation there): nothing was spent.
                 self._release_spend_slot(slot)
-            logger.error(f"Failed to top up stamp {batch_id[:16]}...: {e}")
+            logger.error(f"Failed to top up stamp {batch_id[:16]}...: {exc_text(e)}")
             raise
 
     async def start_background_task(self):

@@ -74,14 +74,18 @@ def spend_certainly_did_not_happen(exc: BaseException) -> bool:
     """Whether a failed spend definitely spent nothing, so its hold can go back.
 
     Only when the refusal came before the money moved: a check of our own
-    (HTTPException), a connection that was never made, or Bee answering with a
-    4xx refusal. A timeout after the request was sent, a cancellation, a 5xx or
+    (HTTPException, or the Bee call gate refusing to send the call), a
+    connection that was never made, or Bee answering with a 4xx refusal. A timeout after the request was sent, a cancellation, a 5xx or
     anything unrecognised may have spent money, so the hold is kept and the
     limits fail closed.
     """
     import httpx
     from fastapi import HTTPException
+    from app.services.bee_gate import BeeBusyError
     if isinstance(exc, HTTPException):
+        return True
+    # Refused by the gateway's own Bee call gate (#588): never sent to Bee.
+    if isinstance(exc, BeeBusyError):
         return True
     if isinstance(exc, (httpx.ConnectError, httpx.ConnectTimeout)):
         return True

@@ -402,6 +402,14 @@ def _pool_reader(key: str):
     return read
 
 
+# The configured pool size, so the "Bee HTTP pool slots stuck" alert can use
+# a ratio that follows BEE_HTTP_MAX_CONNECTIONS.
+bee_http_pool_max_connections = Gauge(
+    "gateway_bee_http_pool_max_connections",
+    "Configured connection limit of the shared HTTP client's pool (BEE_HTTP_MAX_CONNECTIONS)",
+)
+bee_http_pool_max_connections.set_function(lambda: float(settings.BEE_HTTP_MAX_CONNECTIONS))
+
 for _state in ("active", "idle", "stuck"):
     bee_http_pool_connections.labels(state=_state).set_function(_pool_reader(_state))
 bee_http_pool_requests.set_function(_pool_reader("requests"))

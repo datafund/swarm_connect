@@ -638,6 +638,15 @@ async def list_available_stamps():
     return stamps
 
 
+async def _check_and_replenish_in_background():
+    """Pool maintenance after the response. It runs at the end of the request,
+    but its Bee calls are background work for the Bee call gate (#588): they may
+    use the reserved slots and wait instead of being refused."""
+    from app.services import bee_gate
+    bee_gate.enter_background()
+    return await stamp_pool_manager.check_and_replenish()
+
+
 @router.post(
     "/check",
     status_code=status.HTTP_202_ACCEPTED,
@@ -687,7 +696,7 @@ async def trigger_pool_check(
         operation="pool maintenance (spends BZZ)",
     )
 
-    background_tasks.add_task(stamp_pool_manager.check_and_replenish)
+    background_tasks.add_task(_check_and_replenish_in_background)
     logger.info("Pool maintenance scheduled by %s", signer)
 
     return ManualCheckAcceptedResponse(
