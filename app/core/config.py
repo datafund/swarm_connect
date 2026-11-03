@@ -152,6 +152,9 @@ class Settings(BaseSettings):
     # retry of a possibly collected payment is never answered with a payable
     # 402, and work that already ran is not run again, across restarts (#553).
     X402_SETTLEMENT_UNKNOWN_STATE_FILE: str = "data/x402_settlement_unknown.json"
+    # Longest wait for a write of that file on the request path. A write-ahead
+    # that takes longer (a hung disk) refuses the payment with 503, unsettled.
+    X402_SETTLEMENT_STATE_WRITE_TIMEOUT_SECONDS: float = 5.0
 
     # === Base Chain Settings (for monitoring USDC receipts) ===
     BASE_RPC_URL: str = "https://sepolia.base.org"

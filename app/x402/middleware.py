@@ -515,7 +515,7 @@ class X402Middleware(BaseHTTPMiddleware):
             # Write-ahead, AFTER_WORK: the work has run (#553). If it cannot be
             # written, do not settle: the result is withheld, nothing charged,
             # and the authorization released for a retry.
-            prior, recorded = await outcome_unknown.abegin_settlement(auth_key, AFTER_WORK)
+            prior, recorded, gen = await outcome_unknown.abegin_settlement(auth_key, AFTER_WORK)
             if not recorded:
                 from app.x402.settlement import payment_state_unavailable_detail
                 replay_guard.release(auth_key)
@@ -531,17 +531,19 @@ class X402Middleware(BaseHTTPMiddleware):
                 )
                 failure = None if settlement.success else (settlement.error_reason or "unknown")
             except Exception as e:
+                outcome_unknown.release(auth_key)    # an unknown outcome now
                 logger.error(f"x402: Payment settlement failed: {type(e).__name__}: {e}", exc_info=True)
                 failure = f"{type(e).__name__}"
                 unknown_outcome = True
             except BaseException as e:
                 # Interrupted (CancelledError) after the work ran: recorded as
                 # AFTER_WORK, then re-raised; no response can be sent (#553).
+                outcome_unknown.release(auth_key)
                 from app.x402.settlement import settlement_interrupted
                 settlement_interrupted(request, AFTER_WORK, e)
                 raise
-            finally:
-                outcome_unknown.release(auth_key)
+            # A definite answer stays in flight until its resolution is written
+            # (aresolve releases it): a duplicate in between is "in progress".
             if failure is not None:
                 logger.error(f"x402: settlement failed after delivery on {request.url.path}: {failure}")
                 if unknown_outcome:
@@ -568,8 +570,9 @@ class X402Middleware(BaseHTTPMiddleware):
                         result="refused_after_unknown" if remembered else "refused").inc()
                     if not remembered:
                         # Last: records first, then the removal write.
-                        await outcome_unknown.aresolve(auth_key, None, settled=False)
+                        await outcome_unknown.aresolve(auth_key, None, settled=False, gen=gen, release=True)
                     if remembered:
+                        outcome_unknown.release(auth_key)    # nothing to resolve: the entry stays
                         # An earlier attempt may have spent the nonce: no 402 (#553).
                         # This route's work has now run: the write-ahead already
                         # made the entry AFTER_WORK, so it never runs again.
@@ -594,7 +597,7 @@ class X402Middleware(BaseHTTPMiddleware):
             record_settlement(request, settlement)
             x402_settlements_total.labels(result="settled").inc()
             # Last: records first, then the removal write (shielded).
-            await outcome_unknown.aresolve(auth_key, prior, settled=True)
+            await outcome_unknown.aresolve(auth_key, prior, settled=True, gen=gen, release=True)
 
         tx_hash = getattr(settlement, "transaction", None) or "unknown"
         if not ok:

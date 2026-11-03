@@ -679,6 +679,9 @@ def test_in_progress_answer_has_no_retry_after_and_says_not_to_resend():
     assert "Do not resend this X-PAYMENT" in message
     assert "newly signed payment" in message and "Idempotency-Key" in message
     assert "no safe way" in message
+    # #553 review 9: true also when the other request was interrupted before settling.
+    assert "The first request's answer is the result" not in message
+    assert "interrupted" in message and "nonce" in message
 
 
 def test_cancel_during_the_write_ahead_releases_and_removes_it(env, state, monkeypatch):
@@ -728,14 +731,14 @@ def test_cancel_during_the_resolution_keeps_the_records(env, state, monkeypatch,
     from app.services.metrics import x402_settlements_total
     reg = st.outcome_unknown
     started = threading.Event()
-    real_resolve = reg.resolve
+    real_remove = reg._remove     # what aresolve runs (generation-checked since review 9)
 
-    def slow_resolve(*a, **kw):
+    def slow_remove(*a, **kw):
         started.set()
         time.sleep(0.3)
-        real_resolve(*a, **kw)
+        real_remove(*a, **kw)
 
-    monkeypatch.setattr(reg, "resolve", slow_resolve)
+    monkeypatch.setattr(reg, "_remove", slow_remove)
     fac = _facilitator(ok() if outcome == "settled" else refused("insufficient_funds"))
     record = MagicMock()
     metric_before = x402_settlements_total.labels(result=outcome)._value.get()
@@ -842,3 +845,185 @@ def test_the_unavailable_retry_writes_in_the_background(tmp_path, monkeypatch):
     reg.unavailable          # schedules the retry; does not write on this thread
     assert _wait_until(lambda: not reg.unavailable)
     assert calls and threading.get_ident() not in calls
+
+
+# --- #553 review 9 ---------------------------------------------------------
+
+def test_a_stale_abandon_never_removes_a_newer_write_ahead(tmp_path):
+    """Forced interleaving: a cancelled begin's background removal runs after a newer
+    begin for the same authorization; it must leave the newer entry alone."""
+    reg = st.OutcomeUnknownRegistry(state_file=str(tmp_path / "s.json"))
+    old_prior, old_recorded, old_gen = reg.begin_settlement_ex(KEY, st.BEFORE_WORK)
+    assert old_recorded
+    reg.release(KEY)                                     # the cancelled caller's release
+    new_prior, new_recorded, new_gen = reg.begin_settlement_ex(KEY, st.BEFORE_WORK)
+    assert new_recorded and new_gen != old_gen
+    reg.remove_abandoned(KEY, old_prior, old_gen)        # the stale background removal
+    assert reg.contains(KEY) and reg.in_flight(KEY)
+    reg.release(KEY)                                     # newer settle errors: entry stays
+    reg.remove_abandoned(KEY, old_prior, old_gen)
+    assert reg.contains(KEY)
+    # Its own generation, not in flight, no earlier unknown outcome: removed. (Here
+    # new_prior is the stale entry's kind, which is conservatively kept.)
+    reg.remove_abandoned(KEY, new_prior, new_gen)
+    assert reg.contains(KEY)
+    reg.remove_abandoned(KEY, None, new_gen)
+    assert not reg.contains(KEY)
+
+
+def test_a_hung_write_ahead_fails_closed_without_asking_the_facilitator(env, state, monkeypatch):
+    import asyncio
+    import threading
+    from unittest.mock import patch
+    from fastapi import HTTPException
+    from app.core.config import settings
+    monkeypatch.setattr(settings, "X402_SETTLEMENT_STATE_WRITE_TIMEOUT_SECONDS", 0.2)
+    started = threading.Event()
+    _slow(monkeypatch, started, seconds=1.0)
+    fac = _facilitator(ok())
+    reg = st.outcome_unknown
+
+    async def go():
+        with patch("app.x402.dependency._get_facilitator_client", return_value=fac):
+            t0 = time.monotonic()
+            with pytest.raises(HTTPException) as exc:
+                await st.settle_payment(_fake_request())
+            return exc.value, time.monotonic() - t0
+
+    exc, elapsed = asyncio.run(go())
+    assert exc.status_code == 503 and exc.detail["code"] == "PAYMENT_STATE_UNAVAILABLE"
+    assert elapsed < 0.8 and fac.settle.await_count == 0
+    # The write lands later; the entry is then released and removed like a cancelled begin.
+    assert _wait_until(lambda: not reg.in_flight(KEY) and not reg.contains(KEY), timeout=5)
+
+
+def test_a_saturated_default_executor_does_not_delay_settlement(env, state):
+    import asyncio
+    import threading
+    from unittest.mock import patch
+    fac = _facilitator(ok())
+    gate = threading.Event()
+
+    async def go():
+        loop = asyncio.get_running_loop()
+        blockers = [loop.run_in_executor(None, gate.wait, 10) for _ in range(64)]
+        try:
+            with patch("app.x402.dependency._get_facilitator_client", return_value=fac):
+                t0 = time.monotonic()
+                await asyncio.wait_for(st.settle_payment(_fake_request()), 3)
+                return time.monotonic() - t0
+        finally:
+            gate.set()
+            await asyncio.gather(*blockers)
+
+    assert asyncio.run(go()) < 2
+    assert fac.settle.await_count == 1
+
+
+def test_a_refusal_at_verify_counts_as_refused_after_unknown(env, state):
+    from app.services.metrics import x402_settlements_total
+    before = x402_settlements_total.labels(result="refused_after_unknown")._value.get()
+    fac = _facilitator(RuntimeError("down"))
+    good = VerifyResponse(isValid=True, payer="0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1")
+    fac.verify = AsyncMock(side_effect=[good, VerifyResponse(isValid=False, invalidReason="nonce_used", payer=None)])
+    header = create_valid_payment_header()
+    assert _run(fac, header=header).status_code == 502
+    assert _run(fac, header=header).status_code == 409
+    assert x402_settlements_total.labels(result="refused_after_unknown")._value.get() == before + 1
+
+
+def test_shutdown_waits_for_registry_io_bounded():
+    import threading
+    done = threading.Event()
+
+    def slow():
+        time.sleep(0.3)
+        done.set()
+
+    st._submit_registry_io(slow)
+    t0 = time.monotonic()
+    st.shutdown_registry_io(timeout=0.05)
+    assert time.monotonic() - t0 < 0.25          # bounded
+    st._submit_registry_io(slow)                  # a new executor after shutdown
+    done.clear()
+    st.shutdown_registry_io(timeout=2)
+    assert done.is_set()                          # waited for pending work
+
+
+def test_lifespan_shuts_registry_io_down(monkeypatch):
+    import inspect
+    from app import main
+    assert "shutdown_registry_io" in inspect.getsource(main.lifespan)
+
+
+def test_a_duplicate_during_the_resolution_write_is_in_progress_not_unknown(env, state, monkeypatch):
+    """Found by an intermittent failure of the concurrent-reuse test: between the
+    facilitator's answer and the resolution write, a duplicate saw the entry with no
+    in-flight mark and was told the outcome was unknown. The request stays in flight
+    until its resolution is written."""
+    import asyncio
+    import threading
+    import httpx
+    from unittest.mock import patch
+    reg = st.outcome_unknown
+    started = threading.Event()
+    real_remove = reg._remove
+
+    def slow_remove(*a, **kw):
+        started.set()
+        time.sleep(0.3)
+        real_remove(*a, **kw)
+
+    monkeypatch.setattr(reg, "_remove", slow_remove)
+    fac = _facilitator(ok())
+    header = create_valid_payment_header()
+
+    async def run():
+        with patch("app.x402.dependency._get_facilitator_client", return_value=fac):
+            transport = httpx.ASGITransport(app=_app(fac))
+            async with httpx.AsyncClient(transport=transport, base_url="http://t") as c:
+                first = asyncio.ensure_future(c.post("/api/v1/stamps/", headers={"X-PAYMENT": header}))
+                await asyncio.to_thread(started.wait, 2)
+                dup = await c.post("/api/v1/stamps/", headers={"X-PAYMENT": header})
+                return await first, dup
+
+    first, dup = asyncio.run(run())
+    assert first.status_code == 200
+    assert dup.status_code == 409
+    assert dup.json()["detail"]["code"] == "PAYMENT_SETTLEMENT_IN_PROGRESS"
+    assert _wait_until(lambda: not reg.in_flight(KEY) and not reg.contains(KEY))
+
+
+def test_state_reads_in_flight_and_kind_atomically(tmp_path):
+    """The race behind an intermittent concurrent-reuse failure: a duplicate that read
+    'not in flight', then 'remembered', after a write-ahead ran in between, was told
+    the outcome was unknown. state() reads both under one lock."""
+    reg = st.OutcomeUnknownRegistry(state_file=str(tmp_path / "s.json"))
+    assert reg.state(KEY) == (False, None)
+    reg.begin_settlement(KEY, st.BEFORE_WORK)
+    assert reg.state(KEY) == (True, st.BEFORE_WORK)
+    reg.release(KEY)
+    assert reg.state(KEY) == (False, st.BEFORE_WORK)
+
+
+def test_a_duplicate_reserved_out_after_a_write_ahead_ran_is_in_progress(env, state, monkeypatch):
+    """Forced interleaving: the duplicate's first registry read sees nothing; the first
+    request's write-ahead then runs; the duplicate's guard check fails. It must be told
+    'in progress', not 'outcome unknown'."""
+    from app.x402.settlement import replay_guard
+    reg = st.outcome_unknown
+    real_state = reg.state
+    calls = []
+
+    def state_then_begin(key):
+        result = real_state(key)
+        if not calls:
+            calls.append(1)
+            reg.begin_settlement(KEY, st.BEFORE_WORK)     # the other request, on its thread
+            replay_guard.reserve(KEY)                     # it holds the reservation
+        return result
+
+    monkeypatch.setattr(reg, "state", state_then_begin)
+    r = _run(_facilitator(ok()))
+    assert r.status_code == 409
+    assert r.json()["detail"]["code"] == "PAYMENT_SETTLEMENT_IN_PROGRESS"

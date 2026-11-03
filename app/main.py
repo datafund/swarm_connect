@@ -12,6 +12,7 @@ from fastapi.utils import is_body_allowed_for_status_code
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.responses import Response
 from http import HTTPStatus
+import asyncio
 import logging
 import time
 
@@ -97,6 +98,11 @@ async def lifespan(app: FastAPI):
     # is closed.
     from app.api.endpoints.stamps import drain_pending_purchases
     await drain_pending_purchases(settings.SHUTDOWN_PENDING_PURCHASE_GRACE_SECONDS)
+
+    # Pending settlement-state writes (#553): wait for them, bounded, so a
+    # write-ahead or resolution in progress is not cut off by the exit.
+    from app.x402.settlement import shutdown_registry_io
+    await asyncio.to_thread(shutdown_registry_io, 5.0)
 
     # Close shared HTTP client (must be last)
     await close_client()
