@@ -22,7 +22,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from enum import Enum
-from typing import Dict, List, Optional, Set
+from typing import Dict, List, Optional, Set, Tuple
 from threading import Lock
 
 from app.core.atomic_io import StateLoadError, atomic_write_json, keep_corrupt_copy, unreadable_state
@@ -652,34 +652,28 @@ class StampPoolManager:
             # This depth is not configured for pooling
             return False
 
-        # Count current available stamps for this depth
+        # Held batches plus purchases in flight on either path (immediate or
+        # maintenance), counted and claimed under one lock hold, so nothing
+        # can start another purchase between the count and the claim.
         with self._lock:
-            # Reserved batches count: they are still the pool's until their
-            # payment settles, and go back to available if it fails.
-            current_count = len([
-                s for s in self._pool.values()
-                if s.depth == depth and s.status in _HELD
-            ])
-            pending_count = self._pending_replenishments.get(depth, 0)
+            current_count, pending_count = self._count_toward_target_locked(depth)
 
-        # If we're at or above target (including pending), no action needed
-        effective_count = current_count + pending_count
-        if effective_count >= target_count:
-            logger.debug(
-                f"Pool depth {depth}: no replenishment needed "
-                f"(have {current_count}, pending {pending_count}, target {target_count})"
-            )
-            return False
+            # If we're at or above target (including pending), no action needed
+            if current_count + pending_count >= target_count:
+                logger.debug(
+                    f"Pool depth {depth}: no replenishment needed "
+                    f"(have {current_count}, pending {pending_count}, target {target_count})"
+                )
+                return False
+
+            # Track pending replenishment
+            self._pending_replenishments[depth] = pending_count + 1
 
         # Need to replenish - spawn async task
         logger.info(
             f"Pool depth {depth}: triggering immediate replenishment "
             f"(have {current_count}, pending {pending_count}, target {target_count})"
         )
-
-        # Track pending replenishment
-        with self._lock:
-            self._pending_replenishments[depth] = pending_count + 1
 
         # Spawn fire-and-forget async task
         asyncio.create_task(self._async_replenish_one(depth))
@@ -710,13 +704,36 @@ class StampPoolManager:
             self._errors.append(f"Immediate replenishment failed (depth {depth}): "
                                 f"{error_cause(e)}; see the gateway log for details.")
         finally:
-            # Remove from pending count
+            # Remove from pending count. No await since _purchase_stamp added
+            # the batch to the pool, so it is never counted twice.
             with self._lock:
-                current_pending = self._pending_replenishments.get(depth, 1)
-                if current_pending <= 1:
-                    self._pending_replenishments.pop(depth, None)
-                else:
-                    self._pending_replenishments[depth] = current_pending - 1
+                self._end_pending_locked(depth)
+
+    def _count_toward_target_locked(self, depth: int) -> Tuple[int, int]:
+        """(held, in flight) for a depth; call with self._lock held.
+
+        Held batches (available or reserved) are the pool's. In-flight
+        purchases are those started by either replenishment path and not
+        finished yet: the batch is not in the pool until _purchase_stamp adds
+        it, and the count drops in the same step (no await between), so a
+        landed batch is counted once, as held. Both paths compare the sum
+        with the target; counting only one of them let the other buy a
+        batch over the target (#428 f).
+        """
+        held = len([
+            s for s in self._pool.values()
+            if s.depth == depth and s.status in _HELD
+        ])
+        return held, self._pending_replenishments.get(depth, 0)
+
+    def _end_pending_locked(self, depth: int) -> None:
+        """Count one in-flight purchase at this depth as finished; call with
+        self._lock held."""
+        current_pending = self._pending_replenishments.get(depth, 1)
+        if current_pending <= 1:
+            self._pending_replenishments.pop(depth, None)
+        else:
+            self._pending_replenishments[depth] = current_pending - 1
 
     def add_stamp_to_pool(self, batch_id: str, depth: int, amount: int, ttl: int,
                           label: Optional[str] = None, usable: bool = True,
@@ -1216,14 +1233,15 @@ class StampPoolManager:
             for depth, target_count in reserve_config.items():
                 # Reserved batches count toward the target (see reserve_stamp):
                 # counting only available ones bought an extra batch whenever a
-                # check ran while a paid acquire was settling.
-                current_count = len([
-                    s for s in self._pool.values()
-                    if s.depth == depth and s.status in _HELD
-                ])
+                # check ran while a paid acquire was settling. So do immediate
+                # replenishments still in flight: ignoring them bought a batch
+                # over the target whenever a run started while one was buying
+                # (#428 f).
+                with self._lock:
+                    current_count, in_flight = self._count_toward_target_locked(depth)
 
                 # Purchase new stamps if below target
-                needed = target_count - current_count
+                needed = target_count - current_count - in_flight
                 if needed > 0 and self._is_backing_off(depth):
                     until = self._backoff[depth].isoformat()
                     msg = (f"Pool depth {depth}: {needed} short, but the last purchase "
@@ -1231,7 +1249,8 @@ class StampPoolManager:
                     logger.info(msg)
                     results["errors"].append(msg)
                 elif needed > 0:
-                    logger.info(f"Pool depth {depth}: need {needed} stamps (have {current_count}, target {target_count})")
+                    logger.info(f"Pool depth {depth}: need {needed} stamps (have {current_count}, "
+                                f"in flight {in_flight}, target {target_count})")
                     for i in range(needed):
                         try:
                             # Delay between purchases to avoid Bee node rate limiting (429)
@@ -1241,7 +1260,25 @@ class StampPoolManager:
                             # file unreadable and paused the pool (#547).
                             if not self._last_sync_ok:
                                 return self._skip_replenishment(results)
-                            batch_id = await self._purchase_stamp(depth)
+                            # Count again before each purchase, and claim it
+                            # as in flight in the same lock hold: an immediate
+                            # replenishment may have started during the wait
+                            # above, and one starting during this purchase
+                            # must count it. Never more than planned above.
+                            with self._lock:
+                                have, flying = self._count_toward_target_locked(depth)
+                                if have + flying >= target_count:
+                                    logger.info(
+                                        f"Pool depth {depth}: target reached during this run "
+                                        f"(have {have}, in flight {flying}, target {target_count}); "
+                                        "buying no more")
+                                    break
+                                self._pending_replenishments[depth] = flying + 1
+                            try:
+                                batch_id = await self._purchase_stamp(depth)
+                            finally:
+                                with self._lock:
+                                    self._end_pending_locked(depth)
                             if batch_id:
                                 results["stamps_purchased"] += 1
                                 # Working again: forget the previous failure.
