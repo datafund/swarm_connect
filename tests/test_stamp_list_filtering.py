@@ -115,7 +115,7 @@ class TestWalletFilteringX402Enabled:
         # c*64 is owned by WALLET, e*64 is owned by someone else
         def get_info(batch_id):
             if batch_id == "c" * 64:
-                return {"owner": self.WALLET, "mode": "paid"}
+                return {"owner": self.WALLET.lower(), "mode": "paid"}  # stored canonical (#384)
             if batch_id == "e" * 64:
                 return {"owner": "0xOTHER", "mode": "paid"}
             if batch_id == "d" * 64:
@@ -169,7 +169,7 @@ class TestExclusiveFiltering:
 
         def get_info(batch_id):
             if batch_id == "c" * 64:
-                return {"owner": self.WALLET, "mode": "paid"}
+                return {"owner": self.WALLET.lower(), "mode": "paid"}  # stored canonical (#384)
             if batch_id == "d" * 64:
                 return {"owner": "shared", "mode": "free"}
             return None
@@ -293,14 +293,76 @@ class TestIsOwnedByEdgeCases:
         mock_get.return_value = [stamp]
 
         # Registry says mode=free (not paid), so _is_owned_by should return False
-        mock_ownership.get_stamp_info.return_value = {"owner": "0xWALLET", "mode": "free"}
+        wallet = "0x" + "ab" * 20
+        mock_ownership.get_stamp_info.return_value = {"owner": wallet, "mode": "free"}
 
-        response = client.get("/api/v1/stamps/?wallet=0xWALLET")
+        response = client.get(f"/api/v1/stamps/?wallet={wallet}")
+        assert response.status_code == 200
         data = response.json()
         batch_ids = {s["batchID"] for s in data["stamps"]}
         # accessMode="owned" but registry mode=free → _is_owned_by returns False
         # accessMode is not "shared" and not None → excluded
         assert "f" * 64 not in batch_ids
+
+
+class TestWalletCaseInsensitive:
+    """#491: the wallet filter matches whatever casing the caller sends.
+
+    Uses a real ownership registry: owners are stored lowercased (#384), and a
+    checksummed or uppercase query used to match none of that wallet's stamps.
+    """
+
+    # EIP-55 checksummed address; its lowercase form is what the registry stores.
+    CHECKSUMMED = "0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAed"
+    OTHER = "0x" + "ef" * 20
+
+    @pytest.fixture
+    def registry(self, tmp_path):
+        from app.services.stamp_ownership import StampOwnershipManager
+        manager = StampOwnershipManager(state_file=str(tmp_path / "ownership.json"))
+        manager.register_stamp("c" * 64, owner=self.CHECKSUMMED, mode="paid", source="test")
+        manager.register_stamp("e" * 64, owner=self.OTHER, mode="paid", source="test")
+        assert manager.get_stamp_info("c" * 64)["owner"] == self.CHECKSUMMED.lower()
+        with patch("app.api.endpoints.stamps.stamp_ownership_manager", manager), \
+                patch("app.api.endpoints.stamps.settings") as mock_settings, \
+                patch("app.services.swarm_api.get_all_stamps_processed") as mock_get:
+            mock_settings.X402_ENABLED = True
+            mock_get.return_value = [LOCAL_STAMP, OWNED_STAMP, REMOTE_OWNED]
+            yield manager
+
+    @pytest.mark.parametrize("wallet", [
+        CHECKSUMMED,
+        "0x" + CHECKSUMMED[2:].upper(),
+        CHECKSUMMED.lower(),
+        CHECKSUMMED[2:],
+    ], ids=["checksummed", "uppercase", "lowercase", "no-0x"])
+    @pytest.mark.parametrize("exclusive", [True, False])
+    def test_any_casing_finds_own_stamp(self, registry, wallet, exclusive):
+        url = f"/api/v1/stamps/?wallet={wallet}" + ("&exclusive=true" if exclusive else "")
+        response = client.get(url)
+        assert response.status_code == 200
+        batch_ids = {s["batchID"] for s in response.json()["stamps"]}
+        assert "c" * 64 in batch_ids
+        assert "e" * 64 not in batch_ids  # another wallet's stamp
+
+    def test_other_wallet_does_not_get_it(self, registry):
+        response = client.get(f"/api/v1/stamps/?wallet=0x{self.OTHER[2:].upper()}&exclusive=true")
+        assert response.status_code == 200
+        batch_ids = {s["batchID"] for s in response.json()["stamps"]}
+        assert batch_ids == {"e" * 64}
+
+    @pytest.mark.parametrize("wallet", ["0xABC", "not-an-address", "0x" + "g" * 40])
+    @pytest.mark.parametrize("exclusive", [True, False])
+    def test_invalid_wallet_is_422_when_filter_applies(self, registry, wallet, exclusive):
+        url = f"/api/v1/stamps/?wallet={wallet}" + ("&exclusive=true" if exclusive else "")
+        response = client.get(url)
+        assert response.status_code == 422
+        assert "wallet" in response.json()["detail"]
+
+    def test_invalid_wallet_ignored_with_global(self, registry):
+        response = client.get("/api/v1/stamps/?global=true&wallet=not-an-address")
+        assert response.status_code == 200
+        assert response.json()["total_count"] == 3
 
 
 class TestAccessModeServiceLayer:

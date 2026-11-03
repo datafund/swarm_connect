@@ -14,7 +14,7 @@ from app.core.config import settings
 from app.services import swarm_api
 from app.services.bee_errors import error_cause, public_bee_text
 from app.services.swarm_api import expiry_from_amount, get_batch_expiry, plur_to_bzz
-from app.services.stamp_ownership import stamp_ownership_manager
+from app.services.stamp_ownership import normalize_address, stamp_ownership_manager
 from app.services.stamp_tracker import record_purchase
 from app.services.spend_budget import (
     GIVEAWAY_KEY, GLOBAL_KEY, spend_budget_tracker, spend_certainly_did_not_happen,
@@ -230,7 +230,12 @@ def _bee_error_detail(exc: httpx.HTTPError):
 
 
 def _is_owned_by(batch_id: str, wallet: str) -> bool:
-    """Check if a stamp is owned by the given wallet address."""
+    """Check if a stamp is owned by the given wallet address.
+
+    `wallet` must already be canonical (normalize_address). The registry stores
+    owners only in that form (#384), so the comparison is exact, as in
+    check_access; a raw query value would miss its own stamps by casing (#491).
+    """
     info = stamp_ownership_manager.get_stamp_info(batch_id)
     if not info:
         return False
@@ -245,7 +250,7 @@ def _is_owned_by(batch_id: str, wallet: str) -> bool:
 async def list_stamps(
     wallet: Optional[str] = Query(
         default=None,
-        description="Filter to stamps accessible by this wallet address (owned + shared + untracked local). Requires x402 to be enabled."
+        description="Filter to stamps accessible by this wallet address (owned + shared + untracked local). Requires x402 to be enabled. Case-insensitive; 422 if it is not a 40-hex-digit address."
     ),
     global_view: Optional[bool] = Query(
         default=None,
@@ -269,12 +274,31 @@ async def list_stamps(
       Only effective when x402 is enabled; ignored otherwise.
     - `?wallet=0xABC...&exclusive=true` — Return only stamps purchased by this wallet (excludes shared/free and untracked stamps).
 
+    The wallet is matched case-insensitively: it is canonicalised the same way
+    the ownership registry stores owners, so a checksummed address finds its
+    own stamps (#491). Where the filter applies, a value that is not a
+    40-hex-digit address (0x optional) is rejected with 422 rather than
+    silently matching nothing. Where it is ignored (x402 disabled, or
+    `global=true`) it is not checked.
+
     Returns:
         StampListResponse: Contains list of filtered stamps and total count
 
     Raises:
-        HTTPException: 502 if Swarm API is unreachable, 500 for other errors
+        HTTPException: 422 for an invalid wallet address, 502 if Swarm API is
+            unreachable, 500 for other errors
     """
+    # Validated before the try block: its `except Exception` would turn the
+    # 422 into a 500.
+    owner = None
+    if wallet and settings.X402_ENABLED and not global_view:
+        owner = normalize_address(wallet)
+        if owner is None:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="wallet must be a 40-hex-digit address, optionally 0x-prefixed.",
+            )
+
     try:
         processed_stamps = await swarm_api.get_all_stamps_processed()
 
@@ -292,12 +316,12 @@ async def list_stamps(
         if global_view:
             # No filtering — return everything (old behavior)
             pass
-        elif wallet and settings.X402_ENABLED:
+        elif owner:
             if exclusive:
                 # Only stamps purchased by this wallet
                 stamp_details = [
                     s for s in stamp_details
-                    if _is_owned_by(s.batchID, wallet)
+                    if _is_owned_by(s.batchID, owner)
                 ]
             else:
                 # Stamps accessible to this wallet (owned + shared + untracked local)
@@ -305,7 +329,7 @@ async def list_stamps(
                     s for s in stamp_details
                     if s.accessMode == "shared"
                     or (s.accessMode is None and s.local)
-                    or _is_owned_by(s.batchID, wallet)
+                    or _is_owned_by(s.batchID, owner)
                 ]
         else:
             # Default: local stamps only

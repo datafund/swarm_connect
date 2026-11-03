@@ -551,7 +551,7 @@ List postage stamps. Default returns only local stamps (usable for uploads).
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `global` | bool | `false` | If true, return all stamps including non-local |
-| `wallet` | string | - | Filter to stamps accessible by this wallet (requires x402 enabled) |
+| `wallet` | string | - | Filter to stamps accessible by this wallet (requires x402 enabled). Case-insensitive; `422` if not a 40-hex-digit address (`0x` optional) |
 | `exclusive` | bool | `false` | With `wallet`: only stamps purchased by this wallet (excludes shared/untracked) |
 
 - **Response**: `{"stamps": [...], "total_count": N}`
