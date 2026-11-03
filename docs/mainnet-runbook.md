@@ -383,6 +383,38 @@ For a nonce-0 node, every start must carry the hint. Bee 2.8.1 reads it from `BE
 | **BZZ pricing rate off market** *(requires #410)* | `X402_BZZ_USD_RATE` is more than 2× away from the market | Review and set the rate |
 | Low BZZ / xDAI / chequebook (existing) | The Bee node can't buy or upload | Fund the node wallet on Gnosis |
 | Gateway spend near its ceiling (once the spend-ceiling change is deployed) | `gateway_spend_bzz_today` approaching `gateway_spend_ceiling_bzz` | Check for abuse; raise the ceiling only deliberately |
+| **Balance check failing** (#586) | `gateway_balance_check_ok{check}` is 0, or no read of that balance succeeded for 15 minutes, for 15 minutes. The balance gauges keep their last value when a read fails, so the balance alerts above are judging an old number | Read the `Failed to check ... balance` lines in the gateway log. `xbzz`/`xdai`/`chequebook` come from the Bee node, and usually fire with **Bee calls failing**. `base_eth` comes from the Base RPC, `gnosis_signer` from the Gnosis RPC |
+
+### Availability alerts (#586)
+
+`Gateway Down` reads `up`, which only says Alloy could scrape `/metrics`. `/metrics` never calls Bee. On 2026-11-03 staging answered `/metrics` for over 30 minutes while every Bee call failed, `/health` took more than 10 s and the proxy answered 502, and nothing alerted. These rules cover that case.
+
+| Alert | Meaning | First action |
+|---|---|---|
+| **Bee calls failing** (critical) | Over 20 failed gateway-to-Bee calls (`gateway_bee_api_errors_total`) in 5 minutes, for 5 minutes. Normal is about 2; the incident reached 619 | Check which endpoint fails (the "Bee API Errors" panel) and whether Bee itself is up (`bee_up`, the Bee log). `PoolTimeout` in the gateway log while a fresh request to Bee works means the shared HTTP client is stuck (#587); today only a restart of the gateway container clears it. **Check "State file save failures" before restarting** |
+| **Gateway 5xx responses** (critical) | Over 20% of responses to real requests were 5xx in 10 minutes, with at least 20 real requests, for 5 minutes. Health traffic (`/`, `/health`: healthchecks and the probe, about 20 per 10 minutes) is left out of both, so it cannot meet the guard on its own or dilute the share | The "HTTP Status Code Breakdown" panel and the gateway log. 502/503/504 from the gateway usually mean Bee calls are failing |
+| **Public health check failing** (critical) | Alloy's probe of the public `/health` got no 200 within 8 s for 5 minutes. This also covers Docker's `unhealthy` state (below) | `curl -m 10` the URL; on the host, `docker ps` for the container's health, then the reverse proxy and the gateway log. If it has failed ever since the Alloy deploy that added it, see "After the first deploy" |
+| **Public health check slow** (warning) | The probe averaged over 5 s over 10 minutes, for 10 minutes | `/health` makes uncached upstream calls to Bee and the Base RPC on every request (#588). Production measured about 3.5 s on 2026-11-03, mostly the Base RPC; #588's cached `/health` should bring it under 1 s. Check those upstreams |
+| **Bee node not healthy (public /health)** (critical) | `/health` answered 200 but without `bee_node.healthy: true` on every probe for 10 minutes, then for 5 more minutes: it fires about 15 minutes after the node stops being healthy | Read `bee_node.warnings` in `/health`. "could not query the Bee node" is the gateway-to-Bee path (see Bee calls failing); "network availability" or a low peer count is the Bee node itself |
+| **Public health probe missing** (warning) | The gateway reports metrics but no probe result arrived for that environment in 15 minutes, for 30 minutes. The three probe alerts are silent with no data, so without this the probe could disappear unnoticed | Usually a main deploy that removed the probe while it is only on dev (see below). Otherwise Alloy failed to load its config (`docker logs` of the Alloy container) or was not recreated |
+
+**Docker `unhealthy`: alert only, no automatic restart.** The container healthcheck (`curl -f http://localhost:8000/`, 10 s timeout, 3 retries, every 30 s) calls the same handler as `/health`, and `/health` always answers 200 when the gateway answers at all. So Docker marks the container unhealthy only when that handler is slow or not answering, and each of those checks also fails the probe, which has the stricter 8 s timeout. **Public health check failing** therefore fires whenever the container is unhealthy. Nothing restarts the container on it, deliberately: a restart loses any change still in memory only (see **State file save failures** above). Restart by hand, once `gateway_state_unsaved` is 0.
+
+**What the probe does not see.** It runs in Alloy on the gateway host and calls the public hostnames through DNS, TLS and the reverse proxy. If the whole host or its network goes away, the probe goes with it; **Gateway Down** and **No Data** cover that partly. `monitoring/alerting/README.md` describes Grafana Synthetic Monitoring as the option for a check from outside.
+
+#### After the first deploy that adds the probe
+
+**Which deploy adds the probe.** Every deploy clones *its own branch* into the host checkout (`git clone -b $GITHUB_REF_NAME`) and recreates Alloy from that checkout's `monitoring/alloy/config.alloy`. Both environments share one Alloy, so it runs the config of whichever branch deployed last. While this change is only on `dev`, a dev deploy adds the probe for both environments and **any main deploy removes it again** until the next dev deploy. The probe rules have `noDataState: OK`, so they go quiet; **Public health probe missing** fires after about 45 minutes, so the loss is not silent. Expect it to fire after each main deploy until the change reaches `main`. Then redeploy dev, or merge to main, rather than pausing it.
+
+Apply the alert rules (`scripts/apply_grafana.py`) after the dev deploy that adds the probe. Applied earlier, **Public health probe missing** fires for both environments, correctly, because no probe is running yet.
+
+After the dev deploy, **and after every main deploy until the change is on main**, check that the series arrive:
+
+1. In Grafana Explore, query `probe_http_status_code{job="swarm_connect/health_probe"}`. There should be one series per environment (`environment="main"` and `"development"`), at 200, within two minutes of the deploy.
+2. Query `probe_failed_due_to_regex{job="swarm_connect/health_probe"}`. It should be 0 while `/health` shows `bee_node.healthy: true`.
+3. Check `probe_duration_seconds{job="swarm_connect/health_probe"}` against the 5 s slow threshold.
+
+If the series are missing, Alloy did not load the config: `docker logs` of the Alloy container for a config error, and check the deploy recreated it. If they are at 0 (timeout or connection failure) while the URL answers from elsewhere, the host cannot reach its own public hostname from inside the Docker network (hairpin NAT). A gateway container on the deploy host reached both URLs on 2026-11-03, so this is not expected. If it happens, check it from inside the Alloy container (`docker exec <alloy> ...`; the image may lack curl or wget, so a one-off `docker run --rm --network swarm_connect_default curlimages/curl -m 10 -sS -o /dev/null -w '%{http_code}' https://<hostname>/health` on the same network is the cleaner test). Then either fix the host's NAT reflection, or pause the three probe rules in Grafana until it is fixed, and say so in the alert channel. Do not change the probe to a container address: that would skip DNS, TLS and the proxy, which are what it is for.
 
 ## 6. Keys
 

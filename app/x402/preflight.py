@@ -64,6 +64,8 @@ async def check_xbzz_balance() -> Dict[str, Any]:
 
         return {
             "ok": ok,
+            # The balance was read; `ok` is False also for one read but below threshold.
+            "fetched": True,
             "balance_plur": balance_plur,
             "balance_bzz": balance_bzz,
             "threshold_bzz": threshold_bzz,
@@ -75,6 +77,7 @@ async def check_xbzz_balance() -> Dict[str, Any]:
         logger.error(f"Failed to check xBZZ balance: {e}")
         return {
             "ok": False,
+            "fetched": False,
             "balance_plur": 0,
             "balance_bzz": 0.0,
             "threshold_bzz": settings.X402_XBZZ_WARN_THRESHOLD,
@@ -120,6 +123,8 @@ async def check_xdai_balance() -> Dict[str, Any]:
 
         return {
             "ok": ok,
+            # The balance was read; `ok` is False also for one read but below threshold.
+            "fetched": True,
             "balance_wei": balance_wei,
             "balance_xdai": balance_xdai,
             "threshold_xdai": threshold_xdai,
@@ -131,6 +136,7 @@ async def check_xdai_balance() -> Dict[str, Any]:
         logger.error(f"Failed to check xDAI balance: {e}")
         return {
             "ok": False,
+            "fetched": False,
             "balance_wei": 0,
             "balance_xdai": 0.0,
             "threshold_xdai": settings.X402_XDAI_WARN_THRESHOLD,
@@ -188,6 +194,8 @@ async def check_chequebook_balance() -> Dict[str, Any]:
 
         return {
             "ok": ok,
+            # The balance was read; `ok` is False also for one read but below threshold.
+            "fetched": True,
             "available_balance_plur": available_plur,
             "available_balance_bzz": available_bzz,
             "total_balance_plur": total_plur,
@@ -201,6 +209,7 @@ async def check_chequebook_balance() -> Dict[str, Any]:
         logger.error(f"Failed to check chequebook balance: {e}")
         return {
             "ok": False,
+            "fetched": False,
             "available_balance_plur": 0,
             "available_balance_bzz": 0.0,
             "total_balance_plur": 0,
