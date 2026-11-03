@@ -30,6 +30,15 @@ def state(tmp_path, monkeypatch):
     return path
 
 
+def _wait_until(predicate, timeout=3.0):
+    end = time.monotonic() + timeout
+    while time.monotonic() < end:
+        if predicate():
+            return True
+        time.sleep(0.02)
+    return predicate()
+
+
 def _restart(monkeypatch, path):
     """A new process: a fresh registry from the file, and an empty replay guard."""
     monkeypatch.setattr(st, "outcome_unknown", st.OutcomeUnknownRegistry(state_file=path))
@@ -151,7 +160,8 @@ def test_a_failed_write_fails_closed_until_a_write_succeeds(env, tmp_path, monke
     monkeypatch.undo()
     monkeypatch.setattr(st, "outcome_unknown", reg)
     monkeypatch.setattr(st, "WRITE_RETRY_SECONDS", 0)
-    assert not reg.unavailable
+    # The retry runs in the background (review 8): wait for it.
+    assert _wait_until(lambda: not reg.unavailable)
     assert st.OutcomeUnknownRegistry(state_file=str(tmp_path / "s.json")).contains(("0xa", "0x1"))
     assert _run(_facilitator(ok())).status_code == 200
 
@@ -440,6 +450,7 @@ def test_a_failed_write_ahead_on_the_fallback_withholds_the_result_unpaid(env, s
     monkeypatch.undo()
     monkeypatch.setattr(st, "outcome_unknown", reg)
     monkeypatch.setattr(st, "WRITE_RETRY_SECONDS", 0)
+    assert _wait_until(lambda: not reg.unavailable)   # background retry (review 8)
     assert _run(fac, path="/api/v1/data/manifest", header=header).status_code == 200
 
 
@@ -525,6 +536,7 @@ def test_a_failed_write_ahead_is_rolled_back_in_the_same_process(env, state, mon
     assert _run(_facilitator(ok()), header=header).status_code == 503
     assert not st.outcome_unknown.contains(KEY)
     monkeypatch.setattr(st, "atomic_write_json", real)
+    assert _wait_until(lambda: not st.outcome_unknown.unavailable)   # background retry
     st.replay_guard.reset()
     assert _run(_facilitator(ok()), header=header).status_code == 200
 
@@ -537,6 +549,7 @@ def test_a_failed_write_ahead_on_the_fallback_is_rolled_back_in_the_same_process
     assert _run(_facilitator(ok()), path="/api/v1/data/manifest", header=header).status_code == 503
     assert not st.outcome_unknown.contains(KEY)
     monkeypatch.setattr(st, "atomic_write_json", real)
+    assert _wait_until(lambda: not st.outcome_unknown.unavailable)   # background retry
     assert _run(_facilitator(ok()), path="/api/v1/data/manifest", header=header).status_code == 200
 
 
@@ -581,20 +594,22 @@ def test_a_parallel_duplicate_during_settlement_is_told_it_is_in_progress(env, s
     assert not st.outcome_unknown.contains(KEY)
 
 
-def test_cap_keeps_the_write_ahead_and_never_evicts_in_flight_entries(tmp_path, monkeypatch):
+def test_cap_never_evicts_after_work_or_in_flight_entries(tmp_path, monkeypatch):
+    """#553 review 8: an after_work entry is never evicted (its work would run again);
+    when only after_work and in-flight entries remain, the write-ahead fails closed."""
     reg = st.OutcomeUnknownRegistry(state_file=str(tmp_path / "s.json"))
     monkeypatch.setattr(st, "OUTCOME_UNKNOWN_MAX_ENTRIES", 2)
     reg.add(("0xa", "0x1"), st.AFTER_WORK)
-    reg.add(("0xa", "0x2"), st.AFTER_WORK)
+    prior, recorded = reg.begin_settlement(("0xa", "0x2"), st.BEFORE_WORK)   # in flight
+    assert recorded
     prior, recorded = reg.begin_settlement(("0xa", "0x3"), st.BEFORE_WORK)
-    assert recorded and reg.contains(("0xa", "0x3"))        # kept: the oldest AFTER_WORK went
-    assert not reg.contains(("0xa", "0x1"))
+    assert not recorded and not reg.contains(("0xa", "0x3"))
+    assert reg.contains(("0xa", "0x1")) and reg.contains(("0xa", "0x2"))
+    # A before_work entry that is not in flight is evicted to make room.
+    reg.release(("0xa", "0x2"))
     prior, recorded = reg.begin_settlement(("0xa", "0x4"), st.BEFORE_WORK)
-    assert recorded and reg.contains(("0xa", "0x3")) and reg.contains(("0xa", "0x4"))
-    # Both remaining entries are in flight: a third write-ahead cannot be kept.
-    prior, recorded = reg.begin_settlement(("0xa", "0x5"), st.BEFORE_WORK)
-    assert not recorded and not reg.contains(("0xa", "0x5"))
-    assert reg.contains(("0xa", "0x3")) and reg.contains(("0xa", "0x4"))
+    assert recorded and reg.contains(("0xa", "0x4")) and not reg.contains(("0xa", "0x2"))
+    assert reg.contains(("0xa", "0x1"))
 
 
 def test_write_retry_while_unwritable_is_rate_limited(tmp_path, monkeypatch):
@@ -630,3 +645,200 @@ def test_registry_writes_run_off_the_event_loop_thread(env, state, monkeypatch):
     fac.settle = AsyncMock(side_effect=settle)
     assert _run(fac).status_code == 200
     assert threads["loop"] not in threads["write"]
+
+
+# --- #553 review 8 ---------------------------------------------------------
+
+def _fake_request():
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+    req = MagicMock()
+    req.state = SimpleNamespace(x402_mode="paid", x402_payer=KEY[0], x402_payment=object(),
+                                x402_requirements=object(), x402_auth_key=KEY,
+                                x402_idempotency_id=None)
+    req.headers = {}
+    req.client = SimpleNamespace(host="127.0.0.1")
+    return req
+
+
+def _slow(monkeypatch, started, seconds=0.3):
+    real = st.atomic_write_json
+
+    def slow(path, data):
+        started.set()
+        time.sleep(seconds)
+        real(path, data)
+
+    monkeypatch.setattr(st, "atomic_write_json", slow)
+
+
+def test_in_progress_answer_has_no_retry_after_and_says_not_to_resend():
+    exc = st.settlement_in_progress_refusal(KEY)
+    assert "Retry-After" not in exc.headers
+    message = exc.detail["message"]
+    assert "Do not resend this X-PAYMENT" in message
+    assert "newly signed payment" in message and "Idempotency-Key" in message
+    assert "no safe way" in message
+
+
+def test_cancel_during_the_write_ahead_releases_and_removes_it(env, state, monkeypatch):
+    """#553 review 8: a cancellation while the write-ahead is being written left the
+    authorization in flight forever and a before_work entry on disk although the
+    facilitator was never asked."""
+    import asyncio
+    import threading
+    from unittest.mock import patch
+    started = threading.Event()
+    fac = _facilitator(ok())
+    reg = st.outcome_unknown
+    _slow(monkeypatch, started)
+
+    async def go():
+        with patch("app.x402.dependency._get_facilitator_client", return_value=fac):
+            task = asyncio.ensure_future(st.settle_payment(_fake_request()))
+            await asyncio.to_thread(started.wait, 2)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+    asyncio.run(go())
+    assert _wait_until(lambda: not reg.in_flight(KEY) and not reg.contains(KEY))
+    assert fac.settle.await_count == 0
+    assert _wait_until(lambda: json.load(open(state))["entries"] == {})
+
+
+def _new_events(before):
+    from app.x402.audit import read_audit_log
+    events = read_audit_log(max_entries=100000)
+    return events[:len(events) - before]
+
+
+def _audit_len():
+    from app.x402.audit import read_audit_log
+    return len(read_audit_log(max_entries=100000))
+
+
+@pytest.mark.parametrize("outcome", ["settled", "refused"])
+def test_cancel_during_the_resolution_keeps_the_records(env, state, monkeypatch, outcome):
+    """#553 review 8: the audit record, record_settlement and the metric come before the
+    resolution write, so a cancellation while it is written loses none of them."""
+    import asyncio
+    import threading
+    from unittest.mock import MagicMock, patch
+    from app.services.metrics import x402_settlements_total
+    reg = st.outcome_unknown
+    started = threading.Event()
+    real_resolve = reg.resolve
+
+    def slow_resolve(*a, **kw):
+        started.set()
+        time.sleep(0.3)
+        real_resolve(*a, **kw)
+
+    monkeypatch.setattr(reg, "resolve", slow_resolve)
+    fac = _facilitator(ok() if outcome == "settled" else refused("insufficient_funds"))
+    record = MagicMock()
+    metric_before = x402_settlements_total.labels(result=outcome)._value.get()
+    audit_before = _audit_len()
+
+    async def go():
+        with patch("app.x402.dependency._get_facilitator_client", return_value=fac), \
+             patch("app.x402.idempotency.record_settlement", record):
+            task = asyncio.ensure_future(st.settle_payment(_fake_request()))
+            await asyncio.to_thread(started.wait, 2)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+    asyncio.run(go())
+    settled = [e for e in _new_events(audit_before) if e["event_type"] == "payment_settled"]
+    assert settled and settled[0]["data"]["success"] is (outcome == "settled")
+    assert settled[0]["data"]["nonce"] == KEY[1]
+    assert x402_settlements_total.labels(result=outcome)._value.get() == metric_before + 1
+    if outcome == "settled":
+        record.assert_called_once()
+    # The shielded resolution still finishes.
+    assert _wait_until(lambda: not reg.contains(KEY))
+
+
+def test_loop_side_reads_do_not_wait_for_a_slow_write(tmp_path, monkeypatch):
+    import threading
+    reg = st.OutcomeUnknownRegistry(state_file=str(tmp_path / "s.json"))
+    started = threading.Event()
+    _slow(monkeypatch, started, seconds=0.4)
+    t = threading.Thread(target=reg.add, args=(("0xa", "0x1"), st.BEFORE_WORK))
+    t.start()
+    started.wait(2)
+    t0 = time.monotonic()
+    reg.kind(("0xa", "0x1")); reg.in_flight(("0xa", "0x1")); reg.contains(("0xa", "0x2"))
+    reg.release(("0xa", "0x9"))
+    assert time.monotonic() - t0 < 0.1
+    t.join()
+
+
+def test_an_older_snapshot_never_overwrites_a_newer_one(tmp_path):
+    path = str(tmp_path / "s.json")
+    reg = st.OutcomeUnknownRegistry(state_file=path)
+    with reg._lock:
+        reg._entries["old"] = {"expires": time.time() + 60, "kind": st.BEFORE_WORK}
+    older = reg._snapshot()
+    with reg._lock:
+        reg._entries["new"] = {"expires": time.time() + 60, "kind": st.BEFORE_WORK}
+    newer = reg._snapshot()
+    assert reg._write(*newer)
+    assert reg._write(*older)            # skipped: a newer snapshot is on disk
+    assert set(json.load(open(path))["entries"]) == {"old", "new"}
+
+
+def test_no_registry_write_runs_on_the_event_loop(env, state, monkeypatch):
+    """Settle error, fallback error and an interrupted settlement: the write-ahead is the
+    record, so none of them writes again, and nothing writes on the loop thread."""
+    import asyncio
+    import threading
+    loop_threads, write_threads = set(), set()
+    real = st.atomic_write_json
+
+    def recording(path, data):
+        write_threads.add(threading.get_ident())
+        real(path, data)
+
+    monkeypatch.setattr(st, "atomic_write_json", recording)
+
+    def failing(exc):
+        async def settle(**kw):
+            loop_threads.add(threading.get_ident())
+            raise exc
+        f = _facilitator()
+        f.settle = AsyncMock(side_effect=settle)
+        return f
+
+    assert _run(failing(RuntimeError("down"))).status_code == 502
+    st.outcome_unknown.reset(); st.replay_guard.reset()
+    assert _run(failing(RuntimeError("down")), path="/api/v1/data/manifest").status_code == 502
+    st.outcome_unknown.reset(); st.replay_guard.reset()
+    _run(failing(asyncio.CancelledError()))
+    assert loop_threads and not (loop_threads & write_threads)
+
+
+def test_the_unavailable_retry_writes_in_the_background(tmp_path, monkeypatch):
+    import threading
+    reg = st.OutcomeUnknownRegistry(state_file=str(tmp_path / "s.json"))
+    monkeypatch.setattr(st, "WRITE_RETRY_SECONDS", 0)
+    calls = []
+    real = st.atomic_write_json
+
+    def broken(path, data):
+        raise OSError("read-only")
+
+    monkeypatch.setattr(st, "atomic_write_json", broken)
+    reg.add(("0xa", "0x1"), st.BEFORE_WORK)
+    assert reg._write_error
+
+    def recording(path, data):
+        calls.append(threading.get_ident())
+        real(path, data)
+
+    monkeypatch.setattr(st, "atomic_write_json", recording)
+    reg.unavailable          # schedules the retry; does not write on this thread
+    assert _wait_until(lambda: not reg.unavailable)
+    assert calls and threading.get_ident() not in calls

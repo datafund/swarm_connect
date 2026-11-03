@@ -28,6 +28,7 @@ import json
 import logging
 import os
 import re
+import threading
 import time
 from threading import Lock, RLock
 from typing import Dict, Optional, Tuple
@@ -114,25 +115,33 @@ class OutcomeUnknownRegistry:
 
     Write-ahead: every settlement is recorded here (begin_settlement) before
     the facilitator is asked, and the record is removed, on disk, when the
-    answer is definite (resolve). So an entry on disk is always either a real
-    unknown outcome or a settlement interrupted by a crash or kill, which is one
-    too. While this process waits for the facilitator the entry is also "in
-    flight" (memory only): a parallel duplicate is told the settlement is in
-    progress rather than that its outcome is unknown.
+    answer is definite (resolve). An entry on disk is therefore a real unknown
+    outcome (no answer, or a settlement cut off by a crash or kill), except in
+    one rare case: a request cancelled while its write-ahead was being written
+    has the entry removed again by a background write, and if the process dies
+    before that write, the entry stays. Its only effect is that a refusal of
+    that authorization is answered 409 instead of 402 (no charge either way).
+    While this process waits for the facilitator the entry is also "in flight"
+    (memory only): a parallel duplicate is told the settlement is in progress.
 
-    Persisted (X402_SETTLEMENT_UNKNOWN_STATE_FILE) and rewritten atomically on
-    each change: two writes per paid request (write-ahead and resolution),
-    offloaded from the event loop by the async wrappers. Entries past their
-    expiry are dropped on load, and a test write at load finds an unwritable
-    file at startup. An unreadable file is copied aside once and never
-    overwritten. Either way `unavailable` is set and the dependency refuses paid
-    requests, unpaid, until it is repaired (fail closed): an empty or memory-only
-    registry would answer a retry of a possibly collected payment with a 402
-    that clients pay from.
+    Locking: `_lock` guards the in-memory state and is never held across disk
+    I/O, so the loop-side reads (in_flight, kind, contains, release) never wait
+    for a write. Writes take a snapshot under `_lock`, then write it under
+    `_write_lock`; a sequence number makes sure an older snapshot never
+    overwrites a newer one. Two writes per paid request (write-ahead and
+    resolution), both run off the event loop by the async wrappers; a write
+    retry while the file is unwritable runs in a background thread.
+
+    Persisted (X402_SETTLEMENT_UNKNOWN_STATE_FILE). Entries past their expiry
+    are dropped on load, and a test write at load finds an unwritable file at
+    startup. An unreadable file is copied aside once and never overwritten.
+    Either way `unavailable` is set and the dependency refuses paid requests,
+    unpaid, until it is repaired (fail closed).
     """
 
     def __init__(self, state_file: Optional[str] = None):
         self._lock = RLock()
+        self._write_lock = Lock()
         self._state_file = state_file
         # key id -> {"expires": wall-clock seconds, "kind": BEFORE_WORK | AFTER_WORK}
         self._entries: Dict[str, dict] = {}
@@ -143,24 +152,38 @@ class OutcomeUnknownRegistry:
         self._unreadable: Optional[str] = None
         self._write_error: Optional[str] = None
         self._last_write_attempt = 0.0
+        self._retrying = False
+        self._seq = 0            # last snapshot taken
+        self._written_seq = 0    # last snapshot on disk
         self._load()
 
     @property
     def unavailable(self) -> Optional[str]:
-        """Why paid requests must be refused, or None.
-
-        Unreadable file: until it is repaired and the gateway restarted. Failed
-        write: an entry held only in memory is lost at a restart, so until a
-        later write succeeds. A check retries the write at most once every
-        WRITE_RETRY_SECONDS, so requests and /health probes cannot hammer a
-        failing disk.
-        """
+        """Why paid requests must be refused, or None. Never writes on the caller's
+        thread: a due retry (at most every WRITE_RETRY_SECONDS) runs in the
+        background, so requests and /health probes neither block on nor hammer
+        a failing disk."""
         if self._unreadable:
             return self._unreadable
-        if self._write_error and time.monotonic() - self._last_write_attempt >= WRITE_RETRY_SECONDS:
-            with self._lock:
-                self._save()
+        if self._write_error:
+            self._retry_in_background()
         return self._write_error
+
+    def _retry_in_background(self) -> None:
+        with self._lock:
+            if self._retrying or time.monotonic() - self._last_write_attempt < WRITE_RETRY_SECONDS:
+                return
+            self._retrying = True
+            self._last_write_attempt = time.monotonic()
+
+        def run():
+            try:
+                self._persist()
+            finally:
+                with self._lock:
+                    self._retrying = False
+
+        threading.Thread(target=run, name="x402-settlement-state-retry", daemon=True).start()
 
     def _path(self) -> str:
         return self._state_file or settings.X402_SETTLEMENT_UNKNOWN_STATE_FILE
@@ -191,75 +214,113 @@ class OutcomeUnknownRegistry:
         self._entries = {k: v for k, v in entries.items() if v["expires"] > now}
         # A file that loads but cannot be written would keep new entries only in
         # memory and lose them at the next restart: find out now (#553).
-        with self._lock:
-            self._save()
+        self._persist()
 
-    def _save(self) -> bool:
-        """Write the entries; True on success. Call with the lock held."""
+    # --- persistence --------------------------------------------------------
+
+    def _snapshot(self) -> Tuple[int, Dict[str, dict]]:
+        with self._lock:
+            self._seq += 1
+            return self._seq, {k: dict(v) for k, v in self._entries.items()}
+
+    def _write(self, seq: int, snapshot: Dict[str, dict]) -> bool:
+        """Write `snapshot` (taken as number `seq`) unless a newer one is already on
+        disk; True if the state of that snapshot is on disk. No `_lock` held
+        during the I/O."""
         if self._unreadable:
             return False    # never overwrite the only copy
-        self._last_write_attempt = time.monotonic()
-        try:
-            atomic_write_json(self._path(), {"entries": self._entries})
-        except Exception as e:
-            if not self._write_error:
-                logger.error("x402: could not persist settlement-unknown state (%s); paid requests "
-                             "get 503 PAYMENT_STATE_UNAVAILABLE until a write succeeds", e)
-            self._write_error = (f"State file {self._path()} could not be written ({e}). Paid "
-                                 f"requests get 503 PAYMENT_STATE_UNAVAILABLE until a write succeeds.")
-            return False
-        if self._write_error:
-            logger.warning("x402: settlement-unknown state written again; paid requests resume")
-        self._write_error = None
-        return True
+        with self._write_lock:
+            if seq <= self._written_seq:
+                return True     # a newer snapshot, which includes this one's changes, is on disk
+            self._last_write_attempt = time.monotonic()
+            try:
+                atomic_write_json(self._path(), {"entries": snapshot})
+            except Exception as e:
+                with self._lock:
+                    if not self._write_error:
+                        logger.error("x402: could not persist settlement-unknown state (%s); paid "
+                                     "requests get 503 PAYMENT_STATE_UNAVAILABLE until a write "
+                                     "succeeds", e)
+                    self._write_error = (f"State file {self._path()} could not be written ({e}). Paid "
+                                         f"requests get 503 PAYMENT_STATE_UNAVAILABLE until a write "
+                                         f"succeeds.")
+                return False
+            self._written_seq = seq
+            with self._lock:
+                # Only the latest snapshot proves memory and disk agree.
+                if seq == self._seq and self._write_error:
+                    logger.warning("x402: settlement-unknown state written again; paid requests resume")
+                    self._write_error = None
+            return True
+
+    def _persist(self) -> bool:
+        return self._write(*self._snapshot())
+
+    # --- state --------------------------------------------------------------
 
     def _prune(self, now: float) -> None:
         for k in [k for k, v in self._entries.items() if v["expires"] <= now and k not in self._inflight]:
             del self._entries[k]
 
-    def _insert(self, kid: str, kind: str, now: float) -> bool:
-        """Insert or refresh kid, then enforce the cap without evicting kid or any
-        in-flight entry. False if the cap cannot be met that way."""
+    def _insert(self, kid: str, kind: str, now: float) -> Tuple[bool, Optional[dict], Dict[str, dict]]:
+        """Insert or refresh kid under `_lock`, then enforce the cap by evicting
+        before_work entries only (oldest first), never kid, an in-flight entry or
+        an after_work entry (its work would run again). Returns (kept, previous
+        value of kid, evicted). Not kept: nothing changed."""
         previous = self._entries.get(kid)
         if previous is not None and previous["kind"] == AFTER_WORK:
             kind = AFTER_WORK    # once the work has run, it must not run again
+        excess = len(self._entries) + (0 if previous is not None else 1) - max(1, OUTCOME_UNKNOWN_MAX_ENTRIES)
+        candidates = []
+        if excess > 0:
+            candidates = sorted((k for k, v in self._entries.items()
+                                 if k != kid and k not in self._inflight and v["kind"] == BEFORE_WORK),
+                                key=lambda k: self._entries[k]["expires"])
+            if len(candidates) < excess:
+                logger.error("x402: settlement-unknown registry full of entries that may not be "
+                             "evicted (after_work or in flight)")
+                return False, previous, {}
+        evicted = {k: self._entries.pop(k) for k in candidates[:max(0, excess)]}
+        if evicted:
+            logger.warning("x402: settlement-unknown registry over its cap; evicted %d", len(evicted))
         self._entries[kid] = {"expires": now + OUTCOME_UNKNOWN_SECONDS, "kind": kind}
-        excess = len(self._entries) - max(1, OUTCOME_UNKNOWN_MAX_ENTRIES)
-        if excess <= 0:
-            return True
-        # BEFORE_WORK first (a retry of one at worst meets an ordinary refusal),
-        # oldest first; AFTER_WORK guards against rerunning work.
-        candidates = sorted((k for k in self._entries if k != kid and k not in self._inflight),
-                            key=lambda k: (self._entries[k]["kind"] == AFTER_WORK, self._entries[k]["expires"]))
-        for k in candidates[:excess]:
-            del self._entries[k]
-        logger.warning("x402: settlement-unknown registry over its cap; evicted %d",
-                       min(excess, len(candidates)))
-        return len(candidates) >= excess
+        return True, previous, evicted
+
+    def _rollback(self, kid: str, previous: Optional[dict], evicted: Dict[str, dict]) -> None:
+        with self._lock:
+            if previous is None:
+                self._entries.pop(kid, None)
+            else:
+                self._entries[kid] = previous
+            for k, v in evicted.items():
+                self._entries.setdefault(k, v)
 
     def add(self, key: Optional[Tuple[str, str]], kind: str) -> bool:
-        """Record an unknown outcome; True if it is on disk.
-
-        Kept in memory even if the write fails (the registry is then
-        unavailable, so paid requests are refused anyway)."""
+        """Record an unknown outcome directly; True if it is on disk. Kept in memory
+        even over the cap or if the write fails (then the registry is
+        unavailable). Blocking: not for the event loop."""
         if key is None:
             return True
         kid = _key_id(key)
         now = time.time()
         with self._lock:
             self._prune(now)
-            self._insert(kid, kind, now)
-            return self._save()
+            kept, _, _ = self._insert(kid, kind, now)
+            if not kept:
+                previous = self._entries.get(kid)
+                self._entries[kid] = {"expires": now + OUTCOME_UNKNOWN_SECONDS,
+                                      "kind": AFTER_WORK if (previous or {}).get("kind") == AFTER_WORK else kind}
+        return self._persist()
 
     def begin_settlement(self, key: Optional[Tuple[str, str]], kind: str) -> Tuple[Optional[str], bool]:
-        """Write-ahead before the facilitator is asked to settle (#553).
+        """Write-ahead before the facilitator is asked to settle (#553). Blocking.
 
-        Atomically: reads the kind remembered BEFORE this attempt (None: no
-        earlier unknown outcome, so a definite refusal is an ordinary one),
-        records `key` (BEFORE_WORK or AFTER_WORK), writes it, and marks it in
-        flight. Returns (prior, recorded). If the entry cannot be kept (cap)
-        or written, the insert is rolled back and recorded is False: the caller
-        must not settle. Call release() when the facilitator call ends.
+        Under one `_lock`: reads the kind remembered BEFORE this attempt (None:
+        no earlier unknown outcome, so a definite refusal is an ordinary one),
+        records `key` (BEFORE_WORK or AFTER_WORK) and marks it in flight; then
+        writes it. Returns (prior, recorded). If the entry cannot be kept (cap)
+        or written, the change is rolled back and recorded is False: the
+        caller must not settle. Call release() when the facilitator call ends.
         """
         if key is None:
             return None, True
@@ -267,17 +328,17 @@ class OutcomeUnknownRegistry:
         now = time.time()
         with self._lock:
             self._prune(now)
-            previous = self._entries.get(kid)
-            prior = previous["kind"] if previous is not None and previous["expires"] > now else None
-            snapshot = dict(self._entries)
-            if not self._insert(kid, kind, now) or not self._save():
-                self._entries = snapshot
-                if not self._write_error:
-                    logger.error("x402: settlement-unknown registry full of entries that cannot be "
-                                 "evicted; refusing to settle")
+            current = self._entries.get(kid)
+            prior = current["kind"] if current is not None and current["expires"] > now else None
+            kept, previous, evicted = self._insert(kid, kind, now)
+            if not kept:
                 return prior, False
             self._inflight[kid] = self._inflight.get(kid, 0) + 1
-            return prior, True
+        if not self._persist():
+            self._rollback(kid, previous, evicted)
+            self.release(key)
+            return prior, False
+        return prior, True
 
     def release(self, key: Optional[Tuple[str, str]]) -> None:
         """The facilitator call that begin_settlement announced has ended."""
@@ -295,18 +356,39 @@ class OutcomeUnknownRegistry:
         """A definite answer. Settled: no attempt left the authorization unknown,
         the entry goes. Refused: the entry goes unless an earlier attempt's
         outcome is still unknown (`prior`). The removal is written at once, so
-        a resolved entry never outlives the process."""
+        a resolved entry never outlives the process. Blocking."""
         if key is None or (not settled and prior is not None):
             return
         with self._lock:
-            if self._entries.pop(_key_id(key), None) is not None:
-                self._save()
+            removed = self._entries.pop(_key_id(key), None) is not None
+        if removed:
+            self._persist()
 
     async def abegin_settlement(self, key, kind):
-        return await asyncio.to_thread(self.begin_settlement, key, kind)
+        """begin_settlement off the event loop. If the caller is cancelled while it
+        runs, it still finishes; then, since the facilitator was never asked, the
+        entry is released and removed again (in the background)."""
+        inner = asyncio.get_running_loop().run_in_executor(None, self.begin_settlement, key, kind)
+        try:
+            return await asyncio.shield(inner)
+        except asyncio.CancelledError:
+            inner.add_done_callback(lambda f: self._abandon_begin(key, f))
+            raise
+
+    def _abandon_begin(self, key, fut) -> None:
+        if fut.cancelled() or fut.exception() is not None:
+            return
+        prior, recorded = fut.result()
+        if not recorded:
+            return
+        self.release(key)
+        threading.Thread(target=self.resolve, args=(key, prior, False),
+                         name="x402-settlement-state-abandon", daemon=True).start()
 
     async def aresolve(self, key, prior, settled: bool) -> None:
-        await asyncio.to_thread(self.resolve, key, prior, settled)
+        """resolve off the event loop; finishes even if the caller is cancelled."""
+        inner = asyncio.get_running_loop().run_in_executor(None, self.resolve, key, prior, settled)
+        await asyncio.shield(inner)
 
     def in_flight(self, key: Optional[Tuple[str, str]]) -> bool:
         """Whether this process is waiting on the facilitator for `key` right now."""
@@ -332,8 +414,9 @@ class OutcomeUnknownRegistry:
         if key is None:
             return
         with self._lock:
-            if self._entries.pop(_key_id(key), None) is not None:
-                self._save()
+            removed = self._entries.pop(_key_id(key), None) is not None
+        if removed:
+            self._persist()
 
     def reset(self) -> None:
         """For tests: empty, readable, and nothing on disk."""
@@ -343,7 +426,7 @@ class OutcomeUnknownRegistry:
             self._unreadable = None
             self._write_error = None
             self._last_write_attempt = 0.0
-            self._save()
+        self._persist()
 
 
 outcome_unknown = OutcomeUnknownRegistry()
@@ -359,12 +442,15 @@ OUTCOME_UNKNOWN_ADVICE = (
 OUTCOME_UNKNOWN_HEADERS = {"X-Payment-Mode": "failed", "X-Payment-Status": "settlement_unknown"}
 
 
-def payment_state_unavailable_detail() -> dict:
-    return {
-        "code": "PAYMENT_STATE_UNAVAILABLE",
-        "message": ("Paid requests cannot be processed right now; this payment was not "
-                    "charged. Retry later with the same X-PAYMENT."),
-    }
+def payment_state_unavailable_detail(work_ran: bool = False) -> dict:
+    if work_ran:
+        message = ("This request's work ran, but its payment cannot be settled right now, so the "
+                   "result is withheld and this payment was not charged. A retry with the same "
+                   "X-PAYMENT runs the work again; you are charged at most once.")
+    else:
+        message = ("Paid requests cannot be processed right now; this payment was not "
+                   "charged. Retry later with the same X-PAYMENT.")
+    return {"code": "PAYMENT_STATE_UNAVAILABLE", "message": message}
 
 
 def settlement_unavailable_detail(request: Request, interrupted: bool = False) -> dict:
@@ -388,13 +474,15 @@ def settlement_unavailable_detail(request: Request, interrupted: bool = False) -
 def settlement_interrupted(request: Request, kind: str, exc: BaseException) -> None:
     """A settlement request was interrupted (CancelledError) before the facilitator answered.
 
-    The transfer may have been submitted. Recorded like a settlement error, and
-    marked on the request so the middleware neither says "not charged" nor
-    releases the authorization (#553). Never raises: the caller re-raises.
+    The transfer may have been submitted. The write-ahead entry (of this kind,
+    already on disk before the facilitator was asked) is the record, so nothing
+    is written here and nothing can be lost to the cancellation. Audited like a
+    settlement error, and marked on the request so the middleware neither says
+    "not charged" nor releases the authorization (#553). Never raises: the
+    caller re-raises.
     """
     try:
         request.state.x402_settlement_interrupted = kind
-        outcome_unknown.add(getattr(request.state, "x402_auth_key", None), kind)
         logger.error(f"x402: settlement interrupted ({type(exc).__name__}) on {request.url.path}; "
                      f"outcome unknown")
         log_payment_failed(client_ip=get_client_ip(request),
@@ -431,14 +519,18 @@ def settlement_in_progress_refusal(auth_key: Tuple[str, str], request: Optional[
         detail={
             "code": "PAYMENT_SETTLEMENT_IN_PROGRESS",
             "message": ("A settlement for this payment authorization is in progress in another "
-                        "request. This request was not run and not charged. Do not sign a new "
-                        "payment from this response: wait for the first request's answer (with "
-                        "an Idempotency-Key, retry with that key to get it)."),
+                        "request. This request was not run and not charged. Do not resend this "
+                        "X-PAYMENT: once the first request has settled it is answered 402 "
+                        "\"already used\", and paying from that would charge twice. The first "
+                        "request's answer is the result. With an Idempotency-Key, get the stored "
+                        "result by sending the same key with a newly signed payment (the stored "
+                        "result is returned and the new payment is not charged). Without a key "
+                        "there is no safe way to fetch it again."),
             "nonce": auth_key[1],
             "x402_status": "settlement_in_progress",
         },
-        headers={"X-Payment-Mode": "failed", "X-Payment-Status": "settlement_in_progress",
-                 "Retry-After": "5"},
+        # No Retry-After: retrying the same X-PAYMENT is exactly what must not happen.
+        headers={"X-Payment-Mode": "failed", "X-Payment-Status": "settlement_in_progress"},
     )
 
 
@@ -544,7 +636,7 @@ async def settle_payment(request: Request) -> None:
         log_payment_failed(client_ip=client_ip, reason=f"{type(e).__name__}: {e}",
                            stage="settle", wallet_address=payer, nonce=request_nonce(request))
         x402_settlements_total.labels(result="error").inc()
-        outcome_unknown.add(getattr(request.state, "x402_auth_key", None), BEFORE_WORK)
+        # The write-ahead entry (BEFORE_WORK, on disk) is the record: no write here.
         raise HTTPException(status_code=502, detail=settlement_unavailable_detail(request),
                             headers=dict(OUTCOME_UNKNOWN_HEADERS))
     except BaseException as e:
@@ -568,12 +660,13 @@ async def settle_payment(request: Request) -> None:
                                 nonce=request_nonce(request))
             x402_settlements_total.labels(result="refused_after_unknown").inc()
             raise outcome_unknown_refusal(auth_key, reason, where="settle", request=request)
-        await outcome_unknown.aresolve(auth_key, None, settled=False)
         logger.warning(f"x402: settlement refused before delivery: {reason}")
         log_payment_settled(client_ip=client_ip, payer=payer, transaction_hash=None,
                             network=settings.X402_NETWORK, success=False, error_reason=reason,
                             nonce=request_nonce(request))
         x402_settlements_total.labels(result="refused").inc()
+        # Last: a cancellation while the removal is written loses no record.
+        await outcome_unknown.aresolve(auth_key, None, settled=False)
         message = f"The payment could not be settled ({reason}). Nothing was delivered."
         detail = {
             "code": "PAYMENT_SETTLEMENT_FAILED",
@@ -592,8 +685,6 @@ async def settle_payment(request: Request) -> None:
         raise HTTPException(status_code=402, detail=detail)
 
     request.state.x402_settlement = result
-    # Settled now: the transfer happened once, by this attempt.
-    await outcome_unknown.aresolve(auth_key, prior, settled=True)
     # From here on a retry with the same Idempotency-Key must not pay again,
     # whatever happens to this request (#359).
     record_settlement(request, result)
@@ -602,3 +693,7 @@ async def settle_payment(request: Request) -> None:
     log_payment_settled(client_ip=client_ip, payer=payer, transaction_hash=tx,
                         network=settings.X402_NETWORK, success=True, nonce=request_nonce(request))
     x402_settlements_total.labels(result="settled").inc()
+    # Last: the transfer happened once, by this attempt, so the write-ahead
+    # entry goes. Records above come first, so a cancellation while this is
+    # written loses none of them (the shielded write still finishes).
+    await outcome_unknown.aresolve(auth_key, prior, settled=True)

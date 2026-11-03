@@ -519,7 +519,7 @@ class X402Middleware(BaseHTTPMiddleware):
             if not recorded:
                 from app.x402.settlement import payment_state_unavailable_detail
                 replay_guard.release(auth_key)
-                detail = payment_state_unavailable_detail()
+                detail = payment_state_unavailable_detail(work_ran=True)
                 return JSONResponse(status_code=503, content={"detail": detail, **detail},
                                     headers={"Retry-After": "60"})
             from app.x402.idempotency import record_settling, settlement_refused
@@ -554,9 +554,9 @@ class X402Middleware(BaseHTTPMiddleware):
                     log_payment_failed(client_ip=client_ip, reason=failure, stage="settle",
                                        wallet_address=payer, nonce=request_nonce(request))
                     x402_settlements_total.labels(result="error").inc()
-                    # The dependency stops any later attempt with it before the
+                    # The write-ahead entry (AFTER_WORK, on disk) is the record:
+                    # the dependency stops any later attempt with it before the
                     # work runs again, also once the reservation has lapsed.
-                    outcome_unknown.add(auth_key, AFTER_WORK)
                     return _settlement_unknown_response(request)
                 else:
                     settlement_refused(request)
@@ -564,14 +564,15 @@ class X402Middleware(BaseHTTPMiddleware):
                                         network=settings.X402_NETWORK, success=False, error_reason=failure,
                                         nonce=request_nonce(request))
                     remembered = prior is not None
-                    if not remembered:
-                        await outcome_unknown.aresolve(auth_key, None, settled=False)
                     x402_settlements_total.labels(
                         result="refused_after_unknown" if remembered else "refused").inc()
+                    if not remembered:
+                        # Last: records first, then the removal write.
+                        await outcome_unknown.aresolve(auth_key, None, settled=False)
                     if remembered:
                         # An earlier attempt may have spent the nonce: no 402 (#553).
-                        # This route's work has now run: never run it again.
-                        outcome_unknown.add(auth_key, AFTER_WORK)
+                        # This route's work has now run: the write-ahead already
+                        # made the entry AFTER_WORK, so it never runs again.
                         refusal = outcome_unknown_refusal(auth_key, failure, where="settle",
                                                           request=request, work_ran=True)
                         d = refusal.detail
@@ -591,8 +592,9 @@ class X402Middleware(BaseHTTPMiddleware):
                                 network=settings.X402_NETWORK, success=True, nonce=request_nonce(request))
             from app.x402.idempotency import record_settlement
             record_settlement(request, settlement)
-            await outcome_unknown.aresolve(auth_key, prior, settled=True)
             x402_settlements_total.labels(result="settled").inc()
+            # Last: records first, then the removal write (shielded).
+            await outcome_unknown.aresolve(auth_key, prior, settled=True)
 
         tx_hash = getattr(settlement, "transaction", None) or "unknown"
         if not ok:
