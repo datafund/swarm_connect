@@ -151,6 +151,111 @@ prometheus.relabel "bee_development" {
   forward_to = [prometheus.remote_write.grafana_cloud.receiver]
 }
 
+// ── Probe each environment's public /health (#586) ──────────────────────────
+//
+// Everything above reads the gateway from inside: `up` says Alloy could scrape
+// /metrics, and /metrics answers from the event loop without calling Bee. On
+// 2026-11-03 staging kept answering /metrics for over 30 minutes while every
+// Bee call failed, /health took more than 10 s and the proxy answered 502.
+// Nothing alerted. This probe asks what a user asks: does the public URL
+// answer, quickly, with a healthy Bee node.
+//
+// What the module checks, every 60 s per environment:
+//   - an answer within 8 s (shorter than Docker's 10 s healthcheck timeout),
+//   - status 200 (/health never answers 503 by design, so anything else is the
+//     proxy or something in front of it),
+//   - bee_node.healthy == true in the JSON body. A regex, because blackbox has
+//     no portable JSON check: it requires "healthy":true inside the bee_node
+//     object before any nested object, which is how read_root renders it
+//     (tests/test_bee_failure_alerts.py checks the regex against the real
+//     handler output). A failed regex shows as probe_failed_due_to_regex=1
+//     with status 200, which the "Bee node not healthy" alert reads.
+//
+// It also covers Docker's `unhealthy` state. The container healthcheck is
+// `curl -f http://localhost:8000/` with a 10 s timeout, and `/` and `/health`
+// are the same handler. Docker marks the container unhealthy after 3 checks in
+// a row fail or take over 10 s; each of those also fails this probe, which has
+// the stricter timeout. Nothing restarts the container on it, deliberately: a
+// restart can lose state that is not saved yet (see "State file save failures").
+//
+// Not a view from outside the host. Alloy probes the public hostnames from
+// the host that serves them, through DNS, TLS and the reverse proxy, so it
+// sees the proxy and the handler but not the host or its network going away
+// ("Gateway Down" and "No Data" cover that partly). monitoring/alerting/README.md
+// describes Grafana Synthetic Monitoring as the option for a truly external
+// check.
+//
+// LABELS. job is set to "swarm_connect/health_probe". The Grafana stack already
+// holds probe_success series from Synthetic Monitoring for other sites, so the
+// alerts select on this job. Only four probe_* series are kept; `up` for this
+// scrape is dropped, so it can never count as a gateway in "Gateway Down" or
+// keep the "No Data" watchdog quiet.
+//
+// LOAD. Each /health call makes upstream calls to Bee and the Base RPC (#588),
+// so this adds one call per environment per minute next to Docker's two.
+
+prometheus.exporter.blackbox "public_health" {
+  config = `{ modules: { http_health: { prober: http, timeout: 8s, http: { method: GET, valid_status_codes: [200], preferred_ip_protocol: ip4, fail_if_body_not_matches_regexp: ['"bee_node":\{[^{}]*"healthy":\s*true\s*[,}]'] } } } }`
+
+  // The target name becomes the environment label below.
+  target {
+    name    = "main"
+    address = "https://provenance-gateway.datafund.io/health"
+    module  = "http_health"
+  }
+
+  target {
+    name    = "development"
+    address = "https://provenance-gateway.dev.datafund.io/health"
+    module  = "http_health"
+  }
+}
+
+discovery.relabel "public_health" {
+  targets = prometheus.exporter.blackbox.public_health.targets
+
+  // The exporter names each target's job "integrations/blackbox/<name>".
+  rule {
+    action        = "replace"
+    source_labels = ["job"]
+    regex         = "integrations/blackbox/(.*)"
+    target_label  = "environment"
+  }
+  rule {
+    action       = "replace"
+    target_label = "job"
+    replacement  = "swarm_connect/health_probe"
+  }
+  // The probed URL, rather than the component name the exporter puts here.
+  rule {
+    action        = "replace"
+    source_labels = ["__param_target"]
+    target_label  = "instance"
+  }
+  // The host that ran the probe, as on every other series.
+  rule {
+    action       = "replace"
+    target_label = "host"
+    replacement  = sys.env("HOST_LABEL")
+  }
+}
+
+prometheus.scrape "public_health" {
+  targets         = discovery.relabel.public_health.output
+  scrape_interval = "60s"
+  scrape_timeout  = "10s"
+  forward_to      = [prometheus.relabel.public_health.receiver]
+}
+
+prometheus.relabel "public_health" {
+  rule {
+    action        = "keep"
+    source_labels = ["__name__"]
+    regex         = "probe_success|probe_http_status_code|probe_duration_seconds|probe_failed_due_to_regex"
+  }
+  forward_to = [prometheus.remote_write.grafana_cloud.receiver]
+}
+
 // ── Ship gateway container logs to Loki ─────────────────────────────────────
 //
 // Metrics say how many errors there were; they never say what the error was.

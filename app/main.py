@@ -82,12 +82,22 @@ async def lifespan(app: FastAPI):
     # Build the first /health snapshot now, in the background (#588).
     from app.services import health_snapshot
     health_snapshot.start_refresh(bool(settings.X402_ENABLED))
+    # Retry a failed or stalled payment-state write even with no paid traffic,
+    # so a recovered disk stops refusing paid requests by itself (#585).
+    if settings.X402_ENABLED:
+        from app.x402.state_retry import start_state_write_retry_task
+        await start_state_write_retry_task()
 
     yield
 
     await health_snapshot.stop()
 
     # === Shutdown ===
+    # Stop the payment-state retry task before the state-write lanes shut down
+    # below, so it cannot queue a write on a lane that is closing.
+    from app.x402.state_retry import stop_state_write_retry_task
+    await stop_state_write_retry_task()
+
     # Stop metrics background task
     if settings.METRICS_ENABLED:
         from app.services.metrics import stop_metrics_background_task

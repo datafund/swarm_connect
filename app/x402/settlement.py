@@ -264,6 +264,16 @@ class OutcomeUnknownRegistry:
         until a restart: the file is read only then."""
         return bool(self._unreadable)
 
+    def write_failed(self) -> bool:
+        """Whether the last write failed and paid requests are refused until a
+        write of the latest state succeeds (#585). Reads the flag only."""
+        return bool(self._write_error)
+
+    def write_stalled(self) -> bool:
+        """Whether a write did not finish in time, or too many were pending, and
+        paid requests are refused until a write completes (#585). Reads the flag only."""
+        return bool(self._stalled)
+
     def public_cause(self) -> Optional[str]:
         """Short and safe to publish (/health): the file's base name and whether it
         is unreadable or unwritable. Paths and error text stay in the log."""
