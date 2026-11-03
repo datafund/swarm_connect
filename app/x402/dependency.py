@@ -696,7 +696,9 @@ async def require_x402_payment(request: Request) -> None:
             # transfer spent the nonce.
             from app.services.metrics import x402_settlements_total
             x402_settlements_total.labels(result="refused_after_unknown").inc()
-            raise outcome_unknown_refusal(unknown_key, invalid_reason, where="verify", request=request)
+            raise outcome_unknown_refusal(
+                unknown_key, getattr(verify_response, 'invalid_reason', None) or 'unknown',
+                where="verify", request=request)
         # The full reason is in the log above; the caller sees it only if it
         # is a short machine code (#576).
         from app.x402.settlement import public_facilitator_reason
