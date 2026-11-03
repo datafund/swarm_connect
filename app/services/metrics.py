@@ -241,6 +241,15 @@ distinct_callers = Gauge(
     "Distinct callers seen so far today",
 )
 
+# The final count of the previous UTC day. The first scrape after midnight
+# already reads the new day, so callers seen after the last scrape before
+# midnight appear in no sample of distinct_callers. Exported through the next
+# day so the per-day panel can attribute it to the day it belongs to.
+distinct_callers_previous_day = Gauge(
+    "gateway_distinct_callers_previous_day",
+    "Distinct callers on the previous UTC day, final count",
+)
+
 # ── Spending limits (#102) ──────────────────────────────────────────────────
 #
 # Refusals are the signal that matters. The daily budget is a number chosen
