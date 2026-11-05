@@ -296,12 +296,25 @@ def test_invalid_error_never_echoes_values():
 # --- version ----------------------------------------------------------------------------
 
 @pytest.mark.parametrize("decode,_name,make", DECODERS[:2], ids=DECODER_IDS[:2])
-@pytest.mark.parametrize("version", [1, 3, 0])
+@pytest.mark.parametrize("version", [1, 3, 0, -7, 10 ** 3999])
 def test_other_x402_version_is_a_version_mismatch(decode, _name, make, version):
+    value = b64(make(x402Version=version))
+    assert len(value) <= MAX_HEADER_CHARS
     with pytest.raises(PaymentHeaderVersionMismatch) as exc:
-        decode(b64(make(x402Version=version)))
+        decode(value)
     assert exc.value.code == "X402_VERSION_UNSUPPORTED"
     assert isinstance(exc.value, X402HeaderError)
+    assert "x402Version other than 2" in str(exc.value)
+    # The version is client input: never echoed, however long.
+    assert_no_leak(exc.value, str(version) if abs(version) > 9 else "x402Version " + str(version))
+
+
+def test_huge_version_message_has_a_fixed_length():
+    value = b64(payment_msg(x402Version=10 ** 3999))
+    with pytest.raises(PaymentHeaderVersionMismatch) as exc:
+        decode_payment_signature(value)
+    assert "0000000000" not in str(exc.value)
+    assert len(str(exc.value)) < 100
 
 
 @pytest.mark.parametrize("version", ["2", True, None, 2.5])
@@ -341,10 +354,63 @@ def test_every_error_is_a_value_error_with_a_code_and_header_name():
         assert cls.code == code
 
 
-def test_errors_carry_no_exception_chain():
-    # A chained pydantic or json error would carry the input in its text.
-    for value in ["!!", b64(MARKER), b64(payment_msg(accepted=dict(OFFER, network=MARKER)))]:
-        with pytest.raises(X402HeaderError) as exc:
-            decode_payment_signature(value)
-        assert exc.value.__cause__ is None
-        assert exc.value.__suppress_context__
+CHAIN_CASES = {
+    "bad base64": "!!",
+    "not canonical": "QR==",
+    "not utf-8": base64.b64encode(b"\xff" + MARKER.encode()).decode(),
+    "not json": b64(MARKER),
+    "not an object": b64([MARKER]),
+    "lone surrogate": b64('{"x402Version":2,"error":"\\ud800' + MARKER + '"}'),
+    "validation": b64(payment_msg(accepted=dict(OFFER, network=MARKER))),
+    "version": b64(payment_msg(x402Version=10 ** 50)),
+    "too large": "A" * (MAX_HEADER_CHARS + 1),
+}
+
+
+@pytest.mark.parametrize("value", list(CHAIN_CASES.values()), ids=list(CHAIN_CASES))
+def test_errors_carry_no_exception_chain(value):
+    # A chained pydantic, json, binascii or Unicode error would carry the
+    # input in its text: neither __cause__ nor __context__ may be set, so a
+    # logged traceback shows nothing but the X402HeaderError itself.
+    with pytest.raises(X402HeaderError) as exc:
+        decode_payment_signature(value)
+    assert exc.value.__cause__ is None
+    assert exc.value.__context__ is None
+    assert_no_leak(exc.value)
+
+
+# --- lone surrogates (refused at decode) ------------------------------------------------------
+
+@pytest.mark.parametrize("escape", ["\\ud800", "\\udfff", "\\udc00x", "a\\ud83d"])
+@pytest.mark.parametrize("where", ["error", "extra", "extensions", "key"])
+def test_lone_surrogate_is_malformed(escape, where):
+    # json.loads turns the escape into a lone surrogate, which decodes but can
+    # never be encoded back to UTF-8; the decoder refuses it up front.
+    offer = json.dumps(OFFER, separators=(",", ":"))
+    if where == "error":
+        text = '{"x402Version":2,"error":"' + escape + '","resource":{"url":"u"},"accepts":[' + offer + "]}"
+    elif where == "extra":
+        bare = {k: v for k, v in OFFER.items() if k != "extra"}
+        text = ('{"x402Version":2,"resource":{"url":"u"},"accepts":[' + json.dumps(bare)[:-1]
+                + ',"extra":{"name":"' + escape + '"}}]}')
+    elif where == "extensions":
+        text = '{"x402Version":2,"resource":{"url":"u"},"accepts":[' + offer + '],"extensions":{"x":["' + escape + '"]}}'
+    else:
+        text = '{"x402Version":2,"resource":{"url":"u"},"accepts":[' + offer + '],"extensions":{"' + escape + '":1}}'
+    json.loads(text)  # the text itself is valid JSON
+    with pytest.raises(PaymentHeaderMalformed) as exc:
+        decode_payment_required(b64(text))
+    assert "lone surrogate" in str(exc.value)
+
+
+def test_a_valid_surrogate_pair_escape_is_fine():
+    text = '{"x402Version":2,"error":"\\ud83d\\ude00","resource":{"url":"u"},"accepts":[' + json.dumps(OFFER) + "]}"
+    m = decode_payment_required(b64(text))
+    assert m.error == "\U0001F600"
+    assert decode_payment_required(encode_payment_required(m)) == m
+
+
+@pytest.mark.parametrize("value", ["yes", "1", 1])
+def test_payment_response_success_must_be_a_json_boolean(value):
+    err = _invalid(decode_payment_response, dict(SETTLE, success=value))
+    assert err.errors == [("success", "bool_type")]

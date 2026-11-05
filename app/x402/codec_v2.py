@@ -16,7 +16,9 @@ Decoding is strict, in this order, and stops at the first failure:
    whitespace, and it must re-encode to the same text (PaymentHeaderMalformed);
 3. UTF-8, then JSON with no duplicate keys and no NaN/Infinity, and the value
    must be an object (PaymentHeaderMalformed). Duplicate keys are refused so the
-   gateway and a facilitator can never read one header two ways;
+   gateway and a facilitator can never read one header two ways. A string
+   holding a lone surrogate (a JSON escape such as \\ud800) is refused too:
+   it decodes, but the model could then not be encoded back to UTF-8;
 4. x402Version, when present, must be 2 (PaymentHeaderVersionMismatch);
 5. the v2 model (PaymentHeaderInvalid).
 
@@ -30,7 +32,9 @@ offers, as the spec does; the header limit binds well before that.
 
 Errors never contain the header value or any decoded value: only the header
 name, its length, the failing step and, for validation, the field locations
-and pydantic error types. #607 maps `code` to a 400 or 402 answer; these codes
+and pydantic error types. They are raised outside any except block, so no
+exception (with its input-bearing text) is chained to them as __cause__ or
+__context__. #607 maps `code` to a 400 or 402 answer; these codes
 are not sent by any endpoint yet.
 
 Nothing in a request path uses this module yet (#607).
@@ -130,28 +134,48 @@ def _no_constants(_name):
 
 
 def _decode_json_object(value: Any, header_name: str) -> dict:
+    # Each step records its failure and raises after the except block, so the
+    # error has no __cause__ and no __context__: a chained binascii, json or
+    # Unicode error would carry the header or a decoded value in its text.
     if not isinstance(value, str):
         raise PaymentHeaderMalformed(header_name, "is not text")
     if len(value) > MAX_HEADER_CHARS:
         raise PaymentHeaderTooLarge(
             header_name, f"is {len(value)} characters, over the {MAX_HEADER_CHARS} limit")
+    failure = None
     try:
         raw = base64.b64decode(value, validate=True)
     except (binascii.Error, ValueError):
-        raise PaymentHeaderMalformed(header_name, "is not valid base64") from None
-    if base64.b64encode(raw).decode("ascii") != value:
-        raise PaymentHeaderMalformed(header_name, "is not canonical base64") from None
-    try:
-        text = raw.decode("utf-8")
-    except UnicodeDecodeError:
-        raise PaymentHeaderMalformed(header_name, "is not base64 of UTF-8 text") from None
-    try:
-        obj = json.loads(text, object_pairs_hook=_no_duplicates, parse_constant=_no_constants)
-    except (ValueError, RecursionError):
-        raise PaymentHeaderMalformed(header_name, "is not base64 of valid JSON") from None
-    if not isinstance(obj, dict):
-        raise PaymentHeaderMalformed(header_name, "is not base64 of a JSON object")
+        failure = "is not valid base64"
+    if failure is None and base64.b64encode(raw).decode("ascii") != value:
+        failure = "is not canonical base64"
+    if failure is None:
+        try:
+            text = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            failure = "is not base64 of UTF-8 text"
+    if failure is None:
+        try:
+            obj = json.loads(text, object_pairs_hook=_no_duplicates, parse_constant=_no_constants)
+        except (ValueError, RecursionError):
+            failure = "is not base64 of valid JSON"
+    if failure is None and not isinstance(obj, dict):
+        failure = "is not base64 of a JSON object"
+    if failure is None and not _encodable(obj):
+        # A JSON escape such as "\ud800" decodes to a lone surrogate, which
+        # no UTF-8 encoder can write back: the model could not be re-encoded.
+        failure = "has a string that is not valid Unicode (a lone surrogate escape)"
+    if failure is not None:
+        raise PaymentHeaderMalformed(header_name, failure)
     return obj
+
+
+def _encodable(obj: dict) -> bool:
+    try:
+        json.dumps(obj, ensure_ascii=False).encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    return True
 
 
 def _locations(exc: ValidationError) -> List[Tuple[str, str]]:
@@ -164,14 +188,18 @@ def _decode(value: Any, cls: Type[M], header_name: str, versioned: bool) -> M:
     if versioned and "x402Version" in obj:
         version = obj["x402Version"]
         if type(version) is int and version != 2:
-            raise PaymentHeaderVersionMismatch(header_name, f"has x402Version {version}, not 2")
+            # Never the value itself: it is client input, and can be huge.
+            raise PaymentHeaderVersionMismatch(header_name, "has an x402Version other than 2")
+    errors = None
     try:
         return cls.model_validate(obj)
     except ValidationError as exc:
         errors = _locations(exc)
-        fields = ", ".join(f"{loc} ({kind})" for loc, kind in errors[:5])
-        more = f" and {len(errors) - 5} more" if len(errors) > 5 else ""
-        raise PaymentHeaderInvalid(header_name, f"fails validation: {fields}{more}", errors) from None
+    # Raised here, outside the except block, so the ValidationError (which
+    # holds the input values) is neither __cause__ nor __context__.
+    fields = ", ".join(f"{loc} ({kind})" for loc, kind in errors[:5])
+    more = f" and {len(errors) - 5} more" if len(errors) > 5 else ""
+    raise PaymentHeaderInvalid(header_name, f"fails validation: {fields}{more}", errors)
 
 
 def decode_payment_required(value: Any) -> PaymentRequired:
