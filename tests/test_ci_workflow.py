@@ -201,7 +201,9 @@ def _tls_check_script():
 
 def test_image_checks_tls_trust_offline_in_the_running_container():
     """httpx2 trusts the OS CA bundle on Linux, not certifi (#595): the built
-    image must have it and httpx2 must load it, checked without any network."""
+    image must have it and httpx2 must load it, and real handshakes with a local
+    server must refuse an untrusted certificate and a wrong host name, all
+    without any network."""
     blocks = _run_blocks(IMAGE_YML.read_text())
     tls = [i for i, b in enumerate(blocks) if b.startswith(TLS_EXEC)]
     assert len(tls) == 1, f"expected one TLS trust check in image.yml, found {tls}"
@@ -217,9 +219,20 @@ def test_image_checks_tls_trust_offline_in_the_running_container():
                    "httpx2.AsyncHTTPTransport()", "ssl.CERT_REQUIRED", "check_hostname",
                    'cert_store_stats()["x509_ca"]', "ssl.create_default_context(cafile=BUNDLE)"):
         assert needed in script, needed
-    # Offline: the container runs with --network none, and the check names no host.
-    assert not re.search(r"https?://", script)
-    assert "assert " in script and "except" not in script, "a failed check must fail the step"
+    # Real handshakes with a local server and a fresh self-signed certificate:
+    # refused by default httpx2, accepted when trusted, refused for another name.
+    for needed in ("x509.CertificateBuilder()", "asyncio.start_server(", '"127.0.0.1"',
+                   "httpx2.AsyncClient() as default", "ssl.SSLCertVerificationError",
+                   "verify=ssl.create_default_context(cadata=pem)", '"sni_hostname"',
+                   '"mismatch" in wrong.verify_message', "asyncio.run(handshakes())"):
+        assert needed in script, needed
+    # Offline: the container runs with --network none, and the check reaches
+    # nothing but its own server on 127.0.0.1.
+    assert re.findall(r"https?://[^\s\"'/{]*", script) == ["https://127.0.0.1:"]
+    # A failed check fails the step: assertions only, and the one except clause
+    # catches the refused handshake it then examines.
+    assert "assert " in script
+    assert re.findall(r"^\s*except\b.*$", script, re.M) == ["    except httpx2.ConnectError as e:"]
 
 
 # --- one Python version everywhere, and a base image pinned by digest (#617)
