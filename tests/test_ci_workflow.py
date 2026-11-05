@@ -1,0 +1,64 @@
+"""CI tests what the image ships (#523).
+
+tests.yml is the pull-request test gate and, through deploy.yml, the deploy
+gate. It must install the same locked, hash-checked set as the Dockerfile, not
+requirements.txt (floors only), and fail on a lock that pip check rejects.
+The workflow files are read as text, like test_x402_check_config.py does.
+"""
+import re
+from pathlib import Path
+
+REPO = Path(__file__).resolve().parent.parent
+TESTS_YML = REPO / ".github" / "workflows" / "tests.yml"
+DEPLOY_YML = REPO / ".github" / "workflows" / "deploy.yml"
+DOCKERFILE = REPO / "Dockerfile"
+
+LOCK_INSTALL = re.compile(r"pip install\b[^\n]*-r requirements\.lock")
+
+
+def _run_lines(text):
+    """The commands of every `run:` key, one per entry."""
+    return [m.group(1).strip() for m in re.finditer(r"^\s*(?:-\s*)?run:\s*(.+)$", text, re.M)]
+
+
+def _lock_install(text):
+    found = [line for line in text.splitlines() if LOCK_INSTALL.search(line)]
+    assert len(found) == 1, f"expected one install from requirements.lock, found {found}"
+    return found[0]
+
+
+def test_tests_workflow_installs_the_lock_with_hashes():
+    install = _lock_install(TESTS_YML.read_text())
+    assert "--require-hashes" in install
+    assert "--no-deps" in install
+    assert install.strip() in [f"run: {cmd}" for cmd in _run_lines(TESTS_YML.read_text())]
+
+
+def test_tests_workflow_does_not_install_requirements_txt():
+    for cmd in _run_lines(TESTS_YML.read_text()):
+        assert "requirements.txt" not in cmd, cmd
+
+
+def test_tests_workflow_runs_pip_check_after_install_and_before_pytest():
+    cmds = _run_lines(TESTS_YML.read_text())
+    install = next(i for i, c in enumerate(cmds) if LOCK_INSTALL.search(c))
+    check = next((i for i, c in enumerate(cmds) if re.fullmatch(r"(python -m )?pip check", c)), None)
+    pytest_ = next(i for i, c in enumerate(cmds) if "pytest" in c)
+    assert check is not None, "tests.yml does not run pip check as its own step"
+    assert install < check < pytest_
+
+
+def test_tests_workflow_pip_cache_is_keyed_on_the_lock():
+    text = TESTS_YML.read_text()
+    assert re.search(r"^\s*cache-dependency-path:\s*requirements\.lock\s*$", text, re.M)
+
+
+def test_tests_workflow_flags_match_the_dockerfile():
+    docker = _lock_install(DOCKERFILE.read_text())
+    ci = _lock_install(TESTS_YML.read_text())
+    for flag in ("--no-deps", "--require-hashes"):
+        assert flag in docker and flag in ci, flag
+
+
+def test_deploy_workflow_gates_on_tests_workflow():
+    assert re.search(r"^\s*uses:\s*\./\.github/workflows/tests\.yml\s*$", DEPLOY_YML.read_text(), re.M)

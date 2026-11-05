@@ -76,6 +76,8 @@ source venv/bin/activate
 
 # Install dependencies
 pip install -r requirements.txt
+# CI and the Docker image install requirements.lock instead (Python 3.10);
+# to reproduce CI: pip install --no-deps --require-hashes -r requirements.lock
 
 # Set up environment file
 cp .env.example .env

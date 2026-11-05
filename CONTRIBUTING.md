@@ -15,7 +15,7 @@ Thanks for your interest in contributing! Here's how to get started.
    ```bash
    python3 -m venv venv
    source venv/bin/activate
-   pip install -r requirements.txt
+   pip install -r requirements.txt   # CI and the image install requirements.lock (see TEST_STRATEGY.md)
    cp .env.example .env
    ```
 
