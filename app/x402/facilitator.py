@@ -179,9 +179,10 @@ async def check_facilitator_v2_support(client: Optional[FacilitatorClient] = Non
 
     Calls GET {facilitator}/supported once and requires a kind with
     x402Version 2, scheme "exact" and the configured network as its CAIP-2 id
-    (eip155:84532, not base-sepolia). Fails closed: an unreachable facilitator,
-    or an answer that cannot be read, is refused like one that does not list
-    it. Does nothing when x402 is off or 2 is not enabled, so the default
+    (eip155:84532, not base-sepolia), in a 2xx answer. Fails closed: an
+    unreachable facilitator, a request that cannot be made (the credential
+    hook raising, an invalid URL), a non-2xx answer whatever its body, or a
+    2xx answer that cannot be read, is refused like one that does not list it. Does nothing when x402 is off or 2 is not enabled, so the default
     configuration never calls /supported.
 
     Messages name the facilitator host and what it lists, never a credential.
@@ -194,17 +195,32 @@ async def check_facilitator_v2_support(client: Optional[FacilitatorClient] = Non
     host = _host(client.config["url"]) or "the facilitator"
     import httpx
     from pydantic import ValidationError
+    from app.x402.models_v1 import SupportedResponse
     try:
-        answer = await client.supported()
+        response = await client.supported_response()
     except httpx.HTTPError as e:
         raise _v2_refusal(f"the facilitator's /supported on {host} could not be reached "
                           f"({type(e).__name__}), so it is unknown whether it settles x402 v2 exact "
                           f"on {network}") from None
+    except Exception as e:
+        # Anything else before an answer: the CDP header hook raising, an
+        # httpx error outside HTTPError (InvalidURL), a bad header value. A
+        # refusal, not a traceback, and never the error text (it may hold a
+        # credential or the URL).
+        raise _v2_refusal(f"the request to the facilitator's /supported on {host} could not be made "
+                          f"({type(e).__name__}; check the facilitator URL and credentials)") from None
+    status = response.status_code
+    if not 200 <= status < 300:
+        # Not an answer to trust, whatever its body says (CDP answers 401 in
+        # plain text without valid credentials).
+        raise _v2_refusal(f"the facilitator's /supported on {host} answered HTTP {status}, not a list "
+                          f"of payment kinds (a 401 or 403 is an authentication error)")
+    try:
+        answer = SupportedResponse(**response.json())
     except (ValidationError, ValueError, TypeError) as e:
         # ValueError covers a body that is not JSON; TypeError one that is not an object.
-        raise _v2_refusal(f"the facilitator's /supported on {host} answered with something that is not "
-                          f"a list of payment kinds ({type(e).__name__}; an authentication error "
-                          f"answers like this)") from None
+        raise _v2_refusal(f"the facilitator's /supported on {host} answered HTTP {status} with "
+                          f"something that is not a list of payment kinds ({type(e).__name__})") from None
     kinds = answer.kinds
     if any(k.x402_version == 2 and k.scheme == "exact" and k.network == network for k in kinds):
         logger.info(f"x402 v2: the facilitator on {host} settles x402 v2 exact on {network}")

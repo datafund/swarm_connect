@@ -41,8 +41,9 @@ facilitator-side switches it never priced. Answers are classified by status
 
 tests/test_x402_facilitator_differential.py runs verify and settle through
 this client and through x402 1.0.0 against a stub server and compares the
-requests and results. supported() has no 1.0.0 counterpart; the startup
-check for x402 v2 calls it (facilitator.check_facilitator_v2_support, #608).
+requests and results. supported() and supported_response() have no 1.0.0
+counterpart; the startup check for x402 v2 calls supported_response()
+(facilitator.check_facilitator_v2_support, #608) and requires a 2xx.
 """
 import inspect
 from typing import Any, Callable, Optional
@@ -152,17 +153,27 @@ class FacilitatorClient:
         data = await self._post("settle", payment, payment_requirements)
         return SettleResponse(**data)
 
-    async def supported(self) -> SupportedResponse:
-        """GET {url}/supported: the payment kinds the facilitator settles.
+    async def supported_response(self) -> httpx.Response:
+        """GET {url}/supported, unparsed: the HTTP answer with its status.
 
-        Same headers, timeout and parsing rule as verify and settle. Called at
-        startup when x402 v2 is enabled (facilitator.check_facilitator_v2_support, #608)."""
+        Same headers ("supported" entry) and timeout as verify and settle. The
+        v2 startup check (facilitator.check_facilitator_v2_support, #608) uses
+        this, so it can refuse a non-2xx answer before reading any kinds."""
         headers = await self._headers("supported")
         async with self._client() as client:
             response = await client.get(f"{self.config['url']}/supported", headers=headers,
                                         follow_redirects=True)
-            data = response.json()
-        return SupportedResponse(**data)
+            await response.aread()
+        return response
+
+    async def supported(self) -> SupportedResponse:
+        """GET {url}/supported: the payment kinds the facilitator settles.
+
+        Same headers, timeout and parsing rule as v1 verify and settle: the
+        body is parsed whatever the HTTP status. The startup check does not
+        rely on this; it reads supported_response() and requires a 2xx."""
+        response = await self.supported_response()
+        return SupportedResponse(**response.json())
 
 
 def v2_request_body(payment: PaymentPayloadV2, payment_requirements: PaymentRequirementsV2) -> dict:

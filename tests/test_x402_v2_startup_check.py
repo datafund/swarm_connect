@@ -231,3 +231,81 @@ def test_deploy_check_does_not_call_supported_with_v2_off(x402, capsys):
     x402.setattr(facilitator, "_client", sup.client())
     assert check_config.main() == check_config.EXIT_OK
     assert sup.calls == []
+
+
+# --- review round 1: the HTTP status, and errors before any answer ----------
+
+@pytest.mark.parametrize("status", [500, 401, 503, 302, 404])
+def test_a_non_2xx_answer_is_refused_whatever_its_body(x402, status):
+    # A valid kinds list in the body is not trusted on a non-2xx answer.
+    msg = refused(Supported(httpx.Response(status, json={"kinds": [V2_EXACT]})))
+    assert f"answered HTTP {status}" in msg
+
+
+def test_cdp_text_401_names_the_status(x402):
+    msg = refused(Supported(httpx.Response(401, text="Unauthorized")))
+    assert "answered HTTP 401" in msg and "authentication" in msg
+
+
+def test_a_2xx_answer_that_is_not_kinds_names_the_status(x402):
+    msg = refused(Supported(httpx.Response(200, text="<html>")))
+    assert "answered HTTP 200 with something that is not a list of payment kinds" in msg
+
+
+def test_a_2xx_other_than_200_with_v2_is_accepted(x402):
+    check(Supported(httpx.Response(203, json={"kinds": [V2_EXACT]})))
+
+
+@pytest.mark.parametrize("status", [500, 401, 503])
+def test_deploy_check_refuses_a_non_2xx_answer(x402, capsys, status):
+    x402.setattr(facilitator, "_client",
+                 Supported(httpx.Response(status, json={"kinds": [V2_EXACT]})).client())
+    assert check_config.main() == check_config.EXIT_REFUSED
+    assert f"answered HTTP {status}" in capsys.readouterr().err
+
+
+def _hook_raises():
+    raise RuntimeError("cdp-sdk could not sign: secret=do-not-print")
+
+
+def test_a_raising_credential_hook_is_a_refusal(x402, capsys):
+    sup = Supported(kinds(V2_EXACT))
+    client = FacilitatorClient({"url": URL, "create_headers": _hook_raises},
+                               transport=httpx.MockTransport(sup.handler))
+    with pytest.raises(RuntimeError) as exc:
+        asyncio.run(facilitator.check_facilitator_v2_support(client))
+    msg = str(exc.value)
+    assert msg.startswith(PREFIX) and "could not be made (RuntimeError" in msg
+    assert "do-not-print" not in msg and exc.value.__cause__ is None
+    assert sup.calls == []
+    x402.setattr(facilitator, "_client", client)
+    assert check_config.main() == check_config.EXIT_REFUSED
+    err = capsys.readouterr().err
+    assert "could not be made" in err and "do-not-print" not in err and "Traceback" not in err
+
+
+@pytest.mark.parametrize("client", [
+    "raised by the transport",
+    "a NUL in the configured URL",
+])
+def test_an_httpx_error_outside_http_error_is_a_refusal(x402, capsys, client):
+    if client == "raised by the transport":
+        c = Supported(httpx.InvalidURL("bad")).client()
+    else:
+        c = FacilitatorClient({"url": "https://ho\x00st/x402"},
+                              transport=httpx.MockTransport(Supported(kinds(V2_EXACT)).handler))
+    assert not issubclass(httpx.InvalidURL, httpx.HTTPError)
+    with pytest.raises(RuntimeError) as exc:
+        asyncio.run(facilitator.check_facilitator_v2_support(c))
+    assert str(exc.value).startswith(PREFIX) and "could not be made (InvalidURL" in str(exc.value)
+    x402.setattr(facilitator, "_client", c)
+    assert check_config.main() == check_config.EXIT_REFUSED
+    assert "could not be made" in capsys.readouterr().err
+
+
+def test_supported_client_still_parses_whatever_the_status():
+    # The client method keeps its documented rule; only the startup check
+    # requires a 2xx.
+    c = Supported(httpx.Response(500, json={"kinds": [V2_EXACT]})).client()
+    assert [k.x402_version for k in asyncio.run(c.supported()).kinds] == [2]
+    assert asyncio.run(c.supported_response()).status_code == 500
