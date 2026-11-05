@@ -21,6 +21,7 @@ import re
 import shutil
 import stat
 import subprocess
+import sys
 import textwrap
 from pathlib import Path
 
@@ -37,6 +38,7 @@ DEV_LOCK = REPO / "requirements-dev.lock"
 REQUIREMENTS_DEV_TXT = REPO / "requirements-dev.txt"
 DOCKERIGNORE = REPO / ".dockerignore"
 LOCK_SYNC = REPO / "scripts" / "check_lock_sync.sh"
+UV_PIN = REPO / ".github" / "uv-pin.txt"
 
 LOCK_INSTALL = re.compile(r"pip install\b[^\n]*-r requirements\.lock")
 
@@ -330,8 +332,10 @@ def test_lock_pins_are_at_or_above_the_advisory_fixes():
 # --- test-only packages stay out of the image (#430)
 
 # Installed only for the tests. None of them may be a runtime requirement or be
-# pinned in the runtime lock, which is all the image installs.
-TEST_ONLY = ("pytest", "pytest-asyncio", "pluggy", "iniconfig")
+# pinned in the runtime lock, which is all the image installs. (packaging is
+# here because only pytest needs it today; if a runtime package starts to
+# depend on it, take it off this list and off image.yml's check.)
+TEST_ONLY = ("pytest", "pytest-asyncio", "pluggy", "iniconfig", "packaging")
 
 
 def _requirement_names(path):
@@ -441,15 +445,29 @@ def test_tests_workflow_checks_the_locks_are_in_sync():
     text = TESTS_YML.read_text()
     job = _job(text, "lock-sync")
     cmds = _run_lines(job)
-    uv = [c for c in cmds if re.search(r"pip install\b.*\buv\b", c)]
-    assert len(uv) == 1, cmds
-    assert re.search(r"[\"']?uv==0\.11\.\d+[\"']?$", uv[0]), f"uv is not pinned to an exact 0.11.x: {uv[0]}"
+    uv = [c for c in cmds if "uv-pin.txt" in c]
+    assert uv == ["python -m pip install --no-deps --require-hashes -r .github/uv-pin.txt"], cmds
+    assert not [c for c in cmds if re.search(r"pip install\b.*\buv==", c)], "uv installed without its hashes"
     assert "scripts/check_lock_sync.sh" in cmds, cmds
     assert cmds.index(uv[0]) < cmds.index("scripts/check_lock_sync.sh")
     assert re.search(r"^\s*if:\s*github\.event_name == 'pull_request'\s*$", job, re.M)
     assert "continue-on-error" not in job
     # The deploy gate (job pytest) does not depend on PyPI through it.
     assert "needs:" not in job
+
+
+def test_uv_for_the_sync_check_is_pinned_by_version_and_hash():
+    text = UV_PIN.read_text()
+    code = [line for line in text.splitlines() if line.strip() and not line.lstrip().startswith("#")]
+    assert re.fullmatch(r"uv==0\.11\.\d+ \\", code[0]), code[0]
+    hashes = code[1:]
+    assert hashes, "uv has no hashes"
+    for i, line in enumerate(hashes):
+        tail = "" if i == len(hashes) - 1 else " \\"
+        assert re.fullmatch(r"    --hash=sha256:[0-9a-f]{64}" + re.escape(tail), line), line
+    assert len(set(hashes)) == len(hashes)
+    # The image never gets it: .github is not in the build context.
+    assert ".github" in DOCKERIGNORE.read_text().splitlines()
 
 
 def test_lock_sync_script_reruns_both_header_commands():
@@ -460,16 +478,36 @@ def test_lock_sync_script_reruns_both_header_commands():
     assert '"uv 0.11."*)' in text
 
 
-# The script is exercised with a stand-in for uv, so these run offline. The
-# stand-in rewrites the -o file only when told to, the way uv pip compile
-# changes a lock whose input no longer matches it.
-FAKE_UV = """#!/usr/bin/env bash
+# The script is exercised with a stand-in for uv, so these run offline. Like
+# uv pip compile, the stand-in leaves an existing -o file alone (its pins and
+# hashes are kept), unless told to change it, the way uv changes a lock whose
+# input no longer matches it. A missing -o file (the fresh hash pass) it fills
+# from the pristine locks in FAKE_UV_SOURCE, as uv would from the index, and
+# FAKE_UV_FRESH_HASH adds a hash there, as when PyPI gains a file. It keeps a
+# copy of the -c *.pins file it was given.
+FAKE_UV = r"""#!/usr/bin/env bash
 if [ "$1" = "--version" ]; then echo "uv ${FAKE_UV_VERSION:-0.11.17}"; exit 0; fi
-out=""; prev=""
-for a in "$@"; do [ "$prev" = "-o" ] && out="$a"; prev="$a"; done
+out=""; pins=""; prev=""
+for a in "$@"; do
+  [ "$prev" = "-o" ] && out="$a"
+  [ "$prev" = "-c" ] && [ "${a%.pins}" != "$a" ] && pins="$a"
+  prev="$a"
+done
 echo "$PWD|$*|${UV_NO_CONFIG:-}|${UV_INDEX_URL:-}" >> "$FAKE_UV_LOG"
-[ "$out" = "${FAKE_UV_CHANGE:-}" ] && echo "extra==1.0" >> "$out"
-exit "${FAKE_UV_EXIT:-0}"
+[ "${FAKE_UV_EXIT:-0}" = 0 ] || exit "$FAKE_UV_EXIT"
+if [ -e "$out" ]; then
+  [ "$out" = "${FAKE_UV_CHANGE:-}" ] && echo "extra==1.0" >> "$out"
+else
+  cp "$FAKE_UV_SOURCE/$(basename "$out")" "$out"
+  if [ -n "${FAKE_UV_FRESH_HASH:-}" ]; then
+    while IFS= read -r line; do
+      printf '%s\n' "$line"
+      case "$line" in "pytest=="*) printf '    --hash=sha256:%s \\\n' "$FAKE_UV_FRESH_HASH" ;; esac
+    done < "$out" > "$out.new" && mv "$out.new" "$out"
+  fi
+  [ -n "$pins" ] && cp "$pins" "$FAKE_UV_LOG.$(basename "$out").pins"
+fi
+exit 0
 """
 
 
@@ -490,7 +528,7 @@ def lock_sync(tmp_path):
 
     def run(**env):
         full = {**os.environ, "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
-                "FAKE_UV_LOG": str(log), **env}
+                "FAKE_UV_LOG": str(log), "FAKE_UV_SOURCE": str(REPO), **env}
         proc = subprocess.run(["bash", str(repo / "scripts" / LOCK_SYNC.name)], env=full,
                               capture_output=True, text=True, timeout=60)
         calls = log.read_text().splitlines() if log.exists() else []
@@ -498,7 +536,15 @@ def lock_sync(tmp_path):
         return proc, calls
 
     run.repo = repo
+    run.pins = lambda lock: Path(f"{log}.{lock}.pins").read_text()
     return run
+
+
+def _hash_lines(lock_text, package):
+    """The --hash lines of one package's block in a lock."""
+    m = re.search(rf"^{re.escape(package)}==[^\n]*\n((?:    --hash=\S+.*\n)+)", lock_text, re.M)
+    assert m, package
+    return m.group(1).splitlines()
 
 
 def test_lock_sync_passes_and_leaves_the_tree_alone_when_in_sync(lock_sync):
@@ -506,21 +552,68 @@ def test_lock_sync_passes_and_leaves_the_tree_alone_when_in_sync(lock_sync):
     proc, calls = lock_sync(UV_INDEX_URL="https://example.invalid/simple")
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert {p.name: p.read_bytes() for p in lock_sync.repo.iterdir() if p.is_file()} == before
-    assert len(calls) == 2
-    for call, lock in zip(calls, (LOCK, DEV_LOCK)):
-        cwd, args, no_config, index = call.split("|")
+    # Per lock: the header command on a copy, then the fresh hash pass.
+    assert len(calls) == 4
+    for (regen, fresh), lock in zip((calls[0:2], calls[2:4]), (LOCK, DEV_LOCK)):
+        header = _header_command(lock)[len("uv "):]
+        cwd, args, no_config, index = regen.split("|")
         # Run in a scratch copy, verbatim from the header, without user config.
         assert Path(cwd) != lock_sync.repo
-        assert args == _header_command(lock)[len("uv "):] + " --quiet"
+        assert args == header + " --quiet"
         assert no_config == "1" and index == ""
+        cwd, args, no_config, index = fresh.split("|")
+        # The fresh pass writes a new file, constrained to the committed pins.
+        assert Path(cwd) != lock_sync.repo
+        assert args == header.replace(f"-o {lock.name}", f"-o out/{lock.name}") + f" -c {lock.name}.pins --quiet"
+        assert no_config == "1" and index == ""
+        pins = lock_sync.pins(lock.name).splitlines()
+        assert pins == [line.rstrip(" \\") for line in lock.read_text().splitlines()
+                        if re.match(r"[A-Za-z0-9].*==", line)]
+        assert pins and not [p for p in pins if "--hash" in p or "\\" in p]
+
+
+@pytest.mark.parametrize("lock", ["requirements.lock", "requirements-dev.lock"])
+def test_lock_sync_fails_on_a_changed_hash(lock_sync, lock):
+    """uv keeps an existing lock's hashes, so only the fresh pass can see this."""
+    path = lock_sync.repo / lock
+    text = path.read_text()
+    first = _hash_lines(text, "requests")[0]
+    path.write_text(text.replace(first, re.sub(r"sha256:[0-9a-f]{64}", "sha256:" + "0" * 64, first), 1))
+    proc, _ = lock_sync()
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert "sha256:" + "0" * 64 + " is not a file of this version" in proc.stdout
+    assert f"{lock} lists hashes that differ" in proc.stdout
+    assert "out of sync with its input" not in proc.stdout
+
+
+def test_lock_sync_fails_on_a_dropped_hash(lock_sync):
+    path = lock_sync.repo / "requirements-dev.lock"
+    text = path.read_text()
+    dropped = _hash_lines(text, "pytest")[0]
+    path.write_text(text.replace(dropped + "\n", "", 1))
+    proc, _ = lock_sync()
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert "pytest==" in proc.stdout and "is missing from the lock" in proc.stdout
+
+
+def test_lock_sync_fails_when_the_index_has_a_file_the_lock_lacks(lock_sync):
+    """The known false positive: PyPI gains a file for a pinned version. The
+    check fails, which is why CI runs it on pull requests only."""
+    proc, _ = lock_sync(FAKE_UV_FRESH_HASH="f" * 64)
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert "sha256:" + "f" * 64 + " of this version is missing from the lock" in proc.stdout
 
 
 @pytest.mark.parametrize("changed", ["requirements.lock", "requirements-dev.lock"])
 def test_lock_sync_fails_when_a_lock_would_change(lock_sync, changed):
-    proc, _ = lock_sync(FAKE_UV_CHANGE=changed)
+    proc, calls = lock_sync(FAKE_UV_CHANGE=changed)
     assert proc.returncode == 1, proc.stdout + proc.stderr
     assert "+extra==1.0" in proc.stdout
     assert f"{changed} is out of sync" in proc.stdout
+    # A lock that must be regenerated gets no hash pass (its pins may no
+    # longer satisfy the input); the other lock still gets both passes.
+    assert not [c for c in calls if f"-o out/{changed} " in c]
+    assert len(calls) == 3
     # The committed lock itself is not rewritten.
     assert "extra==1.0" not in (lock_sync.repo / changed).read_text()
 
@@ -568,14 +661,14 @@ def test_image_checks_test_packages_are_not_importable():
     assert not re.search(r"\|\|\s*(true|:|exit 0)\b", blocks[checks[0]])
 
     script = _no_test_packages_script()
-    for name in ("pytest", "pytest_asyncio", "pluggy", "iniconfig"):
+    for name in ("pytest", "pytest_asyncio", "pluggy", "iniconfig", "packaging"):
         assert f'"{name}"' in script, name
     assert "except" not in script and not re.search(r"https?://", script)
 
 
 def test_image_test_package_check_fails_where_pytest_is_importable():
     """Run against this interpreter, which has pytest: the check must fail."""
-    proc = subprocess.run([os.sys.executable, "-c", _no_test_packages_script()],
+    proc = subprocess.run([sys.executable, "-c", _no_test_packages_script()],
                           capture_output=True, text=True, timeout=60)
     assert proc.returncode != 0
     assert "test-only packages are importable" in proc.stderr
