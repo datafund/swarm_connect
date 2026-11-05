@@ -1,0 +1,70 @@
+name: image
+
+# Builds the Docker image on every pull request, from a clean state, and checks
+# that it starts and answers GET / (#486).
+#
+# Why: the image used to be built only by deploy.yml, after a merge, on the
+# deploy hosts, which reuse their Docker layer cache. On 2026-10-05 every
+# staging deploy failed at `build docker image` because a clean build rejected
+# the lock (#483); no pull-request check had built the image at all.
+#
+# No layer cache, on purpose: --no-cache rebuilds every layer, so a cached pip
+# layer cannot hide a lock that no longer installs, and --pull fetches the
+# current base image, so a stale one cannot either. A fresh hosted runner has
+# no cache anyway; the flags keep it that way if the runner ever changes.
+# linux/amd64 is what the deploy hosts run, and ubuntu-latest builds it natively.
+#
+# Not called by deploy.yml: each deploy host builds the image itself before it
+# stops the running gateway, so a broken build there already stops the deploy
+# safely. Building it here again would only add minutes to every deploy.
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  docker-build:
+    name: docker-build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      IMAGE: swarm_connect:ci
+      CONTAINER: swarm_connect_ci
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: docker build (no cache)
+        run: docker build --pull --no-cache --platform linux/amd64 -t "$IMAGE" .
+
+      - name: smoke check (GET / with Bee unreachable)
+        # The only required setting is SWARM_BEE_API_URL. It points at a port
+        # nothing listens on, and --network none keeps the check hermetic: no
+        # Bee, RPC or facilitator is reached. GET / still answers 200 then
+        # (status "degraded"), and with a refused port the /health snapshot
+        # is built at once, so the first request does not wait for
+        # HEALTH_SNAPSHOT_FIRST_WAIT_SECONDS. The probe is the compose
+        # healthcheck's own command, run inside the container.
+        run: |
+          docker run -d --name "$CONTAINER" --network none \
+            -e SWARM_BEE_API_URL=http://localhost:1 "$IMAGE"
+          for i in $(seq 1 30); do
+            if docker exec "$CONTAINER" curl -fsS --max-time 10 -o /dev/null http://localhost:8000/; then
+              echo "GET / answered 200, ${SECONDS} s after docker run"
+              exit 0
+            fi
+            # A container that exited will not start answering by waiting.
+            if [ "$(docker inspect -f '{{.State.Running}}' "$CONTAINER")" != "true" ]; then
+              echo "::error::the container exited before GET / answered"
+              break
+            fi
+            sleep 2
+          done
+          echo "::error::GET / did not answer 200 (see the container log below)"
+          docker logs --tail 200 "$CONTAINER" || true
+          exit 1
+
+      - name: remove the container
+        if: always()
+        run: docker rm -f "$CONTAINER" || true

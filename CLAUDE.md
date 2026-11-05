@@ -18,6 +18,8 @@ source venv/bin/activate  # On Windows: venv\Scripts\activate
 pip install -r requirements.txt
 # CI and the Docker image install the pinned set instead; to reproduce CI exactly
 # (Python 3.10): pip install --no-deps --require-hashes -r requirements.lock && pip check
+# CI also builds the image on every PR, uncached, and checks it answers GET /
+# (.github/workflows/image.yml, #486; see TEST_STRATEGY.md for the commands)
 
 # Setup environment
 cp .env.example .env
@@ -832,6 +834,7 @@ If the remote gateway (provenance-gateway.datafund.io) returns 503 or appears br
    SWARM_BEE_API_URL_DEV=http://localhost:1633 \
    docker-compose up --build
    ```
+   To build exactly as PR CI does (`.github/workflows/image.yml`): `docker build --pull --no-cache --platform linux/amd64 -t swarm_connect:ci .`. The deploy hosts reuse their layer cache, so a build that passes there can still fail from clean (#483); the uncached PR build is the one that counts.
 
 2. **Check for Python version compatibility issues**:
    - Docker uses Python 3.10 (`Dockerfile`: `python:3.10-slim`)
@@ -840,6 +843,7 @@ If the remote gateway (provenance-gateway.datafund.io) returns 503 or appears br
 
 3. **Common issues**:
    - Import errors → Check the dependency is in requirements.txt and that requirements.lock was regenerated from it (CI and the image install only the lock)
+   - `build docker image` fails on a deploy host but the PR's `docker-build` check passed → the host's base image or cache differs; the PR build is uncached and pulls the base image fresh
 
 4. **Quick fix workflow**:
    - Fix the issue locally
