@@ -4,15 +4,15 @@ The x402 facilitator client, and the checks that keep x402 configuration safe.
 
 Mainnet facilitators authenticate the gateway (#369). The public x402.org
 facilitator serves test networks only and takes no credentials; a mainnet
-facilitator such as Coinbase CDP signs each request with an API key. The x402
-SDK supports this through FacilitatorConfig.create_headers, which the gateway
-did not use: it built its clients (in two places) from a URL alone.
+facilitator such as Coinbase CDP signs each request with an API key, through
+FacilitatorConfig.create_headers. The client is the gateway's own
+(app/x402/facilitator_client.py, #604), a drop-in for x402 1.0.0's.
 
 Two ways to authenticate, both optional:
 - X402_FACILITATOR_CDP_API_KEY_ID / _SECRET: the Coinbase CDP facilitator, via
   the cdp-sdk package (pinned in requirements.lock, so the image has it; the
   gateway refuses to start if these are set and it is missing). Note: CDP's
-  facilitator route is x402 v2, and this gateway speaks x402 v1 (x402==1.0.0);
+  facilitator route is x402 v2, and this gateway speaks x402 v1;
   whether CDP accepts v1 payloads must be confirmed before relying on it (see
   #524). cdp-sdk signs each token for one path on its x402 route
   (/platform/v2/x402/verify, /settle), so with CDP credentials the gateway
@@ -28,7 +28,7 @@ import logging
 import re
 from typing import Optional
 
-from x402.facilitator import FacilitatorClient, FacilitatorConfig
+from app.x402.facilitator_client import FacilitatorClient, FacilitatorConfig
 
 from app.core.config import settings, is_testnet_network
 
@@ -68,9 +68,9 @@ def _config() -> FacilitatorConfig:
         )
         cdp_headers = cdp["create_headers"]
 
-        # cdp-sdk builds headers synchronously (a fresh JWT per call), while the
-        # x402 1.x client awaits create_headers. Adapt rather than crash on the
-        # first payment.
+        # cdp-sdk builds headers synchronously (a fresh JWT per call). The
+        # client accepts either kind of hook; the async wrapper keeps this one
+        # the same kind as the bearer hook below.
         async def create_headers():
             headers = cdp_headers()
             return await headers if hasattr(headers, "__await__") else headers

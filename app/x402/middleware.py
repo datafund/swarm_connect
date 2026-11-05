@@ -10,7 +10,8 @@ Pre-request payment verification is handled by the dependency
 (app/x402/dependency.py) which runs after FastAPI validation,
 ensuring malformed requests get 422 errors instead of 402.
 
-Uses the official x402 Python SDK for payment handling.
+The x402 v1 types and the facilitator client are the gateway's own
+(models_v1.py, facilitator_client.py, #604).
 """
 import json
 import asyncio
@@ -21,9 +22,9 @@ from fastapi import Request, Response
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import JSONResponse
 
-from x402.types import PaymentRequirements, PaymentPayload, SettleResponse
-from x402.facilitator import FacilitatorClient
-from x402.encoding import safe_base64_decode, safe_base64_encode
+from app.x402.models_v1 import PaymentRequirements, PaymentPayload, SettleResponse
+from app.x402.facilitator_client import FacilitatorClient
+from app.x402.encoding import safe_base64_decode, safe_base64_encode
 
 from app.core.config import settings
 from app.x402.ratelimit import get_rate_limit_headers
