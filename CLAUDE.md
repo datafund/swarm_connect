@@ -270,7 +270,7 @@ The gateway supports x402 payment protocol for pay-per-request access without us
 ### Key Architecture Decisions
 
 - **Two-wallet system**: USDC on Base, xBZZ on Gnosis (no bridging)
-- **SDK**: Official `x402` Python package (v1 - v2 under development)
+- **x402 code**: the gateway's own v1 models (`app/x402/models_v1.py`) and facilitator client (`app/x402/facilitator_client.py`), #604. The `x402` package (1.0.0) is a test oracle only; `app/` does not import it.
 - **Facilitator**: x402.org public facilitator for testnet
 - **Scope**: Uploads gated, downloads free
 
@@ -284,6 +284,11 @@ app/x402/
 ├── preflight.py     # Bee (Gnosis) wallet balance checks (can_accept)
 ├── accept_gate.py   # 503 PAYMENTS_UNAVAILABLE before payment while can_accept is false (#589)
 ├── payment_headers.py # Which payment headers a request carries: X-PAYMENT (v1), PAYMENT-SIGNATURE (v2) (#600)
+├── models_v1.py     # x402 v1 wire types: PaymentRequirements, PaymentPayload, VerifyResponse, SettleResponse, SupportedResponse (#604)
+├── encoding.py      # base64 helpers for the x402 headers (#604)
+├── facilitator_client.py # httpx facilitator client: verify, settle, supported (#604)
+├── facilitator.py   # Builds the shared client (CDP / bearer auth) and validate_x402_config
+├── networks.py      # v1 names <-> CAIP-2 ids (#599)
 ├── base_balance.py  # Base ETH balance of the pay-to address (gates protected requests)
 ├── pricing.py       # Price calculation (BZZ → USD)
 ├── access.py        # IP whitelist/blacklist (not wired into requests yet, #379)
@@ -334,6 +339,8 @@ X402_FREE_TIER_RATE_LIMIT=3  # Requests/minute for free tier (default: 3)
 
 **Accepted versions and the price field (#602).** `/health` reports `x402.versions` (inside the `x402` block, so only with x402 enabled), read from `ACCEPTED_X402_VERSIONS = (1,)` in `app/x402/payment_headers.py`; the `X402_PROTOCOL_VERSIONS` setting (#609) replaces that constant. Each `/api/v1/pricing` quote has `amount` right after `max_amount_required`, the same value; `max_amount_required` is deprecated (D8 in #596) and stays until v1 is removed. v1 402 bodies keep `maxAmountRequired` only (the goldens pin them). OpenAPI shows both through each route's description and a 200 response example; neither route has a `response_model`, which would filter or reorder the existing fields. Tests: `tests/test_x402_versions_and_amount.py`.
 
+**Own x402 v1 models and facilitator client (#604, D1 in #596).** `app/` no longer imports the `x402` library; `tests/test_x402_no_library_import.py` fails on any such import and loads the app with `x402` blocked. `app/x402/models_v1.py` copies the 1.0.0 shapes (same fields and order, camelCase aliases, integer-string validators, the four v1 names on `PaymentRequirements.network`, unknown fields dropped, `VerifyResponse.payer` required but nullable); `app/x402/encoding.py` the base64 helpers. `app/x402/facilitator_client.py` sends the same `POST {url}/verify` and `/settle` as 1.0.0 (body `{"x402Version","paymentPayload","paymentRequirements"}`, the requirements dumped without None, httpx `json=`; `Content-Type` plus the path's entry of `create_headers()`, async or sync; `follow_redirects=True`; a new `httpx.AsyncClient` per call) with an explicit 5 s timeout (`DEFAULT_TIMEOUT`, what 1.0.0 got from httpx's default). It parses the body whatever the status: a body that parses is a result (`success: false` = a definite refusal); a body without the required fields (`ValidationError`), not JSON (`JSONDecodeError`), not an object (`TypeError`), a timeout or a connection error raises, which `settlement.py` treats as an unknown outcome. `supported()` (`GET {url}/supported`, the `supported` header entry, same timeout and parsing, returns `SupportedResponse`) is not called yet (#608). `x402==1.0.0` stays in the testing section of `requirements.txt` as the oracle: `tests/test_x402_own_models.py` (schemas, dumps, refusals, dropped fields, base64), `tests/test_x402_facilitator_differential.py` (both clients against a loopback stub server: identical requests and parsed results or exception types for success, refusal, non-200, malformed, timeout, connection refused, redirects, bearer and CDP-shaped hooks) and `tests/test_x402_v1_golden_own_client.py` (the #599 goldens through the own client). `x402PaymentRequiredResponse` in tests still comes from 1.0.0.
+
 ### Idempotency-Key (paid requests, #359)
 
 Paid POSTs accept an `Idempotency-Key` header (`app/x402/idempotency.py`). Scoped to (payer, method, path, key). Order in `require_x402_payment`: request validation (#427, see above) → facilitator verify (the verified signature makes `from` the payer; for keyed requests a facilitator-reported payer must equal it) → replay guard reserves the new authorization → idempotency lookup (any refusal or replay releases the reservation; nothing is settled). A repeat returns the stored 2xx response with `Idempotent-Replayed: true` (the dependency raises `IdempotentReplay`, which `X402Middleware` turns into the response) and writes a `payment_idempotent_replay` audit event. The authorization that paid for the original is refused by hash, since verify does not reject a spent nonce. Before either settle point calls the facilitator, a `settling` entry (with the authorization's nonce) is persisted; success promotes it to `settled` (with the transaction), a definite refusal (`success=False`) deletes it, and an exception, timeout or cancellation leaves it, so a retry gets `409 IDEMPOTENCY_KEY_SETTLEMENT_UNKNOWN` naming the nonce to check on-chain. The key is released only when nothing can have been collected. A 2xx too large to store marks the entry `delivered_not_stored` (`409 IDEMPOTENCY_KEY_DELIVERED_NOT_STORED`, "it succeeded"). `/chunks/credit` results are stored with the bearer token removed; a replay fills in `bandwidth_credit_manager.issue_token(payer)` (current token, never minted or rotated). `authorization_key()` canonicalises the nonce (bytes32 hex, `0x`-prefixed, lowercase) and payer (20-byte address) and refuses anything else, so the replay guard and the stored authorization hash cannot be bypassed by respelling. Entries missing `request_hash` or a known `state` make the file unreadable (fail closed). A retry while the first request runs → `409 IDEMPOTENCY_KEY_IN_PROGRESS`; after a paid request failed, raised, was cancelled or the gateway restarted → `409 IDEMPOTENCY_KEY_SETTLED_PENDING` naming the transaction; same key with a different query/body (hash stored; multipart hashed field by field) → `422 IDEMPOTENCY_KEY_REUSED`. Free-tier requests ignore the header.
@@ -360,7 +367,7 @@ When `X402_FREE_TIER_ENABLED=false`:
 ### Development Notes
 
 - x402 runs on staging and production - test on staging (`dev`) before merging to `main`
-- Python SDK is v1 only (v2 under development)
+- The gateway speaks x402 v1 only (v2 under development, #596)
 - All x402 transactions logged to `logs/x402_audit.jsonl`
 
 ### x402 Documentation
