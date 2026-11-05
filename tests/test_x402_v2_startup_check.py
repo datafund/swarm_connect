@@ -8,6 +8,7 @@ same prefix as validate_x402_config's refusals. The facilitator is a mock
 transport here; nothing is sent anywhere.
 """
 import asyncio
+import json
 
 import httpx
 import pytest
@@ -98,7 +99,7 @@ def test_mainnet_needs_v2_on_mainnet(x402):
     x402.setattr(settings, "X402_NETWORK", "base")
     check(Supported(kinds({"x402Version": 2, "scheme": "exact", "network": "eip155:8453"})))
     msg = refused(Supported(kinds(V2_EXACT)))
-    assert "network eip155:8453" in msg and "['eip155:84532']" in msg
+    assert "network eip155:8453" in msg and "[eip155:84532]" in msg
 
 
 def test_extra_fields_in_the_answer_are_ignored(x402):
@@ -118,7 +119,7 @@ def test_v2_missing_refuses(x402):
 
 def test_v2_on_the_wrong_network_refuses(x402):
     msg = refused(Supported(kinds({"x402Version": 2, "scheme": "exact", "network": "eip155:8453"})))
-    assert "['eip155:8453']" in msg
+    assert "[eip155:8453]" in msg
 
 
 def test_v2_under_the_v1_network_name_refuses(x402):
@@ -309,3 +310,126 @@ def test_supported_client_still_parses_whatever_the_status():
     c = Supported(httpx.Response(500, json={"kinds": [V2_EXACT]})).client()
     assert [k.x402_version for k in asyncio.run(c.supported()).kinds] == [2]
     assert asyncio.run(c.supported_response()).status_code == 500
+
+
+# --- review round 2: hostile or odd answers ---------------------------------
+
+DEEP = '{"kinds": ' + "[" * 100_000 + "]" * 100_000 + "}"
+
+
+def test_a_deeply_nested_answer_is_a_refusal(x402):
+    msg = refused(Supported(httpx.Response(200, text=DEEP)))
+    assert "answered HTTP 200 with something that is not a list of payment kinds (RecursionError)" in msg
+
+
+def test_a_deeply_nested_answer_stops_startup_cleanly(x402):
+    x402.setattr(facilitator, "_client", Supported(httpx.Response(200, text=DEEP)).client())
+    x402.setattr(facilitator, "validate_x402_config", lambda: None)
+
+    async def run():
+        async with main.lifespan(main.app):
+            pass
+
+    with pytest.raises(RuntimeError) as exc:
+        asyncio.run(run())
+    assert str(exc.value).startswith(PREFIX) and "RecursionError" in str(exc.value)
+    assert exc.value.__cause__ is None and exc.value.__suppress_context__
+
+
+def test_deploy_check_refuses_a_deeply_nested_answer(x402, capsys):
+    x402.setattr(facilitator, "_client", Supported(httpx.Response(200, text=DEEP)).client())
+    assert check_config.main() == check_config.EXIT_REFUSED
+    err = capsys.readouterr().err
+    assert "not a list of payment kinds (RecursionError)" in err and "Traceback" not in err
+
+
+def _safe(text):
+    """What may reach the public deploy log: short, printable ASCII, one line."""
+    assert len(text) < 2000, len(text)
+    assert all(" " <= c <= "~" for c in text), [c for c in text if not " " <= c <= "~"][:5]
+
+
+HOSTILE_NETWORKS = [
+    "eip155:84532\r\nInjected: header",
+    "eip155:8453\u00e9",
+    "eip155:" + "1" * 200_000,
+    "https://attacker.example/phish",
+    "eip155:\u202e1",
+]
+HOSTILE_SCHEMES = ["exact\r\nX: 1", "\u00e9xact", "x" * 200_000, "https://a.example", "UPTO"]
+
+
+def test_hostile_values_are_not_echoed(x402, capsys):
+    hostile = [{"x402Version": 2, "scheme": "exact", "network": n} for n in HOSTILE_NETWORKS]
+    hostile += [{"x402Version": 1, "scheme": s, "network": "eip155:84532"} for s in HOSTILE_SCHEMES]
+    hostile += [{"x402Version": "1" * 4000, "scheme": "exact", "network": "base-sepolia"}]
+    msg = refused(Supported(kinds(*hostile)))
+    _safe(msg)
+    assert "<invalid>" in msg and "v? exact" in msg
+    for bad in ("Injected", "attacker", "\u00e9", "\u202e", "1" * 100, "x" * 100, "UPTO", "a.example"):
+        assert bad not in msg
+    x402.setattr(facilitator, "_client", Supported(kinds(*hostile)).client())
+    assert check_config.main() == check_config.EXIT_REFUSED
+    _safe(capsys.readouterr().err.strip())
+
+
+@pytest.mark.parametrize("network", [["eip155:1"], {"a": 1}, None, 12])
+def test_a_kind_of_the_wrong_type_is_unreadable_and_not_echoed(x402, network):
+    msg = refused(Supported(kinds({"x402Version": 2, "scheme": "exact", "network": network})))
+    _safe(msg)
+    assert "not a list of payment kinds (ValidationError)" in msg
+
+
+def test_at_most_ten_values_then_a_count(x402):
+    # 20,000 kinds, 500 distinct v2 networks. That is over 1 MiB, so the cap
+    # is raised here to reach the message.
+    from app.x402 import facilitator_client
+    x402.setattr(facilitator_client, "MAX_SUPPORTED_BYTES", 4 * 1024 * 1024)
+    many = [{"x402Version": 2, "scheme": "exact", "network": f"eip155:{n % 500 + 1}"} for n in range(20_000)]
+    many += [{"x402Version": 1, "scheme": f"s{n}", "network": "eip155:84532"} for n in range(30)]
+    msg = refused(Supported(kinds(*many)))
+    _safe(msg)
+    assert "and 490 more" in msg and "and 20 more" in msg
+
+
+def test_an_answer_over_one_mib_is_a_refusal(x402):
+    from app.x402.facilitator_client import MAX_SUPPORTED_BYTES
+    assert MAX_SUPPORTED_BYTES == 1024 * 1024
+    big = {"kinds": [V2_EXACT], "pad": "x" * MAX_SUPPORTED_BYTES}
+    msg = refused(Supported(httpx.Response(200, json=big)))
+    assert "answered HTTP 200 with something that is not a list of payment kinds (larger than 1048576 bytes)" in msg
+
+
+def test_a_large_answer_under_the_cap_is_read(x402):
+    check(Supported(httpx.Response(200, json={"kinds": [V2_EXACT], "pad": "x" * 900_000})))
+
+
+def test_the_cap_applies_to_the_decoded_body(x402):
+    import gzip
+    body = json.dumps({"kinds": [V2_EXACT], "pad": "x" * (4 * 1024 * 1024)}).encode()
+    packed = gzip.compress(body)
+    assert len(packed) < 64 * 1024
+    msg = refused(Supported(httpx.Response(200, content=packed, headers={"Content-Encoding": "gzip"})))
+    assert "larger than 1048576 bytes" in msg
+
+
+def test_a_gzip_answer_under_the_cap_is_read(x402):
+    import gzip
+    packed = gzip.compress(json.dumps({"kinds": [V2_EXACT]}).encode())
+    check(Supported(httpx.Response(200, content=packed, headers={"Content-Encoding": "gzip"})))
+
+
+def test_an_oversized_non_2xx_answer_names_its_status(x402):
+    msg = refused(Supported(httpx.Response(503, text="x" * (2 * 1024 * 1024))))
+    assert "HTTP 503" in msg
+
+
+@pytest.mark.parametrize("version", ["2", 2.0, True, [2], None])
+def test_x402_version_must_be_the_int_2(x402, version):
+    msg = refused(Supported(kinds({"x402Version": version, "scheme": "exact", "network": "eip155:84532"})))
+    assert "does not list" in msg or "not a list of payment kinds" in msg
+
+
+def test_scheme_and_network_must_be_exact_strings(x402):
+    refused(Supported(kinds({"x402Version": 2, "scheme": "EXACT", "network": "eip155:84532"})))
+    refused(Supported(kinds({"x402Version": 2, "scheme": "exact", "network": "EIP155:84532"})))

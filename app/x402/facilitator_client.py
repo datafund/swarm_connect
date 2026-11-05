@@ -158,13 +158,25 @@ class FacilitatorClient:
 
         Same headers ("supported" entry) and timeout as verify and settle. The
         v2 startup check (facilitator.check_facilitator_v2_support, #608) uses
-        this, so it can refuse a non-2xx answer before reading any kinds."""
+        this, so it can refuse a non-2xx answer before reading any kinds.
+
+        The body is read up to MAX_SUPPORTED_BYTES (after any content
+        decoding); a longer one raises SupportedAnswerTooLarge, so a
+        facilitator cannot make startup read an unbounded answer."""
         headers = await self._headers("supported")
         async with self._client() as client:
-            response = await client.get(f"{self.config['url']}/supported", headers=headers,
-                                        follow_redirects=True)
-            await response.aread()
-        return response
+            async with client.stream("GET", f"{self.config['url']}/supported", headers=headers,
+                                     follow_redirects=True) as response:
+                body = bytearray()
+                async for chunk in response.aiter_bytes():
+                    body += chunk
+                    if len(body) > MAX_SUPPORTED_BYTES:
+                        raise SupportedAnswerTooLarge(response.status_code)
+                # The decoded body, without the headers that described the encoded one.
+                kept = [(k, v) for k, v in response.headers.multi_items()
+                        if k.lower() not in ("content-encoding", "content-length", "transfer-encoding")]
+                return httpx.Response(response.status_code, headers=kept, content=bytes(body),
+                                      request=response.request)
 
     async def supported(self) -> SupportedResponse:
         """GET {url}/supported: the payment kinds the facilitator settles.
@@ -185,6 +197,18 @@ def v2_request_body(payment: PaymentPayloadV2, payment_requirements: PaymentRequ
         "paymentRequirements": payment_requirements.model_dump(mode="json", by_alias=True,
                                                                exclude_none=True),
     }
+
+
+# The largest GET /supported answer read (#608). Real answers are a few KB.
+MAX_SUPPORTED_BYTES = 1024 * 1024
+
+
+class SupportedAnswerTooLarge(Exception):
+    """A /supported answer over MAX_SUPPORTED_BYTES. Never carries the body."""
+
+    def __init__(self, status: int):
+        super().__init__(f"facilitator /supported answer over {MAX_SUPPORTED_BYTES} bytes (HTTP {status})")
+        self.status = status
 
 
 class FacilitatorAnswerUnusable(Exception):
