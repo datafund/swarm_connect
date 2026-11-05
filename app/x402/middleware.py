@@ -27,6 +27,7 @@ from x402.encoding import safe_base64_decode, safe_base64_encode
 
 from app.core.config import settings
 from app.x402.ratelimit import get_rate_limit_headers
+from app.x402.networks import to_caip2, to_v1
 from app.services.metrics import x402_settlements_total
 
 logger = logging.getLogger(__name__)
@@ -34,7 +35,7 @@ logger = logging.getLogger(__name__)
 # x402 protocol constants
 X402_VERSION = 1
 # One definition, with the v2 header, in app/x402/payment_headers.py (#600).
-from app.x402.payment_headers import X_PAYMENT_HEADER  # noqa: E402
+from app.x402.payment_headers import X_PAYMENT_HEADER, paid_version, paid_version_label  # noqa: E402,F401
 X_PAYMENT_RESPONSE_HEADER = "X-PAYMENT-RESPONSE"
 X_PAYMENT_MODE_HEADER = "X-Payment-Mode"
 
@@ -48,10 +49,12 @@ def is_free_tier_opt_in(request) -> bool:
     """
     return request.headers.get(X_PAYMENT_MODE_HEADER, "").strip().lower() in ("free", "free-tier")
 
-# USDC contract addresses by network
+# USDC contract addresses by network, keyed by CAIP-2 id (#599). Look a
+# configured X402_NETWORK up through app.x402.networks.to_caip2, which accepts
+# the v1 name as well.
 USDC_ADDRESSES = {
-    "base": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
-    "base-sepolia": "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+    "eip155:8453": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",   # base
+    "eip155:84532": "0x036CbD53842c5426634e7929541eC2318f3dCF7e",  # base-sepolia
 }
 
 # USDC token metadata for EIP-3009 signing, advertised in the 402's `extra`.
@@ -63,11 +66,11 @@ USDC_ADDRESSES = {
 # tests/test_x402_middleware.py pins each network's resulting DOMAIN_SEPARATOR
 # to the value read from the chain.
 USDC_TOKEN_METADATA = {
-    "base": {
+    "eip155:8453": {  # base
         "name": "USD Coin",  # name() of 0x8335...2913 on chain 8453
         "version": "2",
     },
-    "base-sepolia": {
+    "eip155:84532": {  # base-sepolia
         "name": "USDC",  # name() of 0x036C...CF7e on chain 84532
         "version": "2",
     },
@@ -146,7 +149,10 @@ def create_payment_requirements(
     Returns:
         PaymentRequirements object for the x402 response
     """
-    network = settings.X402_NETWORK
+    # X402_NETWORK may be a v1 name or a CAIP-2 id (#599). The tables are keyed
+    # by CAIP-2; the requirements are v1, so they carry the v1 name.
+    configured = settings.X402_NETWORK
+    network = to_v1(configured)
     pay_to = settings.X402_PAY_TO_ADDRESS
 
     if not pay_to:
@@ -160,8 +166,8 @@ def create_payment_requirements(
     # USDC address and EIP-712 domain for the configured network. No fallback:
     # an unknown network used to get the Base Sepolia asset silently (#370);
     # validate_x402_config() now refuses to start with one.
-    asset = USDC_ADDRESSES[network]
-    token_metadata = USDC_TOKEN_METADATA[network]
+    asset = USDC_ADDRESSES[to_caip2(configured)]
+    token_metadata = USDC_TOKEN_METADATA[to_caip2(configured)]
 
     resource = public_url(request)
 
@@ -274,9 +280,10 @@ def _log_delivery(request: Request, settlement, body: bytes, client_ip: str, pay
             "method": request.method,
             "path": request.url.path,
             "amount": getattr(requirements, "max_amount_required", None),
-            "network": settings.X402_NETWORK,
+            "network": to_v1(settings.X402_NETWORK),
             "resource": resource,
             "nonce": request_nonce(request),
+            "x402_version": paid_version(request),
         },
         client_ip=client_ip,
         wallet_address=payer,
@@ -571,8 +578,9 @@ class X402Middleware(BaseHTTPMiddleware):
                     # the idempotency entry stays "settling" and the
                     # authorization stays reserved: its nonce may be spent.
                     log_payment_failed(client_ip=client_ip, reason=failure, stage="settle",
-                                       wallet_address=payer, nonce=request_nonce(request))
-                    x402_settlements_total.labels(result="error").inc()
+                                       wallet_address=payer, nonce=request_nonce(request),
+                                       x402_version=paid_version(request))
+                    x402_settlements_total.labels(result="error", version=paid_version_label(request)).inc()
                     # The write-ahead entry (AFTER_WORK, on disk) is the record:
                     # the dependency stops any later attempt with it before the
                     # work runs again, also once the reservation has lapsed.
@@ -580,11 +588,12 @@ class X402Middleware(BaseHTTPMiddleware):
                 else:
                     settlement_refused(request)
                     log_payment_settled(client_ip=client_ip, payer=payer, transaction_hash=None,
-                                        network=settings.X402_NETWORK, success=False, error_reason=failure,
-                                        nonce=request_nonce(request))
+                                        network=to_v1(settings.X402_NETWORK), success=False, error_reason=failure,
+                                        nonce=request_nonce(request), x402_version=paid_version(request))
                     remembered = prior is not None
                     x402_settlements_total.labels(
-                        result="refused_after_unknown" if remembered else "refused").inc()
+                        result="refused_after_unknown" if remembered else "refused",
+                        version=paid_version_label(request)).inc()
                     if not remembered:
                         # Last: records first, then the removal write.
                         await outcome_unknown.aresolve(auth_key, None, settled=False, gen=gen, release=True)
@@ -611,10 +620,11 @@ class X402Middleware(BaseHTTPMiddleware):
                                     headers={"X-Payment-Mode": "failed"})
             log_payment_settled(client_ip=client_ip, payer=payer,
                                 transaction_hash=getattr(settlement, "transaction", None),
-                                network=settings.X402_NETWORK, success=True, nonce=request_nonce(request))
+                                network=to_v1(settings.X402_NETWORK), success=True, nonce=request_nonce(request),
+                                x402_version=paid_version(request))
             from app.x402.idempotency import record_settlement
             record_settlement(request, settlement)
-            x402_settlements_total.labels(result="settled").inc()
+            x402_settlements_total.labels(result="settled", version=paid_version_label(request)).inc()
             # Last: records first, then the removal write (shielded).
             await outcome_unknown.aresolve(auth_key, prior, settled=True, gen=gen, release=True)
 
@@ -627,8 +637,8 @@ class X402Middleware(BaseHTTPMiddleware):
             log_payment_failed(client_ip=client_ip,
                                reason=f"HTTP {response.status_code} after settlement; tx={tx_hash}",
                                stage="delivery_after_settlement", wallet_address=payer,
-                               nonce=request_nonce(request))
-            x402_settlements_total.labels(result="settled_not_delivered").inc()
+                               nonce=request_nonce(request), x402_version=paid_version(request))
+            x402_settlements_total.labels(result="settled_not_delivered", version=paid_version_label(request)).inc()
 
         body = b""
         async for chunk in response.body_iterator:
@@ -676,13 +686,13 @@ class X402Middleware(BaseHTTPMiddleware):
             return JSONResponse(status_code=500, content={"detail": "Internal server error. You were not charged."})
 
         tx_hash = getattr(settlement, "transaction", None) or "unknown"
-        x402_settlements_total.labels(result="settled_not_delivered").inc()
+        x402_settlements_total.labels(result="settled_not_delivered", version=paid_version_label(request)).inc()
         logger.error(f"x402: payment {tx_hash} settled but {request.url.path} raised; refund needed", exc_info=True)
         log_payment_failed(client_ip=get_client_ip(request),
                            reason=f"exception after settlement; tx={tx_hash}",
                            stage="delivery_after_settlement",
                            wallet_address=getattr(request.state, "x402_payer", None),
-                           nonce=request_nonce(request))
+                           nonce=request_nonce(request), x402_version=paid_version(request))
         return JSONResponse(
             status_code=500,
             content={

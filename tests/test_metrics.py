@@ -275,9 +275,9 @@ class TestX402PaymentCounter:
         from app.services.metrics import x402_payments_total
         assert x402_payments_total is not None
         # Labels should not raise
-        x402_payments_total.labels(mode="paid").inc(0)
-        x402_payments_total.labels(mode="free").inc(0)
-        x402_payments_total.labels(mode="rejected").inc(0)
+        x402_payments_total.labels(mode="paid", version="1").inc(0)
+        x402_payments_total.labels(mode="free", version="none").inc(0)
+        x402_payments_total.labels(mode="rejected", version="none").inc(0)
 
 
 class TestBeeApiErrorCounter:

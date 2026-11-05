@@ -20,6 +20,7 @@ from x402.types import PaymentPayload
 from x402.facilitator import FacilitatorClient
 
 from app.core.config import settings
+from app.x402.networks import to_v1
 from app.core.client_ip import client_key
 from app.services.http_client import exc_text
 from app.services.metrics import x402_payments_total
@@ -40,6 +41,8 @@ from app.x402.payment_headers import (
     HEADER_CONFLICT_MESSAGE,
     VERSION_UNSUPPORTED_MESSAGE,
     offered_payment_versions,
+    paid_version_label,
+    payment_version_label,
 )
 
 logger = logging.getLogger(__name__)
@@ -556,10 +559,12 @@ async def require_x402_payment(request: Request) -> None:
     # Payment headers, of either x402 version (#600). Both at once cannot be
     # answered either way: 400 now, before anything is priced or counted.
     payment_versions = offered_payment_versions(request.headers)
+    # The metrics' `version` label (#601): 1, 2 or none.
+    version = payment_version_label(payment_versions)
     if payment_versions == {1, 2}:
         logger.warning(f"x402: refusing {request.method} {request.url.path} from {get_client_ip(request)}: "
-                       f"both X-PAYMENT and PAYMENT-SIGNATURE sent")
-        x402_payments_total.labels(mode="header_conflict").inc()
+                       f"both X-PAYMENT and PAYMENT-SIGNATURE sent (version=2)")
+        x402_payments_total.labels(mode="header_conflict", version=version).inc()
         raise HTTPException(status_code=400, detail={
             "code": "PAYMENT_HEADER_CONFLICT",
             "message": HEADER_CONFLICT_MESSAGE,
@@ -591,7 +596,7 @@ async def require_x402_payment(request: Request) -> None:
         elif reason is not None:
             logger.warning(f"x402: refusing {request.method} {request.url.path} from {client_ip} "
                            f"before payment: payments unavailable ({reason})")
-            x402_payments_total.labels(mode="unavailable").inc()
+            x402_payments_total.labels(mode="unavailable", version=version).inc()
             raise refusal(reason)
 
     # Calculate price for this operation
@@ -627,8 +632,8 @@ async def require_x402_payment(request: Request) -> None:
     # Required body that a v1 client can still pay.
     if 2 in payment_versions:
         logger.warning(f"x402: refusing {request.method} {request.url.path} from {client_ip}: "
-                       f"x402 v2 payment (PAYMENT-SIGNATURE) is not enabled")
-        x402_payments_total.labels(mode="version_unsupported").inc()
+                       f"x402 v2 payment (PAYMENT-SIGNATURE) is not enabled (version=2)")
+        x402_payments_total.labels(mode="version_unsupported", version=version).inc()
         response_body = {
             "code": "X402_VERSION_UNSUPPORTED",
             "message": VERSION_UNSUPPORTED_MESSAGE,
@@ -650,7 +655,7 @@ async def require_x402_payment(request: Request) -> None:
         free_tier_info = get_free_tier_stats(client_key(client_ip)) if settings.X402_FREE_TIER_ENABLED else None
 
         logger.info(f"x402: No payment header, returning 402 for ${price_usd}")
-        x402_payments_total.labels(mode="rejected").inc()
+        x402_payments_total.labels(mode="rejected", version=version).inc()
 
         response_body = {
             "x402Version": X402_VERSION,
@@ -678,7 +683,7 @@ async def require_x402_payment(request: Request) -> None:
 
         if is_allowed:
             logger.info(f"x402: Free tier access granted for {client_ip} ({stats['requests_made']}/{stats['limit']} requests)")
-            x402_payments_total.labels(mode="free").inc()
+            x402_payments_total.labels(mode="free", version=version).inc()
             request.state.x402_mode = "free-tier"
             request.state.x402_payer = None
             request.state.x402_rate_limit_stats = stats
@@ -694,7 +699,7 @@ async def require_x402_payment(request: Request) -> None:
                     "message": "Free tier rate limit exceeded. Use x402 payment for higher limits.",
                     "payment_info": {
                         "price_usd": price_usd,
-                        "network": settings.X402_NETWORK,
+                        "network": to_v1(settings.X402_NETWORK),
                         "pay_to": settings.X402_PAY_TO_ADDRESS,
                     }
                 },
@@ -759,7 +764,9 @@ async def require_x402_payment(request: Request) -> None:
             # Counted like a refusal at settle (#553): probably the earlier
             # transfer spent the nonce.
             from app.services.metrics import x402_settlements_total
-            x402_settlements_total.labels(result="refused_after_unknown").inc()
+            # The version of the payment header this request carried, computed
+            # above: request.state.x402_version is set only once verified.
+            x402_settlements_total.labels(result="refused_after_unknown", version=version).inc()
             raise outcome_unknown_refusal(
                 unknown_key, getattr(verify_response, 'invalid_reason', None) or 'unknown',
                 where="verify", request=request)
@@ -886,12 +893,17 @@ async def require_x402_payment(request: Request) -> None:
             idempotency_store.abandon(*idempotency_id)
         logger.warning(f"x402: refusing a retry from {client_ip} that would settle anew "
                        f"while payments are unavailable ({gate_reason})")
-        x402_payments_total.labels(mode="unavailable").inc()
+        x402_payments_total.labels(mode="unavailable", version=version).inc()
         from app.x402.accept_gate import refusal
         raise refusal(gate_reason)
 
     logger.info(f"x402: Payment verified for payer {verify_response.payer}")
-    x402_payments_total.labels(mode="paid").inc()
+    # The protocol version is the one this request was dispatched on, decided
+    # by its payment header (X-PAYMENT is v1, PAYMENT-SIGNATURE is v2; D2/D7 in
+    # #596), never the x402Version inside the client's payload (#601). Read by
+    # the settlement metrics and audit records (payment_headers.paid_version_label).
+    request.state.x402_version = {"1": 1, "2": 2}.get(version, X402_VERSION)
+    x402_payments_total.labels(mode="paid", version=paid_version_label(request)).inc()
 
     # Store payment info on request.state for middleware settlement
     request.state.x402_mode = "paid"

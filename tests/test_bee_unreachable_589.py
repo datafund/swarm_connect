@@ -318,10 +318,10 @@ class TestPaymentGate:
 
     def test_refusals_are_counted(self, paid_client):
         from app.services.metrics import x402_payments_total
-        before = x402_payments_total.labels(mode="unavailable")._value.get()
+        before = x402_payments_total.labels(mode="unavailable", version="1")._value.get()
         _closed()
         paid_client.post("/api/v1/stamps/", headers=PAYMENT)
-        assert x402_payments_total.labels(mode="unavailable")._value.get() == before + 1
+        assert x402_payments_total.labels(mode="unavailable", version="1")._value.get() == before + 1
 
     @pytest.mark.asyncio
     async def test_snapshot_from_a_raising_bee_closes_payments_without_more_bee_calls(

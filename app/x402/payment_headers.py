@@ -24,6 +24,11 @@ from typing import Set
 X_PAYMENT_HEADER = "X-PAYMENT"               # x402 v1
 PAYMENT_SIGNATURE_HEADER = "PAYMENT-SIGNATURE"  # x402 v2
 
+# The x402 protocol versions this gateway accepts a payment in, as /health
+# reports them (#602). One place to read it. Phase 2 of #596 replaces it with
+# the X402_PROTOCOL_VERSIONS setting (#609).
+ACCEPTED_X402_VERSIONS = (1,)
+
 _VERSION_BY_NAME = {
     X_PAYMENT_HEADER.lower(): 1,
     PAYMENT_SIGNATURE_HEADER.lower(): 2,
@@ -45,6 +50,45 @@ def offered_payment_versions(headers) -> Set[int]:
         if version is not None:
             found.add(version)
     return found
+
+
+def payment_version_label(versions) -> str:
+    """The `version` label of a payment metric for the headers a request carried (#601).
+
+    "none" without a payment header, "2" when PAYMENT-SIGNATURE is present
+    (alone, or with X-PAYMENT: a client attempting v2), else "1".
+    """
+    if not versions:
+        return "none"
+    return "2" if 2 in versions else "1"
+
+
+def paid_version_label(request) -> str:
+    """The x402 version of the payment a request carries, as "1" or "2" (#601).
+
+    For settlement metrics and payment audit records. The dependency records
+    the version of a verified payment on the request (request.state.x402_version).
+    Before that (a refusal during verification) it is read from the request's
+    payment headers. "1" when neither says, including without a request: only
+    v1 reaches verify or settle until v2 is enabled (#609).
+    """
+    version = getattr(getattr(request, "state", None), "x402_version", None)
+    if version in (1, 2):
+        return str(version)
+    headers = getattr(request, "headers", None)
+    if headers is not None:
+        try:
+            label = payment_version_label(offered_payment_versions(headers))
+        except Exception:
+            label = "none"
+        if label != "none":
+            return label
+    return "1"
+
+
+def paid_version(request) -> int:
+    """paid_version_label as the int written to audit records' data.x402_version."""
+    return int(paid_version_label(request))
 
 
 def offers_payment(headers) -> bool:

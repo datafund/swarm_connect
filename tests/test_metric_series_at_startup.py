@@ -47,9 +47,14 @@ EXPECTED_SERIES = (
     + [f'gateway_top_caller_requests{{rank="{n}"}}' for n in range(1, 6)]
     + ["gateway_top_callers_distinct", "gateway_top_callers_untracked_total"]
     # Paid requests refused before payment while payments are unavailable (#589)
-    + ['gateway_x402_payments_total{mode="unavailable"}']
-    # Payment headers refused before payment: v2 before it is enabled, and both versions at once (#600)
-    + [f'gateway_x402_payments_total{{mode="{m}"}}' for m in ("version_unsupported", "header_conflict")]
+    # for every x402 version such a request can carry (#601)
+    + [f'gateway_x402_payments_total{{mode="unavailable",version="{v}"}}' for v in ("1", "2", "none")]
+    # Payment headers refused before payment: v2 before it is enabled, and both versions at once
+    # (#600), both counted as version 2 (#601)
+    + [f'gateway_x402_payments_total{{mode="{m}",version="2"}}' for m in ("version_unsupported", "header_conflict")]
+    # Settlement outcomes (#375), v1 only until v2 is enabled (#601)
+    + [f'gateway_x402_settlements_total{{result="{r}",version="1"}}'
+       for r in ("settled", "refused", "error", "settled_not_delivered", "refused_after_unknown")]
 )
 
 

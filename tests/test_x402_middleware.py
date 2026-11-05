@@ -174,7 +174,7 @@ class TestCreatePaymentRequirements:
         assert result.resource == "https://gateway.example.com/api/v1/data/"
         assert result.description == "Test upload"
         assert result.pay_to == "0x1234567890abcdef1234567890abcdef12345678"
-        assert result.asset == USDC_ADDRESSES["base-sepolia"]
+        assert result.asset == USDC_ADDRESSES["eip155:84532"]
 
     @patch("app.x402.middleware.settings")
     def test_create_payment_requirements_no_address(self, mock_settings):
@@ -444,11 +444,12 @@ class TestMiddlewarePriceCalculation:
 
 
 class TestUSDCAddresses:
+    # Keyed by CAIP-2 id since #599; the v1 names map to these in app/x402/networks.py.
     def test_base_mainnet_address(self):
-        assert USDC_ADDRESSES["base"] == "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
+        assert USDC_ADDRESSES["eip155:8453"] == "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
 
     def test_base_sepolia_address(self):
-        assert USDC_ADDRESSES["base-sepolia"] == "0x036CbD53842c5426634e7929541eC2318f3dCF7e"
+        assert USDC_ADDRESSES["eip155:84532"] == "0x036CbD53842c5426634e7929541eC2318f3dCF7e"
 
 
 class TestTokenMetadata:
@@ -477,8 +478,8 @@ class TestTokenMetadata:
         # The name differs per network (#467): "USD Coin" on Base mainnet,
         # "USDC" on Base Sepolia. An earlier version of this file asserted
         # "USDC" for both and forbade "USD Coin", which pinned the mainnet bug.
-        assert USDC_TOKEN_METADATA["base"]["name"] == "USD Coin"
-        assert USDC_TOKEN_METADATA["base-sepolia"]["name"] == "USDC"
+        assert USDC_TOKEN_METADATA["eip155:8453"]["name"] == "USD Coin"
+        assert USDC_TOKEN_METADATA["eip155:84532"]["name"] == "USDC"
 
 
 # EIP-712 domain separators of the USDC contracts, read from the chain with a
@@ -493,8 +494,8 @@ class TestTokenMetadata:
 #   curl -s -X POST -H 'Content-Type: application/json' <rpc> --data \
 #     '{"jsonrpc":"2.0","id":1,"method":"eth_call","params":[{"to":"<usdc>","data":"0x3644e515"},"latest"]}'
 ONCHAIN_USDC_DOMAIN_SEPARATORS = {
-    "base": (8453, "0x02fa7265e7c5d81118673727957699e4d68f74cd74b7db77da710fe8a2c7834f"),
-    "base-sepolia": (84532, "0x71f17a3b2ff373b803d70a5a07c046c1a2bc8e89c09ef722fcb047abe94c9818"),
+    "eip155:8453": (8453, "0x02fa7265e7c5d81118673727957699e4d68f74cd74b7db77da710fe8a2c7834f"),
+    "eip155:84532": (84532, "0x71f17a3b2ff373b803d70a5a07c046c1a2bc8e89c09ef722fcb047abe94c9818"),
 }
 
 
@@ -525,6 +526,11 @@ class TestUSDCDomainSeparator:
     def test_every_network_has_a_recorded_separator(self):
         assert set(ONCHAIN_USDC_DOMAIN_SEPARATORS) == set(USDC_TOKEN_METADATA) == set(USDC_ADDRESSES)
 
+    def test_table_key_is_the_chain_id(self):
+        # The tables are keyed by CAIP-2 id (#599): eip155:<chainId>.
+        for network, (chain_id, _) in ONCHAIN_USDC_DOMAIN_SEPARATORS.items():
+            assert network == f"eip155:{chain_id}"
+
     @pytest.mark.parametrize("network", sorted(ONCHAIN_USDC_DOMAIN_SEPARATORS))
     def test_domain_separator_matches_chain(self, network):
         chain_id, expected = ONCHAIN_USDC_DOMAIN_SEPARATORS[network]
@@ -547,7 +553,7 @@ class TestUSDCDomainSeparator:
             s.X402_PAY_TO_ADDRESS = "0x" + "11" * 20
             s.TRUSTED_PROXY_HOPS = 0
             req = create_payment_requirements(request, 0.01)
-        chain_id, expected = ONCHAIN_USDC_DOMAIN_SEPARATORS["base"]
+        chain_id, expected = ONCHAIN_USDC_DOMAIN_SEPARATORS["eip155:8453"]
         assert _eip712_domain_separator(
             req.extra["name"], req.extra["version"], chain_id, req.asset
         ) == expected

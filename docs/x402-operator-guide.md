@@ -54,7 +54,7 @@ Add these to your `.env` file:
 X402_ENABLED=true                                    # Enable x402 payments
 X402_FACILITATOR_URL=https://x402.org/facilitator   # Testnet facilitator
 X402_PAY_TO_ADDRESS=0xYourBaseSepoliaAddress        # Your USDC receiving wallet
-X402_NETWORK=base-sepolia                            # Network identifier
+X402_NETWORK=base-sepolia                            # base-sepolia or base (or eip155:84532 / eip155:8453)
 
 # === Pricing ===
 X402_BZZ_USD_RATE=0.50               # Manual BZZ/USD rate
@@ -302,6 +302,8 @@ Each log entry includes:
 - Wallet address (if available)
 - Event-specific data
 
+The payment records (`payment_settled`, `payment_failed`, `payment_delivered`) include `data.x402_version`, the x402 protocol version of the payment. It is `1` for every payment until x402 v2 is enabled. The metrics have a matching `version` label. On `gateway_x402_payments_total` it is `1`, `2` or `none`, where `none` means the request carried no payment header. On `gateway_x402_settlements_total` it is `1` or `2` and never `none`, because only a payment is settled.
+
 ### Reading Audit Logs
 
 ```bash
@@ -332,6 +334,7 @@ curl http://localhost:8000/health | jq .
   "message": "Welcome to Swarm API Aggregator",
   "x402": {
     "enabled": true,
+    "versions": [1],
     "base_wallet": {
       "address": "0xYourAddress...",
       "balance_eth": 0.01,
