@@ -16,7 +16,15 @@ load_dotenv()
 # version ("base-sepolia", "base_sepolia", "sepolia") and a name we fail to
 # recognise must be treated as a testnet: guessing wrong in that direction
 # refuses a real payment, guessing wrong the other way gives batches away.
-_MAINNET_NETWORKS = {"base", "base-mainnet", "ethereum", "mainnet", "polygon", "avalanche"}
+# x402 v2 uses CAIP-2 ids ("eip155:8453"), so each mainnet name below has
+# its CAIP-2 id here too; eip155:84532 (Base Sepolia) stays a testnet (#598).
+_MAINNET_NETWORKS = {
+    "base", "base-mainnet", "ethereum", "mainnet", "polygon", "avalanche",
+    "eip155:8453",   # Base
+    "eip155:1",      # Ethereum
+    "eip155:137",    # Polygon
+    "eip155:43114",  # Avalanche C-Chain
+}
 
 
 def is_testnet_network(network: str) -> bool:
