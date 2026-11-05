@@ -6,6 +6,7 @@ maps to a 400 or 402. No error text may carry the header or a decoded value.
 """
 import base64
 import json
+from pathlib import Path
 
 import pytest
 
@@ -414,3 +415,166 @@ def test_a_valid_surrogate_pair_escape_is_fine():
 def test_payment_response_success_must_be_a_json_boolean(value):
     err = _invalid(decode_payment_response, dict(SETTLE, success=value))
     assert err.errors == [("success", "bool_type")]
+
+
+# --- nesting depth and the re-encode invariant ----------------------------------------------
+
+def nested(levels):
+    """`levels` arrays inside each other, with 1 innermost: depth `levels`."""
+    value = 1
+    for _ in range(levels):
+        value = [value]
+    return value
+
+
+def deep_signature(depth, where):
+    """A PAYMENT-SIGNATURE message whose whole-document depth is exactly `depth`."""
+    msg = payment_msg()
+    if where == "extensions":      # top(1) > extensions(2) > arrays
+        msg["extensions"] = {"x": nested(depth - 2)}
+    else:                          # top(1) > accepted(2) > extra(3) > arrays
+        msg["accepted"]["extra"] = {"name": "USDC", "version": "2", "x": nested(depth - 3)}
+    return msg
+
+
+def every_encoding(model, encoder):
+    """Every way #607 may serialise a decoded model."""
+    encoder(model)
+    model.model_dump_json(by_alias=True, exclude_none=True)
+    json.dumps(model.model_dump(mode="json", by_alias=True, exclude_none=True),
+               ensure_ascii=False, allow_nan=False).encode("utf-8")
+
+
+def test_depth_limit_value():
+    from app.x402.codec_v2 import MAX_JSON_DEPTH, _depth
+    assert MAX_JSON_DEPTH == 32
+    assert _depth({}) == 1 and _depth({"a": [1]}) == 2 and _depth([[{}]]) == 3
+    # The deepest real shape is far below the limit.
+    assert _depth(payment_msg()) == 3
+
+
+@pytest.mark.parametrize("where", ["extensions", "extra"])
+@pytest.mark.parametrize("depth", [31, 32])
+def test_nesting_up_to_the_limit_decodes_and_re_encodes(where, depth):
+    from app.x402.codec_v2 import _depth
+    msg = deep_signature(depth, where)
+    assert _depth(msg) == depth
+    value = b64(msg)
+    model = decode_payment_signature(value)
+    every_encoding(model, encode_payment_signature)
+    # The exact header round-trips: the gateway re-encodes the same bytes.
+    assert encode_payment_signature(model) == value
+    assert decode_payment_signature(encode_payment_signature(model)) == model
+
+
+@pytest.mark.parametrize("where", ["extensions", "extra"])
+@pytest.mark.parametrize("depth", [33, 256, 300])
+def test_nesting_over_the_limit_is_malformed(where, depth):
+    value = b64(deep_signature(depth, where))
+    assert len(value) <= MAX_HEADER_CHARS  # even 300 levels is a small header
+    with pytest.raises(PaymentHeaderMalformed) as exc:
+        decode_payment_signature(value)
+    assert exc.value.code == "PAYMENT_HEADER_MALFORMED"
+    assert "deeper than 32" in str(exc.value)
+    assert exc.value.__context__ is None
+
+
+def test_nesting_over_the_limit_is_malformed_in_every_header():
+    for decode, _name, make in DECODERS:
+        with pytest.raises(PaymentHeaderMalformed):
+            decode(b64(make(extensions={"x": nested(40)})))
+
+
+def test_deep_nesting_without_the_limit_would_break_re_encoding():
+    # Guards the reason for the limit: pydantic's serialiser cannot write a
+    # model nested a few hundred levels deep (300 here), though it validates one.
+    m = PaymentPayloadV2.model_validate(deep_signature(300, "extensions"))
+    with pytest.raises(Exception) as exc:
+        m.model_dump_json(by_alias=True, exclude_none=True)
+    assert not isinstance(exc.value, X402HeaderError)
+
+
+@pytest.mark.parametrize("number", ["1e400", "-1e400", "1E999"])
+def test_number_overflowing_to_infinity_is_malformed(number):
+    text = json.dumps(payment_msg(extensions={"n": 0})).replace('"n": 0', '"n": ' + number)
+    with pytest.raises(PaymentHeaderMalformed):
+        decode_payment_signature(b64(text))
+
+
+FIXTURE_DIR = Path(__file__).resolve().parent / "fixtures" / "x402_v2"
+
+
+def _edge_values():
+    """Headers that decode, for the re-encode property below."""
+    cases = []
+    for name in sorted(FIXTURE_DIR.glob("*.b64")):
+        kind = name.name.split("_", 1)[1].rsplit(".", 1)[0]  # payment_required, ...
+        cases.append((f"fixture {name.name}", kind, name.read_text().strip()))
+    pair = '"\\ud83d\\ude00"'
+    for label, ext in [
+        ("depth 32", {"x": nested(30)}),
+        ("free-form scalars", {"i": 10 ** 300, "f": 1e308, "z": -0.0, "tiny": 5e-324, "s": "", "n": None,
+                               "b": False, "u": "café   \u0000"}),
+        ("empty containers", {"o": {}, "a": [], "aa": [[], {}]}),
+    ]:
+        cases.append((label + " (signature)", "payment_signature", b64(payment_msg(extensions=ext))))
+        cases.append((label + " (required)", "payment_required", b64(required_msg(extensions=ext))))
+    cases.append(("surrogate pair", "payment_required", b64(
+        json.dumps(required_msg(error="x")).replace('"error": "x"', '"error": ' + pair))))
+    cases.append(("underflow and exponent floats", "payment_signature", b64(
+        json.dumps(payment_msg(extensions={"a": 0})).replace('"a": 0', '"a": 1e-400, "b": 1E2'))))
+    # Near the size limit: re-encoding must not push it over.
+    near = required_msg(extensions={"f": [1e2] * 10})
+    pad = MAX_HEADER_CHARS
+    while len(b64(dict(near, error="e" * pad))) > MAX_HEADER_CHARS:
+        pad -= 1
+    cases.append(("near the size limit", "payment_required", b64(dict(near, error="e" * pad))))
+    return cases
+
+
+CODECS = {
+    "payment_required": (decode_payment_required, encode_payment_required),
+    "payment_signature": (decode_payment_signature, encode_payment_signature),
+    "payment_response": (decode_payment_response, encode_payment_response),
+}
+EDGE_CASES = _edge_values()
+
+
+@pytest.mark.parametrize("label,kind,value", EDGE_CASES, ids=[c[0] for c in EDGE_CASES])
+def test_every_decoded_model_re_encodes_without_a_bare_error(label, kind, value):
+    decode, encode = CODECS[kind]
+    model = decode(value)
+    try:
+        every_encoding(model, encode)
+    except X402HeaderError:
+        pass  # allowed: for example TooLarge if re-encoding grew the header
+    # anything else propagates and fails the test
+    again = decode(encode(model))
+    assert again == model
+
+
+ADVERSARIAL = {
+    "depth 256 in extensions": ("payment_signature", b64(deep_signature(256, "extensions"))),
+    "depth 300 in extensions": ("payment_signature", b64(deep_signature(300, "extensions"))),
+    "depth 300 in accepted.extra": ("payment_signature", b64(deep_signature(300, "extra"))),
+    "depth 300 in PAYMENT-REQUIRED": ("payment_required", b64(required_msg(extensions={"x": nested(300)}))),
+    "depth 300 in PAYMENT-RESPONSE": ("payment_response", b64(dict(SETTLE, extra={"x": nested(300)}))),
+    "1e400": ("payment_signature", b64(json.dumps(payment_msg(extensions={"n": 0})).replace('"n": 0', '"n": 1e400'))),
+    "lone surrogate": ("payment_required", b64(
+        json.dumps(required_msg(error="x")).replace('"error": "x"', '"error": "\\ud800"'))),
+}
+
+
+@pytest.mark.parametrize("kind,value", list(ADVERSARIAL.values()), ids=list(ADVERSARIAL))
+def test_a_header_is_either_refused_or_re_encodable(kind, value):
+    # The invariant #607 relies on: decoding raises X402HeaderError, or the
+    # model it returns can be serialised every way without a bare error.
+    decode, encode = CODECS[kind]
+    try:
+        model = decode(value)
+    except X402HeaderError:
+        return
+    try:
+        every_encoding(model, encode)
+    except X402HeaderError:
+        pass
