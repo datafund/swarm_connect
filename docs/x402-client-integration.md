@@ -122,7 +122,10 @@ default), so sign exactly `maxAmountRequired`, never less.
 An upload's price covers the request body plus the parity chunks Bee adds at
 the upload's `redundancy` level (default 2). A higher level costs more once the
 price is above the minimum. To learn the price before you upload, call
-`GET /api/v1/pricing?upload_bytes=<body size>&redundancy=<level>`.
+`GET /api/v1/pricing?upload_bytes=<body size>&redundancy=<level>`. Read each
+quote's `amount`; its `max_amount_required` is the same value and is deprecated.
+`GET /health` lists the x402 versions the gateway accepts in `x402.versions`
+(`[1]` today).
 
 **Before signing, check `network` and `asset`** against the chain you mean to
 pay on, and `payTo` if you know the gateway's address. A client signs whatever

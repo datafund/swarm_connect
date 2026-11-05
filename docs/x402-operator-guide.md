@@ -334,6 +334,7 @@ curl http://localhost:8000/health | jq .
   "message": "Welcome to Swarm API Aggregator",
   "x402": {
     "enabled": true,
+    "versions": [1],
     "base_wallet": {
       "address": "0xYourAddress...",
       "balance_eth": 0.01,

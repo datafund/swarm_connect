@@ -425,7 +425,7 @@ When `X402_ENABLED=true`, protected endpoints (`POST /stamps/`, `POST /data/`) r
 | `POST /api/v1/data/manifest` | Yes |
 | `GET /api/v1/data/{ref}` | No (free) |
 | `GET /api/v1/stamps/` | No (free) |
-| `GET /api/v1/pricing` | No (free): current price quotes for the paid operations, so a client can learn a price without triggering a 402. Pass `upload_bytes` and `redundancy` to quote an upload. |
+| `GET /api/v1/pricing` | No (free): current price quotes for the paid operations, so a client can learn a price without triggering a 402. Pass `upload_bytes` and `redundancy` to quote an upload. Each quote's `amount` is the price in USDC smallest units; `max_amount_required` is the same value, deprecated (#602). |
 
 ### Configuration
 
