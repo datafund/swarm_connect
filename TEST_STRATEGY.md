@@ -36,7 +36,9 @@ image build and no PR check had built it (#483). linux/amd64 is what the deploy
 hosts run. The same job then starts the image with only `SWARM_BEE_API_URL`
 set, pointing at a port nothing listens on, with `--network none`, and fails
 unless `curl -f http://localhost:8000/` (the compose healthcheck) answers 200
-within about a minute. `/` answers 200 with `status: degraded` while Bee is
+within 30 tries, 2 s apart: about a minute when the port refuses, and at most
+about 6 minutes when the app accepts connections but never answers (each try
+waits up to 10 s), inside the job's 20-minute timeout. `/` answers 200 with `status: degraded` while Bee is
 unreachable, and a refused port builds the first health snapshot at once, so
 the check never waits for `HEALTH_SNAPSHOT_FIRST_WAIT_SECONDS`. On failure the
 job prints the container log; the container is always removed.
