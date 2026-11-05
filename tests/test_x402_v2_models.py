@@ -355,3 +355,24 @@ def test_inputs_are_not_mutated():
     before = copy.deepcopy(msg)
     PaymentPayloadV2.model_validate(msg)
     assert msg == before
+
+
+# --- strict booleans on the facilitator answers --------------------------------
+
+@pytest.mark.parametrize("value", ["yes", "true", "1", 1, 0, "false", None, 1.0])
+def test_verify_is_valid_is_a_strict_boolean(value):
+    with pytest.raises(ValidationError):
+        VerifyResponseV2.model_validate({"isValid": value})
+
+
+@pytest.mark.parametrize("value", ["yes", "true", "1", 1, 0, "false", None, 1.0])
+def test_settle_success_is_a_strict_boolean(value):
+    with pytest.raises(ValidationError):
+        SettleResponseV2.model_validate({"success": value, "transaction": "", "network": "eip155:84532"})
+
+
+@pytest.mark.parametrize("value", [True, False])
+def test_json_booleans_are_accepted(value):
+    assert VerifyResponseV2.model_validate({"isValid": value}).is_valid is value
+    assert SettleResponseV2.model_validate(
+        {"success": value, "transaction": "", "network": "eip155:84532"}).success is value
