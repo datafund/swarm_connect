@@ -478,7 +478,6 @@ def test_task_is_being_cancelled_tells_this_task_from_an_inner_cancel():
     import asyncio
     from app.x402.middleware import _task_is_being_cancelled
 
-
     async def inner_cancel():
         inner = asyncio.get_running_loop().create_future()
         inner.cancel()
