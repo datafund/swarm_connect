@@ -13,6 +13,18 @@ python -m pytest tests/ -q                      # everything (hermetic, see belo
 python -m pytest tests/test_stamp_pool.py -v    # one area
 ```
 
+## In CI
+
+`.github/workflows/tests.yml` runs the default (hermetic) suite on every pull
+request, and `deploy.yml` calls it as its gate, so nothing deploys unless it
+passes. It runs on Python 3.10, the image's interpreter, and installs exactly
+what the image ships: `pip install --no-deps --require-hashes -r
+requirements.lock`, then `pip check`, which fails the run if the lock misses a
+dependency or pins a conflicting one (#523). A local venv built from
+`requirements.txt` resolves whatever is current, so it can differ from CI; to
+reproduce CI, build a Python 3.10 venv the same way. `tests/test_ci_workflow.py`
+keeps the workflow on the lock.
+
 ## The default run is hermetic
 
 - **No network.** Bee and chain calls are mocked. The live modules are opt-in (next

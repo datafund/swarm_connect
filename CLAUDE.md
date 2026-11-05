@@ -16,6 +16,8 @@ source venv/bin/activate  # On Windows: venv\Scripts\activate
 
 # Install dependencies
 pip install -r requirements.txt
+# CI and the Docker image install the pinned set instead; to reproduce CI exactly
+# (Python 3.10): pip install --no-deps --require-hashes -r requirements.lock && pip check
 
 # Setup environment
 cp .env.example .env
@@ -643,9 +645,9 @@ feature branches → dev → main
    ```bash
    source venv/bin/activate && python -m pytest tests/ -v
    ```
-   - There is **no CI test gate** — `deploy.yml` only deploys, it does not run pytest. The full suite passing locally is the only thing standing between a regression and staging/production.
+   - CI runs the suite too: `.github/workflows/tests.yml` runs on every pull request, and `deploy.yml` calls it as its gate, so nothing deploys unless it passes. It runs on Python 3.10 from `requirements.lock` (`--no-deps --require-hashes`, then `pip check`), the same set the image installs, with live tests skipped. Still run the suite locally first: CI is a backstop, not a substitute.
    - **Do not open or merge a PR to `dev` or `main` with failing or broken tests.** If a test is failing, either fix it or, if it is a known pre-existing failure, explicitly call it out in the PR description with a tracking issue — never let it pass silently.
-   - This is a **development-process rule**, enforced by discipline, not automation. (Historically, the x402 async migration broke ~51 tests for months precisely because nothing ran them — see the test-repair issue.)
+   - (Historically, the x402 async migration broke ~51 tests for months precisely because nothing ran them — see the test-repair issue.)
 
 4. **Create PR to merge into `dev`**:
    - All code must go through PR review
@@ -661,7 +663,7 @@ feature branches → dev → main
 
 - **Never push directly to `main`** - always use PRs
 - **Never push directly to `dev`** - always use PRs from feature branches
-- **Always run `python -m pytest tests/` locally and confirm it is green before opening or merging a PR into `dev` or `main`** - no CI runs the tests, so this is a manual gate
+- **Always run `python -m pytest tests/` locally and confirm it is green before opening or merging a PR into `dev` or `main`** - CI (`tests.yml`) also runs it on every PR and before every deploy, but a red CI run should never be the first time a failure is seen
 - Feature branches can be pushed directly
 
 ### Deployment Environments
@@ -837,7 +839,7 @@ If the remote gateway (provenance-gateway.datafund.io) returns 503 or appears br
    - The codebase still writes `Optional[int]` rather than `int | None`; keep to that for consistency
 
 3. **Common issues**:
-   - Import errors → Check all dependencies are in requirements.txt
+   - Import errors → Check the dependency is in requirements.txt and that requirements.lock was regenerated from it (CI and the image install only the lock)
 
 4. **Quick fix workflow**:
    - Fix the issue locally
