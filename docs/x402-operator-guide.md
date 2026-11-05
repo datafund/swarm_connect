@@ -302,7 +302,7 @@ Each log entry includes:
 - Wallet address (if available)
 - Event-specific data
 
-The payment records (`payment_settled`, `payment_failed`, `payment_delivered`) include `data.x402_version`, the x402 protocol version of the payment. It is `1` for every payment until x402 v2 is enabled. The metrics `gateway_x402_payments_total` and `gateway_x402_settlements_total` have a matching `version` label: `1`, `2` or `none` (no payment header).
+The payment records (`payment_settled`, `payment_failed`, `payment_delivered`) include `data.x402_version`, the x402 protocol version of the payment. It is `1` for every payment until x402 v2 is enabled. The metrics have a matching `version` label. On `gateway_x402_payments_total` it is `1`, `2` or `none`, where `none` means the request carried no payment header. On `gateway_x402_settlements_total` it is `1` or `2` and never `none`, because only a payment is settled.
 
 ### Reading Audit Logs
 
