@@ -26,8 +26,9 @@ The client's `accepted` is never what is sent on: the requirements sent to
 the facilitator are the gateway's offer, and so is the `accepted` inside the
 forwarded payload (they are equal by step 3).
 
-Every 402 here keeps the v1 Payment Required shape (x402Version 1 and the v1
-`accepts`), as every other 402 does until PAYMENT-REQUIRED is sent (#608).
+Every 402 here is raised with the v1 Payment Required body (x402Version 1 and
+the v1 `accepts`), as every other 402 is; with v2 enabled the middleware adds
+PAYMENT-REQUIRED, and with "2" alone sends the v2 copy (advertise_v2.py, #608).
 """
 from typing import List, Tuple
 

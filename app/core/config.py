@@ -71,8 +71,10 @@ class Settings(BaseSettings):
     X402_NETWORK: str = "base-sepolia"  # Network identifier (v1 style)
     # The x402 protocol versions a payment is accepted in (#607, D3 in #596):
     # "1" (default), "1,2" (dual mode) or "2". Anything else stops startup.
-    # v1 pays with X-PAYMENT, v2 with PAYMENT-SIGNATURE. "2" alone refuses
-    # X-PAYMENT and is not deployable before the PAYMENT-REQUIRED header (#608).
+    # v1 pays with X-PAYMENT, v2 with PAYMENT-SIGNATURE; with 2 enabled every
+    # 402 with an offer carries PAYMENT-REQUIRED, and startup requires the
+    # facilitator's /supported to list v2 exact on the network (#608). "2"
+    # alone refuses X-PAYMENT.
     X402_PROTOCOL_VERSIONS: str = "1"
 
     # === x402 Pricing Settings ===

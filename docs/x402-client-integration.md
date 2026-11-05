@@ -24,7 +24,9 @@ An operator can also accept x402 v2 (`X402_PROTOCOL_VERSIONS`; `GET /health` lis
 - Only `exact` with EIP-3009 is accepted. Permit2 is refused with 402 `PAYMENT_METHOD_UNSUPPORTED`.
 - The receipt comes in `PAYMENT-RESPONSE` (base64 JSON `SettleResponse`) instead of `X-PAYMENT-RESPONSE`.
 - An `Idempotency-Key` retry must use the same version as the first request. Otherwise it gets 409 `IDEMPOTENCY_KEY_VERSION_MISMATCH` and is not charged.
-- 402 bodies stay x402 v1 shaped. The `PAYMENT-REQUIRED` header that v2 clients read comes with #608.
+- Every 402 that offers a payment carries the `PAYMENT-REQUIRED` header: standard base64 of the compact JSON x402 v2 `PaymentRequired` (`x402Version` 2, `error`, `resource` with `url`, `description` and `mimeType`, and `accepts`). `@x402/core` clients read it before the body, and pay its offer in `PAYMENT-SIGNATURE`. Decode it with `JSON.parse(atob(value))`, or `decodePaymentRequiredHeader` from `@x402/core/http`. Its `accepts` are the body's offers in v2 form: the CAIP-2 `network` and `amount` instead of `maxAmountRequired`. Copy the offer unchanged into `accepted`. The header is readable cross-origin (CORS exposes it).
+- With `1,2` the JSON body stays the x402 v1 Payment Required body, so a v1 client keeps working unchanged. With `2` alone the body is the JSON copy of the v2 `PaymentRequired` (`x402Version` 2), plus `code`, `message` and the other fields, at the top level and under `detail`.
+- A 402 without the header, while `/health` lists 2, means the offer could not be put in a header (it would exceed 8192 characters). A v1 client can still pay its body.
 - `@x402/core` 2.30.0's `x402Client` refuses any payment over $1 by default (`spendControls.maxAmountPerPayment`). Larger stamp purchases need that limit raised in the client. The provenance SDK sets its own cap.
 
 An `X-PAYMENT` must carry `x402Version: 1`. Any other value is refused with 400 `PAYMENT_HEADER_INVALID`.
