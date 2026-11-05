@@ -55,6 +55,7 @@ X402_ENABLED=true                                    # Enable x402 payments
 X402_FACILITATOR_URL=https://x402.org/facilitator   # Testnet facilitator
 X402_PAY_TO_ADDRESS=0xYourBaseSepoliaAddress        # Your USDC receiving wallet
 X402_NETWORK=base-sepolia                            # base-sepolia or base (or eip155:84532 / eip155:8453)
+X402_PROTOCOL_VERSIONS=1                             # 1 (default), 1,2 or 2: the x402 versions accepted (see below)
 
 # === Pricing ===
 X402_BZZ_USD_RATE=0.50               # Manual BZZ/USD rate
@@ -87,6 +88,33 @@ X402_BLACKLIST_IPS=                  # Comma-separated: 192.168.1.100,10.0.0.50
 # === Audit ===
 X402_AUDIT_LOG_PATH=logs/x402_audit.jsonl
 ```
+
+### x402 protocol versions (`X402_PROTOCOL_VERSIONS`)
+
+Which x402 versions a payment is accepted in. `/health` reports the result under `x402.versions`.
+
+| Value | Accepts | Refuses |
+|---|---|---|
+| `1` (default) | x402 v1 payments in `X-PAYMENT` | `PAYMENT-SIGNATURE` with 402 `X402_VERSION_UNSUPPORTED` |
+| `1,2` | v1 in `X-PAYMENT` and v2 in `PAYMENT-SIGNATURE`, each settled in its own version | both headers in one request (400 `PAYMENT_HEADER_CONFLICT`) |
+| `2` | v2 in `PAYMENT-SIGNATURE` only | `X-PAYMENT` with 402 `X402_VERSION_UNSUPPORTED` |
+
+Any other value (empty, `3`, `1,1`, `v2`) stops the gateway at startup with a settings error that names `X402_PROTOCOL_VERSIONS`. Whitespace and order do not matter (`2, 1` is `1,2`).
+
+With `1` the gateway behaves exactly as before: same 402 bodies, same facilitator requests, same receipts, same state files.
+
+With 2 enabled:
+
+- A v2 payment is checked before the facilitator is called. Its `accepted` offer must equal the gateway's own offer for that request, field by field (scheme `exact`, the CAIP-2 network such as `eip155:84532`, asset, amount, payTo, maxTimeoutSeconds, extra). The gateway sends its own offer to the facilitator, never the client's copy. Refusals are 400 `PAYMENT_HEADER_TOO_LARGE`, `PAYMENT_HEADER_MALFORMED` or `PAYMENT_HEADER_INVALID`, and 402 `X402_VERSION_UNSUPPORTED`, `PAYMENT_SCHEME_UNSUPPORTED`, `PAYMENT_METHOD_UNSUPPORTED` (Permit2) or `PAYMENT_OFFER_MISMATCH` (see [error-codes.md](error-codes.md)). None of them charges anything.
+- `/verify` and `/settle` are sent with `x402Version: 2`. The facilitator must settle v2 `exact` on the configured network. The startup check that it does (`/supported`) is not in place yet (#608).
+- A v2 settlement answers with the `PAYMENT-RESPONSE` header, a v1 settlement with `X-PAYMENT-RESPONSE`. Never both.
+- A v2 settle answer is a definite refusal only when it is a 4xx with `success: false`. A 5xx, or any answer the gateway cannot read, is an unknown outcome (502, the result withheld), as a timeout is.
+- One signed authorization counts once across both versions. Re-wrapping it in the other version's header is refused like any replay. An `Idempotency-Key` result stored for one version is not served to a request paying in the other: it gets 409 `IDEMPOTENCY_KEY_VERSION_MISMATCH`, unpaid.
+- `gateway_x402_settlements_total{version="2"}` exists from startup for every result, so the "x402 settlement problems" alert sees the first v2 problem after a restart.
+
+**Do not enable 2 on a deployment yet.** v2 clients learn the offer from the `PAYMENT-REQUIRED` header, which the gateway does not send yet (#608). Until then every 402 carries only the v1 body, so v2 clients cannot pay and `2` alone shuts v1 clients out. The deploy configuration for this setting is #609.
+
+Whatever the setting, an `X-PAYMENT` whose payload claims an `x402Version` other than 1 is refused with 400 `PAYMENT_HEADER_INVALID` before the facilitator (#639).
 
 ### Disabling x402
 
@@ -302,7 +330,7 @@ Each log entry includes:
 - Wallet address (if available)
 - Event-specific data
 
-The payment records (`payment_settled`, `payment_failed`, `payment_delivered`) include `data.x402_version`, the x402 protocol version of the payment. It is `1` for every payment until x402 v2 is enabled. The metrics have a matching `version` label. On `gateway_x402_payments_total` it is `1`, `2` or `none`, where `none` means the request carried no payment header. On `gateway_x402_settlements_total` it is `1` or `2` and never `none`, because only a payment is settled.
+The payment records (`payment_settled`, `payment_failed`, `payment_delivered`) include `data.x402_version`, the x402 protocol version of the payment. It is `1` for every payment unless `X402_PROTOCOL_VERSIONS` enables x402 v2; then a `PAYMENT-SIGNATURE` payment is `2`. The metrics have a matching `version` label. On `gateway_x402_payments_total` it is `1`, `2` or `none`, where `none` means the request carried no payment header. On `gateway_x402_settlements_total` it is `1` or `2` and never `none`, because only a payment is settled.
 
 ### Reading Audit Logs
 
