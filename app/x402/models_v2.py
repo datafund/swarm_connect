@@ -22,6 +22,10 @@ Decisions that differ from, or pin down, the reference:
 - Amounts are decimal integer strings without sign (`^[0-9]+$`): `amount`,
   and the EIP-3009 `value`, `validAfter`, `validBefore`. The reference only
   asks for a non-empty string, but the `exact` scheme moves uint256 values.
+- `isValid` (VerifyResponseV2) and `success` (SettleResponseV2) are strict
+  booleans: pydantic's lax mode would read "yes", "1" or 1 as true, and these
+  fields decide whether a payment counts as made. (v1 keeps lax booleans, as
+  x402 1.0.0 had them.)
 - `maxTimeoutSeconds` is a positive integer (the reference allows any positive
   number). A client copies the gateway's offer, so a legitimate one never
   sends a fraction.
@@ -40,6 +44,7 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    StrictBool,
     StrictInt,
     ValidationError,
     field_validator,
@@ -261,7 +266,7 @@ class PaymentPayloadV2(BaseModel):
 class VerifyResponseV2(BaseModel):
     """A facilitator's answer to POST /verify."""
 
-    is_valid: bool
+    is_valid: StrictBool  # JSON true/false only; "yes", "1" and 1 are refused
     invalid_reason: Optional[str] = None
     invalid_message: Optional[str] = None
     payer: Optional[str] = None
@@ -278,7 +283,7 @@ class SettleResponseV2(BaseModel):
     `transaction` is "" on a refusal.
     """
 
-    success: bool
+    success: StrictBool  # JSON true/false only
     transaction: str
     network: str
     error_reason: Optional[str] = None

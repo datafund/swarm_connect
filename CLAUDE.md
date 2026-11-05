@@ -349,13 +349,14 @@ X402_FREE_TIER_RATE_LIMIT=3  # Requests/minute for free tier (default: 3)
 
 - Unknown fields are **dropped** at every level (envelope, `accepted`, `resource`, the `exact` payload). The gateway re-serialises a payload and sends it to the facilitator under its own credentials, so it forwards only what it validated. zod's `z.object()` drops them too, and so did v1. Python x402 2.x forwards them; the gateway does not. `extra`, `extensions` and `extensionResponses` are free-form and keep their contents.
 - Amounts (`amount` and the EIP-3009 `value`, `validAfter`, `validBefore`) must be decimal integer strings. `maxTimeoutSeconds` must be a positive integer. Both are stricter than the reference.
+- `isValid` and `success` on the facilitator answers are `StrictBool`, so `"yes"`, `"1"` and `1` are refused. v1 keeps the lax booleans of 1.0.0.
 - When `accepted.scheme` is `exact`, `payload` is parsed as `ExactEvmPayloadV2`. Any other scheme keeps it as a dict, so #607 can answer "scheme not accepted".
 
 `app/x402/codec_v2.py` encodes a header as base64 of compact UTF-8 JSON (`by_alias`, `exclude_none`, `ensure_ascii=False`), the same as `safeBase64Encode(JSON.stringify(x))`. Its output for the fixture offer is byte-identical to Python x402 2.27. Decoding stops at the first failure, in this order:
 
 1. `MAX_HEADER_CHARS = 8192`, checked first. The ADR's largest headers are about 1.5 KB, and 8192 is nginx's per-field default and the MCP client's limit. The encoder refuses to go over it too.
 2. Canonical standard base64.
-3. UTF-8, then a JSON object with no duplicate keys and no NaN.
+3. UTF-8, then a JSON object with no duplicate keys, no NaN, and no lone surrogate escape such as `\ud800`. Such an escape would decode, but the model could then not be re-encoded.
 4. `x402Version` must be 2.
 5. The v2 model.
 
@@ -366,7 +367,7 @@ Errors are `X402HeaderError(ValueError)` subclasses with `code`, `header_name` a
 - `PaymentHeaderInvalid` → `PAYMENT_HEADER_INVALID`
 - `PaymentHeaderVersionMismatch` → `X402_VERSION_UNSUPPORTED`
 
-They never carry the header or a decoded value, and no exception is chained to them. docs/error-codes.md lists the three new codes as not sent yet.
+They never carry the header or a decoded value, the `x402Version` included. They are raised outside any `except` block, so `__cause__` and `__context__` are both None. docs/error-codes.md lists the three new codes as not sent yet.
 
 Tests:
 
