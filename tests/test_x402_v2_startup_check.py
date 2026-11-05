@@ -728,3 +728,109 @@ def test_x402_version_must_be_the_int_2(x402, version):
 def test_scheme_and_network_must_be_exact_strings(x402):
     refused(Supported(kinds({"x402Version": 2, "scheme": "EXACT", "network": "eip155:84532"})))
     refused(Supported(kinds({"x402Version": 2, "scheme": "exact", "network": "EIP155:84532"})))
+
+
+# --- review round 4: redirects are not followed -----------------------------
+
+class _Endless(httpx2.AsyncByteStream):
+    """An endless body, to a real client. Here it stops after 64 MiB with an
+    error, so a regression that reads it fails the test instead of eating the
+    machine's memory (the code before this fix read it without bound)."""
+
+    async def __aiter__(self):
+        chunk = b"x" * 65536
+        for _ in range(1024):
+            await asyncio.sleep(0)
+            yield chunk
+        raise AssertionError("the endless redirect body was read")
+
+
+def _redirecting(status, body_stream, encoding=None):
+    """A facilitator whose /supported redirects to another origin that would
+    answer with v2 listed. Records every URL requested."""
+    seen = []
+
+    def handler(request):
+        seen.append(str(request.url))
+        if request.url.host == "other.example":
+            return httpx2.Response(200, json={"kinds": [V2_EXACT]})
+        headers = {"Location": "https://other.example/x402/supported"}
+        if encoding:
+            headers["Content-Encoding"] = encoding
+        return httpx2.Response(status, headers=headers, stream=body_stream)
+
+    return FacilitatorClient({"url": URL}, transport=httpx2.MockTransport(handler)), seen
+
+
+def _refused_with_peak(client):
+    import tracemalloc
+    tracemalloc.start()
+    try:
+        with pytest.raises(RuntimeError) as exc:
+            asyncio.run(facilitator.check_facilitator_v2_support(client))
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert str(exc.value).startswith(PREFIX)
+    return str(exc.value), peak
+
+
+@pytest.mark.parametrize("encoding,layers", [("gzip", 1), ("gzip, gzip", 2)])
+def test_a_redirect_with_a_gzip_bomb_is_refused_unread(x402, monkeypatch, encoding, layers):
+    _no_inflating(monkeypatch)
+    client, seen = _redirecting(302, _Raw(_gzip_bomb(layers)), encoding)
+    msg, peak = _refused_with_peak(client)
+    assert "answered HTTP 302, not a list of payment kinds (redirects are not followed" in msg
+    assert peak < 16 * 1024 * 1024, peak
+    assert seen == [URL + "/supported"]
+
+
+def test_a_redirect_with_an_endless_body_is_refused_unread(x402):
+    import time
+    client, seen = _redirecting(302, _Endless())
+    started = time.monotonic()
+    msg, peak = _refused_with_peak(client)
+    assert time.monotonic() - started < 5
+    assert "answered HTTP 302" in msg and peak < 16 * 1024 * 1024, peak
+    assert seen == [URL + "/supported"]
+
+
+@pytest.mark.parametrize("status", [301, 302, 303, 307, 308])
+def test_a_redirect_is_refused_naming_its_status_and_not_followed(x402, status):
+    client, seen = _redirecting(status, _Raw(b""))
+    msg, _ = _refused_with_peak(client)
+    assert f"answered HTTP {status}, not a list of payment kinds" in msg
+    assert "X402_FACILITATOR_URL to the final URL" in msg
+    assert seen == [URL + "/supported"]          # the target is never requested
+    assert "other.example" not in msg
+
+
+def test_deploy_check_refuses_a_redirect_with_a_bomb(x402, monkeypatch, capsys):
+    _no_inflating(monkeypatch)
+    client, seen = _redirecting(302, _Raw(_gzip_bomb(2)), "gzip, gzip")
+    x402.setattr(facilitator, "_client", client)
+    assert check_config.main() == check_config.EXIT_REFUSED
+    assert "answered HTTP 302" in capsys.readouterr().err
+    assert seen == [URL + "/supported"]
+
+
+def test_a_non_2xx_body_is_never_read(x402, monkeypatch):
+    reads = []
+    real = httpx2.Response.aiter_raw
+
+    def spy(self, *a, **kw):
+        reads.append(self.status_code)
+        return real(self, *a, **kw)
+
+    monkeypatch.setattr(httpx2.Response, "aiter_raw", spy)
+    refused(Supported(httpx2.Response(503, json={"kinds": [V2_EXACT]})))
+    assert reads == []
+
+
+def test_v1_verify_and_settle_still_follow_redirects():
+    # Unchanged here (x402 1.0.0 parity); only /supported stops following.
+    import inspect
+    from app.x402 import facilitator_client
+    src = inspect.getsource(facilitator_client.FacilitatorClient)
+    assert src.count("follow_redirects=True") == 3       # _post, _post_v2, supported()
+    assert src.count("follow_redirects=False") == 1      # supported_response()

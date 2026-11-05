@@ -161,8 +161,10 @@ class FacilitatorClient:
         """GET {url}/supported for the v2 startup check, unparsed (#608).
 
         Same headers ("supported" entry) and per-read timeout as verify and
-        settle, plus Accept-Encoding: identity. The answer is never inflated:
-        one that still carries a Content-Encoding other than identity raises
+        settle, plus Accept-Encoding: identity, and no redirects followed. A
+        non-2xx answer (a 3xx included) is returned with its status and an
+        empty body, never read. A 2xx answer is never inflated: one that
+        still carries a Content-Encoding other than identity raises
         SupportedAnswerEncoded, so a small compressed answer cannot make
         startup allocate a large one. The raw body is read up to
         MAX_SUPPORTED_BYTES; a longer one raises SupportedAnswerTooLarge.
@@ -172,8 +174,20 @@ class FacilitatorClient:
         headers = await self._headers("supported")
         headers["Accept-Encoding"] = "identity"
         async with self._client() as client:
+            # Redirects are not followed (#608): httpx2 reads and decodes every
+            # 3xx body in full while following, before the encoding check and
+            # the byte cap below could see it, and a redirect could hand the
+            # check to another origin. A 3xx is returned as is; the caller
+            # refuses it like any other non-2xx answer.
             async with client.stream("GET", f"{self.config['url']}/supported", headers=headers,
-                                     follow_redirects=True) as response:
+                                     follow_redirects=False) as response:
+                kept = [(k, v) for k, v in response.headers.multi_items()
+                        if k.lower() not in ("content-encoding", "content-length", "transfer-encoding")]
+                if not 200 <= response.status_code < 300:
+                    # Refused whatever it says (a 3xx included): its body is
+                    # never read, so it cannot cost memory or time.
+                    return httpx2.Response(response.status_code, headers=kept, content=b"",
+                                           request=response.request)
                 encodings = [e.strip().lower() for v in response.headers.get_list("content-encoding")
                              for e in v.split(",") if e.strip()]
                 if any(e != "identity" for e in encodings):
@@ -183,8 +197,6 @@ class FacilitatorClient:
                     body += chunk
                     if len(body) > MAX_SUPPORTED_BYTES:
                         raise SupportedAnswerTooLarge(response.status_code)
-                kept = [(k, v) for k, v in response.headers.multi_items()
-                        if k.lower() not in ("content-encoding", "content-length", "transfer-encoding")]
                 return httpx2.Response(response.status_code, headers=kept, content=bytes(body),
                                       request=response.request)
 
