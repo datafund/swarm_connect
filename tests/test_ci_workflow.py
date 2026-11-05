@@ -16,6 +16,8 @@ import re
 import textwrap
 from pathlib import Path
 
+import yaml
+
 REPO = Path(__file__).resolve().parent.parent
 TESTS_YML = REPO / ".github" / "workflows" / "tests.yml"
 DEPLOY_YML = REPO / ".github" / "workflows" / "deploy.yml"
@@ -211,6 +213,16 @@ def test_image_checks_tls_trust_offline_in_the_running_container():
     remove = next(i for i, b in enumerate(blocks) if b.startswith("docker rm -f "))
     assert smoke < tls[0] < remove
     assert "continue-on-error" not in IMAGE_YML.read_text()
+    # The step's own failure is not swallowed: it has no continue-on-error,
+    # and its shell part (the run without the Python fed to the container)
+    # neither ignores errors nor exits 0 on its own.
+    steps = yaml.safe_load(IMAGE_YML.read_text())["jobs"]["docker-build"]["steps"]
+    step = [s for s in steps if str(s.get("run", "")).startswith(TLS_EXEC)]
+    assert len(step) == 1 and "continue-on-error" not in step[0], step
+    shell = re.sub(r"<<'PY'\n.*?^PY$", "<<'PY'", step[0]["run"], flags=re.S | re.M)
+    assert shell.strip() == TLS_EXEC, f"shell commands around the TLS check: {shell!r}"
+    for swallow in (r"\|\|\s*(true|:)", r"\bset\s+\+e\b", r"\bexit\s+0\b"):
+        assert not re.search(swallow, shell), swallow
 
     script = _tls_check_script()
     compile(script, "image.yml TLS check", "exec")
