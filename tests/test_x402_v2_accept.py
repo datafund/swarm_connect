@@ -11,7 +11,7 @@ settles after the response (no settle point of its own).
 import base64
 import json
 
-import httpx
+import httpx2
 import pytest
 from fastapi import APIRouter, Depends, FastAPI, Request
 from fastapi.testclient import TestClient
@@ -54,15 +54,15 @@ class Facilitator:
         self.settle = None          # None: success
         self.settle_status = 200
 
-    def handler(self, request: httpx.Request) -> httpx.Response:
+    def handler(self, request: httpx2.Request) -> httpx2.Response:
         path = request.url.path.rsplit("/", 1)[-1]
         body = json.loads(request.content)
         self.calls.append({"path": path, "body": body})
         network = body["paymentRequirements"]["network"]
         if path == "verify":
-            return httpx.Response(200, json=self.verify or {"isValid": True, "payer": PAYER})
+            return httpx2.Response(200, json=self.verify or {"isValid": True, "payer": PAYER})
         answer = self.settle or {"success": True, "transaction": TX, "network": network, "payer": PAYER}
-        return httpx.Response(self.settle_status, json=answer)
+        return httpx2.Response(self.settle_status, json=answer)
 
     def paths(self):
         return [c["path"] for c in self.calls]
@@ -95,7 +95,7 @@ def gw(monkeypatch):
         reset_rate_limiter()
         v2h.RAN.clear()
         fac = Facilitator()
-        client = FacilitatorClient({"url": URL}, transport=httpx.MockTransport(fac.handler))
+        client = FacilitatorClient({"url": URL}, transport=httpx2.MockTransport(fac.handler))
         for p in (patch("app.x402.dependency._calculate_price_for_request",
                         new=AsyncMock(return_value={"price_usd": 0.02, "description": "Test operation"})),
                   patch("app.x402.dependency._get_facilitator_client", return_value=client)):
@@ -833,10 +833,10 @@ def test_v2_verify_5xx_saying_valid_gets_502_and_nothing_runs(gw):
     def handler(request):
         if request.url.path.endswith("/verify"):
             fac.calls.append({"path": "verify", "body": json.loads(request.content)})
-            return httpx.Response(500, json={"isValid": True, "payer": PAYER})
+            return httpx2.Response(500, json={"isValid": True, "payer": PAYER})
         return real(request)
     fac.handler = handler
-    client2 = FacilitatorClient({"url": URL}, transport=httpx.MockTransport(handler))
+    client2 = FacilitatorClient({"url": URL}, transport=httpx2.MockTransport(handler))
     with patch("app.x402.dependency._get_facilitator_client", return_value=client2):
         r = client.post("/api/v1/stamps/", headers=pay(2, offer))
     assert r.status_code == 502, r.text
@@ -1279,3 +1279,40 @@ def test_valid_stored_version(gw, stored, retry, expected):
         assert detail["original_x402_version_accepted"] is True
     else:
         assert r.headers["Idempotent-Replayed"] == "true"
+
+
+# --------------------------------------------------------------------------
+# Transport errors of the gateway's client (httpx2, #626) are unknown
+# outcomes on the v2 path, never a result
+# --------------------------------------------------------------------------
+
+def _raising_client(fac, path, exc):
+    def handler(request):
+        if request.url.path.endswith("/" + path):
+            fac.calls.append({"path": path, "body": json.loads(request.content)})
+            raise exc
+        return fac.handler(request)
+    return FacilitatorClient({"url": URL}, transport=httpx2.MockTransport(handler))
+
+
+@pytest.mark.parametrize("exc", [httpx2.ConnectError("refused"), httpx2.ReadTimeout("slow")],
+                         ids=["connect", "timeout"])
+@pytest.mark.parametrize("path,route,code", [
+    ("verify", ("POST", "/api/v1/stamps/"), None),
+    ("settle", ("POST", "/api/v1/stamps/"), "PAYMENT_SETTLEMENT_UNAVAILABLE"),
+    ("settle", FALLBACK, "PAYMENT_SETTLEMENT_UNKNOWN"),
+], ids=["verify", "settle_payment", "fallback"])
+def test_v2_transport_errors_are_unknown(gw, exc, path, route, code):
+    from app.x402.middleware import X402Middleware  # noqa: F401
+    client, fac = gw("1,2")
+    offer = _offer(client)
+    raising = _raising_client(fac, path, exc)
+    app = _app(raising)
+    with patch("app.x402.dependency._get_facilitator_client", return_value=raising):
+        r = TestClient(app, raise_server_exceptions=False).request(route[0], route[1], headers=pay(2, offer))
+    assert r.status_code == 502, r.text
+    if code:
+        assert r.json()["code"] == code
+    else:
+        assert "settle" not in fac.paths() and v2h.RAN == []
+    assert "PAYMENT-RESPONSE" not in r.headers

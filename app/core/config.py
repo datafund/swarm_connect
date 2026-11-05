@@ -368,17 +368,18 @@ class Settings(BaseSettings):
     # reference, not only ones uploaded here, so without a cap a few requests
     # for large content could exhaust memory and the chequebook.
     MAX_DOWNLOAD_SIZE_MB: int = Field(25, ge=1)
-    # Total time allowed for fetching one download from Bee. httpx timeouts
+    # Total time allowed for fetching one download from Bee. httpx2 timeouts
     # apply per read, so a slow trickle could otherwise hold the request open.
     DOWNLOAD_TIMEOUT_SECONDS: int = Field(120, ge=1)
 
     # === Shared outbound HTTP client (Bee API, Base RPC) ===
-    # Connection limits of the shared httpx client (app/services/http_client.py).
-    # The defaults are httpx's own defaults, written out.
+    # Connection limits of the shared httpx2 client (app/services/http_client.py).
+    # The defaults are httpx2's own defaults, written out.
     BEE_HTTP_MAX_CONNECTIONS: int = Field(100, ge=1)
     BEE_HTTP_MAX_KEEPALIVE_CONNECTIONS: int = Field(20, ge=0)
     BEE_HTTP_KEEPALIVE_EXPIRY_SECONDS: float = Field(5.0, ge=0, allow_inf_nan=False)
-    # Self-recovery of the shared client (#587). httpcore 1.0.9 keeps a
+    # Self-recovery of the shared client (#587), a backstop since the switch
+    # to httpcore2 (#595), which fixed the leak. httpcore 1.0.9 kept a
     # connection slot forever when a request is cancelled right after the pool
     # gives it a new connection, so cancellations under load can fill the pool
     # with slots that hold no request, and every call then fails with

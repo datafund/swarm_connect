@@ -1129,7 +1129,7 @@ class StampPoolManager:
             return 0
 
         except Exception as e:
-            # The full text can name the Bee API address (httpx puts the URL
+            # The full text can name the Bee API address (httpx2 puts the URL
             # in HTTPStatusError). It goes to the log only (#534).
             logger.error(f"Error syncing stamps from Bee node: {exc_text(e)}")
             self._last_sync_error = (f"Sync error: could not read stamps from the Bee node "
@@ -1874,7 +1874,7 @@ class StampPoolManager:
             return batch_id
 
         except BaseException as e:
-            # Surface Bee's own message. httpx's str(e) is only the status line
+            # Surface Bee's own message. httpx2's str(e) is only the status line
             # ("Client error '400 Bad Request' for url ..."), so the actual cause
             # — "out of funds", "insufficient amount for 24h minimum validity" —
             # was discarded and had to be obtained by calling Bee by hand.

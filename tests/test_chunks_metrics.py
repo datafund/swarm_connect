@@ -58,11 +58,11 @@ class TestChunkMetrics:
         assert after_bytes == before_bytes + 8
 
     def test_upload_error_increments_error_counter(self, client):
-        import httpx
+        import httpx2
         before = chunk_uploads_total.labels(status="error", mode="none")._value.get()
         with patch("app.api.endpoints.chunks.settings", _settings(x402=False)):
             with patch("app.api.endpoints.chunks.upload_chunk_to_swarm",
-                       new=AsyncMock(side_effect=httpx.HTTPError("down"))):
+                       new=AsyncMock(side_effect=httpx2.HTTPError("down"))):
                 r = client.post(
                     "/api/v1/chunks/",
                     content=b"x" * 8,

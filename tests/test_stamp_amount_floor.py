@@ -1,5 +1,5 @@
 """Tests for the stamp amount floor and Bee error propagation (issue #258)."""
-import httpx
+import httpx2
 import pytest
 from unittest.mock import AsyncMock, patch
 
@@ -49,9 +49,9 @@ class TestAmountClearsBeeFloor:
 
 
 def _http_error(status_code, payload):
-    request = httpx.Request("POST", "http://bee:1633/stamps/1/17")
-    response = httpx.Response(status_code, json=payload, request=request)
-    return httpx.HTTPStatusError("err", request=request, response=response)
+    request = httpx2.Request("POST", "http://bee:1633/stamps/1/17")
+    response = httpx2.Response(status_code, json=payload, request=request)
+    return httpx2.HTTPStatusError("err", request=request, response=response)
 
 
 class TestBeeErrorIsNotMasked:
@@ -78,8 +78,8 @@ class TestBeeErrorIsNotMasked:
 
     def test_connection_failure_still_reports_502(self, client):
         """No response to read means the node really is unreachable."""
-        request = httpx.Request("POST", "http://bee:1633/stamps/1/17")
-        err = httpx.ConnectError("connection refused", request=request)
+        request = httpx2.Request("POST", "http://bee:1633/stamps/1/17")
+        err = httpx2.ConnectError("connection refused", request=request)
         with patch("app.services.swarm_api.get_chainstate",
                    new=AsyncMock(return_value={"currentPrice": "77610"})), \
              patch("app.services.swarm_api.check_sufficient_funds",
@@ -138,8 +138,8 @@ class TestExtendPathBehavesLikePurchase:
         assert "may be unavailable" not in r.json()["detail"]
 
     def test_connection_failure_on_extend_still_reports_502(self, client):
-        request = httpx.Request("PATCH", "http://bee:1633/stamps/topup/x/1")
-        err = httpx.ConnectError("connection refused", request=request)
+        request = httpx2.Request("PATCH", "http://bee:1633/stamps/topup/x/1")
+        err = httpx2.ConnectError("connection refused", request=request)
         existing = [{"batchID": "a" * 64, "depth": 17, "batchTTL": 86400}]
         with patch("app.services.swarm_api.get_all_stamps_processed",
                    new=AsyncMock(return_value=existing)), \
