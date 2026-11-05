@@ -10,7 +10,7 @@ import json
 import pytest
 
 from app.core.config import settings
-from app.x402.payment_headers import ACCEPTED_X402_VERSIONS
+from app.x402.payment_headers import accepted_x402_versions
 from tests.test_pricing_endpoint import client, x402_on  # noqa: F401  (fixtures)
 
 QUOTE_KEYS_BEFORE = ["method", "path", "price_usd", "max_amount_required", "description"]
@@ -20,8 +20,10 @@ HEALTH_X402_KEYS_BEFORE = {"enabled", "free_tier", "base_wallet", "bee_gnosis_wa
                            "warnings", "errors"}
 
 
-def test_only_v1_is_accepted_for_now():
-    assert ACCEPTED_X402_VERSIONS == (1,)
+def test_only_v1_is_accepted_by_default():
+    # X402_PROTOCOL_VERSIONS replaced the ACCEPTED_X402_VERSIONS constant (#607).
+    assert settings.X402_PROTOCOL_VERSIONS == "1"
+    assert accepted_x402_versions() == (1,)
 
 
 def test_pricing_quotes_add_amount_next_to_max_amount_required(client):  # noqa: F811
@@ -58,10 +60,10 @@ def test_health_reports_the_accepted_versions(health):
     assert set(x402) == HEALTH_X402_KEYS_BEFORE | {"versions"}
 
 
-def test_health_versions_come_from_the_constant(health, monkeypatch):
-    import app.x402.payment_headers as headers
-    monkeypatch.setattr(headers, "ACCEPTED_X402_VERSIONS", (1, 2))
-    assert health(True)["x402"]["versions"] == [1, 2]
+@pytest.mark.parametrize("value,expected", [("1,2", [1, 2]), ("2", [2]), ("1", [1])])
+def test_health_versions_come_from_the_setting(health, monkeypatch, value, expected):
+    monkeypatch.setattr(settings, "X402_PROTOCOL_VERSIONS", value)
+    assert health(True)["x402"]["versions"] == expected
 
 
 def test_health_without_x402_is_unchanged(health):
