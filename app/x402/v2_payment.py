@@ -15,7 +15,14 @@ In this order:
    A Permit2 `exact` payload (permit2Authorization instead of authorization)
    fails the model too; it gets 402 PAYMENT_METHOD_UNSUPPORTED, because
    the gateway offers EIP-3009 only (D9 in #596).
-2. accepted.scheme other than "exact": 402 PAYMENT_SCHEME_UNSUPPORTED.
+2. accepted.scheme other than "exact": 402 PAYMENT_SCHEME_UNSUPPORTED. Then
+   the shape of the exact payload: authorization.from a 20-byte address,
+   authorization.nonce 0x plus 64 hex digits (bytes32), and the signature
+   0x-hex of at least 65 bytes, a whole number of bytes. 65 bytes is an EOA
+   ECDSA signature, which @x402/evm produces; longer ones are smart-wallet
+   (ERC-1271) or ERC-6492-wrapped signatures, which the @x402/evm facilitator
+   accepts (it unwraps ERC-6492 and treats any non-65-byte signature as a
+   smart wallet's). Otherwise 400 PAYMENT_HEADER_INVALID naming the fields.
 3. Every field of `accepted` must equal the gateway's own v2 offer for this
    request, exactly: network, asset, amount, payTo, maxTimeoutSeconds and
    extra. Strings compare as strings, so "00020000" is not "20000" and an
@@ -37,6 +44,7 @@ the request (URL, description, MIME type).
 Every 402 here keeps the v1 Payment Required shape (x402Version 1 and the v1
 `accepts`), as every other 402 does until PAYMENT-REQUIRED is sent (#608).
 """
+import re
 from typing import List, Tuple
 
 from fastapi import HTTPException
@@ -72,6 +80,24 @@ def offer_mismatches(accepted: PaymentRequirementsV2, offer: PaymentRequirements
     got = accepted.model_dump(mode="json", by_alias=True)
     want = offer.model_dump(mode="json", by_alias=True)
     return [f for f in OFFER_FIELDS if got.get(f) != want.get(f)]
+
+
+_ADDRESS = re.compile(r"^0x[0-9a-fA-F]{40}\Z")
+_BYTES32 = re.compile(r"^0x[0-9a-fA-F]{64}\Z")
+_SIGNATURE = re.compile(r"^0x(?:[0-9a-fA-F]{2}){65,}\Z")
+
+
+def authorization_shape_errors(payment: PaymentPayloadV2) -> List[str]:
+    """The fields of an exact payload that are not well formed (step 2)."""
+    exact = payment.exact_payload
+    out = []
+    if not _ADDRESS.match(exact.authorization.from_):
+        out.append("payload.authorization.from")
+    if not _BYTES32.match(exact.authorization.nonce):
+        out.append("payload.authorization.nonce")
+    if not _SIGNATURE.match(exact.signature):
+        out.append("payload.signature")
+    return out
 
 
 def _same_address(got: str, want: str) -> bool:
@@ -163,6 +189,14 @@ def read_v2_payment(value, requirements: PaymentRequirements) -> Tuple[PaymentPa
         raise payment_required_402(
             requirements, code="PAYMENT_SCHEME_UNSUPPORTED",
             message="This gateway accepts the exact scheme only. " + NOT_CHARGED)
+    malformed = authorization_shape_errors(payment)
+    if malformed:
+        raise HTTPException(status_code=400, detail={
+            "code": "PAYMENT_HEADER_INVALID",
+            "message": ("The PAYMENT-SIGNATURE payment is not well formed ("
+                        + ", ".join(malformed) + "). " + NOT_CHARGED),
+            "fields": malformed,
+        })
     try:
         mismatched = offer_mismatches(payment.accepted, offer)
     except Exception:

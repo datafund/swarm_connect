@@ -1180,3 +1180,48 @@ def test_marshaled_stamp_refuses_a_trailing_newline():
     assert _validate_marshaled_stamp(good) == good
     with pytest.raises(HTTPException):
         _validate_marshaled_stamp(good[:-1] + "\n")
+
+
+# --------------------------------------------------------------------------
+# The shape of the signed authorization is checked before verify
+# (#645 review round 4; v2 only)
+# --------------------------------------------------------------------------
+
+@pytest.mark.parametrize("where,value,field", [
+    ("from", "0x" + "a1" * 19, "payload.authorization.from"),
+    ("from", "not-an-address", "payload.authorization.from"),
+    ("from", PAYER + "\n", "payload.authorization.from"),
+    ("nonce", "0x" + "01" * 31, "payload.authorization.nonce"),
+    ("nonce", "01" * 32, "payload.authorization.nonce"),            # no 0x
+    ("nonce", "0x" + "zz" * 32, "payload.authorization.nonce"),
+    ("signature", "0x" + "ab" * 64, "payload.signature"),           # 64 bytes
+    ("signature", "0x" + "ab" * 65 + "a", "payload.signature"),     # half a byte
+    ("signature", "ab" * 65, "payload.signature"),                  # no 0x
+    ("signature", "0x" + "gg" * 65, "payload.signature"),
+])
+def test_malformed_authorization_gets_400_before_verify(gw, where, value, field):
+    client, fac = gw("1,2")
+    offer = _offer(client)
+    payload = v2_payload(offer, authorization(offer))
+    if where == "signature":
+        payload["payload"]["signature"] = value
+    else:
+        payload["payload"]["authorization"][where] = value
+    r = client.post("/api/v1/stamps/", headers=header_for(2, payload))
+    assert r.status_code == 400, r.text
+    body = r.json()
+    assert body["code"] == "PAYMENT_HEADER_INVALID"
+    assert body["detail"]["fields"] == [field]
+    assert value.strip() not in body["message"]
+    assert fac.calls == []
+
+
+@pytest.mark.parametrize("signature", ["0x" + "ab" * 65, "0x" + "cd" * 200])  # EOA, and a longer ERC-1271/6492 one
+def test_well_formed_signatures_go_on_to_verify(gw, signature):
+    client, fac = gw("1,2")
+    offer = _offer(client)
+    payload = v2_payload(offer, authorization(offer))
+    payload["payload"]["signature"] = signature
+    r = client.post("/api/v1/stamps/", headers=header_for(2, payload))
+    assert r.status_code == 200, r.text
+    assert fac.paths() == ["verify", "settle"]
