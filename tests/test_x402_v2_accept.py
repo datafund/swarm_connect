@@ -811,3 +811,62 @@ def test_v2_verify_5xx_saying_valid_gets_502_and_nothing_runs(gw):
         r = client.post("/api/v1/stamps/", headers=pay(2, offer))
     assert r.status_code == 502, r.text
     assert fac.paths() == ["verify"] and v2h.RAN == []
+
+
+# --------------------------------------------------------------------------
+# Hardening: the forwarded resource and the signed authorization (#645 review)
+# --------------------------------------------------------------------------
+
+def test_forwarded_resource_is_the_gateways_own(gw):
+    client, fac = gw("1,2")
+    offer = _offer(client)
+    payload = v2_payload(offer, authorization(offer))
+    payload["resource"] = {"url": "https://evil.example/x", "description": "anything the client says",
+                           "mimeType": "text/html", "serviceName": "Evil"}
+    r = client.post("/api/v1/stamps/", headers=header_for(2, payload))
+    assert r.status_code == 200, r.text
+    for call in fac.calls:
+        assert call["body"]["paymentPayload"]["resource"] == {
+            "url": offer["resource"], "description": offer["description"], "mimeType": offer["mimeType"]}
+
+
+def test_missing_resource_gets_the_gateways_own(gw):
+    client, fac = gw("1,2")
+    offer = _offer(client)
+    payload = v2_payload(offer, authorization(offer))
+    del payload["resource"]
+    assert client.post("/api/v1/stamps/", headers=header_for(2, payload)).status_code == 200
+    assert fac.calls[0]["body"]["paymentPayload"]["resource"]["url"] == offer["resource"]
+
+
+@pytest.mark.parametrize("field,value", [
+    ("to", "0x" + "33" * 20),
+    ("value", "1"),
+    ("value", "020000"),                           # the same number, not the same string
+    ("to", "0x" + "22" * 19 + "2A"),               # another address in mixed case
+])
+def test_authorization_must_pay_the_offer(gw, field, value):
+    client, fac = gw("1,2")
+    offer = _offer(client)
+    auth = dict(authorization(offer), **{field: value})
+    r = client.post("/api/v1/stamps/", headers=header_for(2, v2_payload(offer, auth)))
+    body = _refused_402(r, "PAYMENT_OFFER_MISMATCH")
+    assert body["fields"] == [f"payload.authorization.{field}"]
+    assert value not in body["message"]
+    assert fac.calls == []
+
+
+def test_authorization_to_in_another_letter_case_is_the_same_address(gw, monkeypatch):
+    from eth_utils import to_checksum_address
+    client, fac = gw("1,2")
+    checksummed = to_checksum_address("0x" + "ab" * 20)
+    monkeypatch.setattr(settings, "X402_PAY_TO_ADDRESS", checksummed)
+    offer = _offer(client)
+    for i, to in enumerate((checksummed.lower(), "0x" + checksummed[2:].upper(), checksummed)):
+        auth = dict(authorization(offer, nonce=nonce_hex(f"c{i}")), to=to)
+        r = client.post("/api/v1/stamps/", headers=header_for(2, v2_payload(offer, auth)))
+        assert r.status_code == 200, (to, r.text)
+    bad = checksummed[:2] + checksummed[2:].swapcase()   # mixed case, wrong checksum
+    auth = dict(authorization(offer, nonce=nonce_hex("0f")), to=bad)
+    r = client.post("/api/v1/stamps/", headers=header_for(2, v2_payload(offer, auth)))
+    assert _refused_402(r, "PAYMENT_OFFER_MISMATCH")["fields"] == ["payload.authorization.to"]
