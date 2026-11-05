@@ -14,6 +14,7 @@ The x402 v1 types and the facilitator client are the gateway's own
 (models_v1.py, facilitator_client.py, #604).
 """
 import json
+import re
 import asyncio
 import logging
 from typing import Callable, Optional
@@ -374,45 +375,56 @@ def encode_payment_response(settle_response: SettleResponse) -> str:
     return safe_base64_encode(response_json.encode("utf-8"))
 
 
-# The PAYMENT-RESPONSE fields the gateway passes on from a v2 settle answer.
-# The facilitator's open records (extra, extensions, extensionResponses) are
-# dropped: they are not the client's receipt (@x402/core strips
-# extensionResponses too), and a large one would push the header over
-# codec_v2.MAX_HEADER_CHARS after the money has moved.
-_RECEIPT_FIELDS = ("success", "transaction", "network", "payer", "error_reason", "amount")
-_MINIMAL_RECEIPT_FIELDS = ("success", "transaction", "network")
+_STRICT_ADDRESS = re.compile(r"^0x[0-9a-fA-F]{40}\Z")
 
 
-def encode_payment_response_v2(settlement) -> Optional[str]:
-    """The PAYMENT-RESPONSE header for an x402 v2 settlement (#607), or None.
+def _receipt_payer(request) -> Optional[str]:
+    """The payer for the receipt: the verified payer if it is an address, else
+    the signed authorization's `from` (checked before verify, v2_payment)."""
+    state = getattr(request, "state", None)
+    payer = getattr(state, "x402_payer", None)
+    if isinstance(payer, str) and _STRICT_ADDRESS.match(payer):
+        return payer
+    try:
+        signer = getattr(state, "x402_payment").exact_payload.authorization.from_
+    except Exception:
+        return None
+    return signer if isinstance(signer, str) and _STRICT_ADDRESS.match(signer) else None
 
-    Built from the gateway's typed SettleResponseV2 with _RECEIPT_FIELDS only,
-    encoded by codec_v2. If that cannot be encoded, a minimal receipt
+
+def encode_payment_response_v2(settlement, request) -> Optional[str]:
+    """The PAYMENT-RESPONSE header for a successful x402 v2 settlement (#607), or None.
+
+    The receipt is the gateway's, not the facilitator's answer passed on:
+    success true; transaction the checked value (settlement.checked_settlement,
+    "" when unknown); network and amount from the gateway's own v2 offer for
+    this request; payer the verified payer if it is an address, else the
+    signed authorization's `from`. Nothing else, so no facilitator text
+    (errorReason, extra, extensions, another network, payer or amount)
+    reaches the client. If that cannot be encoded, a minimal receipt
     (success, transaction, network); if not even that, None, and the answer
-    goes out without the header (X-Payment-Transaction still names the
-    transaction). Never raises: this runs after settlement, so a failure here
-    must not turn a delivered, paid result into a 500.
+    goes out without the header. Never raises: this runs after settlement,
+    so a failure here must not turn a delivered, paid result into a 500.
     """
     from app.x402 import codec_v2
     from app.x402.models_v2 import SettleResponseV2
+    from app.x402.settlement import valid_transaction
     try:
-        if isinstance(settlement, SettleResponseV2):
-            data = settlement.model_dump()
-        else:
-            # A stand-in (tests): read into the v2 shape, with the configured
-            # network if it names none.
-            data = settlement.model_dump()
-            data["transaction"] = data.get("transaction") or ""
-            data["network"] = to_caip2(data.get("network")) or to_caip2(settings.X402_NETWORK)
+        offer = getattr(request.state, "x402_requirements_v2", None)
+        network = getattr(offer, "network", None) or to_caip2(settings.X402_NETWORK)
+        amount = getattr(offer, "amount", None)
+        transaction = valid_transaction(getattr(settlement, "transaction", None)) or ""
+        payer = _receipt_payer(request)
     except Exception as e:
-        logger.error(f"x402: v2 settlement could not be read for its receipt: {type(e).__name__}")
+        logger.error(f"x402: v2 receipt could not be built: {type(e).__name__}")
         return None
-    for fields in (_RECEIPT_FIELDS, _MINIMAL_RECEIPT_FIELDS):
+    full = {"success": True, "transaction": transaction, "network": network, "payer": payer, "amount": amount}
+    for data in (full, {"success": True, "transaction": transaction, "network": network}):
         try:
-            receipt = SettleResponseV2(**{k: data.get(k) for k in fields if data.get(k) is not None})
+            receipt = SettleResponseV2(**{k: v for k, v in data.items() if v is not None})
             return codec_v2.encode_payment_response(receipt)
         except Exception as e:
-            logger.error(f"x402: PAYMENT-RESPONSE with {len(fields)} fields could not be encoded "
+            logger.error(f"x402: PAYMENT-RESPONSE with {len(data)} fields could not be encoded "
                          f"({type(e).__name__}); trying fewer")
     return None
 
@@ -708,7 +720,7 @@ class X402Middleware(BaseHTTPMiddleware):
         # The receipt in the header of the request's version only (D4 in #596).
         if paid_version(request) == 2:
             from app.x402.codec_v2 import PAYMENT_RESPONSE_HEADER
-            receipt = encode_payment_response_v2(settlement)
+            receipt = encode_payment_response_v2(settlement, request)
             if receipt is not None:
                 new_response.headers[PAYMENT_RESPONSE_HEADER] = receipt
         else:

@@ -531,7 +531,9 @@ def test_receipt_is_codec_v2_of_the_typed_settle_response(gw):
     offer = _offer(client)
     r = client.post("/api/v1/stamps/", headers=pay(2, offer))
     raw = json.loads(base64.b64decode(r.headers["PAYMENT-RESPONSE"]))
-    assert raw == {"success": True, "transaction": TX, "network": "eip155:84532", "payer": PAYER}
+    # The gateway's receipt: its own network and amount (#645 review round 4).
+    assert raw == {"success": True, "transaction": TX, "network": "eip155:84532", "payer": PAYER,
+                   "amount": offer["maxAmountRequired"]}
 
 
 # --------------------------------------------------------------------------
@@ -775,14 +777,31 @@ def test_large_facilitator_extra_still_gives_the_result_and_a_receipt(gw, route)
     assert codec_v2.decode_payment_response(r.headers["PAYMENT-RESPONSE"]).success is True
 
 
-def test_receipt_falls_back_to_the_minimal_fields_then_to_none():
+def test_receipt_falls_back_to_the_minimal_fields_then_to_none(monkeypatch):
+    from types import SimpleNamespace
+    from app.x402 import codec_v2 as codec
     from app.x402.middleware import encode_payment_response_v2
-    from app.x402.models_v2 import SettleResponseV2
-    big_payer = SettleResponseV2(success=True, transaction=TX, network="eip155:84532", payer="p" * 9000)
-    got = json.loads(base64.b64decode(encode_payment_response_v2(big_payer)))
+    from app.x402.models_v2 import PaymentRequirementsV2, SettleResponseV2
+    offer = PaymentRequirementsV2(scheme="exact", network="eip155:84532", asset="0x" + "11" * 20,
+                                  amount="20000", pay_to="0x" + "22" * 20, max_timeout_seconds=300)
+    request = SimpleNamespace(state=SimpleNamespace(x402_requirements_v2=offer, x402_payer=PAYER))
+    settled = SettleResponseV2(success=True, transaction=TX, network="eip155:84532")
+    real = codec.encode_payment_response
+    calls = []
+
+    def flaky(receipt):
+        calls.append(receipt)
+        if len(calls) == 1:
+            raise codec.PaymentHeaderTooLarge("PAYMENT-RESPONSE", "too large")
+        return real(receipt)
+    monkeypatch.setattr(codec, "encode_payment_response", flaky)
+    got = json.loads(base64.b64decode(encode_payment_response_v2(settled, request)))
     assert got == {"success": True, "transaction": TX, "network": "eip155:84532"}
-    hopeless = SettleResponseV2(success=True, transaction="t" * 9000, network="eip155:84532")
-    assert encode_payment_response_v2(hopeless) is None
+
+    def always(receipt):
+        raise codec.PaymentHeaderTooLarge("PAYMENT-RESPONSE", "too large")
+    monkeypatch.setattr(codec, "encode_payment_response", always)
+    assert encode_payment_response_v2(settled, request) is None
 
 
 def test_oversized_transaction_is_unknown_and_the_receipt_still_goes_out(gw):
@@ -989,3 +1008,48 @@ def test_version_mismatch_still_points_to_the_original_header_while_it_is_accept
     r = client.post("/api/v1/stamps/", headers={**pay(2, offer, nonce=nonce_hex("0e")), **key})
     assert r.json()["detail"]["original_x402_version_accepted"] is True
     assert "X-PAYMENT header" in r.json()["detail"]["message"]
+
+
+
+# --------------------------------------------------------------------------
+# The v2 receipt carries the gateway's own values (#645 review round 4)
+# --------------------------------------------------------------------------
+
+FUZZED_SETTLE = {
+    "crlf-network": {"network": "x\r\nSet-Cookie: evil=1"},
+    "nul-bidi-network": {"network": "eip155:84532\u0000\u202e"},
+    "other-network": {"network": "eip155:1"},
+    "other-amount": {"amount": "999999999"},
+    "other-payer": {"payer": "0x" + "99" * 20},
+    "non-address-payer": {"payer": "not an address\r\n"},
+    "error-reason": {"errorReason": "x\r\nSet-Cookie: evil=1"},
+}
+
+
+@pytest.mark.parametrize("route", [("POST", "/api/v1/stamps/"), FALLBACK], ids=["settle_payment", "fallback"])
+@pytest.mark.parametrize("kind", list(FUZZED_SETTLE))
+def test_v2_receipt_is_built_from_the_gateways_values(gw, route, kind):
+    client, fac = gw("1,2")
+    offer = _offer(client)
+    fac.settle = {"success": True, "transaction": TX, "network": "eip155:84532", "payer": PAYER,
+                  "amount": "20000", **FUZZED_SETTLE[kind]}
+    r = _send(client, route, pay(2, offer))
+    assert r.status_code == 200, r.text
+    receipt = json.loads(base64.b64decode(r.headers["PAYMENT-RESPONSE"]))
+    assert receipt == {"success": True, "transaction": TX, "network": "eip155:84532",
+                       "payer": PAYER, "amount": offer["maxAmountRequired"]}
+
+
+def test_v2_receipt_payer_falls_back_to_the_signed_from(gw):
+    """A verified payer that is not an address never reaches the receipt."""
+    from tests.x402_v2_builders import authorization as auth_for
+    client, fac = gw("1,2")
+    offer = _offer(client)
+    from types import SimpleNamespace
+    from app.x402.middleware import _receipt_payer
+    from app.x402.models_v2 import PaymentPayloadV2
+    payment = PaymentPayloadV2.model_validate(v2_payload(offer, auth_for(offer)))
+    state = SimpleNamespace(x402_payer="0x" + "ab" * 20 + "\n", x402_payment=payment)
+    assert _receipt_payer(SimpleNamespace(state=state)) == PAYER
+    state.x402_payer = "0x" + "cd" * 20
+    assert _receipt_payer(SimpleNamespace(state=state)) == "0x" + "cd" * 20
