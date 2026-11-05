@@ -228,7 +228,7 @@ def test_every_payment_audit_call_passes_the_version():
 
 
 def _v2_payload_header(payer="0x" + "e5" * 20):
-    """An X-PAYMENT whose payload itself says x402Version 2."""
+    """An X-PAYMENT (v1 header) whose payload claims x402Version 2."""
     from x402.encoding import safe_base64_encode
     payload = {
         "x402Version": 2, "scheme": "exact", "network": "base-sepolia",
@@ -239,15 +239,9 @@ def _v2_payload_header(payer="0x" + "e5" * 20):
     return {"X-PAYMENT": safe_base64_encode(json.dumps(payload).encode("utf-8"))}
 
 
-def test_verified_version_comes_from_the_payload(gw):  # noqa: F811
-    """request.state.x402_version is the verified payload's x402Version, not a constant.
-
-    Only v1 payloads are sent today; a payload saying 2 shows the value is read
-    from the request: the state, the settlement label and the audit record say 2.
-    """
+def _paid_request(client, headers, **patches):
+    """Send a paid request; return (request.state.x402_version, new payment_settled records)."""
     from app.x402 import idempotency
-    client, fac, _, _ = gw
-    fac.verify.return_value.payer = "0x" + "e5" * 20
     seen = []
     real = idempotency.record_settlement
 
@@ -255,28 +249,49 @@ def test_verified_version_comes_from_the_payload(gw):  # noqa: F811
         seen.append(request.state.x402_version)
         return real(request, result)
 
-    paid_v2, settled_v2, settled_v1 = (_payments("paid", "2"), _settlements("settled", "2"),
-                                       _settlements("settled", "1"))
     start = len(_audit_events())
     with patch("app.x402.idempotency.record_settlement", side_effect=spy):
-        r = client.post("/api/v1/stamps/", headers=_v2_payload_header())
+        if patches:
+            with patch("app.x402.dependency.payment_version_label", **patches):
+                r = client.post("/api/v1/stamps/", headers=headers)
+        else:
+            r = client.post("/api/v1/stamps/", headers=headers)
     assert r.status_code == 200, r.text
-    assert seen == [2]
-    assert _payments("paid", "2") == paid_v2 + 1
-    assert _settlements("settled", "2") == settled_v2 + 1
-    assert _settlements("settled", "1") == settled_v1
     settled = [e for e in _audit_events()[start:] if e["event_type"] == "payment_settled"]
-    assert [e["data"]["x402_version"] for e in settled] == [2]
-    # The facilitator was asked to verify and settle that same version.
-    assert fac.verify.await_args.kwargs["payment"].x402_version == 2
+    return seen, settled
 
 
-def test_v1_payload_is_still_version_1(gw):  # noqa: F811
-    from app.x402 import idempotency
-    client, _, _, _ = gw
-    seen = []
-    real = idempotency.record_settlement
-    with patch("app.x402.idempotency.record_settlement",
-               side_effect=lambda req, res: (seen.append(req.state.x402_version), real(req, res))):
-        assert client.post("/api/v1/stamps/", headers=X_PAYMENT).status_code == 200
+def test_payload_cannot_claim_another_version(gw):  # noqa: F811
+    """The version is the header the request was dispatched on, not the payload's claim.
+
+    An X-PAYMENT is v1 (D2/D7 in #596): one whose payload says x402Version 2
+    is still labelled and audited as 1.
+    """
+    client, fac, _, _ = gw
+    fac.verify.return_value.payer = "0x" + "e5" * 20
+    paid1, settled1, settled2 = _payments("paid", "1"), _settlements("settled", "1"), _settlements("settled", "2")
+    seen, settled = _paid_request(client, _v2_payload_header())
     assert seen == [1]
+    assert _payments("paid", "1") == paid1 + 1
+    assert _settlements("settled", "1") == settled1 + 1
+    assert _settlements("settled", "2") == settled2
+    assert [e["data"]["x402_version"] for e in settled] == [1]
+
+
+def test_version_follows_the_dispatch_not_a_constant(gw):  # noqa: F811
+    """With the header-derived version made 2, the state, labels and audit say 2."""
+    client, _, _, _ = gw
+    paid2, settled2, settled1 = _payments("paid", "2"), _settlements("settled", "2"), _settlements("settled", "1")
+    seen, settled = _paid_request(client, X_PAYMENT, return_value="2")
+    assert seen == [2]
+    assert _payments("paid", "2") == paid2 + 1
+    assert _settlements("settled", "2") == settled2 + 1
+    assert _settlements("settled", "1") == settled1
+    assert [e["data"]["x402_version"] for e in settled] == [2]
+
+
+def test_v1_payment_is_version_1(gw):  # noqa: F811
+    client, _, _, _ = gw
+    seen, settled = _paid_request(client, X_PAYMENT)
+    assert seen == [1]
+    assert [e["data"]["x402_version"] for e in settled] == [1]

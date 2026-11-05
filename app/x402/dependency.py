@@ -898,12 +898,11 @@ async def require_x402_payment(request: Request) -> None:
         raise refusal(gate_reason)
 
     logger.info(f"x402: Payment verified for payer {verify_response.payer}")
-    # The version of the payment the facilitator just verified: the decoded
-    # payload's own x402Version, which the verify request sent (#601). Read by
-    # the settlement metrics and audit records (payment_headers.paid_version_label);
-    # a value other than 1 or 2 falls back to the request's headers there, so
-    # the label stays bounded.
-    request.state.x402_version = payment_payload.x402_version
+    # The protocol version is the one this request was dispatched on, decided
+    # by its payment header (X-PAYMENT is v1, PAYMENT-SIGNATURE is v2; D2/D7 in
+    # #596), never the x402Version inside the client's payload (#601). Read by
+    # the settlement metrics and audit records (payment_headers.paid_version_label).
+    request.state.x402_version = {"1": 1, "2": 2}.get(version, X402_VERSION)
     x402_payments_total.labels(mode="paid", version=paid_version_label(request)).inc()
 
     # Store payment info on request.state for middleware settlement
