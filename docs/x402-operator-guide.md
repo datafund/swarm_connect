@@ -116,7 +116,23 @@ With 2 enabled:
 - One signed authorization counts once across both versions. Re-wrapping it in the other version's header is refused like any replay. An `Idempotency-Key` result stored for one version is not served to a request paying in the other: it gets 409 `IDEMPOTENCY_KEY_VERSION_MISMATCH`, unpaid.
 - `gateway_x402_settlements_total{version="2"}` exists from startup for every result, so the "x402 settlement problems" alert sees the first v2 problem after a restart.
 
-Switching `PAYMENT-REQUIRED` on switches v2-capable clients to v2, and switching back to `1` moves them back to v1: the header is what they follow. `2` alone shuts out v1 clients (the current CLI). The deploy configuration for this setting is #609; until then set it on the host.
+Switching `PAYMENT-REQUIRED` on switches v2-capable clients to v2, and switching back to `1` moves them back to v1: the header is what they follow. `2` alone shuts out v1 clients (the current CLI).
+
+#### Turning on dual mode in a deployment
+
+`.github/workflows/deploy.yml` writes `X402_PROTOCOL_VERSIONS` into each environment's env file from the GitHub variable of the same name (#609). Unset or empty, it is `1` in both staging and production. Switching takes a variable and a redeploy, nothing else:
+
+1. Rehearse on staging first. Set the variable on the `staging` environment, not on the repository (a repository value would also reach production):
+
+   ```sh
+   gh variable set X402_PROTOCOL_VERSIONS --repo datafund/swarm_connect --env staging --body 1,2
+   ```
+
+2. Redeploy (push to `dev`, or re-run the deploy workflow on `dev`). The deploy check (`python -m app.x402.check_config`) runs the startup check above with the new value, before the running gateway is stopped. If the facilitator does not list v2 `exact` on the network, the run fails with `x402 configuration refused` and the old gateway keeps serving. A value other than `1`, `1,2` or `2` fails it with `x402 configuration check could not run` (a settings error that names `X402_PROTOCOL_VERSIONS`), also before the gateway is touched.
+3. Check `GET /health`: `x402.versions` is `[1, 2]`, and a 402 from a paid route carries `PAYMENT-REQUIRED`.
+4. For production, do the same with `--env production` and a push to `main`.
+
+**Rolling back.** Set the variable back to `1` (`gh variable set X402_PROTOCOL_VERSIONS --repo datafund/swarm_connect --env <environment> --body 1`, or delete the variable) and redeploy. The gateway then advertises and accepts v1 only, and v2 clients move back to v1. With `1` the startup check does not call the facilitator, so this works during a facilitator outage too. Editing the env file on the host and force-recreating the container applies a value at once, but the next deploy writes the GitHub variable's value again: change both, as for any setting.
 
 #### Startup check: the facilitator must settle v2
 
@@ -132,7 +148,7 @@ The check fails closed. Every failure stops startup with a message that begins `
 | `the facilitator's /supported on <host> answered HTTP 401, not a list of payment kinds (a 401 or 403 is an authentication error)` (or any other non-2xx status) | Any answer that is not 2xx, whatever its body: an authentication error (CDP answers 401 without valid credentials), a 404 for a wrong path, a 5xx from a facilitator in trouble. Kinds in a non-2xx body are never trusted. | For 401 or 403, check the credentials; otherwise the facilitator URL and the facilitator's state. |
 | `the facilitator's /supported on <host> answered HTTP 200 with something that is not a list of payment kinds (ValidationError)` (or `JSONDecodeError`, `TypeError`) | A 2xx answer of another shape, such as an HTML page. | Check the facilitator URL. |
 
-**What failing closed costs.** A facilitator outage does not stop a running gateway. But if the gateway restarts (a deploy, a crash, a host reboot) while the facilitator's `/supported` is unreachable, the gateway stays down, free tier and downloads included, until the facilitator answers again. The container restart policy keeps retrying, and the check passes as soon as `/supported` answers. To bring the gateway up during a facilitator outage, set `X402_PROTOCOL_VERSIONS=1` and recreate the container. It then starts without calling `/supported`, advertises and accepts v1 only, and v2 clients move to v1. Set it back to `1,2` once the facilitator answers.
+**What failing closed costs.** A facilitator outage does not stop a running gateway. But if the gateway restarts (a deploy, a crash, a host reboot) while the facilitator's `/supported` is unreachable, the gateway stays down, free tier and downloads included, until the facilitator answers again. The container restart policy keeps retrying, and the check passes as soon as `/supported` answers. To bring the gateway up during a facilitator outage, set `X402_PROTOCOL_VERSIONS=1` and recreate the container (set the GitHub variable to `1` as well and redeploy, or the next deploy brings `1,2` back; see [Turning on dual mode in a deployment](#turning-on-dual-mode-in-a-deployment)). It then starts without calling `/supported`, advertises and accepts v1 only, and v2 clients move to v1. Set it back to `1,2` once the facilitator answers.
 
 Whatever the setting, an `X-PAYMENT` whose payload claims an `x402Version` other than 1 is refused with 400 `PAYMENT_HEADER_INVALID` before the facilitator (#639).
 

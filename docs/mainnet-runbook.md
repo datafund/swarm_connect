@@ -14,7 +14,7 @@ Do these in order. Rehearse on staging first, with the same settings and a tiny 
 |---|---|---|
 | 1 | **Pay-to address** | A new mainnet address you control. Ideally cold or multisig, and not shared with staging. It needs no ETH: the facilitator pays settlement gas. Set `X402_PAY_TO_ADDRESS`. |
 | 2 | **Network** | `X402_NETWORK=base` (or its CAIP-2 id `eip155:8453`, which behaves identically). The gateway refuses to start with an unknown network name. Change it **in the same deploy** as items 1 and 3: see [Items 1–3 change in one deploy](#items-13-change-in-one-deploy). |
-| 3 | **Facilitator** | x402.org serves test networks only. Configure a mainnet facilitator: CDP credentials (`X402_FACILITATOR_CDP_API_KEY_ID` / `_SECRET` as GitHub **secrets**), or `X402_FACILITATOR_URL` plus `X402_FACILITATOR_BEARER_TOKEN`. The facilitator URL setting (`X402_FACILITATOR_URL`) must be empty or exactly `https://api.cdp.coinbase.com/platform/v2/x402` when CDP credentials are set (#527): `cdp-sdk` signs each token for `/platform/v2/x402/verify` or `/settle`, and the gateway calls `{url}/verify` and `{url}/settle`, so the bare host `https://api.cdp.coinbase.com` or any other path would fail every payment. The gateway refuses to start, and the deploy-time check refuses, with any other value. `cdp-sdk` is pinned in `requirements.lock`, so the image has it. First confirm the facilitator accepts the gateway's x402 protocol version (see the x402 version decision). For CDP this is still open: CDP's facilitator route is x402 v2 and the gateway speaks x402 v1 (`x402==1.0.0`). With `cdp-sdk` installed the gateway starts and the deploy-time check passes, but that does not show CDP settles v1 payments; see #524. |
+| 3 | **Facilitator** | x402.org serves test networks only. Configure a mainnet facilitator: CDP credentials (`X402_FACILITATOR_CDP_API_KEY_ID` / `_SECRET` as GitHub **secrets**), or `X402_FACILITATOR_URL` plus `X402_FACILITATOR_BEARER_TOKEN`. The facilitator URL setting (`X402_FACILITATOR_URL`) must be empty or exactly `https://api.cdp.coinbase.com/platform/v2/x402` when CDP credentials are set (#527): `cdp-sdk` signs each token for `/platform/v2/x402/verify` or `/settle`, and the gateway calls `{url}/verify` and `{url}/settle`, so the bare host `https://api.cdp.coinbase.com` or any other path would fail every payment. The gateway refuses to start, and the deploy-time check refuses, with any other value. `cdp-sdk` is pinned in `requirements.lock`, so the image has it. First confirm the facilitator accepts the gateway's x402 protocol version (see the x402 version decision). For CDP this is still open: CDP's facilitator route is x402 v2 and the gateway speaks x402 v1 (`x402==1.0.0`). With `cdp-sdk` installed the gateway starts and the deploy-time check passes, but that does not show CDP settles v1 payments; see #524. The gateway can also accept x402 v2 (`X402_PROTOCOL_VERSIONS=1,2`); see [x402 v2 (dual mode)](#x402-v2-dual-mode). |
 | 4 | **Pricing** | Set `X402_BZZ_USD_RATE` to a reviewed value, and check `X402_MARKUP_PERCENT` and `X402_MIN_PRICE_USD`. Set `X402_BZZ_PRICE_FEED_URL` so drift is alerted *(requires #410)*. |
 | 5 | **Spend ceilings** | Set `GATEWAY_DAILY_BZZ_CEILING` and `GATEWAY_DAILY_BZZ_FREE_CEILING` to what the Bee wallet can afford per day *(requires #408)*. |
 | 6 | **Free tier** | Decide whether it stays on (`X402_FREE_TIER_ENABLED`) and at what rate (`X402_FREE_TIER_RATE_LIMIT`). It is bounded by the free ceiling. |
@@ -41,6 +41,7 @@ Set every row below **before** the deploy that ships the cutover. Then deploy on
 | `X402_FACILITATOR_CDP_API_KEY_ID` | **secret** (`secrets.*`) | production | `<CDP API key id>` (CDP route only) | empty |
 | `X402_FACILITATOR_CDP_API_KEY_SECRET` | **secret** (`secrets.*`) | production | `<CDP API key secret>` on one line (CDP route only) | empty |
 | `X402_FACILITATOR_BEARER_TOKEN` | **secret** (`secrets.*`) | production | `<bearer token>` (bearer route only; leave empty with CDP) | empty |
+| `X402_PROTOCOL_VERSIONS` | variable (`vars.*`) | production | leave unset (`1`) unless dual mode is decided; see [x402 v2 (dual mode)](#x402-v2-dual-mode) | `1` in both environments |
 
 Use **one** credential route: the two CDP secrets, or the bearer token. Do not use both. Set these settings on the `production` **environment**, not on the repository: an environment value overrides a repository value of the same name, and a repository value would also reach staging. For the staging rehearsal, set the same names on the `staging` environment.
 
@@ -58,6 +59,21 @@ gh secret set X402_FACILITATOR_BEARER_TOKEN --repo datafund/swarm_connect --env 
 - **Without the check (deploys before #485, or a container recreated by hand):** the new container is created, refuses to start, and restarts in a loop. The `deploy` run fails at `wait for healthy`. `Refusing to start with x402 enabled: …` appears in the container log (`docker compose logs provenance_gateway`) and in the log tail of the failed step. The gateway is down until a good configuration is deployed.
 
 **Recovering from a refused deploy.** Fix the GitHub variables and secrets, then re-run the deploy, or push again to `main`. Until then, **do not recreate the gateway by hand** (`docker compose up -d --force-recreate`, or `up -d` after a change): the deploy has already rewritten `/opt/swarm_connect.env` with the refused values, and a recreated container would read them and fail to start. `docker restart` and a host reboot keep the old values, because Docker reads `env_file` only when it creates a container.
+
+### x402 v2 (dual mode)
+
+`X402_PROTOCOL_VERSIONS` is a GitHub variable like the ones above (#609). Unset or empty, the deploy writes `1`: the gateway accepts and advertises x402 v1 only, exactly as before v2 existed. To turn on dual mode, set it to `1,2` on the environment and redeploy; nothing else is needed:
+
+```sh
+gh variable set X402_PROTOCOL_VERSIONS --repo datafund/swarm_connect --env staging --body 1,2      # rehearse first
+gh variable set X402_PROTOCOL_VERSIONS --repo datafund/swarm_connect --env production --body 1,2
+```
+
+With 2 enabled, the startup check calls the facilitator's `GET /supported` and refuses to start unless it lists `x402Version` 2, scheme `exact` on the configured network (`eip155:8453` for `base`). The deploy check runs it too, so a facilitator without v2 fails the deploy with `x402 configuration refused` before the running gateway is stopped, and a malformed value fails it with `x402 configuration check could not run`. Details and messages: [x402-operator-guide.md](x402-operator-guide.md#startup-check-the-facilitator-must-settle-v2).
+
+**Rolling back:** set the variable to `1` (or delete it) and redeploy. With `1` the facilitator is not called at startup, so the rollback also works while the facilitator is down. Do not change only the host env file: the next deploy writes the variable's value again.
+
+Keep it out of the cutover deploy (items 1–3): switch it in a deploy of its own, after rehearsing `1,2` on staging. A refused production deploy then has one cause, and rolling back to `1` does not touch the cutover settings.
 
 ## 2. Stopping traffic fast (kill switch)
 
