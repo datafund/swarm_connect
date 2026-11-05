@@ -41,7 +41,7 @@ from app.core.config import settings
 from app.core.client_ip import get_client_ip
 from app.x402.audit import log_payment_failed, log_payment_settled
 from app.x402.networks import to_v1
-from app.x402.payment_headers import paid_version_label
+from app.x402.payment_headers import paid_version, paid_version_label
 from app.services.metrics import x402_settlements_total
 
 logger = logging.getLogger(__name__)
@@ -802,7 +802,7 @@ def settlement_interrupted(request: Request, kind: str, exc: BaseException) -> N
         log_payment_failed(client_ip=get_client_ip(request),
                            reason=f"settlement interrupted ({type(exc).__name__})", stage="settle",
                            wallet_address=getattr(request.state, "x402_payer", None),
-                           nonce=request_nonce(request))
+                           nonce=request_nonce(request), x402_version=paid_version(request))
         x402_settlements_total.labels(result="error", version=paid_version_label(request)).inc()
     except Exception as e:
         logger.error(f"x402: could not record an interrupted settlement: {e}")
@@ -826,7 +826,8 @@ def settlement_in_progress_refusal(auth_key: Tuple[str, str], request: Optional[
         log_payment_failed(
             client_ip=get_client_ip(request) if request is not None else None,
             reason="409 PAYMENT_SETTLEMENT_IN_PROGRESS: a duplicate of a payment being settled",
-            stage="duplicate_in_progress", wallet_address=auth_key[0], nonce=auth_key[1])
+            stage="duplicate_in_progress", wallet_address=auth_key[0], nonce=auth_key[1],
+            x402_version=paid_version(request))
     except Exception as e:
         logger.error(f"x402: could not audit a duplicate payment: {e}")
     return HTTPException(
@@ -868,7 +869,8 @@ def outcome_unknown_refusal(auth_key: Tuple[str, str], reason: Optional[str] = N
             client_ip=get_client_ip(request) if request is not None else None,
             reason=f"409 PAYMENT_AUTHORIZATION_OUTCOME_UNKNOWN at {where}"
                    + (f" ({reason})" if reason else ""),
-            stage="outcome_unknown_retry", wallet_address=auth_key[0], nonce=auth_key[1])
+            stage="outcome_unknown_retry", wallet_address=auth_key[0], nonce=auth_key[1],
+            x402_version=paid_version(request))
     except Exception as e:
         logger.error(f"x402: could not audit an outcome-unknown retry: {e}")
     detail = {
@@ -972,7 +974,8 @@ async def settle_payment(request: Request) -> None:
         outcome_unknown.release(auth_key)    # an unknown outcome now, no longer in flight
         logger.error(f"x402: settlement error before delivery: {type(e).__name__}: {e}", exc_info=True)
         log_payment_failed(client_ip=client_ip, reason=f"{type(e).__name__}: {e}",
-                           stage="settle", wallet_address=payer, nonce=request_nonce(request))
+                           stage="settle", wallet_address=payer, nonce=request_nonce(request),
+                           x402_version=paid_version(request))
         x402_settlements_total.labels(result="error", version=paid_version_label(request)).inc()
         # The write-ahead entry (BEFORE_WORK, on disk) is the record: no write here.
         raise HTTPException(status_code=502, detail=settlement_unavailable_detail(request),
@@ -997,14 +1000,14 @@ async def settle_payment(request: Request) -> None:
                            f"earlier settlement outcome is unknown")
             log_payment_settled(client_ip=client_ip, payer=payer, transaction_hash=None,
                                 network=to_v1(settings.X402_NETWORK), success=False, error_reason=reason,
-                                nonce=request_nonce(request))
+                                nonce=request_nonce(request), x402_version=paid_version(request))
             x402_settlements_total.labels(result="refused_after_unknown", version=paid_version_label(request)).inc()
             outcome_unknown.release(auth_key)    # nothing to resolve: the entry stays
             raise outcome_unknown_refusal(auth_key, reason, where="settle", request=request)
         logger.warning(f"x402: settlement refused before delivery: {reason}")
         log_payment_settled(client_ip=client_ip, payer=payer, transaction_hash=None,
                             network=to_v1(settings.X402_NETWORK), success=False, error_reason=reason,
-                            nonce=request_nonce(request))
+                            nonce=request_nonce(request), x402_version=paid_version(request))
         x402_settlements_total.labels(result="refused", version=paid_version_label(request)).inc()
         # Last: a cancellation while the removal is written loses no record.
         await outcome_unknown.aresolve(auth_key, None, settled=False, gen=gen, release=True)
@@ -1039,7 +1042,8 @@ async def settle_payment(request: Request) -> None:
     tx = getattr(result, "transaction", None)
     logger.info(f"x402: payment settled before delivery, tx={tx}")
     log_payment_settled(client_ip=client_ip, payer=payer, transaction_hash=tx,
-                        network=to_v1(settings.X402_NETWORK), success=True, nonce=request_nonce(request))
+                        network=to_v1(settings.X402_NETWORK), success=True, nonce=request_nonce(request),
+                        x402_version=paid_version(request))
     x402_settlements_total.labels(result="settled", version=paid_version_label(request)).inc()
     # Last: the transfer happened once, by this attempt, so the write-ahead
     # entry goes. Records above come first, so a cancellation while this is

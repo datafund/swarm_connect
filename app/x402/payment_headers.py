@@ -64,13 +64,31 @@ def payment_version_label(versions) -> str:
 
 
 def paid_version_label(request) -> str:
-    """The `version` label of a verified payment's settlement (#601).
+    """The x402 version of the payment a request carries, as "1" or "2" (#601).
 
-    The dependency records the version of a verified payment on the request.
-    Only v1 is verified until v2 is enabled (#609), so that is the default.
+    For settlement metrics and payment audit records. The dependency records
+    the version of a verified payment on the request (request.state.x402_version).
+    Before that (a refusal during verification) it is read from the request's
+    payment headers. "1" when neither says, including without a request: only
+    v1 reaches verify or settle until v2 is enabled (#609).
     """
     version = getattr(getattr(request, "state", None), "x402_version", None)
-    return "2" if version == 2 else "1"
+    if version in (1, 2):
+        return str(version)
+    headers = getattr(request, "headers", None)
+    if headers is not None:
+        try:
+            label = payment_version_label(offered_payment_versions(headers))
+        except Exception:
+            label = "none"
+        if label != "none":
+            return label
+    return "1"
+
+
+def paid_version(request) -> int:
+    """paid_version_label as the int written to audit records' data.x402_version."""
+    return int(paid_version_label(request))
 
 
 def offers_payment(headers) -> bool:

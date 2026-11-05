@@ -12,7 +12,7 @@ import secrets
 from app.x402.settlement import settle_payment
 from app.core.config import settings
 from app.x402.networks import to_v1
-from app.x402.payment_headers import paid_version_label
+from app.x402.payment_headers import paid_version
 from app.services import swarm_api
 from app.services.bee_errors import error_cause, public_bee_text
 from app.services.http_client import exc_text
@@ -679,7 +679,7 @@ def _purchase_pending(request: Request, label: str, depth: int, amount: int,
                            reason=f"stamp purchase pending but not followed up ({type(e).__name__}); "
                                   f"a batch may exist on-chain; label={label}; tx={tx}",
                            stage="delivery_after_settlement", wallet_address=payer,
-                           nonce=request_nonce(request))
+                           nonce=request_nonce(request), x402_version=paid_version(request))
         if purchase is not None:
             purchase.add_done_callback(lambda t: t.cancelled() or t.exception())
     return JSONResponse(status_code=status.HTTP_202_ACCEPTED, content={
@@ -732,7 +732,7 @@ async def _finish_pending_purchase(request: Request, label: str, depth: int, amo
         log_payment_failed(client_ip=client_ip,
                            reason=f"stamp purchase after settlement: {why}; label={label}; tx={tx}",
                            stage="delivery_after_settlement", wallet_address=payer,
-                           nonce=request_nonce(request))
+                           nonce=request_nonce(request), x402_version=paid_version(request))
         # A retry with the key is told the final outcome, not "pending" for 24 h.
         resolve_idempotent_result(idem, status.HTTP_500_INTERNAL_SERVER_ERROR, json.dumps({
             "code": "DELIVERY_FAILED_AFTER_PAYMENT",
@@ -823,7 +823,7 @@ async def _finish_pending_purchase(request: Request, label: str, depth: int, amo
                         data={"transaction_hash": tx, "method": "POST", "path": request.url.path,
                               "network": to_v1(settings.X402_NETWORK), "resource": {"batchID": batch_id},
                               "late": True, "nonce": request_nonce(request),
-                              "x402_version": int(paid_version_label(request))})
+                              "x402_version": paid_version(request)})
         # Estimated from the amount funded at today's price (#383), like the
         # 201 answered in time; None when the price cannot be read in time
         # (#468). The 201 is stored for the Idempotency-Key in `finally`, so a

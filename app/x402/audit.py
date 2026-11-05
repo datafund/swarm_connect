@@ -34,9 +34,11 @@ from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
-# The x402 version of every payment that reaches verify or settle, so of every
-# payment_settled, payment_failed and payment_delivered record (#601). Only v1
-# is verified until v2 is enabled (#609); v2 requests are refused before.
+# The default x402 version of payment_settled and payment_failed records (#601).
+# Every gateway call site passes the request's version
+# (payment_headers.paid_version); this default applies only to a direct call
+# without one, such as a script or test. Only v1 reaches verify or settle until
+# v2 is enabled (#609).
 PAID_X402_VERSION = 1
 
 
