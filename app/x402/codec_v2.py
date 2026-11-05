@@ -18,7 +18,11 @@ Decoding is strict, in this order, and stops at the first failure:
    must be an object (PaymentHeaderMalformed). Duplicate keys are refused so the
    gateway and a facilitator can never read one header two ways. A string
    holding a lone surrogate (a JSON escape such as \\ud800) is refused too:
-   it decodes, but the model could then not be encoded back to UTF-8;
+   it decodes, but the model could then not be encoded back to UTF-8. So is
+   a number too large for a float (1e400 reads as infinity) and nesting deeper
+   than MAX_JSON_DEPTH (32) levels. Together these keep the invariant that every
+   model that decodes can be encoded again without any error other than
+   X402HeaderError;
 4. x402Version, when present, must be 2 (PaymentHeaderVersionMismatch);
 5. the v2 model (PaymentHeaderInvalid).
 
@@ -52,6 +56,14 @@ from app.x402.payment_headers import PAYMENT_SIGNATURE_HEADER
 PAYMENT_REQUIRED_HEADER = "PAYMENT-REQUIRED"
 PAYMENT_RESPONSE_HEADER = "PAYMENT-RESPONSE"
 MAX_HEADER_CHARS = 8192
+# Deepest nesting of objects and arrays a decoded header may have, the top-level
+# object counting as 1. The real shapes are shallow: the deepest fixed path is
+# PAYMENT-SIGNATURE payload.authorization.from (depth 3), and free-form
+# `extra` / `extensions` values seen from facilitators (bazaar, gas-sponsoring
+# data, small JSON schemas) stay under 10. 32 leaves room for those, and is far
+# below pydantic's serialiser limit (it fails on a few hundred levels with
+# "depth exceeded"), so every model that decodes can be encoded again.
+MAX_JSON_DEPTH = 32
 
 M = TypeVar("M", bound=BaseModel)
 
@@ -133,6 +145,30 @@ def _no_constants(_name):
     raise ValueError("NaN or Infinity")
 
 
+def _finite_float(text):
+    # "1e400" parses to inf without going through parse_constant, and an
+    # infinite float cannot be written back as JSON.
+    value = float(text)
+    if value != value or value in (float("inf"), float("-inf")):
+        raise ValueError("non-finite number")
+    return value
+
+
+def _depth(obj) -> int:
+    """Nesting depth of objects and arrays (the outer container is 1), iteratively."""
+    deepest = 0
+    stack = [(obj, 1)]
+    while stack:
+        node, level = stack.pop()
+        if isinstance(node, (dict, list)):
+            deepest = max(deepest, level)
+            if level > MAX_JSON_DEPTH:
+                break
+            children = node.values() if isinstance(node, dict) else node
+            stack.extend((child, level + 1) for child in children)
+    return deepest
+
+
 def _decode_json_object(value: Any, header_name: str) -> dict:
     # Each step records its failure and raises after the except block, so the
     # error has no __cause__ and no __context__: a chained binascii, json or
@@ -156,11 +192,16 @@ def _decode_json_object(value: Any, header_name: str) -> dict:
             failure = "is not base64 of UTF-8 text"
     if failure is None:
         try:
-            obj = json.loads(text, object_pairs_hook=_no_duplicates, parse_constant=_no_constants)
+            obj = json.loads(text, object_pairs_hook=_no_duplicates, parse_constant=_no_constants,
+                             parse_float=_finite_float)
         except (ValueError, RecursionError):
             failure = "is not base64 of valid JSON"
     if failure is None and not isinstance(obj, dict):
         failure = "is not base64 of a JSON object"
+    if failure is None and _depth(obj) > MAX_JSON_DEPTH:
+        # Deeper input decodes, but pydantic's serialiser refuses it later
+        # with a bare error, so #607 could not re-encode the payment.
+        failure = f"nests objects and arrays deeper than {MAX_JSON_DEPTH} levels"
     if failure is None and not _encodable(obj):
         # A JSON escape such as "\ud800" decodes to a lone surrogate, which
         # no UTF-8 encoder can write back: the model could not be re-encoded.
