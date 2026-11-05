@@ -27,17 +27,22 @@ jobs:
           # one against the lock, so it can speed up the install but never
           # change it. Keyed on the lock so a lock bump gets a fresh key.
           cache: pip
-          cache-dependency-path: requirements.lock
+          cache-dependency-path: |
+            requirements.lock
+            requirements-dev.lock
       - name: install (locked)
-        # Test exactly what the image ships (#523): the same command as the
-        # Dockerfile. requirements.txt only sets floors, so installing it here
-        # would test whatever resolves today, not the pinned set.
-        # --no-deps: the lock is complete, and without it pip treats an extra
+        # Test exactly what the image ships (#523): the image's runtime lock,
+        # with the Dockerfile's flags, plus the test-only packages from
+        # requirements-dev.lock, which the image does not install (#430).
+        # requirements.txt only sets floors, so installing it here would test
+        # whatever resolves today, not the pinned set.
+        # --no-deps: the locks are complete, and without it pip treats an extra
         # (x402 -> fastapi[standard]) as a new unpinned requirement and refuses
-        # the install in --require-hashes mode.
-        run: python -m pip install --no-deps --require-hashes -r requirements.lock
+        # the install in --require-hashes mode. The dev lock is compiled with
+        # -c requirements.lock, so a package in both locks has the same pin.
+        run: python -m pip install --no-deps --require-hashes -r requirements.lock -r requirements-dev.lock
       - name: pip check
-        # Fails CI if the lock misses a dependency or pins a conflicting one,
+        # Fails CI if a lock misses a dependency or pins a conflicting one,
         # as the image build would.
         run: python -m pip check
       - name: pytest
@@ -45,3 +50,28 @@ jobs:
           # Required by Settings; tests never reach it.
           SWARM_BEE_API_URL: http://localhost:1
         run: python -m pytest -q
+
+  lock-sync:
+    # Fails when requirements.lock or requirements-dev.lock no longer matches
+    # the file it is compiled from (#430): someone edited requirements.txt or
+    # requirements-dev.txt and did not regenerate. The script reruns the
+    # command in each lock's header on a copy and diffs; see its header for
+    # what it catches. uv is pinned: another version can format a lock
+    # differently, and the script refuses anything but 0.11.x.
+    # Pull requests only: the check needs PyPI, and a pinned version that later
+    # gains a wheel changes its hash list, so a deploy (deploy.yml calls this
+    # workflow on push) must not fail on it. A lock that passed on its pull
+    # request is merged unchanged.
+    if: github.event_name == 'pull_request'
+    name: lock-sync
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: install uv (pinned)
+        run: python -m pip install "uv==0.11.17"
+      - name: locks match their inputs
+        run: scripts/check_lock_sync.sh
