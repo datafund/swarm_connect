@@ -195,13 +195,37 @@ class RecordingBackend:
 class PassThroughBackend(RecordingBackend):
     """httpcore's own connect path, unchanged (no task, no shield), as the
     gateway runs it; it only keeps the streams that connects return, for
-    teardown. A connect cancelled before it returns is closed by the backend
-    itself."""
+    teardown. A socket made by a connect that was cancelled before it returned
+    never reaches this backend and is not closed by httpcore2 either: only the
+    garbage collector closes it (close_recording_client collects; the load
+    test counts the ResourceWarnings; #629)."""
 
     async def connect_tcp(self, *args, **kwargs):
         stream = await self._inner.connect_tcp(*args, **kwargs)
         self.streams.append(stream)
         return stream
+
+
+class UnclosedResourceCounter:
+    """Counts the ResourceWarnings for unclosed sockets and transports raised
+    while it is active, so the load test reports them rather than leaving them
+    to the garbage collector unseen (#629). Other warnings pass through."""
+
+    def __enter__(self):
+        self._cm = warnings.catch_warnings(record=True)
+        self._caught = self._cm.__enter__()
+        warnings.simplefilter("always", ResourceWarning)
+        return self
+
+    def __exit__(self, *exc):
+        self._cm.__exit__(*exc)
+        self.count = 0
+        for w in self._caught:
+            if issubclass(w.category, ResourceWarning) and "unclosed" in str(w.message):
+                self.count += 1
+            else:
+                warnings.warn_explicit(w.message, w.category, w.filename, w.lineno)
+        return False
 
 
 def recording_client(lib, backend=RecordingBackend, **kwargs):
@@ -313,7 +337,7 @@ class TestReproduction:
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("lib, core, load_seconds", LIBRARIES)
-    async def test_bee_errors_and_cancellations_under_load(self, bee, record_property,
+    async def test_bee_errors_and_cancellations_under_load(self, bee, record_property, capsys,
                                                            lib, core, load_seconds):
         """Load: 500s, dropped connections, and three kinds of cancellation.
 
@@ -325,6 +349,7 @@ class TestReproduction:
         # stuck on httpcore2 under anyio cancel scopes (up to 3 of 4 slots,
         # most runs); none on the pass-through path. Tracked in #629.
         backend = PassThroughBackend if known_fixed(core) else RecordingBackend
+        unclosed = UnclosedResourceCounter().__enter__()
         client = recording_client(lib, backend, limits=lib.Limits(max_connections=max_connections),
                                   timeout=lib.Timeout(10.0, connect=5.0, pool=0.5))
         rng = random.Random(5870)
@@ -388,7 +413,16 @@ class TestReproduction:
                                   f"{core.__name__} {core.__version__} may have fixed the leak")
                 assert (await client.get(bee.url("/ok"))).status_code == 200
         finally:
-            await close_recording_client(client)
+            try:
+                await close_recording_client(client)  # collects garbage, so the warnings are raised here
+            finally:
+                unclosed.__exit__(None, None, None)
+                # Reported, not failed: sockets of cancelled connects that only
+                # the garbage collector closed (#629).
+                record_property("httpcore_587_load_unclosed_resources", unclosed.count)
+                with capsys.disabled():
+                    print(f"\n{core.__name__} {core.__version__} load test: {unclosed.count} unclosed "
+                          f"sockets/transports closed only by the garbage collector (#629)")
 
 
 # --------------------------------------------------------------------------
