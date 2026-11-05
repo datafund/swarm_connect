@@ -793,3 +793,21 @@ def test_unencodable_receipt_still_delivers_without_the_header(gw):
     assert r.status_code == 200, r.text
     assert "PAYMENT-RESPONSE" not in r.headers and "X-PAYMENT-RESPONSE" not in r.headers
     assert r.headers["X-Payment-Transaction"] == "0x" + "ab" * 4600
+
+
+def test_v2_verify_5xx_saying_valid_gets_502_and_nothing_runs(gw):
+    client, fac = gw("1,2")
+    offer = _offer(client)
+    real = fac.handler
+
+    def handler(request):
+        if request.url.path.endswith("/verify"):
+            fac.calls.append({"path": "verify", "body": json.loads(request.content)})
+            return httpx.Response(500, json={"isValid": True, "payer": PAYER})
+        return real(request)
+    fac.handler = handler
+    client2 = FacilitatorClient({"url": URL}, transport=httpx.MockTransport(handler))
+    with patch("app.x402.dependency._get_facilitator_client", return_value=client2):
+        r = client.post("/api/v1/stamps/", headers=pay(2, offer))
+    assert r.status_code == 502, r.text
+    assert fac.paths() == ["verify"] and v2h.RAN == []
