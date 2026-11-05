@@ -48,6 +48,8 @@ EXPECTED_SERIES = (
     + ["gateway_top_callers_distinct", "gateway_top_callers_untracked_total"]
     # Paid requests refused before payment while payments are unavailable (#589)
     + ['gateway_x402_payments_total{mode="unavailable"}']
+    # Payment headers refused before payment: v2 before it is enabled, and both versions at once (#600)
+    + [f'gateway_x402_payments_total{{mode="{m}"}}' for m in ("version_unsupported", "header_conflict")]
 )
 
 

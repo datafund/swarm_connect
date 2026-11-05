@@ -33,7 +33,8 @@ logger = logging.getLogger(__name__)
 
 # x402 protocol constants
 X402_VERSION = 1
-X_PAYMENT_HEADER = "X-PAYMENT"
+# One definition, with the v2 header, in app/x402/payment_headers.py (#600).
+from app.x402.payment_headers import X_PAYMENT_HEADER  # noqa: E402
 X_PAYMENT_RESPONSE_HEADER = "X-PAYMENT-RESPONSE"
 X_PAYMENT_MODE_HEADER = "X-Payment-Mode"
 

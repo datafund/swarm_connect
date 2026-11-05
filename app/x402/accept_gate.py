@@ -80,6 +80,8 @@ def is_retry_of_possibly_charged(request) -> bool:
     - reserved, unexpired, in the replay guard (409, or 402 "already used");
     or an Idempotency-Key with a stored entry for that authorization's payer
     on this route (a replay or a 409).
+    Only X-PAYMENT is read: a PAYMENT-SIGNATURE (x402 v2) payment is not
+    accepted yet, so no earlier attempt with one can have been charged (#600).
 
     Not exempt: a BEFORE_WORK authorization. Its retry is settled again by
     settle_payment, which could settle it for the first time while payments

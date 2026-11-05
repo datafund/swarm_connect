@@ -465,6 +465,19 @@ class TestAdmission:
         assert sample(bee_call_rejections_total, lane="admission") == before + 1
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("headers", [
+        {"PAYMENT-SIGNATURE": "e30="},
+        {"payment-signature": ""},
+        {"X-PAYMENT": "e30=", "PAYMENT-SIGNATURE": "e30="},
+    ], ids=["v2", "v2-lowercase-empty", "both"])
+    async def test_v2_payment_header_counts_as_a_payment(self, gate_client, monkeypatch, headers):
+        """PAYMENT-SIGNATURE (x402 v2) offers a payment as X-PAYMENT does (#600):
+        refused up front when full, like a v1 payment."""
+        monkeypatch.setattr(settings, "X402_ENABLED", True)
+        _fill_request_slots()
+        assert_bee_busy(await gate_client.post("/api/v1/stamps/", headers=headers))
+
+    @pytest.mark.asyncio
     async def test_unpaid_request_to_a_paid_route_is_not_refused_up_front(self, gate_client, monkeypatch):
         """It cannot be charged, so it gets its own answer (here the handler's)."""
         monkeypatch.setattr(settings, "X402_ENABLED", True)
