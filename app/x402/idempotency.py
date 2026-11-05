@@ -153,6 +153,16 @@ def _stored_transaction(entry: dict) -> Optional[str]:
     return valid_transaction(entry.get("transaction"))
 
 
+def _stored_version(entry: dict) -> Optional[int]:
+    """The x402 version an entry records: 1 when absent, 2 only as the int 2.
+    Any other value (a string, a list, None, 3, a bool, a float) means the
+    entry is damaged: None, answered like an unreadable stored response."""
+    if "version" not in entry:
+        return 1
+    value = entry["version"]
+    return 2 if type(value) is int and value == 2 else None
+
+
 def _sha(value) -> str:
     return hashlib.sha256(json.dumps(value).encode()).hexdigest()
 
@@ -436,8 +446,12 @@ class IdempotencyStore:
                 if entry.get("state") == SETTLING:
                     return SETTLING, entry, None
                 return "original_auth", None, None
-            if entry["state"] == DONE and entry.get("version", 1) != version:
-                return "version_mismatch", entry, None
+            if entry["state"] == DONE:
+                stored = _stored_version(entry)
+                if stored is None:
+                    return "damaged", entry, None
+                if stored != version:
+                    return "version_mismatch", entry, None
             return entry["state"], entry, None
         token = secrets.token_hex(8)
         self._pending[eid] = (request_hash, now + IN_FLIGHT_TIMEOUT_SECONDS, token)
@@ -451,7 +465,7 @@ class IdempotencyStore:
     def _note_version(self, eid: str, previous: Optional[dict] = None) -> None:
         """Record the request's x402 version on its entry (under `_lock`): only
         when 2, so v1 entries are exactly as before (#607)."""
-        if self._versions.get(eid) == 2 or (previous or {}).get("version") == 2:
+        if self._versions.get(eid) == 2 or _stored_version(previous or {}) == 2:
             self._entries[eid]["version"] = 2
 
     def peek(self, eid: str) -> Optional[dict]:
@@ -741,6 +755,20 @@ def _settlement_unknown_409(entry: dict) -> HTTPException:
     })
 
 
+def _damaged_entry_409(entry: dict) -> HTTPException:
+    """A paid, completed entry whose stored response (or version) cannot be used."""
+    logger.error("x402: stored result for an Idempotency-Key is damaged; answering not stored")
+    tx = _stored_transaction(entry) or "unknown"
+    return HTTPException(status_code=409, headers={"X-Payment-Transaction": tx}, detail={
+        "code": "IDEMPOTENCY_KEY_DELIVERED_NOT_STORED",
+        "message": ("The first request with this Idempotency-Key succeeded and was paid once, "
+                    "but its stored response cannot be read. This payment was not charged. "
+                    "Look the result up through the resource itself."),
+        "transaction": tx,
+        "x402_status": "delivered",
+    })
+
+
 async def raise_if_key_settlement_unknown(request: Request, payer: str) -> None:
     """Raise the key's settlement-unknown 409 if this request's Idempotency-Key has one.
 
@@ -789,19 +817,12 @@ async def begin_idempotent_request(request: Request, payer: str,
         replay = _replay_response(entry, payer)
         if replay is not None:
             raise IdempotentReplay(replay)
-        logger.error("x402: stored result for an Idempotency-Key is damaged; answering not stored")
-        tx = _stored_transaction(entry) or "unknown"
-        raise HTTPException(status_code=409, headers={"X-Payment-Transaction": tx}, detail={
-            "code": "IDEMPOTENCY_KEY_DELIVERED_NOT_STORED",
-            "message": ("The first request with this Idempotency-Key succeeded and was paid once, "
-                        "but its stored response cannot be read. This payment was not charged. "
-                        "Look the result up through the resource itself."),
-            "transaction": tx,
-            "x402_status": "delivered",
-        })
+        raise _damaged_entry_409(entry)
+    if state == "damaged":
+        raise _damaged_entry_409(entry)
     if state == "version_mismatch":
         from app.x402.payment_headers import version_enabled
-        original = entry.get("version", 1)
+        original = _stored_version(entry)
         header = "X-PAYMENT" if original == 1 else "PAYMENT-SIGNATURE"
         raise HTTPException(status_code=409, detail={
             "code": "IDEMPOTENCY_KEY_VERSION_MISMATCH",

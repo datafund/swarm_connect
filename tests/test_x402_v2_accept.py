@@ -1236,3 +1236,46 @@ def test_well_formed_signatures_go_on_to_verify(gw, signature):
     r = client.post("/api/v1/stamps/", headers=header_for(2, payload))
     assert r.status_code == 200, r.text
     assert fac.paths() == ["verify", "settle"]
+
+
+# --------------------------------------------------------------------------
+# A stored version is used only if it is absent (1) or the int 2
+# (#645 review round 5)
+# --------------------------------------------------------------------------
+
+@pytest.mark.parametrize("version", VERSIONS)
+@pytest.mark.parametrize("damaged", ["x", [2], None, 3, "EVIL\r\n", "2", True, 2.0])
+def test_damaged_stored_version_gets_not_stored_never_a_mismatch(gw, version, damaged):
+    from app.x402.idempotency import entry_id
+    client, fac = gw("1,2")
+    offer = _offer(client)
+    eid = entry_id(PAYER, "POST", "/api/v1/stamps/", "k-damaged-version")
+    _store_done(eid, transaction=TX, version=damaged)
+    r = _keyed_retry(client, offer, "k-damaged-version", version)
+    assert r.status_code == 409, r.text
+    detail = r.json()["detail"]
+    assert detail["code"] == "IDEMPOTENCY_KEY_DELIVERED_NOT_STORED"
+    assert "original_x402_version" not in detail
+    assert "EVIL" not in r.text and "\r" not in r.text
+    assert "settle" not in fac.paths()
+
+
+@pytest.mark.parametrize("stored,retry,expected", [
+    (None, 1, 201), (None, 2, 409),     # absent: v1
+    (2, 2, 201), (2, 1, 409),
+])
+def test_valid_stored_version(gw, stored, retry, expected):
+    from app.x402.idempotency import entry_id
+    client, fac = gw("1,2")
+    offer = _offer(client)
+    eid = entry_id(PAYER, "POST", "/api/v1/stamps/", "k-valid-version")
+    _store_done(eid, transaction=TX, **({} if stored is None else {"version": stored}))
+    r = _keyed_retry(client, offer, "k-valid-version", retry)
+    assert r.status_code == expected, r.text
+    if expected == 409:
+        detail = r.json()["detail"]
+        assert detail["code"] == "IDEMPOTENCY_KEY_VERSION_MISMATCH"
+        assert detail["original_x402_version"] == (stored or 1)
+        assert detail["original_x402_version_accepted"] is True
+    else:
+        assert r.headers["Idempotent-Replayed"] == "true"
