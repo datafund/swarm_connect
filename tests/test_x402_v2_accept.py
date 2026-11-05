@@ -743,3 +743,141 @@ def test_prune_drops_markers_of_expired_claims(monkeypatch):
     other = idempotency.entry_id(PAYER, "POST", "/api/v1/stamps/", "k-other")
     store.begin(other, "h", "b", version=1)                            # prunes on the way
     assert eid not in store._versions
+
+
+@pytest.mark.parametrize("mode", ["free", "free-tier", "FREE-TIER"])
+@pytest.mark.parametrize("route", [("POST", "/api/v1/stamps/"), v2h.POOL], ids=lambda r: r[1])
+def test_v2_payment_with_free_mode_is_refused_while_payments_are_unavailable(gw, mode, route):
+    """Free mode exempts free-tier requests from the #589 gate; a v2 payment
+    ignores free mode, so it must not be exempted (#645 review)."""
+    client, fac = gw("1,2", free_tier=True)
+    offer = _offer(client)
+    _gate_closed()
+    r = _send(client, route, {**pay(2, offer), "X-Payment-Mode": mode})
+    assert r.status_code == 503, r.text
+    assert r.json()["detail"]["code"] == "PAYMENTS_UNAVAILABLE"
+    assert fac.calls == [] and v2h.RAN == []
+
+
+def test_free_mode_without_a_payment_still_passes_the_closed_gate(gw):
+    client, fac = gw("1,2", free_tier=True)
+    _gate_closed()
+    r = client.post("/api/v1/stamps/", headers={"X-Payment-Mode": "free"})
+    assert r.status_code == 200 and r.json() == {"mode": "free-tier"}
+    assert fac.calls == []
+
+
+# --------------------------------------------------------------------------
+# The v2 receipt is the gateway's, from fixed fields (#645 review)
+# --------------------------------------------------------------------------
+
+@pytest.mark.parametrize("route", [("POST", "/api/v1/stamps/"), FALLBACK], ids=["settle_payment", "fallback"])
+def test_large_facilitator_extra_still_gives_the_result_and_a_receipt(gw, route):
+    client, fac = gw("1,2")
+    offer = _offer(client)
+    fac.settle = {"success": True, "transaction": TX, "network": "eip155:84532", "payer": PAYER,
+                  "amount": "20000", "extra": {"blob": "x" * 9000},
+                  "extensions": {"e": "y" * 100}, "extensionResponses": {"r": {"z": 1}}}
+    r = _send(client, route, pay(2, offer))
+    assert r.status_code == 200, r.text
+    receipt = json.loads(base64.b64decode(r.headers["PAYMENT-RESPONSE"]))
+    assert receipt == {"success": True, "transaction": TX, "network": "eip155:84532", "payer": PAYER,
+                       "amount": "20000"}
+    assert codec_v2.decode_payment_response(r.headers["PAYMENT-RESPONSE"]).success is True
+
+
+def test_receipt_falls_back_to_the_minimal_fields_then_to_none():
+    from app.x402.middleware import encode_payment_response_v2
+    from app.x402.models_v2 import SettleResponseV2
+    big_payer = SettleResponseV2(success=True, transaction=TX, network="eip155:84532", payer="p" * 9000)
+    got = json.loads(base64.b64decode(encode_payment_response_v2(big_payer)))
+    assert got == {"success": True, "transaction": TX, "network": "eip155:84532"}
+    hopeless = SettleResponseV2(success=True, transaction="t" * 9000, network="eip155:84532")
+    assert encode_payment_response_v2(hopeless) is None
+
+
+def test_unencodable_receipt_still_delivers_without_the_header(gw):
+    client, fac = gw("1,2")
+    offer = _offer(client)
+    fac.settle = {"success": True, "transaction": "0x" + "ab" * 4600, "network": "eip155:84532"}
+    r = client.post("/api/v1/stamps/", headers=pay(2, offer))
+    assert r.status_code == 200, r.text
+    assert "PAYMENT-RESPONSE" not in r.headers and "X-PAYMENT-RESPONSE" not in r.headers
+    assert r.headers["X-Payment-Transaction"] == "0x" + "ab" * 4600
+
+
+def test_v2_verify_5xx_saying_valid_gets_502_and_nothing_runs(gw):
+    client, fac = gw("1,2")
+    offer = _offer(client)
+    real = fac.handler
+
+    def handler(request):
+        if request.url.path.endswith("/verify"):
+            fac.calls.append({"path": "verify", "body": json.loads(request.content)})
+            return httpx.Response(500, json={"isValid": True, "payer": PAYER})
+        return real(request)
+    fac.handler = handler
+    client2 = FacilitatorClient({"url": URL}, transport=httpx.MockTransport(handler))
+    with patch("app.x402.dependency._get_facilitator_client", return_value=client2):
+        r = client.post("/api/v1/stamps/", headers=pay(2, offer))
+    assert r.status_code == 502, r.text
+    assert fac.paths() == ["verify"] and v2h.RAN == []
+
+
+# --------------------------------------------------------------------------
+# Hardening: the forwarded resource and the signed authorization (#645 review)
+# --------------------------------------------------------------------------
+
+def test_forwarded_resource_is_the_gateways_own(gw):
+    client, fac = gw("1,2")
+    offer = _offer(client)
+    payload = v2_payload(offer, authorization(offer))
+    payload["resource"] = {"url": "https://evil.example/x", "description": "anything the client says",
+                           "mimeType": "text/html", "serviceName": "Evil"}
+    r = client.post("/api/v1/stamps/", headers=header_for(2, payload))
+    assert r.status_code == 200, r.text
+    for call in fac.calls:
+        assert call["body"]["paymentPayload"]["resource"] == {
+            "url": offer["resource"], "description": offer["description"], "mimeType": offer["mimeType"]}
+
+
+def test_missing_resource_gets_the_gateways_own(gw):
+    client, fac = gw("1,2")
+    offer = _offer(client)
+    payload = v2_payload(offer, authorization(offer))
+    del payload["resource"]
+    assert client.post("/api/v1/stamps/", headers=header_for(2, payload)).status_code == 200
+    assert fac.calls[0]["body"]["paymentPayload"]["resource"]["url"] == offer["resource"]
+
+
+@pytest.mark.parametrize("field,value", [
+    ("to", "0x" + "33" * 20),
+    ("value", "1"),
+    ("value", "020000"),                           # the same number, not the same string
+    ("to", "0x" + "22" * 19 + "2A"),               # another address in mixed case
+])
+def test_authorization_must_pay_the_offer(gw, field, value):
+    client, fac = gw("1,2")
+    offer = _offer(client)
+    auth = dict(authorization(offer), **{field: value})
+    r = client.post("/api/v1/stamps/", headers=header_for(2, v2_payload(offer, auth)))
+    body = _refused_402(r, "PAYMENT_OFFER_MISMATCH")
+    assert body["fields"] == [f"payload.authorization.{field}"]
+    assert value not in body["message"]
+    assert fac.calls == []
+
+
+def test_authorization_to_in_another_letter_case_is_the_same_address(gw, monkeypatch):
+    from eth_utils import to_checksum_address
+    client, fac = gw("1,2")
+    checksummed = to_checksum_address("0x" + "ab" * 20)
+    monkeypatch.setattr(settings, "X402_PAY_TO_ADDRESS", checksummed)
+    offer = _offer(client)
+    for i, to in enumerate((checksummed.lower(), "0x" + checksummed[2:].upper(), checksummed)):
+        auth = dict(authorization(offer, nonce=nonce_hex(f"c{i}")), to=to)
+        r = client.post("/api/v1/stamps/", headers=header_for(2, v2_payload(offer, auth)))
+        assert r.status_code == 200, (to, r.text)
+    bad = checksummed[:2] + checksummed[2:].swapcase()   # mixed case, wrong checksum
+    auth = dict(authorization(offer, nonce=nonce_hex("0f")), to=bad)
+    r = client.post("/api/v1/stamps/", headers=header_for(2, v2_payload(offer, auth)))
+    assert _refused_402(r, "PAYMENT_OFFER_MISMATCH")["fields"] == ["payload.authorization.to"]

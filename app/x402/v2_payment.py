@@ -22,9 +22,17 @@ In this order:
    address in another letter case does not match. A mismatch: 402
    PAYMENT_OFFER_MISMATCH, naming the fields (never their values).
 
-The client's `accepted` is never what is sent on: the requirements sent to
-the facilitator are the gateway's offer, and so is the `accepted` inside the
-forwarded payload (they are equal by step 3).
+4. The signed EIP-3009 authorization must pay the offer: `to` is payTo (the
+   same address; letter case does not matter, but a mixed-case `to` must be
+   a valid EIP-55 checksum) and `value` is the amount, as the same string.
+   A mismatch: 402 PAYMENT_OFFER_MISMATCH naming payload.authorization.to or
+   .value. The facilitator checks this too; refusing here keeps a payment
+   for someone else's offer away from it.
+
+No client-chosen text is sent on: the requirements sent to the facilitator
+are the gateway's offer, and in the forwarded payload `accepted` is that
+offer (equal by step 3) and `resource` is the gateway's own resource for
+the request (URL, description, MIME type).
 
 Every 402 here is raised with the v1 Payment Required body (x402Version 1 and
 the v1 `accepts`), as every other 402 is; with v2 enabled the middleware adds
@@ -36,7 +44,7 @@ from fastapi import HTTPException
 
 from app.x402 import codec_v2
 from app.x402.models_v1 import PaymentRequirements
-from app.x402.models_v2 import PaymentPayloadV2, PaymentRequirementsV2
+from app.x402.models_v2 import PaymentPayloadV2, PaymentRequirementsV2, ResourceInfo
 from app.x402.networks import to_caip2
 from app.x402.payment_headers import PAYMENT_SIGNATURE_HEADER
 
@@ -65,6 +73,34 @@ def offer_mismatches(accepted: PaymentRequirementsV2, offer: PaymentRequirements
     got = accepted.model_dump(mode="json", by_alias=True)
     want = offer.model_dump(mode="json", by_alias=True)
     return [f for f in OFFER_FIELDS if got.get(f) != want.get(f)]
+
+
+def _same_address(got: str, want: str) -> bool:
+    """The same 20-byte address. A mixed-case value must be a valid checksum."""
+    if not isinstance(got, str) or got.lower() != (want or "").lower():
+        return False
+    body = got[2:]
+    if body != body.lower() and body != body.upper():
+        from eth_utils import is_checksum_address
+        return is_checksum_address(got)
+    return True
+
+
+def authorization_mismatches(payment: PaymentPayloadV2, offer: PaymentRequirementsV2) -> List[str]:
+    """Step 4: the fields of the signed authorization that do not pay `offer`."""
+    auth = payment.exact_payload.authorization
+    out = []
+    if not _same_address(auth.to, offer.pay_to):
+        out.append("payload.authorization.to")
+    if auth.value != offer.amount:
+        out.append("payload.authorization.value")
+    return out
+
+
+def gateway_resource(requirements: PaymentRequirements) -> ResourceInfo:
+    """The resource of this request as the gateway describes it."""
+    return ResourceInfo(url=requirements.resource, description=requirements.description,
+                        mime_type=requirements.mime_type)
 
 
 def payment_required_402(requirements: PaymentRequirements, *, code: str, message: str, **fields) -> HTTPException:
@@ -146,4 +182,12 @@ def read_v2_payment(value, requirements: PaymentRequirements) -> Tuple[PaymentPa
                      f"request ({', '.join(mismatched)}). " + NOT_CHARGED
                      + " Sign a payment for the offer as sent."),
             fields=mismatched)
-    return payment.model_copy(update={"accepted": offer}), offer
+    mismatched = authorization_mismatches(payment, offer)
+    if mismatched:
+        raise payment_required_402(
+            requirements, code="PAYMENT_OFFER_MISMATCH",
+            message=("The signed authorization does not pay this gateway's offer for this request "
+                     f"({', '.join(mismatched)}). " + NOT_CHARGED + " Sign a payment for the offer as sent."),
+            fields=mismatched)
+    return payment.model_copy(update={"accepted": offer,
+                                      "resource": gateway_resource(requirements)}), offer

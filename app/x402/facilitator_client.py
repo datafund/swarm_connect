@@ -29,8 +29,10 @@ by_alias and exclude_none, so fields the models do not know are never sent.
 The payload's `extensions` are left out: the gateway offers none, and they are
 facilitator-side switches it never priced. Answers are classified by status
 (ADR open question 3, decided for v2 only; v1 keeps the rule above):
-- verify: any body that parses as VerifyResponseV2 is the answer, whatever
-  the status (no money moves); anything else raises.
+- verify: a 2xx body that parses as VerifyResponseV2 is the answer. A 4xx
+  body that parses with isValid:false is a refusal. Everything else raises
+  (the dependency answers 502): a 5xx, a non-2xx isValid:true, a body that
+  does not parse. A 5xx saying isValid:true is never taken as verified.
 - settle: a 2xx body that parses is the answer. A 4xx body that parses with
   success:false is a definite refusal. Everything else raises, so the
   settlement code counts it as an unknown outcome: a 5xx (a facilitator or
@@ -133,7 +135,7 @@ class FacilitatorClient:
         returns VerifyResponseV2."""
         if isinstance(payment, PaymentPayloadV2):
             response = await self._post_v2("verify", payment, payment_requirements)
-            return VerifyResponseV2.model_validate(response.json())
+            return classify_v2_verify(response.status_code, response.json())
         self._check_v1(payment, payment_requirements)
         data = await self._post("verify", payment, payment_requirements)
         return VerifyResponse(**data)
@@ -175,8 +177,19 @@ def v2_request_body(payment: PaymentPayloadV2, payment_requirements: PaymentRequ
 
 
 class FacilitatorAnswerUnusable(Exception):
-    """A settle answer that is neither a result nor a definite refusal: the
-    outcome is unknown. Never carries the body."""
+    """A verify or settle answer that is neither a result nor a definite
+    refusal (for settle: the outcome is unknown). Never carries the body."""
+
+
+def classify_v2_verify(status: int, data: Any) -> VerifyResponseV2:
+    """The v2 verify answer, or raise FacilitatorAnswerUnusable (the
+    dependency answers 502, nothing charged)."""
+    result = VerifyResponseV2.model_validate(data)
+    if 200 <= status < 300:
+        return result
+    if 400 <= status < 500 and result.is_valid is False:
+        return result
+    raise FacilitatorAnswerUnusable(f"facilitator answered {status} to verify")
 
 
 def classify_v2_settle(status: int, data: Any) -> SettleResponseV2:

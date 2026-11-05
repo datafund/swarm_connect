@@ -205,7 +205,7 @@ def test_not_a_json_object_is_malformed(decode, _name, _msg, raw):
     assert_no_leak(exc.value)
 
 
-def test_deep_nesting_within_the_limit_is_malformed():
+def test_deep_nesting_within_the_size_limit_is_malformed():
     value = base64.b64encode(b"[" * 6000).decode()
     assert len(value) <= MAX_HEADER_CHARS
     with pytest.raises(PaymentHeaderMalformed):
@@ -547,10 +547,35 @@ def test_every_decoded_model_re_encodes_without_a_bare_error(label, kind, value)
     try:
         every_encoding(model, encode)
     except X402HeaderError:
-        pass  # allowed: for example TooLarge if re-encoding grew the header
+        return  # allowed (for example TooLarge if re-encoding grew the header); nothing to round-trip
     # anything else propagates and fails the test
     again = decode(encode(model))
     assert again == model
+
+
+def test_compact_header_whose_floats_grow_on_re_encode_is_too_large_not_a_bare_error():
+    # Compact JSON, so re-encoding cannot shrink it: every 1e15 is written back
+    # as 1000000000000000.0 (5 bytes become 18), pushing it over the limit.
+    def header_with(count):
+        text = json.dumps(payment_msg(extensions={"a": [1e15] * count}), separators=(",", ":"))
+        return base64.b64encode(text.replace("1000000000000000.0", "1e15").encode()).decode()
+
+    count = 1
+    while len(header_with(count + 1)) <= MAX_HEADER_CHARS:
+        count += 1
+    value = header_with(count)
+    assert MAX_HEADER_CHARS - 8 < len(value) <= MAX_HEADER_CHARS
+    raw = base64.b64decode(value)
+    assert b", " not in raw and b": " not in raw  # compact separators: nothing to shrink
+    model = decode_payment_signature(value)
+    assert model.extensions["a"] == [1e15] * count
+    with pytest.raises(PaymentHeaderTooLarge) as exc:
+        encode_payment_signature(model)
+    assert exc.value.code == "PAYMENT_HEADER_TOO_LARGE"
+    # The other serialisations work: only the header encoder has a size limit.
+    model.model_dump_json(by_alias=True, exclude_none=True)
+    json.dumps(model.model_dump(mode="json", by_alias=True, exclude_none=True),
+               ensure_ascii=False, allow_nan=False).encode("utf-8")
 
 
 ADVERSARIAL = {

@@ -3,9 +3,10 @@
 - The request body is {"x402Version": 2, paymentPayload, paymentRequirements},
   dumped by alias without None fields; unknown fields and `extensions` are
   never sent.
-- Answers: verify takes any body that parses; settle takes a 2xx body, a 4xx
-  body with success:false (a definite refusal), and raises for anything else
-  (an unknown outcome): a 5xx, a non-2xx success:true, an unparsable body.
+- Answers: verify takes a 2xx body, or a 4xx body with isValid:false, and
+  raises for anything else; settle takes a 2xx body, a 4xx body with
+  success:false (a definite refusal), and raises for anything else (an
+  unknown outcome): a 5xx, a non-2xx success:true, an unparsable body.
 - v1 and v2 types cannot be mixed.
 """
 import asyncio
@@ -81,11 +82,26 @@ def test_v2_request_body_is_exact(path):
     }
 
 
-def test_verify_returns_the_v2_model_whatever_the_status():
-    for status in (200, 400, 500):
-        stub = Stub(status, {"isValid": False, "invalidReason": "insufficient_funds", "payer": PAYER})
-        got = asyncio.run(_client(stub).verify(payment=_payment(), payment_requirements=REQS))
-        assert isinstance(got, VerifyResponseV2) and got.is_valid is False
+@pytest.mark.parametrize("status,body,valid", [
+    (200, {"isValid": True, "payer": PAYER}, True),
+    (200, {"isValid": False, "invalidReason": "insufficient_funds", "payer": PAYER}, False),
+    (400, {"isValid": False, "invalidReason": "insufficient_funds", "payer": PAYER}, False),
+    (422, {"isValid": False, "invalidReason": "bad"}, False),
+])
+def test_verify_results(status, body, valid):
+    got = asyncio.run(_client(Stub(status, body)).verify(payment=_payment(), payment_requirements=REQS))
+    assert isinstance(got, VerifyResponseV2) and got.is_valid is valid
+
+
+@pytest.mark.parametrize("status,body", [
+    (500, {"isValid": True, "payer": PAYER}),     # never "verified" from a 5xx
+    (503, {"isValid": False, "invalidReason": "x"}),
+    (400, {"isValid": True, "payer": PAYER}),
+    (302, {"isValid": True, "payer": PAYER}),
+])
+def test_verify_unusable_answers_raise(status, body):
+    with pytest.raises(FacilitatorAnswerUnusable):
+        asyncio.run(_client(Stub(status, body)).verify(payment=_payment(), payment_requirements=REQS))
 
 
 def test_verify_unparsable_raises():

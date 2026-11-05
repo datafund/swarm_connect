@@ -391,19 +391,47 @@ def encode_payment_response(settle_response: SettleResponse) -> str:
     return safe_base64_encode(response_json.encode("utf-8"))
 
 
-def encode_payment_response_v2(settlement) -> str:
-    """The PAYMENT-RESPONSE header for an x402 v2 settlement (#607): the
-    gateway's typed SettleResponseV2, encoded by codec_v2. The facilitator
-    client returns that type for a v2 payment; anything else (a stand-in) is
-    read into it first, with the configured network if it names none."""
+# The PAYMENT-RESPONSE fields the gateway passes on from a v2 settle answer.
+# The facilitator's open records (extra, extensions, extensionResponses) are
+# dropped: they are not the client's receipt (@x402/core strips
+# extensionResponses too), and a large one would push the header over
+# codec_v2.MAX_HEADER_CHARS after the money has moved.
+_RECEIPT_FIELDS = ("success", "transaction", "network", "payer", "error_reason", "amount")
+_MINIMAL_RECEIPT_FIELDS = ("success", "transaction", "network")
+
+
+def encode_payment_response_v2(settlement) -> Optional[str]:
+    """The PAYMENT-RESPONSE header for an x402 v2 settlement (#607), or None.
+
+    Built from the gateway's typed SettleResponseV2 with _RECEIPT_FIELDS only,
+    encoded by codec_v2. If that cannot be encoded, a minimal receipt
+    (success, transaction, network); if not even that, None, and the answer
+    goes out without the header (X-Payment-Transaction still names the
+    transaction). Never raises: this runs after settlement, so a failure here
+    must not turn a delivered, paid result into a 500.
+    """
     from app.x402 import codec_v2
     from app.x402.models_v2 import SettleResponseV2
-    if not isinstance(settlement, SettleResponseV2):
-        data = settlement.model_dump(by_alias=True, exclude_none=True)
-        data.setdefault("transaction", "")
-        data["network"] = to_caip2(data.get("network")) or to_caip2(settings.X402_NETWORK)
-        settlement = SettleResponseV2.model_validate(data)
-    return codec_v2.encode_payment_response(settlement)
+    try:
+        if isinstance(settlement, SettleResponseV2):
+            data = settlement.model_dump()
+        else:
+            # A stand-in (tests): read into the v2 shape, with the configured
+            # network if it names none.
+            data = settlement.model_dump()
+            data["transaction"] = data.get("transaction") or ""
+            data["network"] = to_caip2(data.get("network")) or to_caip2(settings.X402_NETWORK)
+    except Exception as e:
+        logger.error(f"x402: v2 settlement could not be read for its receipt: {type(e).__name__}")
+        return None
+    for fields in (_RECEIPT_FIELDS, _MINIMAL_RECEIPT_FIELDS):
+        try:
+            receipt = SettleResponseV2(**{k: data.get(k) for k in fields if data.get(k) is not None})
+            return codec_v2.encode_payment_response(receipt)
+        except Exception as e:
+            logger.error(f"x402: PAYMENT-RESPONSE with {len(fields)} fields could not be encoded "
+                         f"({type(e).__name__}); trying fewer")
+    return None
 
 
 class X402Middleware(BaseHTTPMiddleware):
@@ -697,7 +725,9 @@ class X402Middleware(BaseHTTPMiddleware):
         # The receipt in the header of the request's version only (D4 in #596).
         if paid_version(request) == 2:
             from app.x402.codec_v2 import PAYMENT_RESPONSE_HEADER
-            new_response.headers[PAYMENT_RESPONSE_HEADER] = encode_payment_response_v2(settlement)
+            receipt = encode_payment_response_v2(settlement)
+            if receipt is not None:
+                new_response.headers[PAYMENT_RESPONSE_HEADER] = receipt
         else:
             new_response.headers[X_PAYMENT_RESPONSE_HEADER] = encode_payment_response(settlement)
         new_response.headers["X-Payment-Mode"] = "paid"

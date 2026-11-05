@@ -612,8 +612,12 @@ async def require_x402_payment(request: Request) -> None:
     # stored result or 409 below. Reads memory only: no Bee call.
     # An exempted retry is noted, so that if it still reaches a new settlement
     # (its state changed in the meantime) it is refused below, before that.
+    # A v2 payment (PAYMENT-SIGNATURE, v2 enabled) is paid even with
+    # X-Payment-Mode: free (#607), so free mode never exempts it: otherwise it
+    # would be verified and settled while payments are refused.
     gate_reason = None
-    if not (is_free_tier_opt_in(request) and settings.X402_FREE_TIER_ENABLED):
+    v2_payment = 2 in payment_versions and version_enabled(2)
+    if v2_payment or not (is_free_tier_opt_in(request) and settings.X402_FREE_TIER_ENABLED):
         from app.x402.accept_gate import is_retry_of_possibly_charged, payments_refusal, refusal
         reason = payments_refusal()
         if reason is not None and is_retry_of_possibly_charged(request):
