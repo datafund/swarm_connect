@@ -12,6 +12,7 @@ allowance offer (built here through the middleware).
   base64 JSON (what @x402/core's decodePaymentRequiredHeader does), it is
   the v2 PaymentRequired of the same offers. A 402 without an offer gets none.
 - "1": no PAYMENT-REQUIRED anywhere.
+- "2": the header, and the body is its JSON copy (D10), every other field kept.
 - Too large or not expressible in v2: the 402 goes out without the header,
   counted, never a 500.
 """
@@ -31,7 +32,11 @@ from app.x402 import advertise_v2, codec_v2
 from app.x402.middleware import X402Middleware, create_402_response, create_payment_requirements
 from tests import test_x402_v1_golden as golden
 from tests.test_x402_v1_golden import gateway  # noqa: F401  (fixture)
-from tests.x402_v2_builders import advertised, expected_payment_required
+from tests.test_x402_v2_accept import _offer, gw  # noqa: F401  (gw: fixture)
+from tests.x402_v2_builders import (
+    PAYER, advertised, authorization, expected_payment_required, header_for, nonce_hex, pay,
+    v2_accepted, v2_payload,
+)
 
 # The golden capture's 402s, by name, and whether their body carries an offer.
 WITH_OFFER = ("no_header_stamps", "no_header_extend", "no_header_data", "no_header_manifest",
@@ -203,13 +208,16 @@ def test_create_402_response(monkeypatch, versions):
     monkeypatch.setattr(settings, "X402_PROTOCOL_VERSIONS", versions)
     r = create_402_response(req, "Payment required")
     body = json.loads(r.body)
-    assert body == {"x402Version": 1, "error": "Payment required", "accepts": [req.model_dump(by_alias=True)]}
+    v1_body = {"x402Version": 1, "error": "Payment required", "accepts": [req.model_dump(by_alias=True)]}
     value = r.headers.get("PAYMENT-REQUIRED")
     if versions == "1":
         assert value is None
-    else:
-        got = codec_v2.decode_payment_required(value).model_dump(mode="json", by_alias=True, exclude_none=True)
-        assert got == expected_payment_required(body)
+        assert body == v1_body
+        return
+    got = codec_v2.decode_payment_required(value).model_dump(mode="json", by_alias=True, exclude_none=True)
+    assert got == expected_payment_required(v1_body)
+    # "1,2": the v1 body (D2); "2": its v2 copy (D10).
+    assert body == (v1_body if versions == "1,2" else got)
 
 
 # --- the fallback: too large, or not expressible in v2 ----------------------
@@ -290,3 +298,112 @@ def test_failure_series_exist_from_startup_with_v2_only():
     for reason in ("too_large", "invalid"):
         assert f'gateway_x402_payment_required_header_failures_total{{reason="{reason}"}} 0.0' in text
     assert 'gateway_x402_payment_required_header_failures_total{' not in _fresh_exposition("1")
+
+
+# --- "2" alone: the body is the JSON copy of the v2 PaymentRequired (D10) ---
+
+V2_FIELDS = ("x402Version", "error", "resource", "accepts")
+
+
+def _v2_only(gw, monkeypatch, **kw):
+    """A gateway with "2" alone, and its v1 offer (read with "1,2") to sign for."""
+    client, fac = gw("1,2", **kw)
+    offer = _offer(client)
+    monkeypatch.setattr(settings, "X402_PROTOCOL_VERSIONS", "2")
+    return client, fac, offer
+
+
+def _d10(r, offer, **kept):
+    """The D10 body: the header's PaymentRequired at the top level and under
+    detail, the other fields kept."""
+    assert r.status_code == 402, r.text
+    body = r.json()
+    header = advertised(r)
+    assert {k: body[k] for k in V2_FIELDS} == header
+    assert header["accepts"] == [v2_accepted(offer)]
+    assert "maxAmountRequired" not in json.dumps(body)
+    detail = body["detail"]
+    assert {k: detail[k] for k in V2_FIELDS} == header
+    for k, v in kept.items():
+        assert body[k] == v and detail[k] == v, k
+    return body
+
+
+def test_v2_only_no_payment(gw, monkeypatch):
+    client, _fac, offer = _v2_only(gw, monkeypatch, free_tier=False)
+    body = _d10(client.post("/api/v1/stamps/"), offer)
+    assert set(body) == set(V2_FIELDS) | {"code", "message", "detail"}
+    assert body["code"] == "HTTP_402" and body["message"] == body["error"]
+
+
+def test_v2_only_keeps_the_free_tier_block(gw, monkeypatch):
+    client, _fac, offer = _v2_only(gw, monkeypatch, free_tier=True)
+    body = _d10(client.post("/api/v1/stamps/"), offer)
+    assert body["freeTier"]["available"] is True and body["detail"]["freeTier"] == body["freeTier"]
+
+
+def test_v2_only_free_tier_disabled(gw, monkeypatch):
+    client, _fac, offer = _v2_only(gw, monkeypatch, free_tier=False)
+    body = _d10(client.post("/api/v1/stamps/", headers={"X-Payment-Mode": "free"}), offer)
+    assert body["error"] == "Free tier is not available. Payment required."
+
+
+def test_v2_only_offer_mismatch_keeps_code_and_fields(gw, monkeypatch):
+    client, fac, offer = _v2_only(gw, monkeypatch)
+    accepted = dict(v2_accepted(offer), amount="1")
+    r = client.post("/api/v1/stamps/", headers=header_for(2, v2_payload(offer, authorization(offer), accepted)))
+    _d10(r, offer, code="PAYMENT_OFFER_MISMATCH", fields=["amount"])
+    assert fac.calls == []
+
+
+def test_v2_only_settlement_failed_keeps_its_fields(gw, monkeypatch):
+    client, fac, offer = _v2_only(gw, monkeypatch)
+    fac.settle_status = 400
+    fac.settle = {"success": False, "errorReason": "invalid_signature", "transaction": "",
+                  "network": "eip155:84532"}
+    r = client.post("/api/v1/stamps/", headers=pay(2, offer, nonce=nonce_hex("07")))
+    body = _d10(r, offer, code="PAYMENT_SETTLEMENT_FAILED", x402_status="settlement_failed",
+                reason="invalid_signature")
+    assert body["error"] == body["message"]
+
+
+def test_v2_only_verify_failed(gw, monkeypatch):
+    client, fac, offer = _v2_only(gw, monkeypatch)
+    fac.verify = {"isValid": False, "invalidReason": "insufficient_funds", "payer": PAYER}
+    body = _d10(client.post("/api/v1/stamps/", headers=pay(2, offer, nonce=nonce_hex("08"))), offer)
+    assert "insufficient_funds" in body["error"]
+
+
+def test_v2_only_still_settles_a_v2_payment(gw, monkeypatch):
+    client, fac, offer = _v2_only(gw, monkeypatch)
+    r = client.post("/api/v1/stamps/", headers=pay(2, offer, nonce=nonce_hex("09")))
+    assert r.status_code == 200, r.text
+    assert fac.paths() == ["verify", "settle"]
+
+
+def test_v2_only_pool_allowance_offer_keeps_the_pool_fields(monkeypatch):
+    golden.configure(monkeypatch, "base-sepolia")
+    monkeypatch.setattr(settings, "X402_ALLOW_TESTNET_PAID_BYPASS", True)
+    monkeypatch.setattr(settings, "X402_PROTOCOL_VERSIONS", "2")
+    with patch("app.x402.dependency._calculate_price_for_request",
+               new=AsyncMock(return_value={"price_usd": 0.02, "description": "Pooled stamp"})), \
+         patch("app.x402.accept_gate.payments_refusal", return_value=None):
+        r = _pool_app().post("/api/v1/pool/acquire")
+    assert r.status_code == 402, r.text
+    body = r.json()
+    header = advertised(r)
+    assert {k: body[k] for k in V2_FIELDS} == header
+    assert body["code"] == "POOL_ALLOWANCE_EXHAUSTED" and "alternative" in body and "message" in body
+
+
+def test_v2_only_fallback_keeps_the_v1_body(gw, monkeypatch):
+    client, _fac, offer = _v2_only(gw, monkeypatch)
+
+    def broken(_requirements):
+        raise ValueError("no CAIP-2 id")
+
+    monkeypatch.setattr("app.x402.v2_payment.v2_offer_from_v1", broken)
+    r = client.post("/api/v1/stamps/")
+    assert r.status_code == 402
+    assert r.json()["x402Version"] == 1 and r.json()["accepts"] == [offer]
+    assert "PAYMENT-REQUIRED" not in r.headers

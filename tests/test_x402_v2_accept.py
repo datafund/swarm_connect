@@ -298,12 +298,18 @@ def test_default_setting_still_refuses_v2(gw):
     assert fac.calls == []
 
 
-def test_v2_only_refuses_x_payment(gw):
-    client, fac = gw("2")
-    offer = _offer(client)
+def test_v2_only_refuses_x_payment(gw, monkeypatch):
+    client, fac = gw("1,2")
+    offer = _offer(client)              # the v1 offer, for the X-PAYMENT below
+    monkeypatch.setattr(settings, "X402_PROTOCOL_VERSIONS", "2")
     before = x402_payments_total.labels(mode="version_unsupported", version="1")._value.get()
     r = client.post("/api/v1/stamps/", headers=pay(1, offer))
-    body = _refused_402(r, "X402_VERSION_UNSUPPORTED")
+    assert r.status_code == 402, r.text
+    # With "2" alone the body is the JSON copy of the v2 PaymentRequired (D10, #608).
+    body = r.json()
+    assert body["code"] == "X402_VERSION_UNSUPPORTED" and body["detail"]["code"] == "X402_VERSION_UNSUPPORTED"
+    assert body["x402Version"] == 2 and body["accepts"] == [v2_accepted(offer)]
+    assert advertised(r) == {k: body[k] for k in ("x402Version", "error", "resource", "accepts")}
     assert "PAYMENT-SIGNATURE" in body["message"]
     assert x402_payments_total.labels(mode="version_unsupported", version="1")._value.get() == before + 1
     assert fac.calls == []

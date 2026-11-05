@@ -18,7 +18,11 @@ byte for byte. With 2 enabled:
   model refuses a value) or encoded (over codec_v2.MAX_HEADER_CHARS), the 402
   goes out without it: logged, counted in
   gateway_x402_payment_required_header_failures_total, never a 500.
-- The v1 body stays (D2): v1 clients read it, and @x402/core reads the header.
+- v2_body(detail), with "2" alone (D10): the body is the JSON copy of that
+  PaymentRequired. x402Version, error and accepts become the v2 ones, resource
+  is added, and every other field (code, message, freeTier, fields,
+  x402_status, reason, the pool's fields) stays. With v1 still enabled the v1
+  body stays (D2): v1 clients read it, and @x402/core reads the header.
 """
 import logging
 from typing import Optional
@@ -33,6 +37,9 @@ from app.x402.payment_headers import accepted_x402_versions
 logger = logging.getLogger(__name__)
 
 PAYMENT_REQUIRED_HEADER = codec_v2.PAYMENT_REQUIRED_HEADER
+
+# The v1 fields of a Payment Required body that the v2 copy replaces (D10).
+_V1_FIELDS = ("x402Version", "error", "accepts")
 
 
 def _count_failure(reason: str) -> None:
@@ -99,3 +106,27 @@ def payment_required_header(detail) -> Optional[str]:
         _count_failure("invalid")
     return None
 
+
+def v2_only() -> bool:
+    return accepted_x402_versions() == (2,)
+
+
+def v2_body(detail):
+    """With "2" alone, the body as the JSON copy of the v2 PaymentRequired (D10).
+
+    Returns `detail` unchanged otherwise, or when it has no offer, or when the
+    offer cannot be expressed in v2 (logged; the header is then not sent
+    either, and counted there)."""
+    if not v2_only():
+        return detail
+    message, _failure = _build(detail)
+    if message is None:
+        return detail
+    copy = message.model_dump(mode="json", by_alias=True, exclude_none=True)
+    rest = {k: v for k, v in detail.items() if k not in _V1_FIELDS}
+    return {**copy, **rest}
+
+
+def advertise(detail):
+    """(body detail, PAYMENT-REQUIRED value or None) for a 402's detail."""
+    return v2_body(detail), payment_required_header(detail)

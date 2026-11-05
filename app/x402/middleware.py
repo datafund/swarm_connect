@@ -213,9 +213,10 @@ def create_402_response(
         response_body["freeTier"] = free_tier_info
 
     headers = {"Content-Type": "application/json"}
-    # With x402 v2 enabled, the PAYMENT-REQUIRED header too (#608).
-    from app.x402.advertise_v2 import PAYMENT_REQUIRED_HEADER, payment_required_header
-    advertised = payment_required_header(response_body)
+    # With x402 v2 enabled, the PAYMENT-REQUIRED header too, and with "2"
+    # alone the body as its JSON copy (#608).
+    from app.x402.advertise_v2 import PAYMENT_REQUIRED_HEADER, advertise
+    response_body, advertised = advertise(response_body)
     if advertised is not None:
         headers[PAYMENT_REQUIRED_HEADER] = advertised
     return JSONResponse(
@@ -314,8 +315,9 @@ async def _spec_shaped_402(response: Response) -> Response:
     top-level `code` and `message` (#381) stay as well.
 
     With x402 v2 enabled, a body with offers also gets the PAYMENT-REQUIRED
-    header, built from those offers (app/x402/advertise_v2.py, #608). Every
-    x402 402 with an offer leaves through here.
+    header, built from those offers, and with "2" alone the body is the JSON
+    copy of that v2 Payment Required (app/x402/advertise_v2.py, #608, D10).
+    Every x402 402 with an offer leaves through here.
     """
     raw = b""
     async for chunk in response.body_iterator:
@@ -327,8 +329,8 @@ async def _spec_shaped_402(response: Response) -> Response:
         parsed, detail = {}, None
     advertised = None
     if isinstance(detail, dict) and "x402Version" in detail and "accepts" in detail:
-        from app.x402.advertise_v2 import payment_required_header
-        advertised = payment_required_header(detail)
+        from app.x402.advertise_v2 import advertise
+        detail, advertised = advertise(detail)
         envelope = {k: parsed[k] for k in ("code", "message") if k in parsed}
         out = JSONResponse(status_code=402, content={**detail, **envelope, "detail": detail})
     else:
