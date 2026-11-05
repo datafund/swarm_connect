@@ -14,7 +14,7 @@ import pytest
 from fastapi import Depends, FastAPI
 from fastapi.exceptions import RequestValidationError
 from fastapi.testclient import TestClient
-from x402.types import VerifyResponse
+from app.x402.models_v1 import VerifyResponse
 
 from app.api.endpoints import chunks, data, pool, stamps, stamps_for_owner
 from app.core.config import settings

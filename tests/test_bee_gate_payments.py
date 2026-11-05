@@ -17,7 +17,7 @@ import httpx
 import pytest
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request
 from fastapi.testclient import TestClient
-from x402.types import SettleResponse, VerifyResponse
+from app.x402.models_v1 import SettleResponse, VerifyResponse
 
 from app.middleware.bee_gate import BeeGateMiddleware
 from app.services import bee_gate

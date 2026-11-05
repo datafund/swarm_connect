@@ -76,7 +76,7 @@ def test_the_handler_buys_exactly_the_priced_batch(monkeypatch):
     from app.api.endpoints import stamps
     from app.x402.dependency import require_x402_payment
     from tests.test_x402_integration import create_valid_payment_header
-    from x402.types import VerifyResponse
+    from app.x402.models_v1 import VerifyResponse
 
     monkeypatch.setattr(settings, "X402_ENABLED", True)
     monkeypatch.setattr(settings, "X402_PAY_TO_ADDRESS", "0xpayee")

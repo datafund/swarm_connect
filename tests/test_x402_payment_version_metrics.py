@@ -88,7 +88,7 @@ def test_settlement_is_counted_as_version_1(gw):  # noqa: F811
 
 
 def test_settlement_refused_is_counted_as_version_1(gw):  # noqa: F811
-    from x402.types import SettleResponse
+    from app.x402.models_v1 import SettleResponse
     client, fac, _, _ = gw
     fac.settle.return_value = SettleResponse(success=False, errorReason="invalid_transaction_state",
                                              transaction="", network="base-sepolia")

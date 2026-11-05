@@ -15,7 +15,7 @@ import httpx
 import pytest
 from fastapi import Depends, FastAPI
 from fastapi.testclient import TestClient
-from x402.types import SettleResponse, VerifyResponse
+from app.x402.models_v1 import SettleResponse, VerifyResponse
 
 from app.core.config import settings
 from app.services import swarm_api

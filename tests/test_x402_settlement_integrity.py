@@ -13,7 +13,7 @@ import httpx
 import pytest
 from fastapi import APIRouter, Depends, FastAPI, Request
 from fastapi.testclient import TestClient
-from x402.types import SettleResponse, VerifyResponse
+from app.x402.models_v1 import SettleResponse, VerifyResponse
 
 from app.x402.dependency import require_x402_payment
 from app.x402.middleware import X402Middleware
