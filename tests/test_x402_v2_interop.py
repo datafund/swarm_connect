@@ -176,9 +176,42 @@ def test_reencoding_a_library_payment_keeps_every_field_the_gateway_knows():
         assert dump(decode_payment_signature(value)) == original
 
 
-def test_signer_recovery_detects_a_changed_authorization():
-    # Guards the check above: a changed amount no longer recovers the payer.
-    payment = decode_payment_signature(header("ts_payment_signature.b64"))
+def _flip_hex(text, index):
+    """`text` with the hex digit at `index` changed."""
+    index %= len(text)
+    ch = text[index]
+    return text[:index] + ("1" if ch != "1" else "2") + text[index + 1:]
+
+
+TAMPERS = {
+    "to": lambda acc, ex: ex.authorization.__setattr__("to", "0x0000000000000000000000000000000000000002"),
+    "value": lambda acc, ex: ex.authorization.__setattr__("value", str(int(ex.authorization.value) + 1)),
+    "validAfter": lambda acc, ex: ex.authorization.__setattr__("valid_after", str(int(ex.authorization.valid_after) + 1)),
+    "validBefore": lambda acc, ex: ex.authorization.__setattr__("valid_before", str(int(ex.authorization.valid_before) + 1)),
+    "nonce": lambda acc, ex: ex.authorization.__setattr__("nonce", _flip_hex(ex.authorization.nonce, -1)),
+    "signature": lambda acc, ex: ex.__setattr__("signature", _flip_hex(ex.signature, 20)),
+    "domain asset": lambda acc, ex: acc.__setattr__("asset", "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"),
+    "domain chainId": lambda acc, ex: acc.__setattr__("network", "eip155:8453"),
+    "domain name": lambda acc, ex: acc.__setattr__("extra", dict(acc.extra, name="USD Coin")),
+    "domain version": lambda acc, ex: acc.__setattr__("extra", dict(acc.extra, version="1")),
+}
+
+
+@pytest.mark.parametrize("field", list(TAMPERS))
+@pytest.mark.parametrize("lib", LIBRARIES)
+def test_signer_recovery_detects_any_change(lib, field):
+    # Guards the signature check above: changing any signed field, the
+    # signature, or the EIP-712 domain no longer recovers the payer.
+    payment = decode_payment_signature(header(f"{lib}_payment_signature.b64"))
+    accepted = payment.accepted.model_copy(deep=True)
     exact = payment.exact_payload.model_copy(deep=True)
-    exact.authorization.value = "20001"
-    assert recover_eip3009_signer(payment.accepted, exact) != exact.authorization.from_
+    payer = exact.authorization.from_
+    assert recover_eip3009_signer(accepted, exact) == payer  # untouched: recovers
+    TAMPERS[field](accepted, exact)
+    assert (accepted, exact) != (payment.accepted, payment.exact_payload)
+    try:
+        recovered = recover_eip3009_signer(accepted, exact)
+    except Exception:  # a changed signature may not be a valid curve point at all
+        assert field == "signature"
+        return
+    assert recovered != payer
