@@ -572,11 +572,11 @@ def build_health_response(snapshot) -> dict:
             response_data["status"] = "degraded"
 
         # Add x402 details
-        from app.x402.payment_headers import ACCEPTED_X402_VERSIONS
+        from app.x402.payment_headers import accepted_x402_versions
         response_data["x402"] = {
             "enabled": True,
             # The x402 protocol versions a payment is accepted in (#602).
-            "versions": list(ACCEPTED_X402_VERSIONS),
+            "versions": list(accepted_x402_versions()),
             "free_tier": {
                 "enabled": settings.X402_FREE_TIER_ENABLED,
                 "rate_limit_per_minute": settings.X402_FREE_TIER_RATE_LIMIT,

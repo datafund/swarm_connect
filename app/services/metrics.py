@@ -407,9 +407,10 @@ x402_settlements_total = Counter(
 )
 # Every result exists from startup. A series first seen at 1 gives increase() of
 # 0 for that event, and the process restarts on every deploy, so without this
-# the first failure of each kind after a restart would never alert. Only v1 is
-# settled until v2 is enabled (#609), which must add its version="2" series.
-for _result in ("settled", "refused", "error", "settled_not_delivered", "refused_after_unknown"):
+# the first failure of each kind after a restart would never alert. v1 always;
+# v2 once X402_PROTOCOL_VERSIONS enables it (#607), by ensure_x402_version_series.
+X402_SETTLEMENT_RESULTS = ("settled", "refused", "error", "settled_not_delivered", "refused_after_unknown")
+for _result in X402_SETTLEMENT_RESULTS:
     x402_settlements_total.labels(result=_result, version="1")
 x402_payments_total = Counter(
     "gateway_x402_payments_total",
@@ -428,6 +429,23 @@ for _version in ("1", "2", "none"):
 # both are counted as version 2.
 x402_payments_total.labels(mode="version_unsupported", version="2")
 x402_payments_total.labels(mode="header_conflict", version="2")
+
+
+def ensure_x402_version_series(versions) -> None:
+    """Pre-create the series of the enabled x402 versions (#607).
+
+    With 2 enabled, every settlement result for version="2" (the "x402
+    settlement problems" alert relies on increase(), which misses a series
+    first seen at 1). With 1 not enabled ("2" alone), the X-PAYMENT refusal,
+    version_unsupported for version="1". Called at import with the setting."""
+    if 2 in versions:
+        for result in X402_SETTLEMENT_RESULTS:
+            x402_settlements_total.labels(result=result, version="2")
+    if 1 not in versions:
+        x402_payments_total.labels(mode="version_unsupported", version="1")
+
+
+ensure_x402_version_series(settings.x402_protocol_versions())
 rate_limit_hits_total = Counter(
     "gateway_rate_limit_hits_total", "Rate limit rejections"
 )

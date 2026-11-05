@@ -39,10 +39,13 @@ from app.x402.middleware import (
 )
 from app.x402.payment_headers import (
     HEADER_CONFLICT_MESSAGE,
+    PAYMENT_SIGNATURE_HEADER,
+    V1_UNSUPPORTED_MESSAGE,
     VERSION_UNSUPPORTED_MESSAGE,
     offered_payment_versions,
     paid_version_label,
     payment_version_label,
+    version_enabled,
 )
 
 logger = logging.getLogger(__name__)
@@ -495,6 +498,28 @@ def _check_before_payment(request: Request) -> None:
             raise HTTPException(status_code=422, detail=invalid_topup_mb_detail(raw))
 
 
+def _decode_v1_payment(header_value, payment_requirements):
+    """The X-PAYMENT payload, None if it cannot be decoded (answered 402 as
+    before), or raise 400 for one whose x402Version is not 1 (#639).
+
+    The header decides the version (D2, D7 in #596): a payload claiming
+    another version inside X-PAYMENT contradicts itself, and used to be sent
+    to the facilitator with that version on the envelope and v1 requirements.
+    """
+    payment_payload = decode_payment_header(header_value)
+    if payment_payload is not None and payment_payload.x402_version != 1:
+        logger.warning(f"x402: refusing an X-PAYMENT whose payload says x402Version "
+                       f"{payment_payload.x402_version!r}, not 1")
+        raise HTTPException(status_code=400, detail={
+            "code": "PAYMENT_HEADER_INVALID",
+            "message": ("The X-PAYMENT header carries a payment whose x402Version is not 1. "
+                        "X-PAYMENT is x402 v1 only; send an x402 v2 payment in PAYMENT-SIGNATURE"
+                        + (" instead." if version_enabled(2) else ", once this gateway accepts v2.")
+                        + " Nothing was charged."),
+        })
+    return payment_payload
+
+
 async def settle_payment_if_offered(request: Request) -> None:
     """Settle an x402 payment when one is presented; otherwise let the request pass.
 
@@ -587,8 +612,12 @@ async def require_x402_payment(request: Request) -> None:
     # stored result or 409 below. Reads memory only: no Bee call.
     # An exempted retry is noted, so that if it still reaches a new settlement
     # (its state changed in the meantime) it is refused below, before that.
+    # A v2 payment (PAYMENT-SIGNATURE, v2 enabled) is paid even with
+    # X-Payment-Mode: free (#607), so free mode never exempts it: otherwise it
+    # would be verified and settled while payments are refused.
     gate_reason = None
-    if not (is_free_tier_opt_in(request) and settings.X402_FREE_TIER_ENABLED):
+    v2_payment = 2 in payment_versions and version_enabled(2)
+    if v2_payment or not (is_free_tier_opt_in(request) and settings.X402_FREE_TIER_ENABLED):
         from app.x402.accept_gate import is_retry_of_possibly_charged, payments_refusal, refusal
         reason = payments_refusal()
         if reason is not None and is_retry_of_possibly_charged(request):
@@ -630,15 +659,19 @@ async def require_x402_payment(request: Request) -> None:
     # free, served free while the client believed it had paid. Refused here,
     # before the free tier and before anything is verified, with a v1 Payment
     # Required body that a v1 client can still pay.
-    if 2 in payment_versions:
+    # With X402_PROTOCOL_VERSIONS=2, an X-PAYMENT is refused the same way (#607).
+    unsupported = (2 if 2 in payment_versions and not version_enabled(2)
+                   else 1 if 1 in payment_versions and not version_enabled(1) else None)
+    if unsupported is not None:
+        message = VERSION_UNSUPPORTED_MESSAGE if unsupported == 2 else V1_UNSUPPORTED_MESSAGE
         logger.warning(f"x402: refusing {request.method} {request.url.path} from {client_ip}: "
-                       f"x402 v2 payment (PAYMENT-SIGNATURE) is not enabled (version=2)")
+                       f"x402 v{unsupported} payment is not enabled (version={version})")
         x402_payments_total.labels(mode="version_unsupported", version=version).inc()
         response_body = {
             "code": "X402_VERSION_UNSUPPORTED",
-            "message": VERSION_UNSUPPORTED_MESSAGE,
+            "message": message,
             "x402Version": X402_VERSION,
-            "error": VERSION_UNSUPPORTED_MESSAGE,
+            "error": message,
             "accepts": [payment_requirements.model_dump(by_alias=True)],
         }
         free_tier_info = get_free_tier_stats(client_key(client_ip)) if settings.X402_FREE_TIER_ENABLED else None
@@ -649,9 +682,12 @@ async def require_x402_payment(request: Request) -> None:
     # Get X-PAYMENT header and payment mode
     payment_header = request.headers.get(X_PAYMENT_HEADER)
     payment_mode = "free" if is_free_tier_opt_in(request) else ""
+    # An x402 v2 payment (PAYMENT-SIGNATURE, v2 enabled, #607) is always a
+    # payment: it never takes the no-payment 402 or the free tier (#600).
+    paid_v2 = 2 in payment_versions
 
     # If no payment header AND no free tier opt-in, return 402
-    if not payment_header and payment_mode != "free":
+    if not paid_v2 and not payment_header and payment_mode != "free":
         free_tier_info = get_free_tier_stats(client_key(client_ip)) if settings.X402_FREE_TIER_ENABLED else None
 
         logger.info(f"x402: No payment header, returning 402 for ${price_usd}")
@@ -668,7 +704,7 @@ async def require_x402_payment(request: Request) -> None:
         raise HTTPException(status_code=402, detail=response_body)
 
     # Handle free tier opt-in
-    if payment_mode == "free":
+    if not paid_v2 and payment_mode == "free":
         if not settings.X402_FREE_TIER_ENABLED:
             logger.warning(f"x402: Free tier requested but disabled for {client_ip}")
             response_body = {
@@ -709,8 +745,18 @@ async def require_x402_payment(request: Request) -> None:
                          "Retry-After": str(stats.get("window_seconds", 60))},
             )
 
-    # At this point, we have an X-PAYMENT header - verify payment
-    payment_payload = decode_payment_header(payment_header)
+    # The requirements sent to the facilitator: the v1 ones, or for v2 the
+    # gateway's own v2 offer (never the client's `accepted`, #607).
+    facilitator_requirements = payment_requirements
+    if paid_v2:
+        # Decoded and checked against the gateway's offer, refused before the
+        # facilitator if anything is wrong (app/x402/v2_payment.py).
+        from app.x402.v2_payment import read_v2_payment
+        payment_payload, facilitator_requirements = read_v2_payment(
+            request.headers.get(PAYMENT_SIGNATURE_HEADER), payment_requirements)
+    else:
+        payment_payload = _decode_v1_payment(payment_header, payment_requirements)
+
     if payment_payload is None:
         logger.warning(f"x402: Invalid X-PAYMENT header from {client_ip}")
         response_body = {
@@ -735,7 +781,7 @@ async def require_x402_payment(request: Request) -> None:
         logger.debug(f"x402: Calling facilitator verify at {settings.X402_FACILITATOR_URL}")
         verify_response = await facilitator.verify(
             payment=payment_payload,
-            payment_requirements=payment_requirements
+            payment_requirements=facilitator_requirements
         )
         logger.debug(f"x402: Verify response: is_valid={verify_response.is_valid}, payer={getattr(verify_response, 'payer', 'unknown')}")
     except Exception as e:
@@ -878,7 +924,8 @@ async def require_x402_payment(request: Request) -> None:
     from app.x402.idempotency import begin_idempotent_request
     request.state.x402_requirements = payment_requirements
     try:
-        idempotency_id = await begin_idempotent_request(request, payer=auth_key[0], auth_key=auth_key)
+        idempotency_id = await begin_idempotent_request(request, payer=auth_key[0], auth_key=auth_key,
+                                                        version=2 if paid_v2 else 1)
     except BaseException:
         replay_guard.release(auth_key)
         raise
@@ -910,5 +957,7 @@ async def require_x402_payment(request: Request) -> None:
     request.state.x402_payer = payer
     request.state.x402_payment = payment_payload
     request.state.x402_requirements = payment_requirements
+    # The gateway's v2 offer, sent to the facilitator for a v2 payment (#607).
+    request.state.x402_requirements_v2 = facilitator_requirements if paid_v2 else None
     request.state.x402_auth_key = auth_key
     request.state.x402_idempotency_id = idempotency_id

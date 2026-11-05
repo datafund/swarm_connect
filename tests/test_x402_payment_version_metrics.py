@@ -268,18 +268,23 @@ def _paid_request(client, headers, **patches):
 def test_payload_cannot_claim_another_version(gw):  # noqa: F811
     """The version is the header the request was dispatched on, not the payload's claim.
 
-    An X-PAYMENT is v1 (D2/D7 in #596): one whose payload says x402Version 2
-    is still labelled and audited as 1.
+    An X-PAYMENT is v1 (D2/D7 in #596). Since #639 one whose payload says
+    x402Version 2 is refused with 400 before the facilitator, so it is never
+    counted or audited as a payment of either version (#601 counted it as 1).
     """
     client, fac, _, _ = gw
     fac.verify.return_value.payer = "0x" + "e5" * 20
-    paid1, settled1, settled2 = _payments("paid", "1"), _settlements("settled", "1"), _settlements("settled", "2")
-    seen, settled = _paid_request(client, _v2_payload_header())
-    assert seen == [1]
-    assert _payments("paid", "1") == paid1 + 1
-    assert _settlements("settled", "1") == settled1 + 1
-    assert _settlements("settled", "2") == settled2
-    assert [e["data"]["x402_version"] for e in settled] == [1]
+    paid1, paid2 = _payments("paid", "1"), _payments("paid", "2")
+    settled1, settled2 = _settlements("settled", "1"), _settlements("settled", "2")
+    start = len(_audit_events())
+    r = client.post("/api/v1/stamps/", headers=_v2_payload_header())
+    assert r.status_code == 400, r.text
+    assert r.json()["code"] == "PAYMENT_HEADER_INVALID"
+    fac.verify.assert_not_called()
+    fac.settle.assert_not_called()
+    assert (_payments("paid", "1"), _payments("paid", "2")) == (paid1, paid2)
+    assert (_settlements("settled", "1"), _settlements("settled", "2")) == (settled1, settled2)
+    assert [e for e in _audit_events()[start:] if e["event_type"] == "payment_settled"] == []
 
 
 def test_version_follows_the_dispatch_not_a_constant(gw):  # noqa: F811

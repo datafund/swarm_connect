@@ -37,6 +37,20 @@ def is_testnet_network(network: str) -> bool:
     return network.strip().lower().replace("_", "-") not in _MAINNET_NETWORKS
 
 
+def parse_x402_protocol_versions(value) -> tuple:
+    """X402_PROTOCOL_VERSIONS as a sorted tuple of ints (#607).
+
+    Comma-separated, each 1 or 2, at least one, no repeats; whitespace and
+    order do not matter. Raises ValueError otherwise.
+    """
+    if not isinstance(value, str):
+        raise ValueError("X402_PROTOCOL_VERSIONS must be text: 1, 1,2 or 2")
+    tokens = [t.strip() for t in value.split(",")]
+    if not tokens or any(t not in ("1", "2") for t in tokens) or len(set(tokens)) != len(tokens):
+        raise ValueError("X402_PROTOCOL_VERSIONS must be 1, 1,2 or 2")
+    return tuple(sorted(int(t) for t in tokens))
+
+
 class Settings(BaseSettings):
     PROJECT_NAME: str = "Provenance Gateway"
     # Where the approved service terms are published; shown on / as terms_url
@@ -55,6 +69,11 @@ class Settings(BaseSettings):
     X402_FACILITATOR_CDP_API_KEY_SECRET: Optional[str] = None
     X402_FACILITATOR_BEARER_TOKEN: Optional[str] = None
     X402_NETWORK: str = "base-sepolia"  # Network identifier (v1 style)
+    # The x402 protocol versions a payment is accepted in (#607, D3 in #596):
+    # "1" (default), "1,2" (dual mode) or "2". Anything else stops startup.
+    # v1 pays with X-PAYMENT, v2 with PAYMENT-SIGNATURE. "2" alone refuses
+    # X-PAYMENT and is not deployable before the PAYMENT-REQUIRED header (#608).
+    X402_PROTOCOL_VERSIONS: str = "1"
 
     # === x402 Pricing Settings ===
     X402_BZZ_USD_RATE: float = 0.50  # Manual BZZ/USD rate (1 BZZ = $0.50)
@@ -501,6 +520,16 @@ class Settings(BaseSettings):
         same value: a trailing space passed validation and then broke every
         payment with a KeyError (#370)."""
         return v.strip() if isinstance(v, str) else v
+
+    @field_validator("X402_PROTOCOL_VERSIONS", mode="before")
+    @classmethod
+    def check_x402_protocol_versions(cls, v):
+        """Normalise to "1", "1,2" or "2"; refuse anything else (#607)."""
+        return ",".join(str(n) for n in parse_x402_protocol_versions(v))
+
+    def x402_protocol_versions(self) -> tuple:
+        """The accepted x402 versions as sorted ints, for example (1, 2)."""
+        return parse_x402_protocol_versions(self.X402_PROTOCOL_VERSIONS)
 
     @model_validator(mode="after")
     def check_bee_call_gate(self):

@@ -485,12 +485,13 @@ def test_late_result_reaches_a_key_whose_request_ended_before_the_202(tmp_path):
     from app.x402.idempotency import IdempotencyStore
     s = IdempotencyStore(state_file=str(tmp_path / "idem.json"))
     _, _, token = s.begin("e", "h", "a1")
-    s.mark_settled("e", token, "a1", "0xtx")
+    # A real 32-byte hash: only a valid one is echoed in a header (#607).
+    s.mark_settled("e", token, "a1", "0x" + "7e" * 32)
     s.abandon("e", token)                      # the request ended without a response
     s.resolve("e", token, 201, b'{"batchID": "b"}')
     state, entry, _ = s.begin("e", "h", "a2")
     assert state == "done" and entry["status"] == 201
-    assert entry["headers"]["x-payment-transaction"] == "0xtx"
+    assert entry["headers"]["x-payment-transaction"] == "0x" + "7e" * 32
 
 
 # --- with the spend reservation (#408) --------------------------------------

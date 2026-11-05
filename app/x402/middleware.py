@@ -14,6 +14,7 @@ The x402 v1 types and the facilitator client are the gateway's own
 (models_v1.py, facilitator_client.py, #604).
 """
 import json
+import re
 import asyncio
 import logging
 from typing import Callable, Optional
@@ -368,6 +369,60 @@ def encode_payment_response(settle_response: SettleResponse) -> str:
     return safe_base64_encode(response_json.encode("utf-8"))
 
 
+_STRICT_ADDRESS = re.compile(r"^0x[0-9a-fA-F]{40}\Z")
+
+
+def _receipt_payer(request) -> Optional[str]:
+    """The payer for the receipt: the verified payer if it is an address, else
+    the signed authorization's `from` (checked before verify, v2_payment)."""
+    state = getattr(request, "state", None)
+    payer = getattr(state, "x402_payer", None)
+    if isinstance(payer, str) and _STRICT_ADDRESS.match(payer):
+        return payer
+    try:
+        signer = getattr(state, "x402_payment").exact_payload.authorization.from_
+    except Exception:
+        return None
+    return signer if isinstance(signer, str) and _STRICT_ADDRESS.match(signer) else None
+
+
+def encode_payment_response_v2(settlement, request) -> Optional[str]:
+    """The PAYMENT-RESPONSE header for a successful x402 v2 settlement (#607), or None.
+
+    The receipt is the gateway's, not the facilitator's answer passed on:
+    success true; transaction the checked value (settlement.checked_settlement,
+    "" when unknown); network and amount from the gateway's own v2 offer for
+    this request; payer the verified payer if it is an address, else the
+    signed authorization's `from`. Nothing else, so no facilitator text
+    (errorReason, extra, extensions, another network, payer or amount)
+    reaches the client. If that cannot be encoded, a minimal receipt
+    (success, transaction, network); if not even that, None, and the answer
+    goes out without the header. Never raises: this runs after settlement,
+    so a failure here must not turn a delivered, paid result into a 500.
+    """
+    from app.x402 import codec_v2
+    from app.x402.models_v2 import SettleResponseV2
+    from app.x402.settlement import valid_transaction
+    try:
+        offer = getattr(request.state, "x402_requirements_v2", None)
+        network = getattr(offer, "network", None) or to_caip2(settings.X402_NETWORK)
+        amount = getattr(offer, "amount", None)
+        transaction = valid_transaction(getattr(settlement, "transaction", None)) or ""
+        payer = _receipt_payer(request)
+    except Exception as e:
+        logger.error(f"x402: v2 receipt could not be built: {type(e).__name__}")
+        return None
+    full = {"success": True, "transaction": transaction, "network": network, "payer": payer, "amount": amount}
+    for data in (full, {"success": True, "transaction": transaction, "network": network}):
+        try:
+            receipt = SettleResponseV2(**{k: v for k, v in data.items() if v is not None})
+            return codec_v2.encode_payment_response(receipt)
+        except Exception as e:
+            logger.error(f"x402: PAYMENT-RESPONSE with {len(data)} fields could not be encoded "
+                         f"({type(e).__name__}); trying fewer")
+    return None
+
+
 class X402Middleware(BaseHTTPMiddleware):
     """
     x402 post-response middleware for FastAPI.
@@ -522,7 +577,8 @@ class X402Middleware(BaseHTTPMiddleware):
             # Write-ahead, AFTER_WORK: the work has run (#553). If it cannot be
             # written, do not settle: the result is withheld, nothing charged,
             # and the authorization released for a retry.
-            prior, recorded, gen = await outcome_unknown.abegin_settlement(auth_key, AFTER_WORK)
+            prior, recorded, gen = await outcome_unknown.abegin_settlement(auth_key, AFTER_WORK,
+                                                                           version=paid_version(request))
             if not recorded:
                 from app.x402.settlement import (payment_state_unavailable_detail,
                                                  settlement_in_progress_refusal)
@@ -550,10 +606,11 @@ class X402Middleware(BaseHTTPMiddleware):
                                     headers={"Retry-After": "60"})
             outcome_unknown.mark_asked(auth_key, gen)
             try:
-                settlement = await self.facilitator_client.settle(
+                from app.x402.settlement import checked_settlement, facilitator_requirements
+                settlement = checked_settlement(await self.facilitator_client.settle(
                     payment=payment_payload,
-                    payment_requirements=payment_requirements,
-                )
+                    payment_requirements=facilitator_requirements(request),
+                ))
                 failure = None if settlement.success else (settlement.error_reason or "unknown")
             except Exception as e:
                 outcome_unknown.release(auth_key)    # an unknown outcome now
@@ -654,7 +711,14 @@ class X402Middleware(BaseHTTPMiddleware):
             headers=dict(response.headers),
             media_type=response.media_type,
         )
-        new_response.headers[X_PAYMENT_RESPONSE_HEADER] = encode_payment_response(settlement)
+        # The receipt in the header of the request's version only (D4 in #596).
+        if paid_version(request) == 2:
+            from app.x402.codec_v2 import PAYMENT_RESPONSE_HEADER
+            receipt = encode_payment_response_v2(settlement, request)
+            if receipt is not None:
+                new_response.headers[PAYMENT_RESPONSE_HEADER] = receipt
+        else:
+            new_response.headers[X_PAYMENT_RESPONSE_HEADER] = encode_payment_response(settlement)
         new_response.headers["X-Payment-Mode"] = "paid"
         new_response.headers["X-Payment-Transaction"] = tx_hash
         if not ok:

@@ -24,10 +24,20 @@ from typing import Set
 X_PAYMENT_HEADER = "X-PAYMENT"               # x402 v1
 PAYMENT_SIGNATURE_HEADER = "PAYMENT-SIGNATURE"  # x402 v2
 
-# The x402 protocol versions this gateway accepts a payment in, as /health
-# reports them (#602). One place to read it. Phase 2 of #596 replaces it with
-# the X402_PROTOCOL_VERSIONS setting (#609).
-ACCEPTED_X402_VERSIONS = (1,)
+
+
+def accepted_x402_versions() -> tuple:
+    """The x402 protocol versions this gateway accepts a payment in, as /health
+    reports them (#602): the X402_PROTOCOL_VERSIONS setting (#607). One place
+    to read it."""
+    from app.core.config import settings
+    return settings.x402_protocol_versions()
+
+
+def version_enabled(version: int) -> bool:
+    """Whether payments in this x402 version are accepted (#607)."""
+    return version in accepted_x402_versions()
+
 
 _VERSION_BY_NAME = {
     X_PAYMENT_HEADER.lower(): 1,
@@ -100,6 +110,10 @@ VERSION_UNSUPPORTED_MESSAGE = (
     "This gateway does not accept x402 v2 payments (the PAYMENT-SIGNATURE header) yet. "
     "Nothing was charged. Pay with x402 v1: sign a payment for accepts[0] and send it "
     "in the X-PAYMENT header instead."
+)
+V1_UNSUPPORTED_MESSAGE = (
+    "This gateway accepts x402 v2 payments only (the PAYMENT-SIGNATURE header), not x402 v1 "
+    "(X-PAYMENT). Nothing was charged."
 )
 HEADER_CONFLICT_MESSAGE = (
     "The request carries both X-PAYMENT (x402 v1) and PAYMENT-SIGNATURE (x402 v2). "

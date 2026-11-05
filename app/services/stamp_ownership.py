@@ -34,7 +34,7 @@ POOL_OWNER = "pool"
 # Owner values that are not wallet addresses.
 _SPECIAL_OWNERS = ("shared", POOL_OWNER)
 
-_ADDRESS_RE = re.compile(r"^(0x)?[0-9a-fA-F]{40}$")
+_ADDRESS_RE = re.compile(r"^(0x)?[0-9a-fA-F]{40}\Z")
 
 # /health warning while saves are refused because the pre-migration copy fails
 # (#558). Fixed text on purpose: no path and no exception text, since /health

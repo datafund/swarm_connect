@@ -16,6 +16,19 @@ Key v1 characteristics:
 
 Clients should check the `x402Version` field in 402 responses to confirm compatibility.
 
+### x402 v2 (opt-in per deployment)
+
+An operator can also accept x402 v2 (`X402_PROTOCOL_VERSIONS`; `GET /health` lists the accepted versions under `x402.versions`). Then:
+
+- Send the v2 payment base64-encoded in `PAYMENT-SIGNATURE` (never together with `X-PAYMENT`). Its `accepted` must be the gateway's offer copied unchanged, with the CAIP-2 network (`eip155:84532`, `eip155:8453`) and `amount` equal to the v1 offer's `maxAmountRequired`. Any difference, even `00020000` for `20000` or another letter case in an address, is refused with 402 `PAYMENT_OFFER_MISMATCH` before anything is charged.
+- Only `exact` with EIP-3009 is accepted. Permit2 is refused with 402 `PAYMENT_METHOD_UNSUPPORTED`.
+- The receipt comes in `PAYMENT-RESPONSE` (base64 JSON `SettleResponse`) instead of `X-PAYMENT-RESPONSE`.
+- An `Idempotency-Key` retry must use the same version as the first request. Otherwise it gets 409 `IDEMPOTENCY_KEY_VERSION_MISMATCH` and is not charged.
+- 402 bodies stay x402 v1 shaped. The `PAYMENT-REQUIRED` header that v2 clients read comes with #608.
+- `@x402/core` 2.30.0's `x402Client` refuses any payment over $1 by default (`spendControls.maxAmountPerPayment`). Larger stamp purchases need that limit raised in the client. The provenance SDK sets its own cap.
+
+An `X-PAYMENT` must carry `x402Version: 1`. Any other value is refused with 400 `PAYMENT_HEADER_INVALID`.
+
 ## Overview
 
 When the gateway has `X402_ENABLED=true`, protected endpoints require payment via the x402 protocol. Clients must:

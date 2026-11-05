@@ -37,6 +37,17 @@ How a retry is matched, and why in this order:
   the first request succeeded rather than that it needs a refund.
 - A /chunks/credit result is stored without its bearer token; a replay fills
   in the account's current token.
+- The x402 version (#607, D4 in #596). The key does not depend on it, so a
+  retry in the other version's header is still found (and not charged
+  again). Entries of a v2 request record "version": 2 (no field: v1). A
+  replay returns the stored receipt header, which is the original version's:
+  X-PAYMENT-RESPONSE or PAYMENT-RESPONSE, never both. A completed result
+  asked for in the other version's header is not served: 409
+  IDEMPOTENCY_KEY_VERSION_MISMATCH, unpaid, telling the client to retry in
+  the original header. Serving it would put a receipt in a header the
+  client did not pay in (or make up one the facilitator never issued);
+  "different request, use a new key" (422) would lead to a second paid
+  purchase; a 402 invites paying again.
 
 Entries live 24 hours, are persisted, and are capped at
 X402_IDEMPOTENCY_MAX_ENTRIES (completed entries are evicted, oldest first,
@@ -101,7 +112,10 @@ MAX_KEY_LENGTH = 255
 MAX_STORED_BODY_BYTES = 64 * 1024
 # What a replay needs to look like the original: its body type and the
 # settlement headers of the payment that paid for it.
-_STORED_HEADERS = ("content-type", "x-payment-response", "x-payment-mode", "x-payment-transaction")
+# PAYMENT-RESPONSE is the v2 receipt (#607); a response carries only the one
+# of its version, so a replay sends exactly that one.
+_STORED_HEADERS = ("content-type", "x-payment-response", "x-payment-mode", "x-payment-transaction",
+                   "payment-response")
 
 # Entry states. SETTLING: the facilitator was asked to settle and has not
 # answered (or the request died waiting), so the payment may have been taken.
@@ -131,6 +145,24 @@ class IdempotentReplay(Exception):
         self.response = response
 
 
+def _stored_transaction(entry: dict) -> Optional[str]:
+    """An entry's transaction, only if it is a valid hash (#607). Entries hold
+    only checked ones (settlement.checked_settlement); this also covers an
+    entry stored before that check existed."""
+    from app.x402.settlement import valid_transaction
+    return valid_transaction(entry.get("transaction"))
+
+
+def _stored_version(entry: dict) -> Optional[int]:
+    """The x402 version an entry records: 1 when absent, 2 only as the int 2.
+    Any other value (a string, a list, None, 3, a bool, a float) means the
+    entry is damaged: None, answered like an unreadable stored response."""
+    if "version" not in entry:
+        return 1
+    value = entry["version"]
+    return 2 if type(value) is int and value == 2 else None
+
+
 def _sha(value) -> str:
     return hashlib.sha256(json.dumps(value).encode()).hexdigest()
 
@@ -148,6 +180,8 @@ class IdempotencyStore:
     """Settled and completed paid requests by entry id, plus those still running."""
 
     def __init__(self, state_file: Optional[str] = None):
+        # entry id -> x402 version of the request holding it, while 2 (memory only).
+        self._versions: Dict[str, int] = {}
         # `_lock` guards memory only and is never held across disk I/O, so
         # begin() and peek() on the event loop never wait for a write. Writes
         # snapshot under `_lock`, then write under `_write_lock`; a sequence
@@ -361,6 +395,9 @@ class IdempotencyStore:
         # A final result whose interim one was never stored has nothing to replace.
         for k in [k for k in self._resolved if k not in self._pending]:
             del self._resolved[k]
+        # A version marker belongs to a pending claim only (#607).
+        for k in [k for k in self._versions if k not in self._pending]:
+            del self._versions[k]
         return bool(expired)
 
     def _enforce_cap(self) -> None:
@@ -375,7 +412,8 @@ class IdempotencyStore:
             del self._entries[k]
         logger.warning("Idempotency store over X402_IDEMPOTENCY_MAX_ENTRIES; evicted %d oldest", excess)
 
-    def begin(self, eid: str, request_hash: str, auth: str) -> Tuple[str, Optional[dict], Optional[str]]:
+    def begin(self, eid: str, request_hash: str, auth: str,
+              version: int = 1) -> Tuple[str, Optional[dict], Optional[str]]:
         """Claim eid for a new request, or say why not.
 
         Returns (state, entry, token). state is one of "new" (token set),
@@ -388,12 +426,12 @@ class IdempotencyStore:
         pruned = False
         with self._lock:
             pruned = self._prune(now)
-            result = self._begin_locked(eid, request_hash, auth, now)
+            result = self._begin_locked(eid, request_hash, auth, now, version)
         if pruned:
             self._after_change("background")    # never on the caller's thread
         return result
 
-    def _begin_locked(self, eid: str, request_hash: str, auth: str, now: float):
+    def _begin_locked(self, eid: str, request_hash: str, auth: str, now: float, version: int = 1):
         pending = self._pending.get(eid)
         if pending is not None:
             return ("in_progress" if pending[0] == request_hash else "mismatch"), None, None
@@ -408,10 +446,27 @@ class IdempotencyStore:
                 if entry.get("state") == SETTLING:
                     return SETTLING, entry, None
                 return "original_auth", None, None
+            if entry["state"] == DONE:
+                stored = _stored_version(entry)
+                if stored is None:
+                    return "damaged", entry, None
+                if stored != version:
+                    return "version_mismatch", entry, None
             return entry["state"], entry, None
         token = secrets.token_hex(8)
         self._pending[eid] = (request_hash, now + IN_FLIGHT_TIMEOUT_SECONDS, token)
+        # Set for this claim, or cleared, so no earlier claim's marker survives.
+        if version == 2:
+            self._versions[eid] = 2
+        else:
+            self._versions.pop(eid, None)
         return "new", None, token
+
+    def _note_version(self, eid: str, previous: Optional[dict] = None) -> None:
+        """Record the request's x402 version on its entry (under `_lock`): only
+        when 2, so v1 entries are exactly as before (#607)."""
+        if self._versions.get(eid) == 2 or _stored_version(previous or {}) == 2:
+            self._entries[eid]["version"] = 2
 
     def peek(self, eid: str) -> Optional[dict]:
         """The stored entry for eid, if any and not expired. Changes nothing."""
@@ -441,6 +496,7 @@ class IdempotencyStore:
                 "state": SETTLING, "request_hash": pending[0], "auth": auth, "nonce": nonce,
                 "token": token, "created": now, "expires": now + TTL_SECONDS,
             }
+            self._note_version(eid)
             self._enforce_cap()
         self._after_change(persist)
         return True
@@ -466,6 +522,7 @@ class IdempotencyStore:
                 "state": SETTLED, "request_hash": pending[0], "auth": auth, "token": token,
                 "transaction": tx, "created": now, "expires": now + TTL_SECONDS,
             }
+            self._note_version(eid)
             self._enforce_cap()
         self._after_change(persist)
 
@@ -510,6 +567,8 @@ class IdempotencyStore:
                 "body": base64.b64encode(body).decode("ascii"),
                 "fill": fill,
             }
+            self._note_version(eid, entry)
+            self._versions.pop(eid, None)
             self._enforce_cap()
             return True
 
@@ -535,8 +594,8 @@ class IdempotencyStore:
         if entry.get("state") != DONE:
             entry["state"] = DONE
             entry["headers"] = {"content-type": "application/json"}
-            if entry.get("transaction"):
-                entry["headers"]["x-payment-transaction"] = entry["transaction"]
+            if _stored_transaction(entry):
+                entry["headers"]["x-payment-transaction"] = _stored_transaction(entry)
         entry["status"] = status
         entry["body"] = base64.b64encode(body).decode("ascii")
 
@@ -552,12 +611,14 @@ class IdempotencyStore:
             if pending is not None and pending[2] == token:
                 del self._pending[eid]
                 self._resolved.pop(eid, None)
+                self._versions.pop(eid, None)
 
     def reset(self) -> None:
         with self._lock:
             self._entries.clear()
             self._pending.clear()
             self._resolved.clear()
+            self._versions.clear()
             self._unreadable = None
             self._write_error = None
             self._stalled = None
@@ -609,17 +670,56 @@ async def _request_hash(request: Request) -> str:
     return h.hexdigest()
 
 
-def _replay_response(entry: dict, payer: str) -> Response:
-    headers = dict(entry.get("headers") or {})
+def _safe_header_value(value) -> bool:
+    """Printable ASCII only: no control character (CR, LF, NUL), nothing a
+    header cannot carry."""
+    return isinstance(value, str) and all(" " <= c <= "~" for c in value)
+
+
+def _replay_response(entry: dict, payer: str) -> Optional[Response]:
+    """The stored response, or None if the entry is damaged (#607 review).
+
+    Stored headers are replayed only if their name is one the store keeps and
+    their value is printable ASCII; X-Payment-Transaction only if it is a
+    valid hash (settlement.valid_transaction), else "unknown". An entry
+    written before those checks, or damaged on disk, can never make a replay
+    raise or carry a CR/LF: a status, headers or body that cannot be used
+    give None, and the caller answers "result not stored" instead.
+    """
+    from app.x402.settlement import valid_transaction
+    stored = entry.get("headers")
+    status = entry.get("status")
+    if stored is not None and not isinstance(stored, dict):
+        return None
+    if type(status) is not int or not 200 <= status < 600:
+        return None
+    try:
+        body = base64.b64decode(entry["body"], validate=True)
+    except Exception:
+        return None
+    headers = {}
+    for name, value in (stored or {}).items():
+        if not isinstance(name, str) or name.lower() not in _STORED_HEADERS:
+            continue
+        if name.lower() == "x-payment-transaction":
+            value = valid_transaction(value) or "unknown"
+        elif not _safe_header_value(value):
+            continue
+        headers[name] = value
     headers[REPLAYED_HEADER] = "true"
-    body = base64.b64decode(entry["body"])
     if entry.get("fill") == _CREDIT_TOKEN:
         # The account's current token, never a new or rotated one.
         from app.services.bandwidth_credit import bandwidth_credit_manager
-        parsed = json.loads(body)
-        parsed["token"] = bandwidth_credit_manager.issue_token(payer)
-        body = json.dumps(parsed).encode()
-    return Response(content=body, status_code=entry["status"], headers=headers)
+        try:
+            parsed = json.loads(body)
+            parsed["token"] = bandwidth_credit_manager.issue_token(payer)
+            body = json.dumps(parsed).encode()
+        except Exception:
+            return None
+    try:
+        return Response(content=body, status_code=status, headers=headers)
+    except Exception:
+        return None
 
 
 def _log_replay(request: Request, payer: str, entry: dict, retry_nonce: Optional[str] = None) -> None:
@@ -629,7 +729,7 @@ def _log_replay(request: Request, payer: str, entry: dict, retry_nonce: Optional
     log_audit_event(
         event_type=AuditEventType.PAYMENT_IDEMPOTENT_REPLAY,
         data={"method": request.method, "path": request.url.path,
-              "transaction_hash": entry.get("transaction"), "network": to_v1(settings.X402_NETWORK),
+              "transaction_hash": _stored_transaction(entry), "network": to_v1(settings.X402_NETWORK),
               # The retry's own authorization: verified, never settled.
               "nonce": retry_nonce},
         client_ip=get_client_ip(request),
@@ -655,6 +755,20 @@ def _settlement_unknown_409(entry: dict) -> HTTPException:
     })
 
 
+def _damaged_entry_409(entry: dict) -> HTTPException:
+    """A paid, completed entry whose stored response (or version) cannot be used."""
+    logger.error("x402: stored result for an Idempotency-Key is damaged; answering not stored")
+    tx = _stored_transaction(entry) or "unknown"
+    return HTTPException(status_code=409, headers={"X-Payment-Transaction": tx}, detail={
+        "code": "IDEMPOTENCY_KEY_DELIVERED_NOT_STORED",
+        "message": ("The first request with this Idempotency-Key succeeded and was paid once, "
+                    "but its stored response cannot be read. This payment was not charged. "
+                    "Look the result up through the resource itself."),
+        "transaction": tx,
+        "x402_status": "delivered",
+    })
+
+
 async def raise_if_key_settlement_unknown(request: Request, payer: str) -> None:
     """Raise the key's settlement-unknown 409 if this request's Idempotency-Key has one.
 
@@ -672,7 +786,7 @@ async def raise_if_key_settlement_unknown(request: Request, payer: str) -> None:
 
 
 async def begin_idempotent_request(request: Request, payer: str,
-                                   auth_key: Tuple[str, str]) -> Optional[Tuple[str, str]]:
+                                   auth_key: Tuple[str, str], version: int = 1) -> Optional[Tuple[str, str]]:
     """Check the Idempotency-Key of a VERIFIED, reserved paid request.
 
     Returns (entry id, token) to settle, complete or abandon the request with,
@@ -693,13 +807,39 @@ async def begin_idempotent_request(request: Request, payer: str,
             "message": f"{IDEMPOTENCY_HEADER} must be 1-{MAX_KEY_LENGTH} printable ASCII characters.",
         })
     eid = entry_id(payer, request.method, request.url.path, key)
-    state, entry, token = idempotency_store.begin(eid, await _request_hash(request), auth_hash(auth_key))
+    state, entry, token = idempotency_store.begin(eid, await _request_hash(request), auth_hash(auth_key),
+                                                  version)
     if state == "new":
         return eid, token
     if state == DONE:
         logger.info(f"x402: idempotent replay for payer {payer} on {request.url.path}; new payment not settled")
         _log_replay(request, payer, entry, auth_key[1])
-        raise IdempotentReplay(_replay_response(entry, payer))
+        replay = _replay_response(entry, payer)
+        if replay is not None:
+            raise IdempotentReplay(replay)
+        raise _damaged_entry_409(entry)
+    if state == "damaged":
+        raise _damaged_entry_409(entry)
+    if state == "version_mismatch":
+        from app.x402.payment_headers import version_enabled
+        original = _stored_version(entry)
+        header = "X-PAYMENT" if original == 1 else "PAYMENT-SIGNATURE"
+        raise HTTPException(status_code=409, detail={
+            "code": "IDEMPOTENCY_KEY_VERSION_MISMATCH",
+            "message": (f"The first request with this Idempotency-Key was paid once, with x402 "
+                        f"v{original}, and its result is stored. This request uses x402 "
+                        f"v{version}, so it is not answered with that result. This payment was "
+                        f"not charged. "
+                        + (f"To get the result, retry with the same key and a newly signed x402 "
+                           f"v{original} payment in the {header} header."
+                           if version_enabled(original) else
+                           f"This gateway no longer accepts x402 v{original} payments, so the "
+                           f"stored result cannot be fetched with this key. Do not pay again "
+                           f"for it: look the result up through the resource itself, or contact "
+                           f"the operator.")),
+            "original_x402_version": original,
+            "original_x402_version_accepted": version_enabled(original),
+        })
     if state == "unavailable":
         raise HTTPException(status_code=503, detail={
             "code": "IDEMPOTENCY_UNAVAILABLE",
@@ -715,7 +855,7 @@ async def begin_idempotent_request(request: Request, payer: str,
     if state == SETTLING:
         raise _settlement_unknown_409(entry)
     if state == DELIVERED:
-        tx = entry.get("transaction") or "unknown"
+        tx = _stored_transaction(entry) or "unknown"
         raise HTTPException(status_code=409, headers={"X-Payment-Transaction": tx}, detail={
             "code": "IDEMPOTENCY_KEY_DELIVERED_NOT_STORED",
             "message": ("The first request with this Idempotency-Key succeeded and was paid once, "
@@ -725,7 +865,7 @@ async def begin_idempotent_request(request: Request, payer: str,
             "x402_status": "delivered",
         })
     if state == SETTLED:
-        tx = entry.get("transaction") or "unknown"
+        tx = _stored_transaction(entry) or "unknown"
         raise HTTPException(status_code=409, headers={"X-Payment-Transaction": tx}, detail={
             "code": "IDEMPOTENCY_KEY_SETTLED_PENDING",
             "message": ("The first request with this Idempotency-Key was paid, but its result is "
