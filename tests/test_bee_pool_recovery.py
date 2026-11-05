@@ -211,6 +211,9 @@ class UnclosedResourceCounter:
     while it is active, so the load test reports them rather than leaving them
     to the garbage collector unseen (#629). Other warnings pass through."""
 
+    count = 0
+    _cm = None
+
     def __enter__(self):
         self._cm = warnings.catch_warnings(record=True)
         self._caught = self._cm.__enter__()
@@ -218,7 +221,10 @@ class UnclosedResourceCounter:
         return self
 
     def __exit__(self, *exc):
+        if self._cm is None:  # never entered
+            return False
         self._cm.__exit__(*exc)
+        self._cm = None
         self.count = 0
         for w in self._caught:
             if issubclass(w.category, ResourceWarning) and "unclosed" in str(w.message):
@@ -349,7 +355,7 @@ class TestReproduction:
         # stuck on httpcore2 under anyio cancel scopes (up to 3 of 4 slots,
         # most runs); none on the pass-through path. Tracked in #629.
         backend = PassThroughBackend if known_fixed(core) else RecordingBackend
-        unclosed = UnclosedResourceCounter().__enter__()
+        unclosed = UnclosedResourceCounter()
         client = recording_client(lib, backend, limits=lib.Limits(max_connections=max_connections),
                                   timeout=lib.Timeout(10.0, connect=5.0, pool=0.5))
         rng = random.Random(5870)
@@ -373,6 +379,9 @@ class TestReproduction:
         outcome = "healthy"
         deadline = time.monotonic() + load_seconds
         try:
+            # Entered inside the try, so the finally below always restores the
+            # warning filters, even when the load itself fails.
+            unclosed.__enter__()
             while time.monotonic() < deadline:
                 await asyncio.gather(*(one(i % 3) for i in range(40)))
                 try:
