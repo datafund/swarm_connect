@@ -366,11 +366,16 @@ class OutcomeUnknownRegistry:
         for k in [k for k, v in self._entries.items() if v["expires"] <= now and k not in self._inflight]:
             del self._entries[k]
 
-    def _insert(self, kid: str, kind: str, now: float) -> Tuple[bool, Optional[dict], Dict[str, dict]]:
+    def _insert(self, kid: str, kind: str, now: float,
+                version: int = 1) -> Tuple[bool, Optional[dict], Dict[str, dict]]:
         """Insert or refresh kid under `_lock`, then enforce the cap by evicting
         before_work entries only (oldest first), never kid, an in-flight entry or
         an after_work entry (its work would run again). Returns (kept, previous
-        value of kid, evicted). Not kept: nothing changed."""
+        value of kid, evicted). Not kept: nothing changed.
+
+        The entry records the x402 version of the attempt (#607) as
+        "version": 2; no field means 1, so v1 entries are as before. The key
+        itself is version-neutral (D5): one authorization, either envelope."""
         previous = self._entries.get(kid)
         if previous is not None and previous["kind"] == AFTER_WORK:
             kind = AFTER_WORK    # once the work has run, it must not run again
@@ -388,6 +393,8 @@ class OutcomeUnknownRegistry:
         if evicted:
             logger.warning("x402: settlement-unknown registry over its cap; evicted %d", len(evicted))
         self._entries[kid] = {"expires": now + OUTCOME_UNKNOWN_SECONDS, "kind": kind}
+        if version == 2:
+            self._entries[kid]["version"] = 2
         return True, previous, evicted
 
     def _rollback(self, kid: str, previous: Optional[dict], evicted: Dict[str, dict]) -> None:
@@ -437,7 +444,8 @@ class OutcomeUnknownRegistry:
             return self._gen_counter
 
     def begin_settlement_ex(self, key: Optional[Tuple[str, str]], kind: str,
-                            gen: Optional[int] = None) -> Tuple[Optional[str], bool, Optional[int]]:
+                            gen: Optional[int] = None,
+                            version: int = 1) -> Tuple[Optional[str], bool, Optional[int]]:
         """begin_settlement, also returning the generation of this write-ahead,
         which resolve() and remove_abandoned() check. `gen` is allocated by the
         async caller beforehand, so it can give up on it before this runs.
@@ -462,7 +470,7 @@ class OutcomeUnknownRegistry:
             self._prune(now)
             prior = self._kind_locked(kid, now)
             previous_unasked = self._unasked.get(kid)
-            kept, previous, evicted = self._insert(kid, kind, now)
+            kept, previous, evicted = self._insert(kid, kind, now, version)
             if not kept:
                 return prior, False, None
             self._inflight[kid] = self._inflight.get(kid, 0) + 1
@@ -597,7 +605,7 @@ class OutcomeUnknownRegistry:
                     return
         self._remove(key, prior, settled=False, gen=gen, require_idle=True)
 
-    async def abegin_settlement(self, key, kind):
+    async def abegin_settlement(self, key, kind, version: int = 1):
         """begin_settlement off the event loop, on the registry pool. Returns
         (prior, recorded, gen); the entry is not yet "asked" (mark_asked, give_up). Refused at
         once (recorded False, so 503) while too many registry writes are pending.
@@ -617,7 +625,7 @@ class OutcomeUnknownRegistry:
             self.mark_stalled(f"{MAX_PENDING_REGISTRY_IO} settlement-state writes pending")
             return None, False, None
         gen = self.next_generation()
-        cfut = _submit_registry_io(self.begin_settlement_ex, key, kind, gen)
+        cfut = _submit_registry_io(self.begin_settlement_ex, key, kind, gen, version)
         inner = asyncio.wrap_future(cfut)
         try:
             prior, recorded, got = await asyncio.wait_for(
@@ -910,6 +918,16 @@ def authorization_key(payment_payload) -> Optional[Tuple[str, str]]:
     return (payer.lower(), "0x" + nonce[-64:].lower())
 
 
+def facilitator_requirements(request):
+    """The requirements to send the facilitator for this request's payment:
+    the gateway's own v2 offer for an x402 v2 payment, else the v1
+    requirements (#607). The envelope's x402Version follows the payment."""
+    state = getattr(request, "state", None)
+    if getattr(state, "x402_version", None) == 2:
+        return getattr(state, "x402_requirements_v2", None)
+    return getattr(state, "x402_requirements", None)
+
+
 def _facilitator():
     # Resolved through the dependency module so there is one client, and tests
     # that patch dependency._get_facilitator_client cover settlement too.
@@ -945,7 +963,8 @@ async def settle_payment(request: Request) -> None:
     auth_key = getattr(request.state, "x402_auth_key", None)
     # Write-ahead: on disk before the facilitator is asked, so a kill while
     # waiting leaves an unknown outcome behind, not nothing (#553).
-    prior, recorded, gen = await outcome_unknown.abegin_settlement(auth_key, BEFORE_WORK)
+    prior, recorded, gen = await outcome_unknown.abegin_settlement(auth_key, BEFORE_WORK,
+                                                                   version=paid_version(request))
     if not recorded:
         if outcome_unknown.in_flight(auth_key):
             raise settlement_in_progress_refusal(auth_key, request)
@@ -964,7 +983,8 @@ async def settle_payment(request: Request) -> None:
                             detail=payment_state_unavailable_detail())
     outcome_unknown.mark_asked(auth_key, gen)
     try:
-        result = await _facilitator().settle(payment=payment, payment_requirements=requirements)
+        result = await _facilitator().settle(payment=payment,
+                                             payment_requirements=facilitator_requirements(request))
     except Exception as e:
         # The outcome is unknown: the facilitator may or may not have submitted
         # the transfer. Deliver nothing. The middleware then releases the
@@ -1022,7 +1042,10 @@ async def settle_payment(request: Request) -> None:
             "reason": shown,
         }
         # Also a well-formed x402 Payment Required body, so a client can sign a
-        # fresh payment from it like from any other 402 (#372).
+        # fresh payment from it like from any other 402 (#372). It stays the v1
+        # shape for a v2 payment too, as every 402 does until PAYMENT-REQUIRED
+        # is sent (#608); what follows the request's version is the
+        # facilitator call above (facilitator_requirements, #607).
         if hasattr(requirements, "model_dump"):
             detail.update({
                 "x402Version": 1,
