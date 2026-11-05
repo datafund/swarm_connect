@@ -492,3 +492,40 @@ def test_a_paid_v2_answer_carries_its_receipt_and_no_offer(gw):
     assert r.status_code == 200
     assert "PAYMENT-RESPONSE" in r.headers and "PAYMENT-REQUIRED" not in r.headers
     assert codec_v2.decode_payment_response(r.headers["PAYMENT-RESPONSE"]).success is True
+
+
+# --- review round 1: the fallbacks with "2" alone ---------------------------
+
+def test_v2_only_too_large_keeps_the_v1_body(gw, monkeypatch, caplog):
+    """Without the header, a v2 copy in the body would be unpayable:
+    @x402/core reads a body only when its x402Version is 1."""
+    client, _fac, _offer_v1 = _v2_only(gw, monkeypatch)
+    huge = "Postage stamp " + "x" * 9000
+    before = failures.labels(reason="too_large")._value.get()
+    with patch("app.x402.dependency._calculate_price_for_request",
+               new=AsyncMock(return_value={"price_usd": 0.02, "description": huge})), \
+         caplog.at_level(logging.WARNING, logger="app.x402.advertise_v2"):
+        r = client.post("/api/v1/stamps/")
+    assert r.status_code == 402, r.text
+    body = r.json()
+    assert body["x402Version"] == 1 and body["detail"]["x402Version"] == 1
+    assert body["accepts"][0]["maxAmountRequired"] == "20000" and "resource" not in body
+    assert "PAYMENT-REQUIRED" not in r.headers
+    assert failures.labels(reason="too_large")._value.get() == before + 1
+    assert sum("not sent" in m for m in caplog.messages) == 1
+
+
+@pytest.mark.parametrize("versions", ["1,2", "2"])
+def test_an_invalid_offer_is_logged_and_counted_once(gw, monkeypatch, caplog, versions):
+    client, _fac = gw(versions)
+    before = failures.labels(reason="invalid")._value.get()
+
+    def broken(_requirements):
+        raise ValueError("no CAIP-2 id")
+
+    monkeypatch.setattr("app.x402.v2_payment.v2_offer_from_v1", broken)
+    with caplog.at_level(logging.WARNING, logger="app.x402.advertise_v2"):
+        r = client.post("/api/v1/stamps/")
+    assert r.status_code == 402 and r.json()["x402Version"] == 1
+    assert sum("cannot express" in m for m in caplog.messages) == 1
+    assert failures.labels(reason="invalid")._value.get() == before + 1

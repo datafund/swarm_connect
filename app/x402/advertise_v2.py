@@ -15,15 +15,17 @@ byte for byte. With 2 enabled:
   PaymentRequired with x402Version 2, the body's `error`, `resource` (url,
   description, mimeType of accepts[0]) and `accepts` (every v1 offer, in v2
   form). The resource is v2_payment.gateway_resource, the one forwarded to
-  the facilitator with a v2 payment. A body without offers gets none. If it cannot be built (the v2
-  model refuses a value) or encoded (over codec_v2.MAX_HEADER_CHARS), the 402
+  the facilitator with a v2 payment. A body without offers gets none. If it
+  cannot be built (the v2 model refuses a value) or encoded (over codec_v2.MAX_HEADER_CHARS), the 402
   goes out without it: logged, counted in
   gateway_x402_payment_required_header_failures_total, never a 500.
-- v2_body(detail), with "2" alone (D10): the body is the JSON copy of that
-  PaymentRequired. x402Version, error and accepts become the v2 ones, resource
+- advertise(detail), with "2" alone (D10): the body is the JSON copy of that
+  PaymentRequired, whenever the header is sent with it. x402Version, error and accepts become the v2 ones, resource
   is added, and every other field (code, message, freeTier, fields,
   x402_status, reason, the pool's fields) stays. With v1 still enabled the v1
   body stays (D2): v1 clients read it, and @x402/core reads the header.
+  Whenever the header cannot be sent, the v1 body stays too, also with "2"
+  alone: @x402/core reads a body only when its x402Version is 1.
 """
 import logging
 from typing import Optional
@@ -90,14 +92,8 @@ def _build(detail):
         return None, "invalid"
 
 
-def payment_required_header(detail) -> Optional[str]:
-    """The PAYMENT-REQUIRED value for a v1 402 body, or None (see the module docstring)."""
-    message, failure = _build(detail)
-    if failure is not None:
-        _count_failure(failure)
-        return None
-    if message is None:
-        return None
+def _encode(message: PaymentRequired) -> Optional[str]:
+    """The header value, or None (logged and counted) when it cannot be encoded."""
     try:
         return codec_v2.encode_payment_required(message)
     except codec_v2.PaymentHeaderTooLarge as e:
@@ -109,26 +105,43 @@ def payment_required_header(detail) -> Optional[str]:
     return None
 
 
+def _advertised(detail):
+    """(PaymentRequired, header value), or (None, None). Logs and counts a
+    failure once."""
+    message, failure = _build(detail)
+    if failure is not None:
+        _count_failure(failure)
+        return None, None
+    if message is None:
+        return None, None
+    value = _encode(message)
+    return (message, value) if value is not None else (None, None)
+
+
+def payment_required_header(detail) -> Optional[str]:
+    """The PAYMENT-REQUIRED value for a v1 402 body, or None (see the module docstring)."""
+    return _advertised(detail)[1]
+
+
 def v2_only() -> bool:
     return accepted_x402_versions() == (2,)
 
 
-def v2_body(detail):
-    """With "2" alone, the body as the JSON copy of the v2 PaymentRequired (D10).
-
-    Returns `detail` unchanged otherwise, or when it has no offer, or when the
-    offer cannot be expressed in v2 (logged; the header is then not sent
-    either, and counted there)."""
-    if not v2_only():
-        return detail
-    message, _failure = _build(detail)
-    if message is None:
-        return detail
+def _v2_copy(detail, message: PaymentRequired) -> dict:
     copy = message.model_dump(mode="json", by_alias=True, exclude_none=True)
     rest = {k: v for k, v in detail.items() if k not in _V1_FIELDS}
     return {**copy, **rest}
 
 
 def advertise(detail):
-    """(body detail, PAYMENT-REQUIRED value or None) for a 402's detail."""
-    return v2_body(detail), payment_required_header(detail)
+    """(body detail, PAYMENT-REQUIRED value or None) for a 402's detail.
+
+    With "2" alone the body is the v2 copy (D10) only when the header is
+    sent too. When the header cannot be sent (the offer cannot be expressed
+    in v2, or the header would be too large) the v1 body is kept: @x402/core
+    reads a body only when its x402Version is 1, so a v2 copy without the
+    header would leave the 402 unpayable."""
+    message, value = _advertised(detail)
+    if value is not None and v2_only():
+        return _v2_copy(detail, message), value
+    return detail, value

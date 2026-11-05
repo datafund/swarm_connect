@@ -454,11 +454,10 @@ def ensure_x402_version_series(versions) -> None:
     if 2 in versions:
         for result in X402_SETTLEMENT_RESULTS:
             x402_settlements_total.labels(result=result, version="2")
-    if 1 not in versions:
-        x402_payments_total.labels(mode="version_unsupported", version="1")
-    if 2 in versions:
         for reason in X402_PAYMENT_REQUIRED_HEADER_FAILURES:
             x402_payment_required_header_failures_total.labels(reason=reason)
+    if 1 not in versions:
+        x402_payments_total.labels(mode="version_unsupported", version="1")
 
 
 ensure_x402_version_series(settings.x402_protocol_versions())
