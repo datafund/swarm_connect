@@ -172,11 +172,13 @@ jobs:
       - name: no test packages in the image (offline)
         # The image installs requirements.lock only; pytest and the other
         # test-only packages are in requirements-dev.lock (#430). This fails
-        # if any of them can be imported in the built image.
+        # if any of them can be imported in the built image. packaging is on
+        # the list because only pytest needs it: the pinned base image has no
+        # top-level packaging (pip's own copy is pip._vendor.packaging).
         run: |
           docker exec -i "$CONTAINER" python - <<'TESTPKGS'
           import importlib.util
-          TEST_ONLY = ("pytest", "_pytest", "pytest_asyncio", "pluggy", "iniconfig")
+          TEST_ONLY = ("pytest", "_pytest", "pytest_asyncio", "pluggy", "iniconfig", "packaging")
           found = [name for name in TEST_ONLY if importlib.util.find_spec(name) is not None]
           assert not found, f"test-only packages are importable in the image: {found}"
           print(f"OK: none of {', '.join(TEST_ONLY)} is importable")
