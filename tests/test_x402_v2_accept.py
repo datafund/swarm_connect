@@ -563,3 +563,55 @@ def test_bee_gate_keeps_an_answer_carrying_payment_response():
     assert r.status_code == 502 and "retry-after" not in r.headers
     assert_not_rewritten(r)
     assert client.get("/plain-502").json()["code"] == "BEE_BUSY"    # the control
+
+
+# --------------------------------------------------------------------------
+# Deeply nested values (#645 review)
+# --------------------------------------------------------------------------
+
+def _nested(depth):
+    value = "x"
+    for _ in range(depth):
+        value = {"a": value}
+    return value
+
+
+def test_deeply_nested_extra_gets_400_from_the_codec(gw):
+    client, fac = gw("1,2")
+    offer = _offer(client)
+    accepted = dict(v2_accepted(offer), extra=_nested(400))
+    payload = v2_payload(offer, authorization(offer), accepted)
+    # json.dumps recurses too; build the 400-deep JSON text by hand.
+    text = json.dumps(dict(payload, accepted=dict(accepted, extra="@@")), separators=(",", ":"))
+    text = text.replace('"@@"', '{"a":' * 400 + '"x"' + "}" * 400)
+    r = client.post("/api/v1/stamps/", headers={"PAYMENT-SIGNATURE": base64.b64encode(text.encode()).decode()})
+    assert r.status_code == 400, r.text
+    assert r.json()["code"] == "PAYMENT_HEADER_MALFORMED"
+    assert fac.calls == [] and v2h.RAN == []
+
+
+def test_an_offer_that_cannot_be_dumped_gets_400_not_500(gw):
+    """Past the codec's depth limit (a model built directly): still 400."""
+    from fastapi import HTTPException
+    from app.x402 import v2_payment
+    from app.x402.models_v1 import PaymentRequirements
+    from app.x402.models_v2 import PaymentPayloadV2
+    client, fac = gw("1,2")
+    offer = _offer(client)
+    deep = {}
+    node = deep
+    for _ in range(5000):
+        node["a"] = {}
+        node = node["a"]
+    payment = PaymentPayloadV2.model_validate(v2_payload(offer, authorization(offer)))
+    payment.accepted.extra = deep
+    requirements = PaymentRequirements.model_validate(offer)
+    with patch("app.x402.v2_payment.decode_v2_payment", return_value=payment):
+        with pytest.raises(HTTPException) as exc:
+            v2_payment.read_v2_payment("ignored", requirements)
+    assert exc.value.status_code == 400
+    assert exc.value.detail["code"] == "PAYMENT_HEADER_INVALID"
+    with patch("app.x402.v2_payment.decode_v2_payment", return_value=payment):
+        r = client.post("/api/v1/stamps/", headers={"PAYMENT-SIGNATURE": "e30="})
+    assert r.status_code == 400 and r.json()["code"] == "PAYMENT_HEADER_INVALID"
+    assert fac.calls == []

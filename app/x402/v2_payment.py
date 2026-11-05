@@ -127,7 +127,17 @@ def read_v2_payment(value, requirements: PaymentRequirements) -> Tuple[PaymentPa
         raise payment_required_402(
             requirements, code="PAYMENT_SCHEME_UNSUPPORTED",
             message="This gateway accepts the exact scheme only. " + NOT_CHARGED)
-    mismatched = offer_mismatches(payment.accepted, offer)
+    try:
+        mismatched = offer_mismatches(payment.accepted, offer)
+    except Exception:
+        # The codec's depth and number limits keep any decoded payment
+        # serialisable; should a value still fail to dump (a RecursionError, a
+        # ValueError), it is refused as invalid, never answered with a 500.
+        raise HTTPException(status_code=400, detail={
+            "code": "PAYMENT_HEADER_INVALID",
+            "message": ("The PAYMENT-SIGNATURE header's accepted offer cannot be read. "
+                        + NOT_CHARGED),
+        }) from None
     if mismatched:
         raise payment_required_402(
             requirements, code="PAYMENT_OFFER_MISMATCH",
