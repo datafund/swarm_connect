@@ -1,0 +1,13 @@
+# Test-only dependencies, edited by hand (#430). The Docker image does not
+# install them; CI (tests.yml) installs requirements-dev.lock next to
+# requirements.lock. This file does not include requirements.txt: its lock
+# lists only what the tests add, resolved against the runtime pins.
+# After changing this file or requirements.lock, regenerate (uv 0.11.x):
+#   uv pip compile requirements-dev.txt -c requirements.lock --universal --python-version 3.12 --generate-hashes -o requirements-dev.lock
+# -c requirements.lock keeps every package the runtime lock also pins (requests,
+# typing-extensions, pygments ...) at the runtime version, so installing both
+# locks never asks for two versions of one package.
+pytest>=7.0.0
+pytest-asyncio>=0.21.0
+packaging>=23.0           # tests/test_ci_workflow.py compares versions with it
+requests>=2.28.0          # HTTP client of the integration and live tests
