@@ -16,6 +16,7 @@ The image carries runtime packages only: test-only packages are in
 requirements-dev.txt and its lock, which CI installs next to the runtime lock,
 and CI fails when a lock no longer matches its input (#430).
 """
+import ast
 import os
 import re
 import shutil
@@ -383,12 +384,12 @@ def test_runtime_requirements_and_lock_have_no_test_packages():
 
 def test_dev_requirements_hold_the_test_packages():
     direct = _requirement_names(REQUIREMENTS_DEV_TXT)
-    for name in ("pytest", "pytest-asyncio", "requests", "packaging"):
+    for name in ("pytest", "pytest-asyncio", "requests", "packaging", "pyyaml"):
         assert name in direct, f"{name} (imported by the tests) is not in requirements-dev.txt"
     # The dev lock lists what the tests add; it does not pull in the runtime set.
     assert "-r requirements.txt" not in REQUIREMENTS_DEV_TXT.read_text()
     blocks = _lock_blocks(DEV_LOCK)
-    for name in ("pytest", "pytest-asyncio", "pluggy", "iniconfig", "packaging", "requests"):
+    for name in ("pytest", "pytest-asyncio", "pluggy", "iniconfig", "packaging", "requests", "pyyaml"):
         assert name in blocks, f"{name} is not pinned in requirements-dev.lock"
         assert blocks[name][1], f"{name} has no hashes in requirements-dev.lock"
 
@@ -488,8 +489,9 @@ def test_lock_sync_script_reruns_both_header_commands():
 # hashes are kept), unless told to change it, the way uv changes a lock whose
 # input no longer matches it. A missing -o file (the fresh hash pass) it fills
 # from the pristine locks in FAKE_UV_SOURCE, as uv would from the index, and
-# FAKE_UV_FRESH_HASH adds a hash there, as when PyPI gains a file. It keeps a
-# copy of the -c *.pins file it was given.
+# FAKE_UV_FRESH_HASH adds a hash there, as when PyPI gains a file;
+# FAKE_UV_NO_OUTPUT leaves it missing. It keeps a copy of the -c *.pins file
+# it was given.
 FAKE_UV = r"""#!/usr/bin/env bash
 if [ "$1" = "--version" ]; then echo "uv ${FAKE_UV_VERSION:-0.11.17}"; exit 0; fi
 out=""; pins=""; prev=""
@@ -502,6 +504,8 @@ echo "$PWD|$*|${UV_NO_CONFIG:-}|${UV_INDEX_URL:-}" >> "$FAKE_UV_LOG"
 [ "${FAKE_UV_EXIT:-0}" = 0 ] || exit "$FAKE_UV_EXIT"
 if [ -e "$out" ]; then
   [ "$out" = "${FAKE_UV_CHANGE:-}" ] && echo "extra==1.0" >> "$out"
+elif [ -n "${FAKE_UV_NO_OUTPUT:-}" ]; then
+  :
 else
   cp "$FAKE_UV_SOURCE/$(basename "$out")" "$out"
   if [ -n "${FAKE_UV_FRESH_HASH:-}" ]; then
@@ -541,6 +545,7 @@ def lock_sync(tmp_path):
         return proc, calls
 
     run.repo = repo
+    run.bin = bin_dir
     run.pins = lambda lock: Path(f"{log}.{lock}.pins").read_text()
     return run
 
@@ -601,6 +606,61 @@ def test_lock_sync_fails_on_a_dropped_hash(lock_sync):
     assert "pytest==" in proc.stdout and "is missing from the lock" in proc.stdout
 
 
+def _duplicate_block(lock_text, package, drop_second_hash=False):
+    """The lock with one package's block pinned twice, under two markers, the
+    way a universal lock pins a version per platform. Optionally drop one hash
+    from the second block only."""
+    m = re.search(rf"^({re.escape(package)}==\S+) \\\n((?:    --hash=\S+.*\n)+)((?:    #.*\n)*)",
+                  lock_text, re.M)
+    assert m, package
+    pin, hashes, via = m.groups()
+    second = hashes
+    if drop_second_hash:
+        second = hashes.replace(hashes.splitlines(True)[0], "", 1)
+    blocks = (f"{pin} ; sys_platform == 'win32' \\\n{hashes}{via}"
+              f"{pin} ; sys_platform != 'win32' \\\n{second}{via}")
+    return lock_text[:m.start()] + blocks + lock_text[m.end():]
+
+
+def test_lock_sync_compares_duplicate_blocks_separately(lock_sync, tmp_path):
+    """A hash dropped from one of two blocks of the same version must fail,
+    although the other block still lists it."""
+    source = tmp_path / "source"
+    source.mkdir()
+    shutil.copy2(LOCK, source / LOCK.name)
+    full = _duplicate_block(DEV_LOCK.read_text(), "pytest")
+    (source / DEV_LOCK.name).write_text(full)
+
+    (lock_sync.repo / DEV_LOCK.name).write_text(full)
+    proc, _ = lock_sync(FAKE_UV_SOURCE=str(source))
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+
+    (lock_sync.repo / DEV_LOCK.name).write_text(_duplicate_block(DEV_LOCK.read_text(), "pytest", True))
+    proc, _ = lock_sync(FAKE_UV_SOURCE=str(source))
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert "pytest==9.1.1 ; sys_platform != 'win32': hash sha256:" in proc.stdout
+    assert "is missing from the lock" in proc.stdout
+    assert "sys_platform == 'win32': hash" not in proc.stdout
+
+
+def test_lock_sync_gives_2_when_diff_fails(lock_sync):
+    (lock_sync.bin / "diff").write_text("#!/bin/sh\necho 'diff: broken' >&2\nexit 2\n")
+    (lock_sync.bin / "diff").chmod(0o755)
+    proc, _ = lock_sync()
+    assert proc.returncode == 2, proc.stdout + proc.stderr
+    assert "diff failed for requirements.lock (rc 2)" in proc.stderr
+    assert "out of sync" not in proc.stdout
+
+
+def test_lock_sync_gives_2_when_the_hash_comparison_raises(lock_sync):
+    """The fresh compile leaves no output, so the comparison cannot read it:
+    a tool error, not a lock difference."""
+    proc, _ = lock_sync(FAKE_UV_NO_OUTPUT="1")
+    assert proc.returncode == 2, proc.stdout + proc.stderr
+    assert "the hash comparison failed: FileNotFoundError" in proc.stderr
+    assert "lists hashes that differ" not in proc.stdout
+
+
 def test_lock_sync_fails_when_the_index_has_a_file_the_lock_lacks(lock_sync):
     """The known false positive: PyPI gains a file for a pinned version. The
     check fails, which is why CI runs it on pull requests only."""
@@ -656,19 +716,84 @@ def _no_test_packages_script():
     return textwrap.dedent(m.group(2))
 
 
+def _no_test_packages_step():
+    steps = yaml.safe_load(IMAGE_YML.read_text())["jobs"]["docker-build"]["steps"]
+    # Found by its heredoc, not by its first line, so that anything put
+    # around the docker exec is seen by the checks below.
+    found = [s for s in steps if "<<'TESTPKGS'" in str(s.get("run", ""))]
+    assert len(found) == 1, f"expected one no-test-packages step in image.yml, found {found}"
+    return found[0]
+
+
+# Ways for a Python script to end early with a status of its choosing.
+_EARLY_EXITS = {("sys", "exit"), ("os", "_exit")}
+
+
+def _early_exits(script):
+    found = []
+    for node in ast.walk(ast.parse(script)):
+        if isinstance(node, ast.Call):
+            f = node.func
+            if isinstance(f, ast.Name) and f.id in ("exit", "quit", "_exit"):
+                found.append(f.id)
+            elif isinstance(f, ast.Attribute) and isinstance(f.value, ast.Name) \
+                    and (f.value.id, f.attr) in _EARLY_EXITS:
+                found.append(f"{f.value.id}.{f.attr}")
+        elif isinstance(node, ast.Raise) and node.exc is not None:
+            exc = node.exc.func if isinstance(node.exc, ast.Call) else node.exc
+            if isinstance(exc, ast.Name) and exc.id == "SystemExit":
+                found.append("raise SystemExit")
+        elif isinstance(node, ast.ImportFrom) and node.module in ("sys", "os"):
+            found += [f"from {node.module} import {a.name}" for a in node.names
+                      if a.name in ("exit", "_exit")]
+    return found
+
+
 def test_image_checks_test_packages_are_not_importable():
     blocks = _run_blocks(IMAGE_YML.read_text())
-    checks = [i for i, b in enumerate(blocks) if b.startswith(NO_TEST_PKGS_EXEC)]
+    checks = [i for i, b in enumerate(blocks) if "<<'TESTPKGS'" in b]
     assert len(checks) == 1
     smoke = next(i for i, b in enumerate(blocks) if "docker run" in b)
     remove = next(i for i, b in enumerate(blocks) if b.startswith("docker rm -f "))
     assert smoke < checks[0] < remove
-    assert not re.search(r"\|\|\s*(true|:|exit 0)\b", blocks[checks[0]])
+
+    # The step's own failure is not swallowed: it has no continue-on-error,
+    # and its shell part (the run without the Python fed to the container)
+    # is the docker exec alone.
+    step = _no_test_packages_step()
+    assert "continue-on-error" not in step, step
+    shell = re.sub(r"<<'TESTPKGS'\n.*?^TESTPKGS$", "<<'TESTPKGS'", step["run"], flags=re.S | re.M)
+    assert shell.strip() == NO_TEST_PKGS_EXEC, f"shell commands around the check: {shell!r}"
+    for swallow in (r"\|\|\s*(true|:)", r"\bset\s+\+e\b", r"\bexit\s+0\b"):
+        assert not re.search(swallow, shell), swallow
 
     script = _no_test_packages_script()
+    assert step["run"].split("\n", 1)[1].rstrip("\n").endswith("TESTPKGS")
+    assert textwrap.dedent(step["run"].split("\n", 1)[1].rsplit("TESTPKGS", 1)[0]) == script
     for name in ("pytest", "pytest_asyncio", "pluggy", "iniconfig", "packaging"):
         assert f'"{name}"' in script, name
-    assert "except" not in script and not re.search(r"https?://", script)
+    # A failed check fails the step: nothing catches the assertion, and
+    # nothing ends the script early with a status of its own.
+    assert not [n for n in ast.walk(ast.parse(script)) if isinstance(n, ast.Try)]
+    assert _early_exits(script) == [], _early_exits(script)
+    assert not re.search(r"https?://", script)
+
+
+def test_early_exit_detection_catches_each_form():
+    for code in ("import sys\nsys.exit(0)", "import os\nos._exit(0)", "exit(0)", "quit()",
+                 "raise SystemExit", "raise SystemExit(0)", "from sys import exit"):
+        assert _early_exits(code), code
+    assert _early_exits("import importlib.util\nassert True") == []
+
+
+def test_image_test_package_check_passes_without_the_test_packages():
+    """-S leaves site-packages off sys.path and -I ignores PYTHON* variables and
+    the user site, so only the standard library is importable, as in an image
+    without test packages."""
+    proc = subprocess.run([sys.executable, "-I", "-S", "-c", _no_test_packages_script()],
+                          capture_output=True, text=True, timeout=60)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert proc.stdout.startswith("OK: none of pytest")
 
 
 def test_image_test_package_check_fails_where_pytest_is_importable():
