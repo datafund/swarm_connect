@@ -181,8 +181,10 @@ class FacilitatorClient:
             # refuses it like any other non-2xx answer.
             async with client.stream("GET", f"{self.config['url']}/supported", headers=headers,
                                      follow_redirects=False) as response:
-                kept = [(k, v) for k, v in response.headers.multi_items()
-                        if k.lower() not in ("content-encoding", "content-length", "transfer-encoding")]
+                # The raw byte pairs: decoded as latin-1 and re-encoded, an
+                # obs-text header (0x80-0xFF) would raise UnicodeEncodeError.
+                kept = [(k, v) for k, v in response.headers.raw
+                        if k.lower() not in (b"content-encoding", b"content-length", b"transfer-encoding")]
                 if not 200 <= response.status_code < 300:
                     # Refused whatever it says (a 3xx included): its body is
                     # never read, so it cannot cost memory or time.

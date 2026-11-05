@@ -834,3 +834,45 @@ def test_v1_verify_and_settle_still_follow_redirects():
     src = inspect.getsource(facilitator_client.FacilitatorClient)
     assert src.count("follow_redirects=True") == 3       # _post, _post_v2, supported()
     assert src.count("follow_redirects=False") == 1      # supported_response()
+
+
+# --- review round 5 ---------------------------------------------------------
+
+def test_a_valid_answer_with_an_obs_text_header_is_read(x402):
+    """Header bytes 0x80-0xFF used to break the rebuilt Response
+    (UnicodeEncodeError) and refuse a valid answer as 'could not be made'."""
+    body = json.dumps({"kinds": [V2_EXACT]}).encode()
+
+    class Wire(httpx2.AsyncByteStream):
+        async def __aiter__(self):
+            yield body
+
+    def handler(request):
+        return httpx2.Response(200, headers=[(b"X-Note", b"caf\xe9 \xff"), (b"Content-Type", b"application/json")],
+                               stream=Wire())
+
+    check(_ObsClient(handler))
+
+
+class _ObsClient:
+    def __init__(self, handler):
+        self.handler = handler
+
+    def client(self):
+        return FacilitatorClient({"url": URL}, transport=httpx2.MockTransport(self.handler))
+
+
+@pytest.mark.parametrize("status,hint", [
+    (401, "(an authentication error: check the facilitator credentials)"),
+    (403, "(an authentication error: check the facilitator credentials)"),
+    (302, "(redirects are not followed"),
+])
+def test_status_hints(x402, status, hint):
+    assert hint in refused(Supported(httpx2.Response(status, json={})))
+
+
+@pytest.mark.parametrize("status", [400, 404, 429, 500, 502, 503, 999])
+def test_no_authentication_hint_for_other_statuses(x402, status):
+    msg = refused(Supported(httpx2.Response(status, json={})))
+    assert f"answered HTTP {status}, not a list of payment kinds. " in msg
+    assert "authentication" not in msg and "redirect" not in msg

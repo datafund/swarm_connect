@@ -270,6 +270,7 @@ Owner addresses are canonical (lowercase, `0x`-prefixed, validated) on `register
 - Authentication/authorization placeholder code exists but not implemented
 - SSL/HTTPS support built into development server
 - Logging configured at INFO level with structured error handling
+- httpx2's per-request INFO line is rewritten by `app/core/http_log.py` (installed in `app/main.py` and `check_config`, #608) to `HTTP Request: <METHOD> <path> <status>`: the URL's host and query, the HTTP version and the server's reason phrase are dropped (the reason phrase is server-controlled, up to about 100 KiB, and the container log reaches the public deploy log); the path is capped at 200 characters. This changes every such line, Bee requests included: they no longer show the Bee host, query parameters or the reason phrase. httpcore2's DEBUG `receive_response_headers.complete` trace is redacted too. Tests: `tests/test_http_log_filter.py`
 
 ## x402 Payment Integration
 
