@@ -6,6 +6,8 @@ configured with eip155:84532 must send exactly what one configured with
 base-sepolia sends: compared here against the v1 goldens captured before the
 map existed (tests/golden/x402_v1/).
 """
+import json
+
 import pytest
 
 from app.core.config import is_testnet_network, settings
@@ -83,3 +85,47 @@ def test_caip2_configured_gateway_sends_the_v1_golden_bytes(gateway, monkeypatch
     got = run_capture(gateway, monkeypatch, caip2, v1)
     assert '"network":"%s"' % v1 in got["no_header_stamps"]["body"]
     assert caip2 not in "".join(str(v) for v in got.values())
+
+
+def _audit_events():
+    # The audit log is created on its first event: absent when a test runs alone.
+    try:
+        with open(settings.X402_AUDIT_LOG_PATH) as f:
+            return [json.loads(line) for line in f if line.strip()]
+    except FileNotFoundError:
+        return []
+
+
+def test_caip2_configured_gateway_shows_v1_names_outside_the_goldens(gateway, monkeypatch):  # noqa: F811
+    """With X402_NETWORK=eip155:84532: /pricing, the free-tier 429 and the audit
+    records all name the network base-sepolia."""
+    from unittest.mock import AsyncMock, patch
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from app.api.endpoints import pricing
+    from tests.test_x402_v1_golden import payment_header
+
+    # Payment audit record (payment_settled) and the free-tier 429.
+    client, _ = gateway("eip155:84532", free_tier=True)
+    start = len(_audit_events())
+    r = client.post("/api/v1/stamps/", headers={"X-PAYMENT": payment_header("base-sepolia", nonce_byte="0f")})
+    assert r.status_code == 200, r.text
+    settled = [e for e in _audit_events()[start:] if e["event_type"] == "payment_settled"]
+    assert settled and {e["data"]["network"] for e in settled} == {"base-sepolia"}
+
+    for _ in range(3):     # the free-tier limit
+        assert client.post("/api/v1/stamps/", headers={"X-Payment-Mode": "free"}).status_code == 200
+    r = client.post("/api/v1/stamps/", headers={"X-Payment-Mode": "free"})
+    assert r.status_code == 429, r.text
+    body = r.json()
+    info = body.get("payment_info") or body["detail"]["payment_info"]
+    assert info["network"] == "base-sepolia"
+
+    # /pricing
+    app = FastAPI()
+    app.include_router(pricing.router, prefix="/api/v1")
+    with patch("app.services.swarm_api.get_chainstate",
+               new=AsyncMock(return_value={"currentPrice": "240000", "chainTip": 1, "block": 1})):
+        body = TestClient(app).get("/api/v1/pricing").json()
+    assert body["network"] == "base-sepolia"
+    assert settings.X402_NETWORK == "eip155:84532"
