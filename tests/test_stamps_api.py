@@ -1,6 +1,6 @@
 # tests/test_stamps_api.py
 import pytest
-import httpx
+import httpx2
 from unittest.mock import patch, MagicMock
 from fastapi.testclient import TestClient
 import json
@@ -186,7 +186,7 @@ class TestStampsAPI:
     @patch('app.services.swarm_api.get_all_stamps_processed')
     def test_list_stamps_api_error(self, mock_get_stamps):
         """Test stamps list endpoint when API call fails."""
-        mock_get_stamps.side_effect = httpx.HTTPError("Network error")
+        mock_get_stamps.side_effect = httpx2.HTTPError("Network error")
 
         response = client.get("/api/v1/stamps/")
 
@@ -385,7 +385,7 @@ class TestStampsAPI:
         """Test stamp purchase when API call fails."""
         mock_calc_cost.return_value = 131072000000000
         mock_funds.return_value = {"sufficient": True, "wallet_balance_bzz": 10.0, "required_bzz": 0.013, "shortfall_bzz": 0.0}
-        mock_purchase.side_effect = httpx.HTTPError("Purchase failed")
+        mock_purchase.side_effect = httpx2.HTTPError("Purchase failed")
 
         purchase_data = {
             "amount": 1000000000,
@@ -521,7 +521,7 @@ class TestStampsAPI:
         ]
         mock_calc_cost.return_value = 1048576000000000
         mock_funds.return_value = {"sufficient": True, "wallet_balance_bzz": 10.0, "required_bzz": 0.1, "shortfall_bzz": 0.0}
-        mock_extend.side_effect = httpx.HTTPError("Extension failed")
+        mock_extend.side_effect = httpx2.HTTPError("Extension failed")
 
         extension_data = {
             "amount": 8000000000

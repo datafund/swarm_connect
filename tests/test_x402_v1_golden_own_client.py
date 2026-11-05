@@ -6,7 +6,7 @@ bytes the gateway's own client puts on the wire. This runs the same capture
 with app.x402.facilitator_client.FacilitatorClient (the one production uses)
 and compares it with the same golden files, read-only. Never regenerate them.
 """
-import httpx
+import httpx2
 import pytest
 from unittest.mock import AsyncMock, patch
 from fastapi.testclient import TestClient
@@ -14,6 +14,11 @@ from fastapi.testclient import TestClient
 from app.x402.facilitator_client import FacilitatorClient
 from app.x402.ratelimit import reset_rate_limiter
 from tests import test_x402_v1_golden as golden
+
+
+def _httpx2(response):
+    """The golden stub answers with an httpx.Response; the client is on httpx2."""
+    return httpx2.Response(response.status_code, headers=list(response.headers.raw), content=response.content)
 
 
 @pytest.fixture
@@ -25,7 +30,7 @@ def own_gateway(monkeypatch):
         reset_rate_limiter()
         fac = golden.Facilitator()
         client = FacilitatorClient(config={"url": golden.FACILITATOR_URL},
-                                   transport=httpx.MockTransport(fac.handler))
+                                   transport=httpx2.MockTransport(lambda request: _httpx2(fac.handler(request))))
         p1 = patch("app.x402.dependency._calculate_price_for_request",
                    new=AsyncMock(return_value={"price_usd": 0.02, "description": "Golden operation"}))
         p2 = patch("app.x402.dependency._get_facilitator_client", return_value=client)

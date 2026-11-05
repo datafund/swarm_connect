@@ -12,7 +12,7 @@ import threading
 from datetime import datetime, timezone
 from unittest.mock import AsyncMock, patch
 
-import httpx
+import httpx2
 import pytest
 from fastapi import FastAPI
 
@@ -175,7 +175,7 @@ async def test_concurrent_acquires_never_get_the_same_batch(tmp_path, monkeypatc
     monkeypatch.setattr(pool, "settle_payment", slow_settle)
     app = FastAPI()
     app.include_router(pool.router, prefix="/api/v1/pool")
-    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t") as c:
+    async with httpx2.AsyncClient(transport=httpx2.ASGITransport(app=app), base_url="http://t") as c:
         rs = await asyncio.gather(*[c.post("/api/v1/pool/acquire", json={"size": "small"})
                                     for _ in range(3)])
 
@@ -238,7 +238,7 @@ async def _acquire_with_settle(tmp_path, monkeypatch, settle):
     monkeypatch.setattr(pool, "settle_payment", settle)
     app = FastAPI()
     app.include_router(pool.router, prefix="/api/v1/pool")
-    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t") as c:
+    async with httpx2.AsyncClient(transport=httpx2.ASGITransport(app=app), base_url="http://t") as c:
         try:
             return mgr, await c.post("/api/v1/pool/acquire", json={"size": "small"})
         except BaseException as e:  # CancelledError is not an Exception
@@ -362,9 +362,9 @@ async def test_release_log_names_the_caller_not_the_proxy(tmp_path, monkeypatch,
     monkeypatch.setattr(pool, "settle_payment", settle)
     app = FastAPI()
     app.include_router(pool.router, prefix="/api/v1/pool")
-    transport = httpx.ASGITransport(app=app, client=("10.0.0.2", 51234))   # the proxy
+    transport = httpx2.ASGITransport(app=app, client=("10.0.0.2", 51234))   # the proxy
     with caplog.at_level("INFO", logger="app.services.stamp_pool"):
-        async with httpx.AsyncClient(transport=transport, base_url="http://t") as c:
+        async with httpx2.AsyncClient(transport=transport, base_url="http://t") as c:
             r = await c.post("/api/v1/pool/acquire", json={"size": "small"},
                              headers={"X-Forwarded-For": "2001:db8:1:2::77"})
     assert r.status_code == 200, r.text

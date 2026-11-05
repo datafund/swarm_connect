@@ -9,7 +9,7 @@
 import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import httpx
+import httpx2
 import pytest
 from fastapi import APIRouter, Depends, FastAPI, Request
 from fastapi.testclient import TestClient
@@ -136,8 +136,8 @@ def test_concurrent_reuse_of_one_authorization_delivers_once(env):
     header = create_valid_payment_header()
 
     async def burst():
-        transport = httpx.ASGITransport(app=_app(fac))
-        async with httpx.AsyncClient(transport=transport, base_url="http://t") as c:
+        transport = httpx2.ASGITransport(app=_app(fac))
+        async with httpx2.AsyncClient(transport=transport, base_url="http://t") as c:
             return await asyncio.gather(*[c.post("/api/v1/stamps/", headers={"X-PAYMENT": header})
                                           for _ in range(10)])
 

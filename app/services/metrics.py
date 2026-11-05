@@ -882,8 +882,8 @@ async def _update_bzz_rates() -> None:
         return
     _last_price_fetch = time.monotonic()
     try:
-        import httpx
-        async with httpx.AsyncClient(timeout=httpx.Timeout(5.0, connect=3.0)) as client:
+        import httpx2
+        async with httpx2.AsyncClient(timeout=httpx2.Timeout(5.0, connect=3.0)) as client:
             response = await client.get(url)
             response.raise_for_status()
             if len(response.content) > 64 * 1024:

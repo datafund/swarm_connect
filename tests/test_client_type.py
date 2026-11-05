@@ -38,6 +38,7 @@ class TestClassification:
         ("curl/8.7.1", "curl"),
         ("Wget/1.21", "curl"),
         ("python-httpx/0.28.1", "http-lib"),
+        ("python-httpx2/2.16.0", "http-lib"),  # the gateway's own client since #595
         ("python-requests/2.32.4", "http-lib"),
         ("Go-http-client/2.0", "http-lib"),
         ("facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)", "bot"),
