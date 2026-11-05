@@ -14,16 +14,19 @@ This is a FastAPI-based service that provides a simplified API layer for accessi
 python3 -m venv venv
 source venv/bin/activate  # On Windows: venv\Scripts\activate
 
-# Install dependencies
-pip install -r requirements.txt
-# CI and the Docker image install the pinned set instead; to reproduce CI exactly
-# (Python 3.12): pip install --no-deps --require-hashes -r requirements.lock && pip check
+# Install dependencies: the runtime set plus the test-only packages (#430).
+# requirements.txt holds what the gateway runs; requirements-dev.txt holds
+# pytest, pytest-asyncio and the other test-only packages, which the image
+# does not ship.
+pip install -r requirements.txt -r requirements-dev.txt
+# CI installs the pinned sets instead (the image installs only requirements.lock);
+# to reproduce CI exactly (Python 3.12):
+#   pip install --no-deps --require-hashes -r requirements.lock -r requirements-dev.lock && pip check
 # CI also builds the image on every PR, uncached, and checks it answers GET /
 # (.github/workflows/image.yml, #486; see TEST_STRATEGY.md for the commands)
 # After a dependency change, refresh an existing venv the same way: since #595
 # the gateway imports httpx2, so a venv made before it fails with
-# "No module named 'httpx2'" until you rerun pip install -r requirements.txt
-# (or rebuild it from the lock)
+# "No module named 'httpx2'" until you rerun the install (or rebuild it from the locks)
 
 # Setup environment
 cp .env.example .env
@@ -654,7 +657,7 @@ feature branches → dev → main
    ```bash
    source venv/bin/activate && python -m pytest tests/ -v
    ```
-   - CI runs the suite too: `.github/workflows/tests.yml` runs on every pull request, and `deploy.yml` calls it as its gate, so nothing deploys unless it passes. It runs on Python 3.12 (the image's minor version; `tests/test_ci_workflow.py` keeps CI, the Dockerfile and the lock on one version) from `requirements.lock` (`--no-deps --require-hashes`, then `pip check`), the same set the image installs, with live tests skipped. Still run the suite locally first: CI is a backstop, not a substitute.
+   - CI runs the suite too: `.github/workflows/tests.yml` runs on every pull request, and `deploy.yml` calls it as its gate, so nothing deploys unless it passes. It runs on Python 3.12 (the image's minor version; `tests/test_ci_workflow.py` keeps CI, the Dockerfile and the lock on one version) from `requirements.lock` plus `requirements-dev.lock` (`--no-deps --require-hashes`, then `pip check`): the runtime set the image installs, plus the test-only packages the image does not ship (#430). Live tests are skipped. A second job, `lock-sync`, runs `scripts/check_lock_sync.sh` on pull requests: it fails if either lock no longer matches `requirements.txt` / `requirements-dev.txt`, or lists hashes that differ from PyPI (uv is installed from `.github/uv-pin.txt`, pinned by hash). Still run the suite locally first: CI is a backstop, not a substitute.
    - **Do not open or merge a PR to `dev` or `main` with failing or broken tests.** If a test is failing, either fix it or, if it is a known pre-existing failure, explicitly call it out in the PR description with a tracking issue — never let it pass silently.
    - (Historically, the x402 async migration broke ~51 tests for months precisely because nothing ran them — see the test-repair issue.)
 
@@ -848,11 +851,11 @@ If the remote gateway (provenance-gateway.datafund.io) returns 503 or appears br
    - Avoid Python 3.13+ features (e.g. `warnings.deprecated`, `copy.replace`, PEP 696 type-parameter defaults); a local 3.13 venv will not catch them
    - From 3.11, `asyncio.TimeoutError` is the built-in `TimeoutError` (an `OSError`), so `except asyncio.TimeoutError` also catches OS-level timeouts; httpx2 maps socket timeouts to `httpx2.TimeoutException`, which is not one
    - From 3.12, `asyncio.wait_for` is built on `asyncio.timeout`, so a result that completes in the same loop step as the deadline can still end in `TimeoutError` (3.10 returned it). The shielded call sites treat that conservatively: `stamps.py` answers 202 pending and the background half registers the batch; `settlement.py` answers 503 and gives the write-ahead up, which `_abandon_begin` clears; `idempotency.py` marks a stall that the next write clears. `BeeCallGate.acquire` keeps a slot granted in that step (tested in `tests/test_bee_call_gate.py::TestGrantRace`)
-   - Bumping the base image: `docker buildx imagetools inspect python:3.12-slim`, copy the top-level index `Digest:` into the Dockerfile `FROM` (not a per-platform manifest, so arm64 dev builds keep working), update the version comment, and let the PR's `image.yml` prove it. A minor-version move also changes `tests.yml` `python-version` and the lock's `--python-version` (regenerate with the command in `requirements.txt`); `tests/test_ci_workflow.py` fails until they agree
+   - Bumping the base image: `docker buildx imagetools inspect python:3.12-slim`, copy the top-level index `Digest:` into the Dockerfile `FROM` (not a per-platform manifest, so arm64 dev builds keep working), update the version comment, and let the PR's `image.yml` prove it. A minor-version move also changes both `python-version` entries in `tests.yml` and the `--python-version` of both locks (regenerate with the two commands in `requirements.txt`); `tests/test_ci_workflow.py` fails until they agree
    - The codebase still writes `Optional[int]` rather than `int | None`; keep to that for consistency
 
 3. **Common issues**:
-   - Import errors → Check the dependency is in requirements.txt and that requirements.lock was regenerated from it (CI and the image install only the lock)
+   - Import errors → Check the dependency is in requirements.txt (or, for a test-only package, requirements-dev.txt) and that both locks were regenerated with the commands in `requirements.txt` (runtime lock first). `scripts/check_lock_sync.sh` (uv 0.11.x) shows whether they match; the PR's `lock-sync` job runs it. The image installs only `requirements.lock`, so app code must never import a package that is only in `requirements-dev.txt`
    - `build docker image` fails on a deploy host but the PR's `docker-build` check passed → the host's base image or cache differs; the PR build is uncached and pulls the base image fresh
 
 4. **Quick fix workflow**:

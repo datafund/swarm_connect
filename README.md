@@ -48,7 +48,8 @@ swarm_connect/
 ├── .env.example            # Example environment file
 ├── docker-compose.yml      # Docker deployment (production + staging)
 ├── Dockerfile              # Container image (Python 3.12, base pinned by digest)
-├── requirements.txt        # Python dependencies
+├── requirements.txt        # Runtime dependencies (locked in requirements.lock)
+├── requirements-dev.txt    # Test-only dependencies (locked in requirements-dev.lock)
 └── run.py                  # Development server
 ``` 
 
@@ -74,10 +75,11 @@ python3 -m venv venv
 source venv/bin/activate
 # On Windows: venv\Scripts\activate
 
-# Install dependencies
-pip install -r requirements.txt
-# CI and the Docker image install requirements.lock instead (Python 3.12);
-# to reproduce CI: pip install --no-deps --require-hashes -r requirements.lock
+# Install dependencies (runtime, plus the test-only packages in requirements-dev.txt)
+pip install -r requirements.txt -r requirements-dev.txt
+# CI installs the locks instead (Python 3.12); the Docker image installs only
+# requirements.lock. To reproduce CI:
+# pip install --no-deps --require-hashes -r requirements.lock -r requirements-dev.lock
 
 # Set up environment file
 cp .env.example .env
