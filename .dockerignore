@@ -16,6 +16,8 @@ VERSION
 
 # Development-only
 tests/
+requirements-dev.txt
+requirements-dev.lock
 MagicMock/
 .pytest_cache/
 __pycache__/

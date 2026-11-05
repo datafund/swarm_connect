@@ -13,7 +13,7 @@ the payment answer must come through unchanged.
 import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import httpx
+import httpx2
 import pytest
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request
 from fastapi.testclient import TestClient
@@ -43,7 +43,7 @@ async def swallow_a_refusal():
     caller does before a paid purchase."""
     try:
         raise refused_by_the_gate()
-    except httpx.HTTPError:
+    except httpx2.HTTPError:
         pass
 
 
@@ -127,8 +127,8 @@ def test_refusal_counts_as_certainly_unspent():
     assert spend_certainly_did_not_happen(e) is True
     assert _outcome_unknown(e) is False
     # Unchanged for a real transport failure after the request was sent.
-    assert _outcome_unknown(httpx.ReadTimeout("slow")) is True
-    assert spend_certainly_did_not_happen(httpx.ReadTimeout("slow")) is False
+    assert _outcome_unknown(httpx2.ReadTimeout("slow")) is True
+    assert spend_certainly_did_not_happen(httpx2.ReadTimeout("slow")) is False
 
 
 # --------------------------------------------------------------------------
@@ -440,10 +440,10 @@ async def bee(monkeypatch):
 
 async def _local_stamps_refused():
     """get_local_stamps whose /stamps call the gate refused: it swallows the
-    error and returns [], as the real one does for any httpx error."""
+    error and returns [], as the real one does for any httpx2 error."""
     try:
         raise refused_by_the_gate()
-    except httpx.HTTPError:
+    except httpx2.HTTPError:
         return []
 
 
@@ -459,8 +459,8 @@ def _stamps_app(x402=False):
 
 
 async def _call(app, method, path, **kw):
-    transport = httpx.ASGITransport(app=app, raise_app_exceptions=False)
-    async with httpx.AsyncClient(transport=transport, base_url="http://gw") as c:
+    transport = httpx2.ASGITransport(app=app, raise_app_exceptions=False)
+    async with httpx2.AsyncClient(transport=transport, base_url="http://gw") as c:
         return await c.request(method, path, **kw)
 
 
@@ -519,7 +519,7 @@ async def test_unpaid_purchase_sent_after_a_refused_read_keeps_its_502(bee, monk
     async def funds(required):
         try:
             raise refused_by_the_gate()   # a read refused and swallowed
-        except httpx.HTTPError:
+        except httpx2.HTTPError:
             pass
         return {"sufficient": True, "wallet_balance_bzz": 10.0, "required_bzz": 0.01, "shortfall_bzz": 0.0}
     monkeypatch.setattr(swarm_api, "check_sufficient_funds", funds)

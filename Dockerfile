@@ -1,6 +1,20 @@
-# Use an official Python runtime as a parent image
-# Python 3.10+ required for x402 SDK
-FROM python:3.10-slim
+# Official Python image, pinned by digest so every host and CI build the same
+# base (#617, #430). Without the digest each deploy host built from whatever
+# python:*-slim it had cached, so hosts could differ in patch level.
+# The digest is the multi-platform index: linux/amd64 (the deploy hosts and
+# image.yml) gets one fixed manifest from it, and arm64 dev machines still
+# build natively.
+# Pinned 2026-11-05: Python 3.12.16, Debian trixie.
+#
+# To bump it (a CPython or Debian security release, or monthly):
+#   docker buildx imagetools inspect python:3.12-slim
+# copy the top-level "Digest:" (the index, not a per-platform manifest) here,
+# update the line above, and let the pull request's image.yml build prove it.
+# A minor-version move (3.12 -> 3.13) also changes tests.yml python-version and
+# the --python-version of requirements.lock and requirements-dev.lock (the
+# commands are in requirements.txt); tests/test_ci_workflow.py fails until all
+# of them agree.
+FROM python:3.12-slim@sha256:b18b261e1b4974b4f321451ad5251ded85abb22c2b8b262da527dda1d031ab30
 
 # Set the working directory in the container
 WORKDIR /app
@@ -9,6 +23,8 @@ WORKDIR /app
 # floors, so every build used to re-resolve and could ship a new major version
 # nobody had tested (web3 6 -> 8). The lockfile pins every package, transitive
 # ones included, with hashes; --require-hashes makes pip refuse anything else.
+# Runtime packages only: pytest and the other test-only packages are in
+# requirements-dev.lock, which CI installs and the image does not (#430).
 COPY requirements.lock .
 RUN apt-get update && apt-get install -y curl && rm -rf /var/lib/apt/lists/*
 # --no-deps: the lockfile is complete, so pip must not resolve anything itself.

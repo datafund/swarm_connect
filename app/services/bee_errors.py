@@ -1,7 +1,7 @@
 # app/services/bee_errors.py
 """Keep internal addresses out of error text shown to callers (#534, #549).
 
-httpx's HTTPStatusError text names the request URL, which is the internal Bee
+httpx2's HTTPStatusError text names the request URL, which is the internal Bee
 API address (or an RPC endpoint, which can carry an API key). Responses that
 anyone can read -- /health, /pool/status, stamp purchase and extend errors --
 name a failure by its HTTP status or exception class instead, and the full

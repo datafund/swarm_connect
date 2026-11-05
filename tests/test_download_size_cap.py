@@ -2,7 +2,7 @@
 import asyncio
 from unittest.mock import patch
 
-import httpx
+import httpx2
 import pytest
 from fastapi.testclient import TestClient
 
@@ -27,9 +27,9 @@ def _client(body: bytes, declare_length: bool = True, chunk: int = 64 * 1024, st
     def handler(request):
         served["accept_encoding"] = request.headers.get("accept-encoding")
         headers = {"content-length": str(len(body))} if declare_length else {}
-        return httpx.Response(status, headers=headers, content=stream())
+        return httpx2.Response(status, headers=headers, content=stream())
 
-    return httpx.AsyncClient(transport=httpx.MockTransport(handler)), served
+    return httpx2.AsyncClient(transport=httpx2.MockTransport(handler)), served
 
 
 def _download(client):
@@ -101,6 +101,20 @@ def test_endpoint_answers_504_on_the_deadline():
 
     with patch("app.api.endpoints.data.download_data_from_swarm", new=slow):
         assert TestClient(app).get(f"/api/v1/data/{REF}").status_code == 504
+
+
+def test_an_os_level_timeout_is_also_a_504_on_both_download_routes():
+    """From Python 3.11 asyncio.TimeoutError is the built-in TimeoutError (#617),
+    so `except asyncio.TimeoutError` also catches an OS-level one. On the 3.10
+    image that was a 500. httpx maps socket timeouts to httpx2.TimeoutException,
+    so in practice only the deadline reaches it; this pins the 3.12 answer."""
+    async def os_timeout(ref):
+        raise TimeoutError("timed out")
+
+    with patch("app.api.endpoints.data.download_data_from_swarm", new=os_timeout):
+        client = TestClient(app)
+        assert client.get(f"/api/v1/data/{REF}").status_code == 504
+        assert client.get(f"/api/v1/data/{REF}/json").status_code == 504
 
 
 def test_large_json_is_labelled_without_a_full_parse():

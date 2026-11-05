@@ -8,7 +8,7 @@ import json
 import time
 from unittest.mock import patch
 
-import httpx
+import httpx2
 import pytest
 from eth_account import Account
 from eth_account.messages import encode_defunct
@@ -288,14 +288,14 @@ class TestOwnerProofSpentOnlyOnSuccess:
     def test_unreachable_bee_does_not_spend_the_proof(self, client):
         h = self._headers()
         with patch("app.api.endpoints.data.upload_data_to_swarm",
-                   side_effect=httpx.ConnectError("refused")):
+                   side_effect=httpx2.ConnectError("refused")):
             assert self._upload(client, h).status_code == 502
         self._retry_succeeds(client, h)
 
     def test_bee_4xx_refusal_does_not_spend_the_proof(self, client):
         h = self._headers()
-        req = httpx.Request("POST", "http://bee/bytes")
-        err = httpx.HTTPStatusError("bad", request=req, response=httpx.Response(400, request=req))
+        req = httpx2.Request("POST", "http://bee/bytes")
+        err = httpx2.HTTPStatusError("bad", request=req, response=httpx2.Response(400, request=req))
         with patch("app.api.endpoints.data.upload_data_to_swarm", side_effect=err):
             assert self._upload(client, h).status_code == 502
         self._retry_succeeds(client, h)
@@ -363,8 +363,8 @@ class TestOwnerProofSpentOnlyOnSuccess:
         )
 
     def _bee_status_error(self, code):
-        req = httpx.Request("POST", "http://bee/bzz")
-        return httpx.HTTPStatusError("bad", request=req, response=httpx.Response(code, request=req))
+        req = httpx2.Request("POST", "http://bee/bzz")
+        return httpx2.HTTPStatusError("bad", request=req, response=httpx2.Response(code, request=req))
 
     def test_manifest_bee_4xx_does_not_spend_the_proof(self, client):
         h = self._headers()
@@ -391,14 +391,14 @@ class TestOwnerProofSpentOnlyOnSuccess:
     def test_bee_timeout_spends_the_proof(self, client):
         h = self._headers()
         with patch("app.api.endpoints.data.upload_data_to_swarm",
-                   side_effect=httpx.ReadTimeout("slow")):
+                   side_effect=httpx2.ReadTimeout("slow")):
             assert self._upload(client, h).status_code == 502
         self._retry_refused(client, h)
 
     def test_bee_5xx_spends_the_proof(self, client):
         h = self._headers()
-        req = httpx.Request("POST", "http://bee/bytes")
-        err = httpx.HTTPStatusError("bad", request=req, response=httpx.Response(500, request=req))
+        req = httpx2.Request("POST", "http://bee/bytes")
+        err = httpx2.HTTPStatusError("bad", request=req, response=httpx2.Response(500, request=req))
         with patch("app.api.endpoints.data.upload_data_to_swarm", side_effect=err):
             assert self._upload(client, h).status_code == 502
         self._retry_refused(client, h)
@@ -537,9 +537,9 @@ class TestUploadToBeeSettlesTheProof:
 
     def test_connect_error_releases(self):
         async def fail():
-            raise httpx.ConnectError("refused")
+            raise httpx2.ConnectError("refused")
         proof, result = self._run(fail)
-        assert isinstance(result, httpx.ConnectError) and self._state(proof) is None
+        assert isinstance(result, httpx2.ConnectError) and self._state(proof) is None
 
     def test_cancellation_during_the_bee_call_keeps_it_spent(self):
         import asyncio

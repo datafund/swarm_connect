@@ -6,7 +6,7 @@ import logging
 import time
 from fastapi import APIRouter, Header, HTTPException, Path, Query, Request, File, UploadFile
 from fastapi.responses import Response
-import httpx
+import httpx2
 
 from app.x402.settlement import settle_payment
 from app.x402.openapi_docs import paid_route_openapi
@@ -581,7 +581,7 @@ async def upload_data(
     except HTTPException:
         uploads_total.labels(status="error").inc()
         raise  # Re-raise HTTP exceptions as-is
-    except httpx.HTTPError as e:
+    except httpx2.HTTPError as e:
         uploads_total.labels(status="error").inc()
         logger.error(f"Swarm API error during upload: {exc_text(e)}")
         # Check if the failure was due to stamp issues
@@ -654,7 +654,7 @@ async def download_data(
         raise _too_large(reference, e)
     except asyncio.TimeoutError:
         raise _download_timeout(reference)
-    except httpx.HTTPError as e:
+    except httpx2.HTTPError as e:
         downloads_total.labels(status="error").inc()
         logger.error(f"Swarm API error during download: {exc_text(e)}")
         raise HTTPException(status_code=502, detail="Failed to download data from Swarm. The Bee node may be unavailable.")
@@ -718,7 +718,7 @@ async def download_data_json(
         raise _too_large(reference, e)
     except asyncio.TimeoutError:
         raise _download_timeout(reference)
-    except httpx.HTTPError as e:
+    except httpx2.HTTPError as e:
         downloads_total.labels(status="error").inc()
         logger.error(f"Swarm API error during download: {exc_text(e)}")
         raise HTTPException(status_code=502, detail="Failed to download data from Swarm. The Bee node may be unavailable.")
@@ -1032,7 +1032,7 @@ async def upload_manifest(
     except HTTPException:
         uploads_total.labels(status="error").inc()
         raise
-    except httpx.HTTPError as e:
+    except httpx2.HTTPError as e:
         uploads_total.labels(status="error").inc()
         logger.error(f"Swarm API error during manifest upload: {exc_text(e)}")
         failure_info = await check_upload_failure_reason(stamp_id, str(e))

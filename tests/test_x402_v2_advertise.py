@@ -21,7 +21,7 @@ import json
 import logging
 from unittest.mock import AsyncMock, patch
 
-import httpx
+import httpx2
 import pytest
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.testclient import TestClient
@@ -456,7 +456,7 @@ def test_a_v2_verify_refusal_402_carries_the_header(gw, monkeypatch, status):
     def handler(self, request):
         if request.url.path.endswith("/verify"):
             self.calls.append({"path": "verify", "body": json.loads(request.content)})
-            return httpx.Response(status, json={"isValid": False, "invalidReason": "insufficient_funds",
+            return httpx2.Response(status, json={"isValid": False, "invalidReason": "insufficient_funds",
                                                 "payer": PAYER})
         return real(self, request)
 
@@ -475,7 +475,7 @@ def test_a_v2_verify_answer_that_is_not_a_result_is_502_without_the_header(gw, m
 
     def handler(self, request):
         if request.url.path.endswith("/verify"):
-            return httpx.Response(500, json={"isValid": True, "payer": PAYER})
+            return httpx2.Response(500, json={"isValid": True, "payer": PAYER})
         return real(self, request)
 
     monkeypatch.setattr(Facilitator, "handler", handler)

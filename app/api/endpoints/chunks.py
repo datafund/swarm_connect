@@ -3,7 +3,7 @@ import logging
 import re
 from typing import Optional
 
-import httpx
+import httpx2
 from fastapi import APIRouter, Header, HTTPException, Query, Request, status
 
 from app.core.client_ip import get_client_key
@@ -400,14 +400,14 @@ async def upload_chunk(
     # --- Forward the chunk to Bee. Refund the debit if forwarding fails. ---
     try:
         reference = await upload_chunk_to_swarm(chunk_bytes, stamp, deferred=deferred)
-    except (httpx.HTTPError, ValueError) as e:
+    except (httpx2.HTTPError, ValueError) as e:
         # Refund: the upload never landed, so the client shouldn't be charged.
         if billing_address is not None:
             bandwidth_credit_manager.credit(billing_address, chunk_len)
         if free_ip is not None:
             free_tier_tracker.refund(free_ip, chunk_len)
         chunk_uploads_total.labels(status="error", mode=mode).inc()
-        if isinstance(e, httpx.HTTPError):
+        if isinstance(e, httpx2.HTTPError):
             logger.error(f"Failed to forward chunk to Swarm API: {e}")
             raise HTTPException(
                 status_code=status.HTTP_502_BAD_GATEWAY,

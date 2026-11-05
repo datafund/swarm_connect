@@ -4,7 +4,7 @@ Essential tests for data upload functionality to prevent future regressions.
 Tests file uploads, error handling, and basic functionality.
 """
 import pytest
-import httpx
+import httpx2
 import json
 import io
 from unittest.mock import patch
@@ -140,7 +140,7 @@ class TestErrorHandling:
     @patch('app.api.endpoints.data.upload_data_to_swarm')
     def test_swarm_api_error(self, mock_upload, mock_check):
         """Test handling of Swarm API errors."""
-        mock_upload.side_effect = httpx.HTTPError("Swarm API unavailable")
+        mock_upload.side_effect = httpx2.HTTPError("Swarm API unavailable")
 
         test_data = {"test": "data"}
         json_content = json.dumps(test_data).encode('utf-8')

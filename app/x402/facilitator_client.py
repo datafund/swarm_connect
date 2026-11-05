@@ -6,21 +6,25 @@ Replaces x402 1.0.0's FacilitatorClient, and behaves the same for v1:
 - POST {url}/verify and {url}/settle with the JSON body
   {"x402Version", "paymentPayload", "paymentRequirements"}: the payload dumped
   by alias, the requirements by alias without None fields, serialized by
-  httpx's json= exactly as 1.0.0 did.
+  json= exactly as 1.0.0's httpx did.
 - Headers: Content-Type: application/json, then the entry for the path
   ("verify", "settle", "supported") of create_headers(), when configured.
   create_headers may be async (the gateway's own hooks) or sync (cdp-sdk's).
-- A new httpx.AsyncClient per call, following redirects, with the proxy
-  environment honoured (httpx's default).
+- A new httpx2.AsyncClient per call, following redirects, with the proxy
+  environment honoured (trust_env, the default). httpx2 like the rest of app/
+  (#595, #626), not encode's httpx that 1.0.0 used: the requests are the same
+  except for the User-Agent, python-httpx2/<version> instead of
+  python-httpx/<version>.
 - Timeout: 5 seconds, set explicitly. 1.0.0 built a bare httpx.AsyncClient(),
-  whose default is httpx.Timeout(5.0).
+  whose default is Timeout(5.0); httpx2's default is the same.
 - The answer is parsed whatever its status code: Model(**response.json()).
   So a 200 or non-200 body that parses is a result, success:false included,
   and anything else raises as it did before: a pydantic ValidationError (a
   body without the required fields), a JSONDecodeError (not JSON), a
-  TypeError (JSON that is not an object), or the httpx error of a timeout or
-  a failed connection. app/x402/settlement.py counts a raise as an unknown
-  outcome and a parsed success:false as a definite refusal.
+  TypeError (JSON that is not an object), or the error of a timeout or a
+  failed connection (now httpx2's classes, not httpx's). Every caller catches
+  these as Exception: app/x402/settlement.py and the middleware count a raise
+  as an unknown outcome, and a parsed success:false as a definite refusal.
 
 x402 v2 (#607): verify and settle take a PaymentPayloadV2 with
 PaymentRequirementsV2 (mixing the versions raises TypeError). The body is
@@ -48,14 +52,14 @@ counterpart; the startup check for x402 v2 calls supported_response()
 import inspect
 from typing import Any, Callable, Optional
 
-import httpx
+import httpx2
 from typing_extensions import TypedDict
 
 from app.x402.models_v1 import PaymentPayload, PaymentRequirements, SettleResponse, SupportedResponse, VerifyResponse
 from app.x402.models_v2 import PaymentPayloadV2, PaymentRequirementsV2, SettleResponseV2, VerifyResponseV2
 
-# What x402 1.0.0 got from httpx.AsyncClient() without arguments.
-DEFAULT_TIMEOUT = httpx.Timeout(5.0)
+# What x402 1.0.0 got from a bare httpx.AsyncClient(); httpx2's default too.
+DEFAULT_TIMEOUT = httpx2.Timeout(5.0)
 
 
 class FacilitatorConfig(TypedDict, total=False):
@@ -68,8 +72,8 @@ class FacilitatorConfig(TypedDict, total=False):
 
 class FacilitatorClient:
     def __init__(self, config: Optional[FacilitatorConfig] = None, *,
-                 timeout: httpx.Timeout = DEFAULT_TIMEOUT,
-                 transport: Optional[httpx.AsyncBaseTransport] = None):
+                 timeout: httpx2.Timeout = DEFAULT_TIMEOUT,
+                 transport: Optional[httpx2.AsyncBaseTransport] = None):
         if config is None:
             config = {"url": "https://x402.org/facilitator"}
         url = config.get("url", "")
@@ -91,10 +95,10 @@ class FacilitatorClient:
             headers.update(custom.get(path, {}))
         return headers
 
-    def _client(self) -> httpx.AsyncClient:
+    def _client(self) -> httpx2.AsyncClient:
         if self._transport is not None:
-            return httpx.AsyncClient(timeout=self.timeout, transport=self._transport)
-        return httpx.AsyncClient(timeout=self.timeout)
+            return httpx2.AsyncClient(timeout=self.timeout, transport=self._transport)
+        return httpx2.AsyncClient(timeout=self.timeout)
 
     async def _post(self, path: str, payment: PaymentPayload, payment_requirements: PaymentRequirements):
         headers = await self._headers(path)
@@ -112,7 +116,7 @@ class FacilitatorClient:
             return response.json()
 
     async def _post_v2(self, path: str, payment: PaymentPayloadV2,
-                       payment_requirements: PaymentRequirementsV2) -> httpx.Response:
+                       payment_requirements: PaymentRequirementsV2) -> httpx2.Response:
         if not isinstance(payment_requirements, PaymentRequirementsV2):
             raise TypeError("an x402 v2 payment needs PaymentRequirementsV2")
         headers = await self._headers(path)
@@ -153,29 +157,35 @@ class FacilitatorClient:
         data = await self._post("settle", payment, payment_requirements)
         return SettleResponse(**data)
 
-    async def supported_response(self) -> httpx.Response:
-        """GET {url}/supported, unparsed: the HTTP answer with its status.
+    async def supported_response(self) -> httpx2.Response:
+        """GET {url}/supported for the v2 startup check, unparsed (#608).
 
-        Same headers ("supported" entry) and timeout as verify and settle. The
-        v2 startup check (facilitator.check_facilitator_v2_support, #608) uses
-        this, so it can refuse a non-2xx answer before reading any kinds.
-
-        The body is read up to MAX_SUPPORTED_BYTES (after any content
-        decoding); a longer one raises SupportedAnswerTooLarge, so a
-        facilitator cannot make startup read an unbounded answer."""
+        Same headers ("supported" entry) and per-read timeout as verify and
+        settle, plus Accept-Encoding: identity. The answer is never inflated:
+        one that still carries a Content-Encoding other than identity raises
+        SupportedAnswerEncoded, so a small compressed answer cannot make
+        startup allocate a large one. The raw body is read up to
+        MAX_SUPPORTED_BYTES; a longer one raises SupportedAnswerTooLarge.
+        The returned Response holds the raw bytes and the status; the caller
+        (facilitator.check_facilitator_v2_support) decodes them itself, and
+        puts an overall deadline around this call."""
         headers = await self._headers("supported")
+        headers["Accept-Encoding"] = "identity"
         async with self._client() as client:
             async with client.stream("GET", f"{self.config['url']}/supported", headers=headers,
                                      follow_redirects=True) as response:
+                encodings = [e.strip().lower() for v in response.headers.get_list("content-encoding")
+                             for e in v.split(",") if e.strip()]
+                if any(e != "identity" for e in encodings):
+                    raise SupportedAnswerEncoded(response.status_code)
                 body = bytearray()
-                async for chunk in response.aiter_bytes():
+                async for chunk in response.aiter_raw():
                     body += chunk
                     if len(body) > MAX_SUPPORTED_BYTES:
                         raise SupportedAnswerTooLarge(response.status_code)
-                # The decoded body, without the headers that described the encoded one.
                 kept = [(k, v) for k, v in response.headers.multi_items()
                         if k.lower() not in ("content-encoding", "content-length", "transfer-encoding")]
-                return httpx.Response(response.status_code, headers=kept, content=bytes(body),
+                return httpx2.Response(response.status_code, headers=kept, content=bytes(body),
                                       request=response.request)
 
     async def supported(self) -> SupportedResponse:
@@ -183,9 +193,13 @@ class FacilitatorClient:
 
         Same headers, timeout and parsing rule as v1 verify and settle: the
         body is parsed whatever the HTTP status. The startup check does not
-        rely on this; it reads supported_response() and requires a 2xx."""
-        response = await self.supported_response()
-        return SupportedResponse(**response.json())
+        use this; it reads supported_response() and requires a 2xx."""
+        headers = await self._headers("supported")
+        async with self._client() as client:
+            response = await client.get(f"{self.config['url']}/supported", headers=headers,
+                                        follow_redirects=True)
+            data = response.json()
+        return SupportedResponse(**data)
 
 
 def v2_request_body(payment: PaymentPayloadV2, payment_requirements: PaymentRequirementsV2) -> dict:
@@ -208,6 +222,15 @@ class SupportedAnswerTooLarge(Exception):
 
     def __init__(self, status: int):
         super().__init__(f"facilitator /supported answer over {MAX_SUPPORTED_BYTES} bytes (HTTP {status})")
+        self.status = status
+
+
+class SupportedAnswerEncoded(Exception):
+    """A /supported answer with a Content-Encoding other than identity,
+    refused without being inflated. Never carries the body."""
+
+    def __init__(self, status: int):
+        super().__init__(f"facilitator /supported answer is content-encoded (HTTP {status})")
         self.status = status
 
 
