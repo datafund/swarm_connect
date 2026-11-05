@@ -122,8 +122,12 @@ def test_settlement_refused_is_counted_as_version_1(gw):  # noqa: F811
 
 
 def _audit_events():
-    with open(settings.X402_AUDIT_LOG_PATH) as f:
-        return [json.loads(line) for line in f if line.strip()]
+    # The audit log is created on its first event: absent when a test runs alone.
+    try:
+        with open(settings.X402_AUDIT_LOG_PATH) as f:
+            return [json.loads(line) for line in f if line.strip()]
+    except FileNotFoundError:
+        return []
 
 
 def test_audit_records_carry_the_version(gw):  # noqa: F811

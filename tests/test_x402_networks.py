@@ -88,8 +88,12 @@ def test_caip2_configured_gateway_sends_the_v1_golden_bytes(gateway, monkeypatch
 
 
 def _audit_events():
-    with open(settings.X402_AUDIT_LOG_PATH) as f:
-        return [json.loads(line) for line in f if line.strip()]
+    # The audit log is created on its first event: absent when a test runs alone.
+    try:
+        with open(settings.X402_AUDIT_LOG_PATH) as f:
+            return [json.loads(line) for line in f if line.strip()]
+    except FileNotFoundError:
+        return []
 
 
 def test_caip2_configured_gateway_shows_v1_names_outside_the_goldens(gateway, monkeypatch):  # noqa: F811
