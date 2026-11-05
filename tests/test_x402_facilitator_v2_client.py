@@ -12,7 +12,7 @@
 import asyncio
 import json
 
-import httpx
+import httpx2
 import pytest
 from pydantic import ValidationError
 
@@ -51,12 +51,12 @@ class Stub:
     def handler(self, request):
         self.requests.append({"path": request.url.path, "body": json.loads(request.content)})
         if isinstance(self.body, (dict, list)):
-            return httpx.Response(self.status, json=self.body)
-        return httpx.Response(self.status, content=self.body or b"")
+            return httpx2.Response(self.status, json=self.body)
+        return httpx2.Response(self.status, content=self.body or b"")
 
 
 def _client(stub):
-    return FacilitatorClient({"url": URL}, transport=httpx.MockTransport(stub.handler))
+    return FacilitatorClient({"url": URL}, transport=httpx2.MockTransport(stub.handler))
 
 
 SETTLED = {"success": True, "transaction": "0x" + "cd" * 32, "network": "eip155:84532", "payer": PAYER}

@@ -115,7 +115,7 @@ class FacilitatorClient:
             return response.json()
 
     async def _post_v2(self, path: str, payment: PaymentPayloadV2,
-                       payment_requirements: PaymentRequirementsV2) -> httpx.Response:
+                       payment_requirements: PaymentRequirementsV2) -> httpx2.Response:
         if not isinstance(payment_requirements, PaymentRequirementsV2):
             raise TypeError("an x402 v2 payment needs PaymentRequirementsV2")
         headers = await self._headers(path)

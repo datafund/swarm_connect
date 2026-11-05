@@ -6,7 +6,7 @@ the environment the test sets (as tests/test_client_facing_headers.py does).
 
 Here only the outside world is replaced:
 - the facilitator, at the HTTP layer: the real FacilitatorClient with an
-  httpx.MockTransport that records each request body;
+  httpx2.MockTransport that records each request body;
 - Bee: the chain state, the funds check and the purchase call;
 - the price: the stamp purchase is priced at $0.02, the amount the recorded
   @x402/evm payment signed for.
@@ -20,7 +20,7 @@ import sys
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
-import httpx
+import httpx2
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures" / "x402_v2"
 SIGNATURE = (FIXTURES / "ts_payment_signature.b64").read_text().strip()
@@ -32,17 +32,17 @@ BATCH = "f" * 64
 def main() -> None:
     calls = []
 
-    def handler(request: httpx.Request) -> httpx.Response:
+    def handler(request: httpx2.Request) -> httpx2.Response:
         path = request.url.path.rsplit("/", 1)[-1]
         calls.append({"path": path, "body": json.loads(request.content)})
         if path == "verify":
-            return httpx.Response(200, json={"isValid": True, "payer": PAYER})
-        return httpx.Response(200, json={"success": True, "transaction": TX,
+            return httpx2.Response(200, json={"isValid": True, "payer": PAYER})
+        return httpx2.Response(200, json={"success": True, "transaction": TX,
                                          "network": "eip155:84532", "payer": PAYER})
 
     from app.x402.facilitator_client import FacilitatorClient
     client = FacilitatorClient({"url": "https://facilitator.example"},
-                               transport=httpx.MockTransport(handler))
+                               transport=httpx2.MockTransport(handler))
     with patch("app.x402.facilitator.get_facilitator_client", return_value=client), \
          patch("app.x402.dependency._get_facilitator_client", return_value=client), \
          patch("app.x402.dependency._calculate_price_for_request",
