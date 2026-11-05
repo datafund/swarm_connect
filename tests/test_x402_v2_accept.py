@@ -754,3 +754,42 @@ def test_free_mode_without_a_payment_still_passes_the_closed_gate(gw):
     r = client.post("/api/v1/stamps/", headers={"X-Payment-Mode": "free"})
     assert r.status_code == 200 and r.json() == {"mode": "free-tier"}
     assert fac.calls == []
+
+
+# --------------------------------------------------------------------------
+# The v2 receipt is the gateway's, from fixed fields (#645 review)
+# --------------------------------------------------------------------------
+
+@pytest.mark.parametrize("route", [("POST", "/api/v1/stamps/"), FALLBACK], ids=["settle_payment", "fallback"])
+def test_large_facilitator_extra_still_gives_the_result_and_a_receipt(gw, route):
+    client, fac = gw("1,2")
+    offer = _offer(client)
+    fac.settle = {"success": True, "transaction": TX, "network": "eip155:84532", "payer": PAYER,
+                  "amount": "20000", "extra": {"blob": "x" * 9000},
+                  "extensions": {"e": "y" * 100}, "extensionResponses": {"r": {"z": 1}}}
+    r = _send(client, route, pay(2, offer))
+    assert r.status_code == 200, r.text
+    receipt = json.loads(base64.b64decode(r.headers["PAYMENT-RESPONSE"]))
+    assert receipt == {"success": True, "transaction": TX, "network": "eip155:84532", "payer": PAYER,
+                       "amount": "20000"}
+    assert codec_v2.decode_payment_response(r.headers["PAYMENT-RESPONSE"]).success is True
+
+
+def test_receipt_falls_back_to_the_minimal_fields_then_to_none():
+    from app.x402.middleware import encode_payment_response_v2
+    from app.x402.models_v2 import SettleResponseV2
+    big_payer = SettleResponseV2(success=True, transaction=TX, network="eip155:84532", payer="p" * 9000)
+    got = json.loads(base64.b64decode(encode_payment_response_v2(big_payer)))
+    assert got == {"success": True, "transaction": TX, "network": "eip155:84532"}
+    hopeless = SettleResponseV2(success=True, transaction="t" * 9000, network="eip155:84532")
+    assert encode_payment_response_v2(hopeless) is None
+
+
+def test_unencodable_receipt_still_delivers_without_the_header(gw):
+    client, fac = gw("1,2")
+    offer = _offer(client)
+    fac.settle = {"success": True, "transaction": "0x" + "ab" * 4600, "network": "eip155:84532"}
+    r = client.post("/api/v1/stamps/", headers=pay(2, offer))
+    assert r.status_code == 200, r.text
+    assert "PAYMENT-RESPONSE" not in r.headers and "X-PAYMENT-RESPONSE" not in r.headers
+    assert r.headers["X-Payment-Transaction"] == "0x" + "ab" * 4600
