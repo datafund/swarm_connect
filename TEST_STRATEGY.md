@@ -17,13 +17,16 @@ python -m pytest tests/test_stamp_pool.py -v    # one area
 
 `.github/workflows/tests.yml` runs the default (hermetic) suite on every pull
 request, and `deploy.yml` calls it as its gate, so nothing deploys unless it
-passes. It runs on Python 3.10, the image's interpreter, and installs exactly
+passes. It runs on Python 3.12, the image's interpreter, and installs exactly
 what the image ships: `pip install --no-deps --require-hashes -r
 requirements.lock`, then `pip check`, which fails the run if the lock misses a
 dependency or pins a conflicting one (#523). A local venv built from
 `requirements.txt` resolves whatever is current, so it can differ from CI; to
-reproduce CI, build a Python 3.10 venv the same way. `tests/test_ci_workflow.py`
-keeps the workflow on the lock.
+reproduce CI, build a Python 3.12 venv the same way (for example `uv venv -p 3.12`,
+then `uv pip install --no-deps --require-hashes -r requirements.lock` and
+`uv pip check`). `tests/test_ci_workflow.py` keeps the workflow on the lock, and
+CI, the Dockerfile base image and the lock on one Python version, with the base
+image pinned by digest.
 
 `.github/workflows/image.yml` builds the Docker image on every pull request
 (#486): `docker build --pull --no-cache --platform linux/amd64`, so neither a
@@ -37,7 +40,7 @@ within 30 tries, 2 s apart: about a minute when the port refuses, and at most
 about 6 minutes when the app accepts connections but never answers (each try
 waits up to 10 s), inside the job's 20-minute timeout. `/` answers 200 with `status: degraded` while Bee is
 unreachable, and a refused port builds the first health snapshot at once, so
-the check never waits for `HEALTH_SNAPSHOT_FIRST_WAIT_SECONDS`. On failure the
+the check never waits for `HEALTH_SNAPSHOT_FIRST_WAIT_SECONDS`. Once `/` answers, it runs `python -m app.x402.check_config` in the container (x402 off by default), which must exit 0 (#617). On failure the
 job prints the container log; the container is always removed.
 `deploy.yml` does not call it: each deploy host builds the image itself before
 stopping the running gateway, so a broken build there already stops the deploy

@@ -103,6 +103,20 @@ def test_endpoint_answers_504_on_the_deadline():
         assert TestClient(app).get(f"/api/v1/data/{REF}").status_code == 504
 
 
+def test_an_os_level_timeout_is_also_a_504_on_both_download_routes():
+    """From Python 3.11 asyncio.TimeoutError is the built-in TimeoutError (#617),
+    so `except asyncio.TimeoutError` also catches an OS-level one. On the 3.10
+    image that was a 500. httpx maps socket timeouts to httpx.TimeoutException,
+    so in practice only the deadline reaches it; this pins the 3.12 answer."""
+    async def os_timeout(ref):
+        raise TimeoutError("timed out")
+
+    with patch("app.api.endpoints.data.download_data_from_swarm", new=os_timeout):
+        client = TestClient(app)
+        assert client.get(f"/api/v1/data/{REF}").status_code == 504
+        assert client.get(f"/api/v1/data/{REF}/json").status_code == 504
+
+
 def test_large_json_is_labelled_without_a_full_parse():
     from app.api.endpoints.data import _detect_content_type_and_filename
     big = b"[" + b"1," * (2 * 1024 * 1024) + b"1]"

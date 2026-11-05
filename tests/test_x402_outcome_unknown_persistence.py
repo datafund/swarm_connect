@@ -455,25 +455,60 @@ def test_a_failed_write_ahead_on_the_fallback_withholds_the_result_unpaid(env, s
 
 
 def test_inner_cancel_on_the_fallback_is_a_structured_502(env, state):
-    """From Python 3.11, an inner CancelledError (this task not being cancelled) gets the
-    structured 502. Python 3.10 cannot tell it from a real cancellation of the task, so
-    there it is re-raised (the safe choice) and the client gets no settlement answer; the
-    unknown outcome is recorded either way, and nothing says "not charged"."""
+    """An inner CancelledError (this task not being cancelled) gets the structured 502,
+    the unknown outcome is recorded, and nothing says "not charged". On the Python 3.10
+    image this ended in a plain-text 500 instead (#617)."""
     import asyncio
-    import sys
     fac = _facilitator(asyncio.CancelledError())
     r = _run(fac, path="/api/v1/data/manifest")
     assert st.outcome_unknown.kind(KEY) == st.AFTER_WORK
     assert "not charged" not in r.text and "accepts" not in r.text and '"ok"' not in r.text
-    if sys.version_info < (3, 11):
-        assert r.status_code == 500
-        return
     assert r.status_code == 502
     body = r.json()
     assert body["code"] == "PAYMENT_SETTLEMENT_UNKNOWN" and body["detail"]["code"] == "PAYMENT_SETTLEMENT_UNKNOWN"
     assert body["nonce"] == KEY[1]
     assert r.headers["X-Payment-Status"] == "settlement_unknown"
     assert "ok" not in body
+
+
+def test_task_is_being_cancelled_tells_this_task_from_an_inner_cancel():
+    """The fallback's choice between the structured 502 and re-raising (#617):
+    an inner CancelledError leaves this task uncancelled; a cancellation of the
+    task itself is seen even while its CancelledError is being handled."""
+    import asyncio
+    from app.x402.middleware import _task_is_being_cancelled
+
+    async def inner_cancel():
+        inner = asyncio.get_running_loop().create_future()
+        inner.cancel()
+        try:
+            await inner
+        except asyncio.CancelledError:
+            return _task_is_being_cancelled()
+
+    seen = []
+
+    async def own_cancel(started):
+        try:
+            started.set()
+            await asyncio.sleep(10)
+        except asyncio.CancelledError:
+            seen.append(_task_is_being_cancelled())
+            raise
+
+    async def main():
+        assert await inner_cancel() is False
+        started = asyncio.Event()
+        task = asyncio.create_task(own_cancel(started))
+        await started.wait()
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+    asyncio.run(main())
+    assert seen == [True]
 
 
 def test_outcome_unknown_message_says_whether_the_work_ran(env, state):

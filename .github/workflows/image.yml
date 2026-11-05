@@ -65,6 +65,13 @@ jobs:
           docker logs --tail 200 "$CONTAINER" || true
           exit 1
 
+      - name: x402 configuration check inside the image
+        # Runs only once GET / has answered. The same check deploy.yml runs
+        # before replacing a gateway (#485), here with the default settings
+        # (x402 off): it must exit 0, so an image that cannot even import its
+        # x402 configuration code fails the pull request (#617).
+        run: docker exec "$CONTAINER" python -m app.x402.check_config
+
       - name: remove the container
         if: always()
         run: docker rm -f "$CONTAINER" || true

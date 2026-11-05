@@ -8,6 +8,9 @@ The workflow files are read as text, like test_x402_check_config.py does.
 image.yml builds the image on every pull request with no layer cache, so a
 lock that a clean build rejects fails the PR instead of the next deploy, and
 checks that the built image answers GET / with Bee unreachable (#486).
+
+CI, the image and the lock name one Python minor version, and the image's
+base is pinned by digest (#617).
 """
 import re
 from pathlib import Path
@@ -17,6 +20,8 @@ TESTS_YML = REPO / ".github" / "workflows" / "tests.yml"
 DEPLOY_YML = REPO / ".github" / "workflows" / "deploy.yml"
 DOCKERFILE = REPO / "Dockerfile"
 IMAGE_YML = REPO / ".github" / "workflows" / "image.yml"
+LOCK = REPO / "requirements.lock"
+REQUIREMENTS_TXT = REPO / "requirements.txt"
 
 LOCK_INSTALL = re.compile(r"pip install\b[^\n]*-r requirements\.lock")
 
@@ -161,6 +166,61 @@ def test_image_smoke_checks_root_with_curl_fail_and_a_timeout():
     assert smoke.rstrip().endswith("exit 1")
 
 
+def test_image_runs_the_x402_config_check_in_the_running_container():
+    """The issue's verification step: python -m app.x402.check_config inside the
+    built image, after GET / answered, and before the container is removed."""
+    blocks = _run_blocks(IMAGE_YML.read_text())
+    checks = [i for i, b in enumerate(blocks)
+              if re.fullmatch(r'docker exec "?\$CONTAINER"? python -m app\.x402\.check_config', b)]
+    assert len(checks) == 1, f"expected one x402 config check in image.yml, found {checks}"
+    smoke = next(i for i, b in enumerate(blocks) if "docker run" in b)
+    remove = next(i for i, b in enumerate(blocks) if b.startswith("docker rm -f "))
+    assert smoke < checks[0] < remove
+    swallow = re.compile(r"\|\|\s*(true|:|exit 0)\b|;\s*(true|:|exit 0)\s*$")
+    assert not swallow.search(blocks[checks[0]])
+    # Its step is not allowed to fail quietly.
+    assert "continue-on-error" not in IMAGE_YML.read_text()
+
+
 def test_image_smoke_always_removes_the_container():
     text = IMAGE_YML.read_text()
     assert re.search(r"if:\s*always\(\)\s*\n\s*run:\s*docker rm -f ", text)
+
+
+# --- one Python version everywhere, and a base image pinned by digest (#617)
+
+FROM_LINE = re.compile(r"^FROM\s+(\S+)", re.M)
+
+
+def _from_images():
+    return FROM_LINE.findall(DOCKERFILE.read_text())
+
+
+def _dockerfile_python():
+    images = _from_images()
+    assert len(images) == 1, f"expected one FROM in the Dockerfile, found {images}"
+    m = re.fullmatch(r"python:(\d+\.\d+)(?:\.\d+)?-slim(?:-\w+)?@sha256:[0-9a-f]{64}", images[0])
+    assert m, f"base image is not python:X.Y-slim pinned by digest: {images[0]}"
+    return m.group(1)
+
+
+def test_dockerfile_base_image_is_pinned_by_digest():
+    """Without the digest each deploy host builds from whatever base image it
+    has cached, so hosts can differ in patch level."""
+    images = _from_images()
+    assert len(images) == 1, images
+    assert re.search(r"@sha256:[0-9a-f]{64}$", images[0]), images[0]
+    _dockerfile_python()
+
+
+def test_python_version_is_the_same_in_ci_the_image_and_the_lock():
+    """CI must test the interpreter the image runs, and the lock must be
+    resolved for it: a lock compiled for another minor version can pin
+    different packages (the lock's 3.10 and 3.11+ branches differed in eight)."""
+    image = _dockerfile_python()
+    ci = re.findall(r"^\s*python-version:\s*[\"']?([0-9.]+)[\"']?\s*$", TESTS_YML.read_text(), re.M)
+    assert ci == [image], f"tests.yml python-version {ci}, Dockerfile {image}"
+    header = re.findall(r"--python-version (\S+)", "".join(LOCK.read_text().splitlines(True)[:3]))
+    assert header == [image], f"requirements.lock header {header}, Dockerfile {image}"
+    command = re.findall(r"uv pip compile .*--python-version (\S+)", REQUIREMENTS_TXT.read_text())
+    assert command == [image], f"requirements.txt regenerate command {command}, Dockerfile {image}"
