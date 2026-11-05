@@ -286,6 +286,8 @@ app/x402/
 ├── payment_headers.py # Which payment headers a request carries: X-PAYMENT (v1), PAYMENT-SIGNATURE (v2) (#600)
 ├── models_v1.py     # x402 v1 wire types: PaymentRequirements, PaymentPayload, VerifyResponse, SettleResponse, SupportedResponse (#604)
 ├── encoding.py      # base64 helpers for the x402 headers (#604)
+├── models_v2.py     # x402 v2 wire types: PaymentRequired, PaymentRequirementsV2, ResourceInfo, PaymentPayloadV2, ExactEvmPayloadV2, VerifyResponseV2, SettleResponseV2 (#606; not used in requests yet)
+├── codec_v2.py      # PAYMENT-REQUIRED / PAYMENT-SIGNATURE / PAYMENT-RESPONSE encode and strict decode, typed errors (#606)
 ├── facilitator_client.py # httpx facilitator client: verify, settle, supported (#604)
 ├── facilitator.py   # Builds the shared client (CDP / bearer auth) and validate_x402_config
 ├── networks.py      # v1 names <-> CAIP-2 ids (#599)
@@ -340,6 +342,37 @@ X402_FREE_TIER_RATE_LIMIT=3  # Requests/minute for free tier (default: 3)
 **Accepted versions and the price field (#602).** `/health` reports `x402.versions` (inside the `x402` block, so only with x402 enabled), read from `ACCEPTED_X402_VERSIONS = (1,)` in `app/x402/payment_headers.py`; the `X402_PROTOCOL_VERSIONS` setting (#609) replaces that constant. Each `/api/v1/pricing` quote has `amount` right after `max_amount_required`, the same value; `max_amount_required` is deprecated (D8 in #596) and stays until v1 is removed. v1 402 bodies keep `maxAmountRequired` only (the goldens pin them). OpenAPI shows both through each route's description and a 200 response example; neither route has a `response_model`, which would filter or reorder the existing fields. Tests: `tests/test_x402_versions_and_amount.py`.
 
 **Own x402 v1 models and facilitator client (#604, D1 in #596).** `app/` no longer imports the `x402` library; `tests/test_x402_no_library_import.py` fails on any such import and loads the app with `x402` blocked. `app/x402/models_v1.py` copies the 1.0.0 shapes (same fields and order, camelCase aliases, integer-string validators, the four v1 names on `PaymentRequirements.network`, unknown fields dropped, `VerifyResponse.payer` required but nullable); `app/x402/encoding.py` the base64 helpers. `app/x402/facilitator_client.py` sends the same `POST {url}/verify` and `/settle` as 1.0.0 (body `{"x402Version","paymentPayload","paymentRequirements"}`, the requirements dumped without None, httpx `json=`; `Content-Type` plus the path's entry of `create_headers()`, async or sync; `follow_redirects=True`; a new `httpx.AsyncClient` per call) with an explicit 5 s timeout (`DEFAULT_TIMEOUT`, what 1.0.0 got from httpx's default). It parses the body whatever the status: a body that parses is a result (`success: false` = a definite refusal); a body without the required fields (`ValidationError`), not JSON (`JSONDecodeError`), not an object (`TypeError`), a timeout or a connection error raises, which `settlement.py` treats as an unknown outcome. `supported()` (`GET {url}/supported`, the `supported` header entry, same timeout and parsing, returns `SupportedResponse`) is not called yet (#608). `x402==1.0.0` stays in the testing section of `requirements.txt` as the oracle: `tests/test_x402_own_models.py` (schemas, dumps, refusals, dropped fields, base64), `tests/test_x402_facilitator_differential.py` (both clients against a loopback stub server: identical requests and parsed results or exception types for success, refusal, non-200, malformed, timeout, connection refused, redirects, bearer and CDP-shaped hooks) and `tests/test_x402_v1_golden_own_client.py` (the #599 goldens through the own client). `x402PaymentRequiredResponse` in tests still comes from 1.0.0.
+
+**x402 v2 models and header codecs (#606, part of #596).** Not used in any request path yet (#607 does that). `app/x402/models_v2.py` follows the `@x402/core` 2.30.0 zod schemas (docs/adr/x402-v2.md, Question 6). Required versus optional fields match the schemas, as do the CAIP-2 network regex `^[-a-z0-9]{3,8}:[-_a-zA-Z0-9]{1,32}$`, `accepts` 1..1024, the ResourceInfo limits (`serviceName` and tags up to 32 printable ASCII characters, at most 5 tags, `iconUrl` at most 2048 characters), `extra` absent or null, and the optional fields of VerifyResponse and SettleResponse. Deliberate choices:
+
+- Unknown fields are **dropped** at every level (envelope, `accepted`, `resource`, the `exact` payload). The gateway re-serialises a payload and sends it to the facilitator under its own credentials, so it forwards only what it validated. zod's `z.object()` drops them too, and so did v1. Python x402 2.x forwards them; the gateway does not. `extra`, `extensions` and `extensionResponses` are free-form and keep their contents.
+- Amounts (`amount` and the EIP-3009 `value`, `validAfter`, `validBefore`) must be decimal integer strings. `maxTimeoutSeconds` must be a positive integer. Both are stricter than the reference.
+- When `accepted.scheme` is `exact`, `payload` is parsed as `ExactEvmPayloadV2`. Any other scheme keeps it as a dict, so #607 can answer "scheme not accepted".
+
+`app/x402/codec_v2.py` encodes a header as base64 of compact UTF-8 JSON (`by_alias`, `exclude_none`, `ensure_ascii=False`), the same as `safeBase64Encode(JSON.stringify(x))`. Its output for the fixture offer is byte-identical to Python x402 2.27. Decoding stops at the first failure, in this order:
+
+1. `MAX_HEADER_CHARS = 8192`, checked first. The ADR's largest headers are about 1.5 KB, and 8192 is nginx's per-field default and the MCP client's limit. The encoder refuses to go over it too.
+2. Canonical standard base64.
+3. UTF-8, then a JSON object with no duplicate keys and no NaN.
+4. `x402Version` must be 2.
+5. The v2 model.
+
+Errors are `X402HeaderError(ValueError)` subclasses with `code`, `header_name` and `errors` (a list of (field location, pydantic type) pairs):
+
+- `PaymentHeaderTooLarge` → `PAYMENT_HEADER_TOO_LARGE`
+- `PaymentHeaderMalformed` → `PAYMENT_HEADER_MALFORMED`
+- `PaymentHeaderInvalid` → `PAYMENT_HEADER_INVALID`
+- `PaymentHeaderVersionMismatch` → `X402_VERSION_UNSUPPORTED`
+
+They never carry the header or a decoded value, and no exception is chained to them. docs/error-codes.md lists the three new codes as not sent yet.
+
+Tests:
+
+- `tests/test_x402_v2_models.py` covers the field rules.
+- `tests/test_x402_v2_codec.py` covers round trips, bad base64, non-object JSON, size limits, validation, version mismatch, and checks that no input is echoed.
+- `tests/test_x402_v2_interop.py` covers both directions. The gateway decodes the `PAYMENT-REQUIRED`, `PAYMENT-SIGNATURE` and `PAYMENT-RESPONSE` values made by `@x402/core` and `@x402/evm` 2.30.0 and by Python x402 2.27.0, and recovers each EIP-3009 signer. For the reverse direction, each library's decode of the gateway's `PAYMENT-REQUIRED`, and the payment it built for it, is recorded. That record holds because a test asserts the gateway still encodes exactly `gateway_payment_required.b64`. CI has no node, so nothing runs node.
+
+The fixtures, the generators (`make_gateway_header.py`, `generate_ts.mjs` with `package.json`, `generate_py.py`) and the exact regeneration commands are in `tests/fixtures/x402_v2/` (README.md there). The signing keys are throwaway and never written, the pay-to is a placeholder, and the asset is the public Base Sepolia USDC contract.
 
 ### Idempotency-Key (paid requests, #359)
 
