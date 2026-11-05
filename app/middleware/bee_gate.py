@@ -6,14 +6,15 @@ For each HTTP request:
 1. Marks the request's context, so its Bee calls take request slots rather
    than background ones.
 2. On a paid route (x402 PROTECTED_ENDPOINTS), refuses a request that carries
-   an X-PAYMENT header with 503 BEE_BUSY before anything runs, payment
+   a payment header (X-PAYMENT, or x402 v2's PAYMENT-SIGNATURE, #600) with
+   503 BEE_BUSY before anything runs, payment
    included, when no request slot is free at that moment. A request without
    a payment cannot be charged, so it goes on and gets its usual answer.
 3. If one of THIS request's own Bee calls was refused by the gate, replaces
    an error response (status 400 or above) with 503 BEE_BUSY and Retry-After,
    which tells the client nothing was charged. Never when that may be untrue
    or hide what the client needs about a payment:
-   - the request carries X-PAYMENT;
+   - the request carries X-PAYMENT or PAYMENT-SIGNATURE;
    - a state-changing Bee call (any method but GET and HEAD) of this request
      got a slot and was sent, whatever its outcome;
    - settlement of its payment was started (marked immediately before every
@@ -35,6 +36,7 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from app.core.config import settings
 from app.services import bee_gate
+from app.x402.payment_headers import offers_payment
 
 logger = logging.getLogger(__name__)
 
@@ -80,8 +82,9 @@ def _is_paid_route(method: str, path: str) -> bool:
 
 
 def _offers_payment(scope: Scope) -> bool:
-    """The request carries an x402 payment, so it could be charged."""
-    return any(name.lower() == b"x-payment" for name, _ in scope.get("headers", []))
+    """The request carries an x402 payment header of either version, so it
+    could be charged (#600: PAYMENT-SIGNATURE counts as X-PAYMENT does)."""
+    return offers_payment(scope.get("headers", []))
 
 
 class BeeGateMiddleware:

@@ -288,6 +288,14 @@ def test_a_request_carrying_a_payment_is_never_rewritten(plain):
     assert r.status_code == 422 and r.json()["detail"] == "bad input"
 
 
+@pytest.mark.parametrize("headers", [{"PAYMENT-SIGNATURE": "e30="}, {"payment-signature": "e30="},
+                                     {"X-PAYMENT": "e30=", "PAYMENT-SIGNATURE": "e30="}])
+def test_a_request_carrying_a_v2_payment_header_is_never_rewritten(plain, headers):
+    # PAYMENT-SIGNATURE (x402 v2) is a payment header like X-PAYMENT (#600).
+    r = plain.get("/plain-422", headers=headers)
+    assert r.status_code == 422 and r.json()["detail"] == "bad input"
+
+
 def test_rewrite_keeps_rate_limit_headers_and_drops_the_rest():
     app = FastAPI()
 
