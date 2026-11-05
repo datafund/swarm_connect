@@ -25,6 +25,41 @@ dependency or pins a conflicting one (#523). A local venv built from
 reproduce CI, build a Python 3.10 venv the same way. `tests/test_ci_workflow.py`
 keeps the workflow on the lock.
 
+`.github/workflows/image.yml` builds the Docker image on every pull request
+(#486): `docker build --pull --no-cache --platform linux/amd64`, so neither a
+cached pip layer nor a stale base image can hide a lock that a clean build
+rejects. That happened on 2026-10-05, when every staging deploy failed at the
+image build and no PR check had built it (#483). linux/amd64 is what the deploy
+hosts run. The same job then starts the image with only `SWARM_BEE_API_URL`
+set, pointing at a port nothing listens on, with `--network none`, and fails
+unless `curl -f http://localhost:8000/` (the compose healthcheck) answers 200
+within about a minute. `/` answers 200 with `status: degraded` while Bee is
+unreachable, and a refused port builds the first health snapshot at once, so
+the check never waits for `HEALTH_SNAPSHOT_FIRST_WAIT_SECONDS`. On failure the
+job prints the container log; the container is always removed.
+`deploy.yml` does not call it: each deploy host builds the image itself before
+stopping the running gateway, so a broken build there already stops the deploy
+safely. `tests/test_ci_workflow.py` keeps the job uncached and its smoke check
+in place. To reproduce it locally:
+
+```bash
+docker build --pull --no-cache --platform linux/amd64 -t swarm_connect:ci .
+docker run -d --name swarm_connect_ci --network none \
+  -e SWARM_BEE_API_URL=http://localhost:1 swarm_connect:ci
+docker exec swarm_connect_ci curl -fsS --max-time 10 -o /dev/null http://localhost:8000/
+docker rm -f swarm_connect_ci
+```
+
+On an arm64 machine the amd64 build runs under emulation and is much slower
+than in CI.
+
+Known limits of the image job:
+
+- A direct push to `dev` or `main` that skipped a pull request is built only
+  on the deploy hosts, which reuse their Docker layer cache.
+- It blocks a merge only once `docker-build` is a required status check in
+  the branch protection settings; until then a red run is advisory.
+
 ## The default run is hermetic
 
 - **No network.** Bee and chain calls are mocked. The live modules are opt-in (next
