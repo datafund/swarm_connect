@@ -415,6 +415,10 @@ x402_payments_total = Counter(
 # Paid requests refused before payment while the gateway cannot accept them
 # (#589): a rare event, so the series exists from startup.
 x402_payments_total.labels(mode="unavailable")
+# Payment headers refused before payment (#600): x402 v2 (PAYMENT-SIGNATURE)
+# while only v1 is accepted, and both versions in one request. Rare as well.
+x402_payments_total.labels(mode="version_unsupported")
+x402_payments_total.labels(mode="header_conflict")
 rate_limit_hits_total = Counter(
     "gateway_rate_limit_hits_total", "Rate limit rejections"
 )

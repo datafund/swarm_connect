@@ -36,6 +36,11 @@ from app.x402.middleware import (
     is_free_tier_opt_in,
     X402_VERSION,
 )
+from app.x402.payment_headers import (
+    HEADER_CONFLICT_MESSAGE,
+    VERSION_UNSUPPORTED_MESSAGE,
+    offered_payment_versions,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -508,10 +513,15 @@ async def settle_payment_if_offered(request: Request) -> None:
     The effect is that paying callers bypass the allowance entirely, which is the
     point: the allowance exists to bound what the operator gives away, not to
     limit what someone has paid for.
+
+    A PAYMENT-SIGNATURE (x402 v2) header counts as offered too, even empty
+    (#600): such a request goes to require_x402_payment, which refuses it,
+    rather than to the allowance. An empty X-PAYMENT alone is still no offer,
+    as before.
     """
     if not settings.X402_ENABLED:
         return
-    if not request.headers.get("X-PAYMENT"):
+    if not request.headers.get(X_PAYMENT_HEADER) and 2 not in offered_payment_versions(request.headers):
         return
     await require_x402_payment(request)
 
@@ -542,6 +552,18 @@ async def require_x402_payment(request: Request) -> None:
     # payment is verified or reserved.
     await _validate_before_payment(request)
     _check_before_payment(request)
+
+    # Payment headers, of either x402 version (#600). Both at once cannot be
+    # answered either way: 400 now, before anything is priced or counted.
+    payment_versions = offered_payment_versions(request.headers)
+    if payment_versions == {1, 2}:
+        logger.warning(f"x402: refusing {request.method} {request.url.path} from {get_client_ip(request)}: "
+                       f"both X-PAYMENT and PAYMENT-SIGNATURE sent")
+        x402_payments_total.labels(mode="header_conflict").inc()
+        raise HTTPException(status_code=400, detail={
+            "code": "PAYMENT_HEADER_CONFLICT",
+            "message": HEADER_CONFLICT_MESSAGE,
+        })
 
     # No pay-to balance check here (#371). With x402 the facilitator submits
     # the transfer and pays its gas; the pay-to address never sends anything.
@@ -597,6 +619,27 @@ async def require_x402_payment(request: Request) -> None:
         price_usd=price_usd,
         description=description
     )
+
+    # A v2 payment (PAYMENT-SIGNATURE) cannot be settled until v2 is enabled
+    # (#600). Before #600 it was taken for no payment and, with X-Payment-Mode:
+    # free, served free while the client believed it had paid. Refused here,
+    # before the free tier and before anything is verified, with a v1 Payment
+    # Required body that a v1 client can still pay.
+    if 2 in payment_versions:
+        logger.warning(f"x402: refusing {request.method} {request.url.path} from {client_ip}: "
+                       f"x402 v2 payment (PAYMENT-SIGNATURE) is not enabled")
+        x402_payments_total.labels(mode="version_unsupported").inc()
+        response_body = {
+            "code": "X402_VERSION_UNSUPPORTED",
+            "message": VERSION_UNSUPPORTED_MESSAGE,
+            "x402Version": X402_VERSION,
+            "error": VERSION_UNSUPPORTED_MESSAGE,
+            "accepts": [payment_requirements.model_dump(by_alias=True)],
+        }
+        free_tier_info = get_free_tier_stats(client_key(client_ip)) if settings.X402_FREE_TIER_ENABLED else None
+        if free_tier_info and free_tier_info.get("available"):
+            response_body["freeTier"] = free_tier_info
+        raise HTTPException(status_code=402, detail=response_body)
 
     # Get X-PAYMENT header and payment mode
     payment_header = request.headers.get(X_PAYMENT_HEADER)
