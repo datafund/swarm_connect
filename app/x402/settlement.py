@@ -896,8 +896,8 @@ def outcome_unknown_refusal(auth_key: Tuple[str, str], reason: Optional[str] = N
     return HTTPException(status_code=409, detail=detail, headers=dict(OUTCOME_UNKNOWN_HEADERS))
 
 
-_ADDRESS = re.compile(r"^0x[0-9a-fA-F]{40}$")
-_NONCE = re.compile(r"^(0x)?[0-9a-fA-F]{64}$")
+_ADDRESS = re.compile(r"^0x[0-9a-fA-F]{40}\Z")
+_NONCE = re.compile(r"^(0x)?[0-9a-fA-F]{64}\Z")
 
 
 def authorization_key(payment_payload) -> Optional[Tuple[str, str]]:

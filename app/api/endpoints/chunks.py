@@ -31,7 +31,7 @@ router = APIRouter()
 # A marshaled postage stamp is 113 bytes = 226 hex characters:
 #   batchID[0:32] + index[32:40] + timestamp[40:48] + signature[48:113]
 MARSHALED_STAMP_HEX_LEN = 226
-_HEX_RE = re.compile(r"^[A-Fa-f0-9]+$")
+_HEX_RE = re.compile(r"^[A-Fa-f0-9]+\Z")
 
 # Header the client uses to present its prepaid bandwidth credit token.
 CREDIT_TOKEN_HEADER = "X-Bandwidth-Credit-Token"

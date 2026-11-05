@@ -1132,3 +1132,51 @@ def test_damaged_stored_entry_never_gives_a_500(gw, damage):
     assert "not charged" in detail["message"]
     assert r.headers["X-Payment-Transaction"] == TX
     assert "settle" not in fac.paths()
+
+
+# --------------------------------------------------------------------------
+# Validation regexes end at the end of the text, not before a newline
+# (#645 review round 4)
+# --------------------------------------------------------------------------
+
+def test_authorization_key_refuses_a_trailing_newline():
+    from types import SimpleNamespace
+    from app.x402.settlement import authorization_key
+
+    def payload(frm, nonce):
+        return SimpleNamespace(payload=SimpleNamespace(authorization=SimpleNamespace(from_=frm, nonce=nonce)))
+    nonce = "0x" + "01" * 32
+    assert authorization_key(payload(PAYER, nonce)) == (PAYER.lower(), nonce)
+    assert authorization_key(payload(PAYER + "\n", nonce)) is None
+    assert authorization_key(payload(PAYER, nonce + "\n")) is None
+
+
+@pytest.mark.parametrize("version", VERSIONS)
+def test_trailing_newline_in_from_is_not_a_second_replay_key(gw, version):
+    """D5: one authorization, one key. PAYER + newline used to be a distinct
+    key, so the same signature could be presented twice."""
+    client, fac = gw("1,2")
+    offer = _offer(client)
+    assert client.post("/api/v1/stamps/", headers=pay(version, offer)).status_code == 200
+    auth = authorization(offer, payer=PAYER + "\n")
+    payload = v1_payload(offer, auth) if version == 1 else v2_payload(offer, auth)
+    r = client.post("/api/v1/stamps/", headers=header_for(version, payload))
+    assert r.status_code in (400, 402), r.text
+    assert fac.paths().count("settle") == 1
+
+
+def test_normalize_address_refuses_a_trailing_newline():
+    from app.services.stamp_ownership import normalize_address
+    assert normalize_address(PAYER) == PAYER
+    assert normalize_address(PAYER[2:]) == PAYER
+    assert normalize_address(PAYER + "\n") is None
+    assert normalize_address(PAYER[2:] + "\n") is None
+
+
+def test_marshaled_stamp_refuses_a_trailing_newline():
+    from fastapi import HTTPException
+    from app.api.endpoints.chunks import MARSHALED_STAMP_HEX_LEN, _validate_marshaled_stamp
+    good = "ab" * (MARSHALED_STAMP_HEX_LEN // 2)
+    assert _validate_marshaled_stamp(good) == good
+    with pytest.raises(HTTPException):
+        _validate_marshaled_stamp(good[:-1] + "\n")
