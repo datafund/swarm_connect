@@ -79,8 +79,11 @@ jobs:
         # Windows only. An image without that bundle would fail every HTTPS
         # call (Base RPC, the price feed) at runtime, so this checks offline,
         # in the running container, that the gateway's transport gets a
-        # verifying context with the OS CAs loaded. The live check against
-        # real hosts is on staging (#618).
+        # verifying context with the OS CAs loaded, and that real handshakes
+        # with a local server (127.0.0.1, a fresh self-signed certificate)
+        # are refused by default httpx2, accepted by a client that trusts the
+        # certificate, and refused for another host name. The live check
+        # against real hosts is on staging (#618).
         run: |
           docker exec -i "$CONTAINER" python - <<'PY'
           import os, ssl
@@ -102,6 +105,68 @@ jobs:
           assert bundle_ctx.verify_mode == ssl.CERT_REQUIRED
           assert bundle_ctx.cert_store_stats()["x509_ca"] >= 50
           print(f"OK: {in_bundle} certificates in {BUNDLE}; httpx2's verifying context has {loaded} CAs loaded")
+          # Real handshakes, offline: a local TLS server with a fresh self-signed certificate.
+          import asyncio, datetime, tempfile
+          from cryptography import x509
+          from cryptography.hazmat.primitives import hashes, serialization
+          from cryptography.hazmat.primitives.asymmetric import ec
+          from cryptography.x509.oid import NameOID
+          HOST = "tls-check.test"
+          key = ec.generate_private_key(ec.SECP256R1())
+          name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, HOST)])
+          now = datetime.datetime.now(datetime.timezone.utc)
+          cert = (x509.CertificateBuilder().subject_name(name).issuer_name(name).public_key(key.public_key())
+                  .serial_number(x509.random_serial_number())
+                  .not_valid_before(now - datetime.timedelta(minutes=5)).not_valid_after(now + datetime.timedelta(hours=1))
+                  .add_extension(x509.SubjectAlternativeName([x509.DNSName(HOST)]), critical=False)
+                  .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
+                  .sign(key, hashes.SHA256()))
+          pem = cert.public_bytes(serialization.Encoding.PEM).decode()
+          tmp = tempfile.mkdtemp()
+          with open(f"{tmp}/cert.pem", "w") as f:
+              f.write(pem)
+          with open(f"{tmp}/key.pem", "wb") as f:
+              f.write(key.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8,
+                                        serialization.NoEncryption()))
+
+          def cert_error(exc):
+              """The certificate verification failure behind an httpx2 error, or None."""
+              while exc is not None and not isinstance(exc, ssl.SSLCertVerificationError):
+                  exc = exc.__cause__ or exc.__context__
+              return exc
+
+          async def refused(client, url, host):
+              """The verification error when the handshake is refused; None when it succeeds."""
+              try:
+                  await client.get(url, extensions={"sni_hostname": host})
+              except httpx2.ConnectError as e:
+                  assert cert_error(e) is not None, f"refused, but not by certificate verification: {e!r}"
+                  return cert_error(e)
+              return None
+
+          async def handshakes():
+              server_ctx = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
+              server_ctx.load_cert_chain(f"{tmp}/cert.pem", f"{tmp}/key.pem")
+              async def answer(reader, writer):
+                  try:
+                      await reader.readuntil(b"\r\n\r\n")
+                      writer.write(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+                      await writer.drain()
+                  finally:
+                      writer.close()
+              server = await asyncio.start_server(answer, "127.0.0.1", 0, ssl=server_ctx)
+              url = f"https://127.0.0.1:{server.sockets[0].getsockname()[1]}/"
+              async with httpx2.AsyncClient() as default:  # the gateway's settings: OS CAs only
+                  assert await refused(default, url, HOST) is not None, "default httpx2 accepted a self-signed certificate"
+              async with httpx2.AsyncClient(verify=ssl.create_default_context(cadata=pem)) as trusting:
+                  assert await refused(trusting, url, HOST) is None, "a client trusting the certificate was refused"
+                  wrong = await refused(trusting, url, "other.test")
+                  assert wrong is not None and "mismatch" in wrong.verify_message, f"wrong host name accepted: {wrong!r}"
+              server.close()
+              print("OK: default httpx2 refuses a self-signed certificate; a client trusting it connects, "
+                    "and refuses it for another host name")
+
+          asyncio.run(handshakes())
           PY
 
       - name: no test packages in the image (offline)
