@@ -224,3 +224,36 @@ def test_python_version_is_the_same_in_ci_the_image_and_the_lock():
     assert header == [image], f"requirements.lock header {header}, Dockerfile {image}"
     command = re.findall(r"uv pip compile .*--python-version (\S+)", REQUIREMENTS_TXT.read_text())
     assert command == [image], f"requirements.txt regenerate command {command}, Dockerfile {image}"
+
+
+# Lowest versions without the advisories pip-audit reported on the lock (#525).
+# x402 1.0.0 is pinned on purpose (2.x changes the API), so it is not listed.
+LOCK_MINIMUMS = {
+    "aiohttp": "3.14.4",
+    "certifi": "2026.10.18",
+    "dnspython": "2.9.0",
+    "werkzeug": "3.1.9",
+}
+
+
+def _lock_pins():
+    """Every `name==version` pin in the lock, by normalised name. A universal
+    lock can pin one package more than once, under different markers."""
+    pins = {}
+    for m in re.finditer(r"^([A-Za-z0-9][A-Za-z0-9._-]*)==([^\s;\\]+)", LOCK.read_text(), re.M):
+        name = re.sub(r"[-_.]+", "-", m.group(1)).lower()
+        pins.setdefault(name, []).append(m.group(2))
+    return pins
+
+
+def test_lock_pins_are_at_or_above_the_advisory_fixes():
+    """A regeneration must not take these back below the fixed versions."""
+    from packaging.version import Version
+
+    pins = _lock_pins()
+    for name, minimum in LOCK_MINIMUMS.items():
+        assert name in pins, f"{name} is no longer in requirements.lock; update LOCK_MINIMUMS"
+        for version in pins[name]:
+            assert Version(version) >= Version(minimum), (
+                f"requirements.lock pins {name}=={version}, below {minimum} (advisory fix, #525)"
+            )
