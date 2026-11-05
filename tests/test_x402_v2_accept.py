@@ -1053,3 +1053,82 @@ def test_v2_receipt_payer_falls_back_to_the_signed_from(gw):
     assert _receipt_payer(SimpleNamespace(state=state)) == PAYER
     state.x402_payer = "0x" + "cd" * 20
     assert _receipt_payer(SimpleNamespace(state=state)) == "0x" + "cd" * 20
+
+
+# --------------------------------------------------------------------------
+# A stored result is replayed only with safe headers (#645 review round 4)
+# --------------------------------------------------------------------------
+
+def _store_done(eid, **fields):
+    import hashlib
+    from app.x402.idempotency import idempotency_store
+    entry = {"state": "done", "request_hash": hashlib.sha256(b"\0").hexdigest(), "auth": "x",
+             "created": 1e12, "expires": 1e12, "status": 201,
+             "headers": {"content-type": "application/json"},
+             "body": base64.b64encode(b'{"batchID": "b"}').decode()}
+    entry.update(fields)
+    idempotency_store._entries[eid] = entry
+
+
+def _keyed_retry(client, offer, key, version=1):
+    return client.post("/api/v1/stamps/", headers={**pay(version, offer, nonce=nonce_hex("1f")),
+                                                   "Idempotency-Key": key})
+
+
+@pytest.mark.parametrize("version", VERSIONS)
+def test_replay_never_sends_an_unchecked_transaction_or_control_characters(gw, version):
+    from app.x402.idempotency import entry_id
+    client, fac = gw("1,2")
+    offer = _offer(client)
+    eid = entry_id(PAYER, "POST", "/api/v1/stamps/", "k-dirty")
+    receipt = receipt_header(version).lower()
+    _store_done(eid, headers={"content-type": "application/json",
+                              "x-payment-transaction": "0x" + "ab" * 32 + "\r\nSet-Cookie: x=1",
+                              receipt: "ok-receipt", "x-payment-mode": "pa\u0000id",
+                              "set-cookie": "never=1"},
+                **({"version": 2} if version == 2 else {}))
+    r = _keyed_retry(client, offer, "k-dirty", version)
+    assert r.status_code == 201, r.text
+    assert r.headers["Idempotent-Replayed"] == "true"
+    assert r.headers["X-Payment-Transaction"] == "unknown"
+    assert r.headers[receipt] == "ok-receipt"
+    assert "x-payment-mode" not in r.headers and "set-cookie" not in r.headers
+    for value in r.headers.values():
+        assert "\r" not in value and "\n" not in value and "\x00" not in value
+
+
+def test_replay_keeps_a_valid_stored_transaction(gw):
+    from app.x402.idempotency import entry_id
+    client, fac = gw("1,2")
+    offer = _offer(client)
+    eid = entry_id(PAYER, "POST", "/api/v1/stamps/", "k-clean")
+    _store_done(eid, headers={"content-type": "application/json", "x-payment-transaction": TX})
+    r = _keyed_retry(client, offer, "k-clean")
+    assert r.status_code == 201 and r.headers["X-Payment-Transaction"] == TX
+
+
+@pytest.mark.parametrize("damage", [
+    {"headers": ["not", "a", "dict"]},
+    {"status": "201"},
+    {"status": True},
+    {"status": 99},
+    {"body": None},
+    {"body": "!!! not base64"},
+    {"headers": {"content-type": 5}},          # skipped, not fatal
+])
+def test_damaged_stored_entry_never_gives_a_500(gw, damage):
+    from app.x402.idempotency import entry_id
+    client, fac = gw("1,2")
+    offer = _offer(client)
+    eid = entry_id(PAYER, "POST", "/api/v1/stamps/", "k-damaged")
+    _store_done(eid, transaction=TX, **damage)
+    r = _keyed_retry(client, offer, "k-damaged")
+    if damage == {"headers": {"content-type": 5}}:
+        assert r.status_code == 201 and r.headers["Idempotent-Replayed"] == "true"
+        return
+    assert r.status_code == 409, r.text
+    detail = r.json()["detail"]
+    assert detail["code"] == "IDEMPOTENCY_KEY_DELIVERED_NOT_STORED"
+    assert "not charged" in detail["message"]
+    assert r.headers["X-Payment-Transaction"] == TX
+    assert "settle" not in fac.paths()

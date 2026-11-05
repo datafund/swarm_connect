@@ -656,17 +656,56 @@ async def _request_hash(request: Request) -> str:
     return h.hexdigest()
 
 
-def _replay_response(entry: dict, payer: str) -> Response:
-    headers = dict(entry.get("headers") or {})
+def _safe_header_value(value) -> bool:
+    """Printable ASCII only: no control character (CR, LF, NUL), nothing a
+    header cannot carry."""
+    return isinstance(value, str) and all(" " <= c <= "~" for c in value)
+
+
+def _replay_response(entry: dict, payer: str) -> Optional[Response]:
+    """The stored response, or None if the entry is damaged (#607 review).
+
+    Stored headers are replayed only if their name is one the store keeps and
+    their value is printable ASCII; X-Payment-Transaction only if it is a
+    valid hash (settlement.valid_transaction), else "unknown". An entry
+    written before those checks, or damaged on disk, can never make a replay
+    raise or carry a CR/LF: a status, headers or body that cannot be used
+    give None, and the caller answers "result not stored" instead.
+    """
+    from app.x402.settlement import valid_transaction
+    stored = entry.get("headers")
+    status = entry.get("status")
+    if stored is not None and not isinstance(stored, dict):
+        return None
+    if type(status) is not int or not 200 <= status < 600:
+        return None
+    try:
+        body = base64.b64decode(entry["body"], validate=True)
+    except Exception:
+        return None
+    headers = {}
+    for name, value in (stored or {}).items():
+        if not isinstance(name, str) or name.lower() not in _STORED_HEADERS:
+            continue
+        if name.lower() == "x-payment-transaction":
+            value = valid_transaction(value) or "unknown"
+        elif not _safe_header_value(value):
+            continue
+        headers[name] = value
     headers[REPLAYED_HEADER] = "true"
-    body = base64.b64decode(entry["body"])
     if entry.get("fill") == _CREDIT_TOKEN:
         # The account's current token, never a new or rotated one.
         from app.services.bandwidth_credit import bandwidth_credit_manager
-        parsed = json.loads(body)
-        parsed["token"] = bandwidth_credit_manager.issue_token(payer)
-        body = json.dumps(parsed).encode()
-    return Response(content=body, status_code=entry["status"], headers=headers)
+        try:
+            parsed = json.loads(body)
+            parsed["token"] = bandwidth_credit_manager.issue_token(payer)
+            body = json.dumps(parsed).encode()
+        except Exception:
+            return None
+    try:
+        return Response(content=body, status_code=status, headers=headers)
+    except Exception:
+        return None
 
 
 def _log_replay(request: Request, payer: str, entry: dict, retry_nonce: Optional[str] = None) -> None:
@@ -747,7 +786,19 @@ async def begin_idempotent_request(request: Request, payer: str,
     if state == DONE:
         logger.info(f"x402: idempotent replay for payer {payer} on {request.url.path}; new payment not settled")
         _log_replay(request, payer, entry, auth_key[1])
-        raise IdempotentReplay(_replay_response(entry, payer))
+        replay = _replay_response(entry, payer)
+        if replay is not None:
+            raise IdempotentReplay(replay)
+        logger.error("x402: stored result for an Idempotency-Key is damaged; answering not stored")
+        tx = _stored_transaction(entry) or "unknown"
+        raise HTTPException(status_code=409, headers={"X-Payment-Transaction": tx}, detail={
+            "code": "IDEMPOTENCY_KEY_DELIVERED_NOT_STORED",
+            "message": ("The first request with this Idempotency-Key succeeded and was paid once, "
+                        "but its stored response cannot be read. This payment was not charged. "
+                        "Look the result up through the resource itself."),
+            "transaction": tx,
+            "x402_status": "delivered",
+        })
     if state == "version_mismatch":
         from app.x402.payment_headers import version_enabled
         original = entry.get("version", 1)
