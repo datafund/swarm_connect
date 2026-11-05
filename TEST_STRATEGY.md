@@ -50,7 +50,12 @@ script checks each lock twice, the runtime lock first:
    changed or deleted `--hash` line. The script therefore compiles each input
    again into a new file, with no lock to start from, constrained to the
    committed pins without their hashes, and fails unless every package has
-   exactly the hashes the committed lock lists.
+   exactly the hashes the committed lock lists. Each block is compared on its
+   own, by name, version and marker, so a version pinned twice under two
+   markers cannot hide a missing hash behind the other block.
+
+The script exits 1 only for a lock difference. A tool error (uv, diff or the
+hash comparison itself failing) exits 2.
 
 The second pass takes the hashes from PyPI, so it also fails when a pinned
 version gains a file after the lock was made, although the lock is not wrong.

@@ -27,7 +27,8 @@
 #
 # Needs uv 0.11.x (another version can format the lock differently), python3
 # and access to PyPI. CI (tests.yml, job lock-sync) runs it on every pull request.
-# Run: scripts/check_lock_sync.sh     Exit 0 = in sync, 1 = out of sync, 2 = error.
+# Run: scripts/check_lock_sync.sh
+# Exit 0 = in sync, 1 = out of sync, 2 = a tool error (uv, diff, python3), never 1.
 set -u
 set -o pipefail
 
@@ -73,36 +74,52 @@ for line in open(sys.argv[1]):
 PY
 }
 
-# Compare the hashes of two locks, package by package. Exit 1 on any difference.
+# Compare the hashes of two locks, block by block. A universal lock can pin one
+# version more than once, under different markers, so a block is keyed by name,
+# version and marker, and the hashes of two blocks are never merged.
+# Exit 0 = same, 1 = different, 2 = the comparison itself failed.
 same_hashes() {
   python3 - "$1" "$2" <<'PY'
-import re, sys
+import collections, re, sys
 
 def parse(path):
-    pkgs = {}
-    for block in re.split(r"\n(?=[A-Za-z0-9])", open(path).read()):
-        m = re.match(r"([A-Za-z0-9][A-Za-z0-9._-]*)==([^\s;\\]+)", block)
+    blocks = collections.defaultdict(list)
+    with open(path) as f:
+        text = f.read()
+    for block in re.split(r"\n(?=[A-Za-z0-9])", text):
+        m = re.match(r"([A-Za-z0-9][A-Za-z0-9._-]*)==([^\s;\\]+)(?:\s*;([^\\\n]*))?", block)
         if m:
-            key = (re.sub(r"[-_.]+", "-", m.group(1)).lower(), m.group(2))
-            pkgs.setdefault(key, set()).update(re.findall(r"--hash=(sha256:[0-9a-f]+)", block))
-    return pkgs
+            marker = " ".join((m.group(3) or "").split())
+            key = (re.sub(r"[-_.]+", "-", m.group(1)).lower(), m.group(2), marker)
+            blocks[key].append(frozenset(re.findall(r"--hash=(sha256:[0-9a-f]+)", block)))
+    return blocks
 
-committed, fresh = parse(sys.argv[1]), parse(sys.argv[2])
-bad = []
-for key in sorted(set(committed) | set(fresh)):
-    name = "==".join(key)
-    if key not in fresh:
-        bad.append(f"{name}: in the lock, but not resolved from its input")
-    elif key not in committed:
-        bad.append(f"{name}: resolved from the input, but not in the lock")
-    else:
-        for h in sorted(committed[key] - fresh[key]):
-            bad.append(f"{name}: hash {h} is not a file of this version on the index")
-        for h in sorted(fresh[key] - committed[key]):
-            bad.append(f"{name}: hash {h} of this version is missing from the lock")
-for line in bad:
-    print("  " + line)
-sys.exit(1 if bad else 0)
+def main():
+    committed, fresh = parse(sys.argv[1]), parse(sys.argv[2])
+    bad = []
+    for key in sorted(set(committed) | set(fresh)):
+        name = f"{key[0]}=={key[1]}" + (f" ; {key[2]}" if key[2] else "")
+        if key not in fresh:
+            bad.append(f"{name}: in the lock, but not resolved from its input")
+        elif key not in committed:
+            bad.append(f"{name}: resolved from the input, but not in the lock")
+        elif collections.Counter(committed[key]) != collections.Counter(fresh[key]):
+            old, new = frozenset().union(*committed[key]), frozenset().union(*fresh[key])
+            for h in sorted(old - new):
+                bad.append(f"{name}: hash {h} is not a file of this version on the index")
+            for h in sorted(new - old):
+                bad.append(f"{name}: hash {h} of this version is missing from the lock")
+            if old == new:
+                bad.append(f"{name}: listed {len(committed[key])} times with hashes that differ from the index")
+    for line in bad:
+        print("  " + line)
+    return 1 if bad else 0
+
+try:
+    sys.exit(main())
+except Exception as e:  # a tool error, not a lock difference
+    print(f"check_lock_sync: the hash comparison failed: {e!r}", file=sys.stderr)
+    sys.exit(2)
 PY
 }
 
@@ -123,7 +140,13 @@ for lock in "${LOCKS[@]}"; do
     echo "check_lock_sync: the compile command for $lock failed" >&2
     exit 2
   fi
-  if ! diff -u "$HERE/$lock" "$WORK/$lock"; then
+  diff -u "$HERE/$lock" "$WORK/$lock"
+  rc=$?
+  if [ "$rc" -gt 1 ]; then
+    echo "check_lock_sync: diff failed for $lock (rc $rc)" >&2
+    exit 2
+  fi
+  if [ "$rc" -eq 1 ]; then
     echo "::error file=$lock::$lock is out of sync with its input. Regenerate it with the command in its header (see requirements.txt) and commit the result."
     status=1
     # It has to be regenerated anyway, and its pins may no longer satisfy
@@ -144,7 +167,13 @@ for lock in "${LOCKS[@]}"; do
     exit 2
   fi
   echo "== $lock: hashes against a fresh compile"
-  if ! same_hashes "$HERE/$lock" "$FRESH/out/$lock"; then
+  same_hashes "$HERE/$lock" "$FRESH/out/$lock"
+  rc=$?
+  if [ "$rc" -gt 1 ]; then
+    echo "check_lock_sync: the hash comparison for $lock failed (rc $rc)" >&2
+    exit 2
+  fi
+  if [ "$rc" -eq 1 ]; then
     echo "::error file=$lock::$lock lists hashes that differ from the index (see above). Find out why first: a hand edit, or a file PyPI added to a pinned version. Then regenerate it with the command in its header (see requirements.txt)."
     status=1
   fi
