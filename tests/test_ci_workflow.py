@@ -62,3 +62,17 @@ def test_tests_workflow_flags_match_the_dockerfile():
 
 def test_deploy_workflow_gates_on_tests_workflow():
     assert re.search(r"^\s*uses:\s*\./\.github/workflows/tests\.yml\s*$", DEPLOY_YML.read_text(), re.M)
+
+
+def test_tests_workflow_gates_cannot_be_turned_off_silently():
+    """No step may be marked continue-on-error, and no gate command may
+    swallow its exit status, or a failed install, pip check or test run would
+    leave the job green."""
+    text = TESTS_YML.read_text()
+    assert "continue-on-error" not in text
+    gates = [c for c in _run_lines(text)
+             if LOCK_INSTALL.search(c) or re.fullmatch(r"(python -m )?pip check", c) or "pytest" in c]
+    assert len(gates) == 3, gates
+    swallow = re.compile(r"\|\|\s*(true|:|exit 0)\b|;\s*(true|:|exit 0)\s*$|\|\|\s*echo\b")
+    for cmd in gates:
+        assert not swallow.search(cmd), cmd
