@@ -17,13 +17,16 @@ python -m pytest tests/test_stamp_pool.py -v    # one area
 
 `.github/workflows/tests.yml` runs the default (hermetic) suite on every pull
 request, and `deploy.yml` calls it as its gate, so nothing deploys unless it
-passes. It runs on Python 3.10, the image's interpreter, and installs exactly
+passes. It runs on Python 3.12, the image's interpreter, and installs exactly
 what the image ships: `pip install --no-deps --require-hashes -r
 requirements.lock`, then `pip check`, which fails the run if the lock misses a
 dependency or pins a conflicting one (#523). A local venv built from
 `requirements.txt` resolves whatever is current, so it can differ from CI; to
-reproduce CI, build a Python 3.10 venv the same way. `tests/test_ci_workflow.py`
-keeps the workflow on the lock.
+reproduce CI, build a Python 3.12 venv the same way (for example `uv venv -p 3.12`,
+then `uv pip install --no-deps --require-hashes -r requirements.lock` and
+`uv pip check`). `tests/test_ci_workflow.py` keeps the workflow on the lock, and
+CI, the Dockerfile base image and the lock on one Python version, with the base
+image pinned by digest.
 
 `.github/workflows/image.yml` builds the Docker image on every pull request
 (#486): `docker build --pull --no-cache --platform linux/amd64`, so neither a

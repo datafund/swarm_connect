@@ -47,7 +47,7 @@ swarm_connect/
 │
 ├── .env.example            # Example environment file
 ├── docker-compose.yml      # Docker deployment (production + staging)
-├── Dockerfile              # Container image (Python 3.10)
+├── Dockerfile              # Container image (Python 3.12, base pinned by digest)
 ├── requirements.txt        # Python dependencies
 └── run.py                  # Development server
 ``` 
@@ -76,7 +76,7 @@ source venv/bin/activate
 
 # Install dependencies
 pip install -r requirements.txt
-# CI and the Docker image install requirements.lock instead (Python 3.10);
+# CI and the Docker image install requirements.lock instead (Python 3.12);
 # to reproduce CI: pip install --no-deps --require-hashes -r requirements.lock
 
 # Set up environment file
