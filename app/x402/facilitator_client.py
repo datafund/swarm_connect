@@ -22,6 +22,21 @@ Replaces x402 1.0.0's FacilitatorClient, and behaves the same for v1:
   a failed connection. app/x402/settlement.py counts a raise as an unknown
   outcome and a parsed success:false as a definite refusal.
 
+x402 v2 (#607): verify and settle take a PaymentPayloadV2 with
+PaymentRequirementsV2 (mixing the versions raises TypeError). The body is
+{"x402Version": 2, "paymentPayload", "paymentRequirements"}, both dumped with
+by_alias and exclude_none, so fields the models do not know are never sent.
+The payload's `extensions` are left out: the gateway offers none, and they are
+facilitator-side switches it never priced. Answers are classified by status
+(ADR open question 3, decided for v2 only; v1 keeps the rule above):
+- verify: any body that parses as VerifyResponseV2 is the answer, whatever
+  the status (no money moves); anything else raises.
+- settle: a 2xx body that parses is the answer. A 4xx body that parses with
+  success:false is a definite refusal. Everything else raises, so the
+  settlement code counts it as an unknown outcome: a 5xx (a facilitator or
+  proxy in trouble may still have submitted the transfer), a non-2xx
+  success:true, or a body that does not parse.
+
 tests/test_x402_facilitator_differential.py runs verify and settle through
 this client and through x402 1.0.0 against a stub server and compares the
 requests and results. supported() has no 1.0.0 counterpart; nothing in app/
@@ -34,6 +49,7 @@ import httpx
 from typing_extensions import TypedDict
 
 from app.x402.models_v1 import PaymentPayload, PaymentRequirements, SettleResponse, SupportedResponse, VerifyResponse
+from app.x402.models_v2 import PaymentPayloadV2, PaymentRequirementsV2, SettleResponseV2, VerifyResponseV2
 
 # What x402 1.0.0 got from httpx.AsyncClient() without arguments.
 DEFAULT_TIMEOUT = httpx.Timeout(5.0)
@@ -92,13 +108,45 @@ class FacilitatorClient:
             )
             return response.json()
 
-    async def verify(self, payment: PaymentPayload, payment_requirements: PaymentRequirements) -> VerifyResponse:
-        """Ask the facilitator whether the signed payment is valid for the requirements."""
+    async def _post_v2(self, path: str, payment: PaymentPayloadV2,
+                       payment_requirements: PaymentRequirementsV2) -> httpx.Response:
+        if not isinstance(payment_requirements, PaymentRequirementsV2):
+            raise TypeError("an x402 v2 payment needs PaymentRequirementsV2")
+        headers = await self._headers(path)
+        async with self._client() as client:
+            return await client.post(
+                f"{self.config['url']}/{path}",
+                json=v2_request_body(payment, payment_requirements),
+                headers=headers,
+                follow_redirects=True,
+            )
+
+    @staticmethod
+    def _check_v1(payment, payment_requirements) -> None:
+        if isinstance(payment_requirements, PaymentRequirementsV2):
+            raise TypeError("an x402 v1 payment needs v1 PaymentRequirements")
+
+    async def verify(self, payment, payment_requirements):
+        """Ask the facilitator whether the signed payment is valid for the requirements.
+
+        A PaymentPayload (v1) returns VerifyResponse; a PaymentPayloadV2
+        returns VerifyResponseV2."""
+        if isinstance(payment, PaymentPayloadV2):
+            response = await self._post_v2("verify", payment, payment_requirements)
+            return VerifyResponseV2.model_validate(response.json())
+        self._check_v1(payment, payment_requirements)
         data = await self._post("verify", payment, payment_requirements)
         return VerifyResponse(**data)
 
-    async def settle(self, payment: PaymentPayload, payment_requirements: PaymentRequirements) -> SettleResponse:
-        """Ask the facilitator to submit the payment on-chain."""
+    async def settle(self, payment, payment_requirements):
+        """Ask the facilitator to submit the payment on-chain.
+
+        A PaymentPayload (v1) returns SettleResponse; a PaymentPayloadV2
+        returns SettleResponseV2, classified as the module docstring says."""
+        if isinstance(payment, PaymentPayloadV2):
+            response = await self._post_v2("settle", payment, payment_requirements)
+            return classify_v2_settle(response.status_code, response.json())
+        self._check_v1(payment, payment_requirements)
         data = await self._post("settle", payment, payment_requirements)
         return SettleResponse(**data)
 
@@ -113,3 +161,29 @@ class FacilitatorClient:
                                         follow_redirects=True)
             data = response.json()
         return SupportedResponse(**data)
+
+
+def v2_request_body(payment: PaymentPayloadV2, payment_requirements: PaymentRequirementsV2) -> dict:
+    """The /verify and /settle JSON body for an x402 v2 payment (#607)."""
+    return {
+        "x402Version": 2,
+        "paymentPayload": payment.model_dump(mode="json", by_alias=True, exclude_none=True,
+                                             exclude={"extensions"}),
+        "paymentRequirements": payment_requirements.model_dump(mode="json", by_alias=True,
+                                                               exclude_none=True),
+    }
+
+
+class FacilitatorAnswerUnusable(Exception):
+    """A settle answer that is neither a result nor a definite refusal: the
+    outcome is unknown. Never carries the body."""
+
+
+def classify_v2_settle(status: int, data: Any) -> SettleResponseV2:
+    """The v2 settle answer, or raise FacilitatorAnswerUnusable (unknown outcome)."""
+    result = SettleResponseV2.model_validate(data)    # ValidationError: unknown outcome too
+    if 200 <= status < 300:
+        return result
+    if 400 <= status < 500 and result.success is False:
+        return result
+    raise FacilitatorAnswerUnusable(f"facilitator answered {status} to settle")
