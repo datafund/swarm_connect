@@ -17,6 +17,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from fastapi import APIRouter, Depends, FastAPI, Request
 from fastapi.testclient import TestClient
+from pydantic import BaseModel
 from x402.types import SettleResponse, VerifyResponse, x402PaymentRequiredResponse
 
 from app.services.metrics import x402_payments_total
@@ -53,6 +54,15 @@ async def paid_handler(request: Request):
     return {"mode": mode}
 
 
+class Purchase(BaseModel):
+    depth: int
+
+
+async def validated_handler(request: Request, body: Purchase):
+    RAN.append(getattr(request.state, "x402_mode", None))
+    return {"depth": body.depth}
+
+
 async def chunk_upload(request: Request):
     RAN.append(getattr(request.state, "x402_mode", None))
     return {"ran": True}
@@ -79,6 +89,8 @@ def _app(fac):
     paid.add_api_route("/api/v1/data/manifest", paid_handler, methods=["POST"])
     paid.add_api_route("/api/v1/chunks/credit", paid_handler, methods=["POST"])
     paid.add_api_route("/api/v1/chunks/", chunk_upload, methods=["POST"])
+    # A paid route with a validated body, for the order of checks (#427 before #600).
+    paid.add_api_route("/api/v1/stamps/validated", validated_handler, methods=["POST"])
     optional = APIRouter(dependencies=[Depends(settle_payment_if_offered)])
     optional.add_api_route("/api/v1/pool/acquire", paid_handler, methods=["POST"])
     app.include_router(paid)
@@ -190,6 +202,72 @@ def test_version_402_offers_the_free_tier_like_the_plain_402(gw):
     v2 = client.post("/api/v1/stamps/", headers={"PAYMENT-SIGNATURE": V2}).json()
     assert "freeTier" in plain and "freeTier" in v2
     assert v2["accepts"] == plain["accepts"]
+
+
+# --------------------------------------------------------------------------
+# Order of checks, as docs/error-codes.md states it: request validation (422)
+# first, then the header conflict (400), then the payments gate (503, #589,
+# skipped with free mode), then pricing, then the version 402.
+# --------------------------------------------------------------------------
+
+BOTH = {"X-PAYMENT": create_valid_payment_header(), "PAYMENT-SIGNATURE": V2}
+
+
+def _payments_unavailable():
+    return patch("app.x402.accept_gate.payments_refusal", return_value="balances_unreadable")
+
+
+@pytest.mark.parametrize("headers", [BOTH, {"PAYMENT-SIGNATURE": V2}], ids=["both", "v2"])
+def test_invalid_body_gets_422_before_the_header_checks(gw, headers):
+    client, fac, _, _ = gw
+    before = (_count("header_conflict"), _count("version_unsupported"))
+    r = client.post("/api/v1/stamps/validated", json={"depth": "not-a-number"}, headers=headers)
+    assert r.status_code == 422, r.text
+    assert isinstance(r.json()["detail"], list)
+    assert RAN == []
+    fac.verify.assert_not_called()
+    assert (_count("header_conflict"), _count("version_unsupported")) == before
+
+
+def test_valid_body_then_gets_the_header_answer(gw):
+    # The 422 above is the body, not the route: with a valid body the same
+    # requests get the conflict and the version answers.
+    client, _, _, _ = gw
+    _assert_conflict(client.post("/api/v1/stamps/validated", json={"depth": 17}, headers=BOTH))
+    _assert_version_unsupported(client.post("/api/v1/stamps/validated", json={"depth": 17},
+                                            headers={"PAYMENT-SIGNATURE": V2}))
+    assert RAN == []
+
+
+def test_payments_unavailable_comes_before_the_version_402(gw):
+    client, fac, _, _ = gw
+    before = _count("version_unsupported")
+    with _payments_unavailable():
+        r = client.post("/api/v1/stamps/", headers={"PAYMENT-SIGNATURE": V2})
+    assert r.status_code == 503, r.text
+    assert r.json()["code"] == "PAYMENTS_UNAVAILABLE"
+    assert _count("version_unsupported") == before
+    assert RAN == []
+    fac.verify.assert_not_called()
+
+
+def test_free_mode_skips_the_payments_gate_and_gets_the_version_402(gw):
+    client, fac, _, _ = gw
+    with _payments_unavailable():
+        r = client.post("/api/v1/stamps/", headers={"PAYMENT-SIGNATURE": V2, **FREE})
+    _assert_version_unsupported(r)
+    assert RAN == []
+    fac.verify.assert_not_called()
+
+
+@pytest.mark.parametrize("free", [False, True], ids=["no-mode", "free-mode"])
+def test_header_conflict_comes_before_the_payments_gate(gw, free):
+    client, fac, _, _ = gw
+    with _payments_unavailable():
+        r = client.post("/api/v1/stamps/", headers={**BOTH, **(FREE if free else {})})
+    _assert_conflict(r)
+    assert RAN == []
+    fac.verify.assert_not_called()
 
 
 # --------------------------------------------------------------------------
