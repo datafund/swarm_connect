@@ -14,7 +14,8 @@ byte for byte. With 2 enabled:
 - payment_required_header(detail): the PAYMENT-REQUIRED value, codec_v2 of a
   PaymentRequired with x402Version 2, the body's `error`, `resource` (url,
   description, mimeType of accepts[0]) and `accepts` (every v1 offer, in v2
-  form). A body without offers gets none. If it cannot be built (the v2
+  form). The resource is v2_payment.gateway_resource, the one forwarded to
+  the facilitator with a v2 payment. A body without offers gets none. If it cannot be built (the v2
   model refuses a value) or encoded (over codec_v2.MAX_HEADER_CHARS), the 402
   goes out without it: logged, counted in
   gateway_x402_payment_required_header_failures_total, never a 500.
@@ -31,7 +32,7 @@ from pydantic import ValidationError
 
 from app.x402 import codec_v2
 from app.x402.models_v1 import PaymentRequirements
-from app.x402.models_v2 import PaymentRequired, ResourceInfo
+from app.x402.models_v2 import PaymentRequired
 from app.x402.payment_headers import accepted_x402_versions
 
 logger = logging.getLogger(__name__)
@@ -65,14 +66,15 @@ def payment_required_v2(detail) -> Optional[PaymentRequired]:
     offers = _v1_offers(detail)
     if not offers:
         return None
-    from app.x402.v2_payment import v2_offer_from_v1
+    from app.x402.v2_payment import gateway_resource, v2_offer_from_v1
     v1 = [PaymentRequirements.model_validate(o) for o in offers]
     error = detail.get("error")
     return PaymentRequired(
         x402_version=2,
         error=error if isinstance(error, str) else None,
-        resource=ResourceInfo(url=v1[0].resource, description=v1[0].description,
-                              mime_type=v1[0].mime_type),
+        # The same resource the gateway forwards in a v2 payment (#607), so the
+        # client is offered exactly what the facilitator is told it paid for.
+        resource=gateway_resource(v1[0]),
         accepts=[v2_offer_from_v1(r) for r in v1],
     )
 

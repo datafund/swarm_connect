@@ -21,6 +21,7 @@ import json
 import logging
 from unittest.mock import AsyncMock, patch
 
+import httpx
 import pytest
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.testclient import TestClient
@@ -32,7 +33,8 @@ from app.x402 import advertise_v2, codec_v2
 from app.x402.middleware import X402Middleware, create_402_response, create_payment_requirements
 from tests import test_x402_v1_golden as golden
 from tests.test_x402_v1_golden import gateway  # noqa: F401  (fixture)
-from tests.test_x402_v2_accept import _offer, gw  # noqa: F401  (gw: fixture)
+from tests import test_x402_v2_payment_header as v2h
+from tests.test_x402_v2_accept import Facilitator, _offer, gw  # noqa: F401  (gw: fixture)
 from tests.x402_v2_builders import (
     PAYER, advertised, authorization, expected_payment_required, header_for, nonce_hex, pay,
     v2_accepted, v2_payload,
@@ -407,3 +409,86 @@ def test_v2_only_fallback_keeps_the_v1_body(gw, monkeypatch):
     assert r.status_code == 402
     assert r.json()["x402Version"] == 1 and r.json()["accepts"] == [offer]
     assert "PAYMENT-REQUIRED" not in r.headers
+
+
+# --- composing with #607's v2 path ------------------------------------------
+
+# The routes that answer 402 without a payment (the pool's payment is optional).
+PAID_ROUTES = v2h.PAID
+
+
+@pytest.mark.parametrize("route", PAID_ROUTES, ids=lambda r: f"{r[0]} {r[1]}")
+def test_advertised_resource_is_the_forwarded_gateway_resource(gw, route):
+    """The resource in PAYMENT-REQUIRED is what the gateway forwards to the
+    facilitator with a v2 payment (v2_payment.gateway_resource), and the
+    advertised offer is what it sends as the requirements."""
+    client, fac = gw("1,2")
+    offered = client.request(route[0], route[1])
+    assert offered.status_code == 402, offered.text
+    header = advertised(offered)
+    offer = offered.json()["accepts"][0]
+    r = client.request(route[0], route[1], headers=pay(2, offer, nonce=nonce_hex("0c")))
+    assert r.status_code == 200, r.text
+    verify = fac.calls[0]["body"]
+    assert verify["paymentPayload"]["resource"] == header["resource"]
+    assert verify["paymentRequirements"] == header["accepts"][0]
+    assert verify["paymentPayload"]["accepted"] == header["accepts"][0]
+
+
+def test_a_client_chosen_resource_is_not_what_is_advertised_or_forwarded(gw):
+    client, fac = gw("1,2")
+    offered = client.post("/api/v1/stamps/")
+    header = advertised(offered)
+    offer = offered.json()["accepts"][0]
+    payload = v2_payload(offer, authorization(offer, nonce=nonce_hex("0d")))
+    payload["resource"] = {"url": "https://other.example/x", "description": "client text",
+                           "mimeType": "text/html"}
+    assert client.post("/api/v1/stamps/", headers=header_for(2, payload)).status_code == 200
+    assert fac.calls[0]["body"]["paymentPayload"]["resource"] == header["resource"]
+
+
+@pytest.mark.parametrize("status", [400, 200])
+def test_a_v2_verify_refusal_402_carries_the_header(gw, monkeypatch, status):
+    """#607's v2 verify rule: a 4xx (or 2xx) isValid:false is a refusal, and
+    its 402 advertises the offer again."""
+    real = Facilitator.handler
+
+    def handler(self, request):
+        if request.url.path.endswith("/verify"):
+            self.calls.append({"path": "verify", "body": json.loads(request.content)})
+            return httpx.Response(status, json={"isValid": False, "invalidReason": "insufficient_funds",
+                                                "payer": PAYER})
+        return real(self, request)
+
+    monkeypatch.setattr(Facilitator, "handler", handler)
+    client, fac = gw("1,2")
+    offer = _offer(client)
+    r = client.post("/api/v1/stamps/", headers=pay(2, offer, nonce=nonce_hex("0e")))
+    assert r.status_code == 402, r.text
+    body = r.json()
+    assert "insufficient_funds" in body["error"]
+    assert advertised(r) == expected_payment_required(body)
+
+
+def test_a_v2_verify_answer_that_is_not_a_result_is_502_without_the_header(gw, monkeypatch):
+    real = Facilitator.handler
+
+    def handler(self, request):
+        if request.url.path.endswith("/verify"):
+            return httpx.Response(500, json={"isValid": True, "payer": PAYER})
+        return real(self, request)
+
+    monkeypatch.setattr(Facilitator, "handler", handler)
+    client, _fac = gw("1,2")
+    offer = _offer(client)
+    r = client.post("/api/v1/stamps/", headers=pay(2, offer, nonce=nonce_hex("0f")))
+    assert r.status_code == 502 and "PAYMENT-REQUIRED" not in r.headers
+
+
+def test_a_paid_v2_answer_carries_its_receipt_and_no_offer(gw):
+    client, _fac = gw("1,2")
+    offer = _offer(client)
+    r = client.post("/api/v1/stamps/", headers=pay(2, offer, nonce=nonce_hex("10")))
+    assert r.status_code == 200
+    assert "PAYMENT-RESPONSE" in r.headers and "PAYMENT-REQUIRED" not in r.headers
+    assert codec_v2.decode_payment_response(r.headers["PAYMENT-RESPONSE"]).success is True
