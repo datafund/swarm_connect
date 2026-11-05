@@ -749,6 +749,7 @@ async def begin_idempotent_request(request: Request, payer: str,
         _log_replay(request, payer, entry, auth_key[1])
         raise IdempotentReplay(_replay_response(entry, payer))
     if state == "version_mismatch":
+        from app.x402.payment_headers import version_enabled
         original = entry.get("version", 1)
         header = "X-PAYMENT" if original == 1 else "PAYMENT-SIGNATURE"
         raise HTTPException(status_code=409, detail={
@@ -756,9 +757,16 @@ async def begin_idempotent_request(request: Request, payer: str,
             "message": (f"The first request with this Idempotency-Key was paid once, with x402 "
                         f"v{original}, and its result is stored. This request uses x402 "
                         f"v{version}, so it is not answered with that result. This payment was "
-                        f"not charged. To get the result, retry with the same key and a newly "
-                        f"signed x402 v{original} payment in the {header} header."),
+                        f"not charged. "
+                        + (f"To get the result, retry with the same key and a newly signed x402 "
+                           f"v{original} payment in the {header} header."
+                           if version_enabled(original) else
+                           f"This gateway no longer accepts x402 v{original} payments, so the "
+                           f"stored result cannot be fetched with this key. Do not pay again "
+                           f"for it: look the result up through the resource itself, or contact "
+                           f"the operator.")),
             "original_x402_version": original,
+            "original_x402_version_accepted": version_enabled(original),
         })
     if state == "unavailable":
         raise HTTPException(status_code=503, detail={

@@ -961,3 +961,31 @@ def test_stored_unusable_transaction_is_not_echoed_by_the_409s(gw, state):
     assert r.status_code == 409, r.text
     assert r.headers["X-Payment-Transaction"] == "unknown"
     assert r.json()["detail"]["transaction"] == "unknown"
+
+
+@pytest.mark.parametrize("first,later_setting", [(1, "2"), (2, "1")])
+def test_version_mismatch_when_the_original_version_is_no_longer_accepted(gw, monkeypatch, first, later_setting):
+    client, fac = gw("1,2")
+    offer = _offer(client)
+    key = {"Idempotency-Key": "k-disabled"}
+    assert client.post("/api/v1/stamps/", headers={**pay(first, offer), **key}).status_code == 200
+    monkeypatch.setattr(settings, "X402_PROTOCOL_VERSIONS", later_setting)   # the operator drops it
+    second = 2 if first == 1 else 1
+    r = client.post("/api/v1/stamps/", headers={**pay(second, offer, nonce=nonce_hex("0d")), **key})
+    assert r.status_code == 409, r.text
+    detail = r.json()["detail"]
+    assert detail["code"] == "IDEMPOTENCY_KEY_VERSION_MISMATCH"
+    assert detail["original_x402_version_accepted"] is False
+    assert "no longer accepts" in detail["message"] and "retry with the same key" not in detail["message"]
+    assert "not charged" in detail["message"]
+    assert fac.paths().count("settle") == 1
+
+
+def test_version_mismatch_still_points_to_the_original_header_while_it_is_accepted(gw):
+    client, fac = gw("1,2")
+    offer = _offer(client)
+    key = {"Idempotency-Key": "k-enabled"}
+    client.post("/api/v1/stamps/", headers={**pay(1, offer), **key})
+    r = client.post("/api/v1/stamps/", headers={**pay(2, offer, nonce=nonce_hex("0e")), **key})
+    assert r.json()["detail"]["original_x402_version_accepted"] is True
+    assert "X-PAYMENT header" in r.json()["detail"]["message"]
