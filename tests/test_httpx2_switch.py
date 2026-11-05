@@ -274,7 +274,10 @@ class TestRealErrors:
 
 class TestBodiesRelease:
     """_CountedStream (in-flight count) and _ReleasingStream (gate slot) wrap
-    httpx2's response stream; every way a body ends must release both."""
+    httpx2's response stream; a body that is read, closed or cancelled must
+    release both. Release happens in aclose(): httpx2/httpcore2 2.16 have no
+    finalizer, so a stream dropped without aclose() releases nothing, as with
+    httpx before #595."""
 
     @staticmethod
     def _released():
@@ -289,6 +292,9 @@ class TestBodiesRelease:
 
     @pytest.mark.asyncio
     async def test_body_abandoned_mid_iteration_then_closed(self, shared_on, stub):
+        """Iteration stopped early, then aclose(): the release depends on that
+        aclose() (no finalizer), which `async with client.stream(...)` and
+        client.get() both do."""
         await shared_on(stub.base_url)
         client = hc.get_client()
         request = client.build_request("GET", str(settings.SWARM_BEE_API_URL) + "bzz/" + "ab" * 32)

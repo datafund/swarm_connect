@@ -344,12 +344,15 @@ class TestReproduction:
             # Pinned to "healthy" on a fixed httpcore2: a library without the
             # leak cannot leak by chance, so any leak there is a regression.
             # "Healthy" is the same test as for the leak: a later call gets a
-            # connection. Single stuck slots are recorded and warned about,
-            # not failed: measured with this test's RecordingBackend (an extra
-            # task around connect) and anyio cancel scopes, httpcore2 2.16.0
-            # kept one or two "HTTP/1.1 NEW" connections in some 5 s runs
-            # (#595). That is what the gateway's recovery and the stuck-slot
-            # alert remain for (#618).
+            # connection. Stuck slots short of a full pool are recorded and
+            # warned about, not failed: measured with this test's
+            # RecordingBackend (an extra task and shield around connect) and
+            # anyio cancel scopes, httpcore2 2.16.0 kept "HTTP/1.1 NEW"
+            # connections after most 5 s runs, up to 3 of the 4 slots; with a
+            # pass-through backend, none (#595). That the backend opens the
+            # window is a hypothesis. The gateway does run its endpoints under
+            # anyio cancel scopes (BaseHTTPMiddleware), so #618 checks the
+            # stuck gauge before the recovery and its alert are removed.
             await asyncio.sleep(0.1)
             leftover = [c.info() for c in stuck_connections(pool)]
             record_property("httpcore_587_load_stuck", len(leftover))
