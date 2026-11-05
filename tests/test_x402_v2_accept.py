@@ -796,14 +796,14 @@ def test_receipt_falls_back_to_the_minimal_fields_then_to_none():
     assert encode_payment_response_v2(hopeless) is None
 
 
-def test_unencodable_receipt_still_delivers_without_the_header(gw):
+def test_oversized_transaction_is_unknown_and_the_receipt_still_goes_out(gw):
     client, fac = gw("1,2")
     offer = _offer(client)
     fac.settle = {"success": True, "transaction": "0x" + "ab" * 4600, "network": "eip155:84532"}
     r = client.post("/api/v1/stamps/", headers=pay(2, offer))
     assert r.status_code == 200, r.text
-    assert "PAYMENT-RESPONSE" not in r.headers and "X-PAYMENT-RESPONSE" not in r.headers
-    assert r.headers["X-Payment-Transaction"] == "0x" + "ab" * 4600
+    assert r.headers["X-Payment-Transaction"] == "unknown"
+    assert codec_v2.decode_payment_response(r.headers["PAYMENT-RESPONSE"]).transaction == ""
 
 
 def test_v2_verify_5xx_saying_valid_gets_502_and_nothing_runs(gw):
@@ -881,3 +881,122 @@ def test_authorization_to_in_another_letter_case_is_the_same_address(gw, monkeyp
     auth = dict(authorization(offer, nonce=nonce_hex("0f")), to=bad)
     r = client.post("/api/v1/stamps/", headers=header_for(2, v2_payload(offer, auth)))
     assert _refused_402(r, "PAYMENT_OFFER_MISMATCH")["fields"] == ["payload.authorization.to"]
+
+
+
+# --------------------------------------------------------------------------
+# A facilitator transaction is passed on only if it is a 32-byte hex hash
+# (#645 review round 3), in both versions, on both settle points
+# --------------------------------------------------------------------------
+
+BAD_TRANSACTIONS = {
+    "non-ascii": "0x\u2603",
+    "crlf": "0x" + "ab" * 32 + "\r\nSet-Cookie: x=1",
+    "long": "0x" + "ab" * 100_000,
+    "empty": "",
+    "short": "0xabc",
+}
+
+
+def _no_raw_value_anywhere(r, raw):
+    if not raw:
+        return
+    for name, value in r.headers.items():
+        assert raw not in value, name
+        assert "\u2603" not in value and "\r" not in value and "\n" not in value
+        assert len(value) < 2000 or name.lower() == "content-length", name
+    assert raw not in r.text
+
+
+@pytest.mark.parametrize("version", VERSIONS)
+@pytest.mark.parametrize("route", [("POST", "/api/v1/stamps/"), FALLBACK], ids=["settle_payment", "fallback"])
+@pytest.mark.parametrize("kind", list(BAD_TRANSACTIONS))
+def test_unusable_transaction_is_unknown_and_the_paid_result_is_delivered(gw, version, route, kind):
+    raw = BAD_TRANSACTIONS[kind]
+    client, fac = gw("1,2")
+    offer = _offer(client)
+    network = "base-sepolia" if version == 1 else "eip155:84532"
+    fac.settle = {"success": True, "transaction": raw, "network": network, "payer": PAYER}
+    r = _send(client, route, pay(version, offer))
+    assert r.status_code == 200, r.text
+    assert r.headers["X-Payment-Transaction"] == "unknown"
+    assert r.headers["X-Payment-Mode"] == "paid"
+    receipt = json.loads(base64.b64decode(r.headers[receipt_header(version)]))
+    assert receipt["success"] is True
+    assert receipt["transaction"] in (None, "")
+    _no_raw_value_anywhere(r, raw)
+
+
+@pytest.mark.parametrize("version", VERSIONS)
+@pytest.mark.parametrize("route", [("POST", "/api/v1/stamps/"), FALLBACK], ids=["settle_payment", "fallback"])
+def test_valid_transaction_is_passed_on(gw, version, route):
+    client, fac = gw("1,2")
+    offer = _offer(client)
+    r = _send(client, route, pay(version, offer))
+    assert r.status_code == 200
+    assert r.headers["X-Payment-Transaction"] == TX
+    assert json.loads(base64.b64decode(r.headers[receipt_header(version)]))["transaction"] == TX
+
+
+@pytest.mark.parametrize("kind", ["non-ascii", "crlf", "long"])
+def test_unusable_transaction_never_reaches_the_audit_log_or_the_idempotency_store(gw, kind):
+    from app.x402.idempotency import idempotency_store
+    from app.core.config import settings as cfg
+    raw = BAD_TRANSACTIONS[kind]
+    client, fac = gw("1,2")
+    offer = _offer(client)
+    fac.settle = {"success": True, "transaction": raw, "network": "eip155:84532", "payer": PAYER}
+    r = client.post("/api/v1/stamps/", headers={**pay(2, offer), "Idempotency-Key": f"k-tx-{kind}"})
+    assert r.status_code == 200
+    for entry in idempotency_store._entries.values():
+        assert entry.get("transaction") in (None, "")
+        assert raw not in json.dumps(entry)
+    with open(cfg.X402_AUDIT_LOG_PATH) as f:
+        assert raw not in f.read()
+
+
+@pytest.mark.parametrize("state", ["settled", "delivered_not_stored"])
+def test_stored_unusable_transaction_is_not_echoed_by_the_409s(gw, state):
+    """An entry stored before the check existed: its 409 says "unknown"."""
+    from app.x402 import idempotency
+    from app.x402.idempotency import auth_hash, entry_id, idempotency_store
+    client, fac = gw("1,2")
+    offer = _offer(client)
+    eid = entry_id(PAYER, "POST", "/api/v1/stamps/", "k-legacy")
+    import hashlib
+    idempotency_store._entries[eid] = {
+        "state": state, "request_hash": hashlib.sha256(b"\0").hexdigest(), "auth": "x",
+        "transaction": "0x\u2603\r\n", "created": 1e12, "expires": 1e12,
+    }
+    r = client.post("/api/v1/stamps/", headers={**pay(1, offer), "Idempotency-Key": "k-legacy"})
+    assert r.status_code == 409, r.text
+    assert r.headers["X-Payment-Transaction"] == "unknown"
+    assert r.json()["detail"]["transaction"] == "unknown"
+
+
+@pytest.mark.parametrize("first,later_setting", [(1, "2"), (2, "1")])
+def test_version_mismatch_when_the_original_version_is_no_longer_accepted(gw, monkeypatch, first, later_setting):
+    client, fac = gw("1,2")
+    offer = _offer(client)
+    key = {"Idempotency-Key": "k-disabled"}
+    assert client.post("/api/v1/stamps/", headers={**pay(first, offer), **key}).status_code == 200
+    monkeypatch.setattr(settings, "X402_PROTOCOL_VERSIONS", later_setting)   # the operator drops it
+    second = 2 if first == 1 else 1
+    r = client.post("/api/v1/stamps/", headers={**pay(second, offer, nonce=nonce_hex("0d")), **key})
+    assert r.status_code == 409, r.text
+    detail = r.json()["detail"]
+    assert detail["code"] == "IDEMPOTENCY_KEY_VERSION_MISMATCH"
+    assert detail["original_x402_version_accepted"] is False
+    assert "no longer accepts" in detail["message"] and "retry with the same key" not in detail["message"]
+    assert "not charged" in detail["message"]
+    assert fac.paths().count("settle") == 1
+
+
+def test_version_mismatch_still_points_to_the_original_header_while_it_is_accepted(gw):
+    client, fac = gw("1,2")
+    offer = _offer(client)
+    key = {"Idempotency-Key": "k-enabled"}
+    client.post("/api/v1/stamps/", headers={**pay(1, offer), **key})
+    r = client.post("/api/v1/stamps/", headers={**pay(2, offer, nonce=nonce_hex("0e")), **key})
+    assert r.json()["detail"]["original_x402_version_accepted"] is True
+    assert "X-PAYMENT header" in r.json()["detail"]["message"]
