@@ -24,6 +24,11 @@ from typing import Set
 X_PAYMENT_HEADER = "X-PAYMENT"               # x402 v1
 PAYMENT_SIGNATURE_HEADER = "PAYMENT-SIGNATURE"  # x402 v2
 
+# The x402 protocol versions this gateway accepts a payment in, as /health
+# reports them (#602). One place to read it. Phase 2 of #596 replaces it with
+# the X402_PROTOCOL_VERSIONS setting (#609).
+ACCEPTED_X402_VERSIONS = (1,)
+
 _VERSION_BY_NAME = {
     X_PAYMENT_HEADER.lower(): 1,
     PAYMENT_SIGNATURE_HEADER.lower(): 2,

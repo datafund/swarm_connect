@@ -337,7 +337,22 @@ app.include_router(stamps_for_owner.router, prefix=f"{settings.API_V1_STR}/stamp
 # Price quotes (#381). No x402 dependency: learning a price must never cost one.
 app.include_router(pricing.router, prefix=f"{settings.API_V1_STR}", tags=["pricing"])
 
-@app.get("/", summary="Health Check", tags=["default"])
+# Shown in OpenAPI (#602): the x402 block, present only when payments are enabled.
+_HEALTH_X402_EXAMPLE = {
+    "status": "ok",
+    "x402": {
+        "enabled": True,
+        "versions": [1],
+        "free_tier": {"enabled": True, "rate_limit_per_minute": 3, "header": "X-Payment-Mode: free"},
+    },
+}
+
+
+@app.get("/", summary="Health Check", tags=["default"], responses={200: {
+    "description": ("Gateway health. `x402.versions` lists the x402 protocol versions a payment is "
+                    "accepted in (only when x402 is enabled). The example shows only some fields."),
+    "content": {"application/json": {"example": _HEALTH_X402_EXAMPLE}},
+}})
 @app.get("/health", summary="Health Check", tags=["default"], include_in_schema=False)
 async def read_root():
     """
@@ -371,6 +386,8 @@ async def read_root():
 
     **When x402 payments are enabled**, the response includes:
     - `x402.enabled`: true
+    - `x402.versions`: the x402 protocol versions a payment is accepted in, for
+      example `[1]` (v1, the `X-PAYMENT` header)
     - `x402.free_tier.enabled`: whether free tier access is available
     - `x402.free_tier.rate_limit_per_minute`: requests allowed per minute on free tier
     - `x402.free_tier.header`: the exact header to add for free tier access
@@ -555,8 +572,11 @@ def build_health_response(snapshot) -> dict:
             response_data["status"] = "degraded"
 
         # Add x402 details
+        from app.x402.payment_headers import ACCEPTED_X402_VERSIONS
         response_data["x402"] = {
             "enabled": True,
+            # The x402 protocol versions a payment is accepted in (#602).
+            "versions": list(ACCEPTED_X402_VERSIONS),
             "free_tier": {
                 "enabled": settings.X402_FREE_TIER_ENABLED,
                 "rate_limit_per_minute": settings.X402_FREE_TIER_RATE_LIMIT,

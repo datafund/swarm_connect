@@ -80,11 +80,45 @@ async def _quote(path: str, body: Optional[dict] = None, query: str = "",
         "path": path,
         "price_usd": priced["price_usd"],
         "max_amount_required": requirements.max_amount_required,
+        # The same amount under its x402 v2 name (#602, D8 in #596).
+        # max_amount_required stays until v1 is removed, deprecated.
+        "amount": requirements.max_amount_required,
         "description": requirements.description,
     }, requirements
 
 
-@router.get("/pricing", summary="Price quotes for paid operations")
+# Shown in OpenAPI (#602). No response_model: a model would filter or reorder
+# the fields this endpoint has always returned.
+_PRICING_EXAMPLE = {
+    "x402_enabled": True,
+    "currency": "USDC",
+    "network": "base-sepolia",
+    "asset": "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+    "pay_to": "0x<pay-to address>",
+    "min_price_usd": 0.01,
+    "free_tier": {"enabled": True, "header": "X-Payment-Mode: free"},
+    "quotes": {
+        "stamp_purchase": {
+            "method": "POST",
+            "path": "/api/v1/stamps/",
+            "price_usd": 0.05,
+            "max_amount_required": "50000",
+            "amount": "50000",
+            "description": "Postage stamp purchase",
+        },
+    },
+}
+
+
+@router.get(
+    "/pricing",
+    summary="Price quotes for paid operations",
+    responses={200: {
+        "description": ("Price quotes. In each quote, `amount` is the price in USDC smallest units; "
+                        "`max_amount_required` is the same value under its deprecated x402 v1 name."),
+        "content": {"application/json": {"example": _PRICING_EXAMPLE}},
+    }},
+)
 async def get_pricing(
     size: Optional[Literal["small", "medium", "large"]] = Query(
         None, description="Stamp size preset, as in the purchase and pool-acquire bodies."),
@@ -108,8 +142,10 @@ async def get_pricing(
 
     The parameters mirror the bodies of the paid requests. Each quote is computed
     by the same function that prices the 402 for that request, so
-    `max_amount_required` is the amount (USDC, 6 decimals) the 402 would ask for,
-    at the current Bee chain price. Prices move with the chain price, so treat a
+    `amount` is the amount (USDC smallest units, 6 decimals) the 402 would ask
+    for, at the current Bee chain price. `max_amount_required` carries the same
+    value and is **deprecated**: it is the x402 v1 name, kept until v1 is
+    removed. Read `amount`. Prices move with the chain price, so treat a
     quote as current rather than guaranteed.
 
     Operations are listed only when they are enabled on this gateway. When x402
