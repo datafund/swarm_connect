@@ -33,6 +33,7 @@ so the PoolTimeouts and the pool snapshot in those tests are real.
 """
 import asyncio
 import contextlib
+import gc
 import random
 import time
 import warnings
@@ -191,17 +192,33 @@ class RecordingBackend:
                 await stream.aclose()
 
 
-def recording_client(lib, **kwargs):
+class PassThroughBackend(RecordingBackend):
+    """httpcore's own connect path, unchanged (no task, no shield), as the
+    gateway runs it; it only keeps the streams that connects return, for
+    teardown. A connect cancelled before it returns is closed by the backend
+    itself."""
+
+    async def connect_tcp(self, *args, **kwargs):
+        stream = await self._inner.connect_tcp(*args, **kwargs)
+        self.streams.append(stream)
+        return stream
+
+
+def recording_client(lib, backend=RecordingBackend, **kwargs):
     """A plain client of `lib` (httpx or httpx2) whose sockets the test can close in teardown."""
     client = lib.AsyncClient(**kwargs)
     pool = raw_pool(client)
-    pool._network_backend = RecordingBackend(pool._network_backend)
+    pool._network_backend = backend(pool._network_backend)
     return client
 
 
 async def close_recording_client(client):
     await client.aclose()
     await raw_pool(client)._network_backend.aclose_all()
+    # A socket made by a connect that was cancelled before it returned never
+    # reaches a PassThroughBackend, and is closed only by the garbage
+    # collector; until then the stub's wait_closed() would wait for it.
+    gc.collect()
 
 
 def stuck_connections(pool):
@@ -303,7 +320,12 @@ class TestReproduction:
         Runs until a call on the client gets PoolTimeout or load_seconds pass.
         """
         max_connections = 4
-        client = recording_client(lib, limits=lib.Limits(max_connections=max_connections),
+        # httpcore2 runs on its own connect path, as in the gateway. The
+        # shielded connect of RecordingBackend left "HTTP/1.1 NEW" connections
+        # stuck on httpcore2 under anyio cancel scopes (up to 3 of 4 slots,
+        # most runs); none on the pass-through path. Tracked in #629.
+        backend = PassThroughBackend if known_fixed(core) else RecordingBackend
+        client = recording_client(lib, backend, limits=lib.Limits(max_connections=max_connections),
                                   timeout=lib.Timeout(10.0, connect=5.0, pool=0.5))
         rng = random.Random(5870)
         pool = raw_pool(client)
@@ -341,27 +363,18 @@ class TestReproduction:
             # Measured: it leaks within about 2 s in a normal run on Python 3.10
             # and 3.13, but never in 120 s under tracemalloc, which slows every
             # allocation. Pinning it would make a slow CI runner fail.
-            # Pinned to "healthy" on a fixed httpcore2: a library without the
-            # leak cannot leak by chance, so any leak there is a regression.
-            # "Healthy" is the same test as for the leak: a later call gets a
-            # connection. Stuck slots short of a full pool are recorded and
-            # warned about, not failed: measured with this test's
-            # RecordingBackend (an extra task and shield around connect) and
-            # anyio cancel scopes, httpcore2 2.16.0 kept "HTTP/1.1 NEW"
-            # connections after most 5 s runs, up to 3 of the 4 slots; with a
-            # pass-through backend, none (#595). That the backend opens the
-            # window is a hypothesis. The gateway does run its endpoints under
-            # anyio cancel scopes (BaseHTTPMiddleware), so #618 checks the
-            # stuck gauge before the recovery and its alert are removed.
+            # Pinned on a fixed httpcore2: a library without the leak cannot
+            # leak by chance, so a later call must get a connection and no
+            # connection may be left stuck.
             await asyncio.sleep(0.1)
             leftover = [c.info() for c in stuck_connections(pool)]
             record_property("httpcore_587_load_stuck", len(leftover))
             if known_fixed(core):
                 assert outcome == "healthy", (
                     f"{core.__name__} {core.__version__} should not leak (pydantic/httpx2#983)")
-                if leftover:
-                    warnings.warn(f"{core.__name__} {core.__version__} kept {len(leftover)} stuck "
-                                  f"connections after load: {leftover}")
+                assert not leftover, (
+                    f"{core.__name__} {core.__version__} kept {len(leftover)} stuck connections "
+                    f"after load: {leftover}")
             if outcome == "leak":
                 stuck = stuck_connections(pool)
                 # Every slot is taken, but not by a request being served.
