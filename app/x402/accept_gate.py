@@ -74,14 +74,18 @@ def is_retry_of_possibly_charged(request) -> bool:
     use. Refusing it with "not charged" would be wrong for a client whose
     first attempt was, and would delay its recovery.
 
-    True when the request carries an X-PAYMENT whose authorization is:
+    True when the request carries a payment (an X-PAYMENT, or with x402 v2
+    enabled a PAYMENT-SIGNATURE, #607) whose authorization is:
     - in the outcome-unknown registry and in flight (409 in progress), or
       remembered as AFTER_WORK (409 outcome unknown, refused before any work);
     - reserved, unexpired, in the replay guard (409, or 402 "already used");
     or an Idempotency-Key with a stored entry for that authorization's payer
     on this route (a replay or a 409).
-    Only X-PAYMENT is read: a PAYMENT-SIGNATURE (x402 v2) payment is not
-    accepted yet, so no earlier attempt with one can have been charged (#600).
+    The authorization key is version-neutral (from and nonce, D5 in #596),
+    so a retry in either header finds an attempt made in the other. A
+    PAYMENT-SIGNATURE is read only while v2 is enabled: otherwise it is not
+    accepted, so no attempt with one can have been charged (#600). A payment
+    header that cannot be decoded is not a retry, in either version.
 
     Not exempt: a BEFORE_WORK authorization. Its retry is settled again by
     settle_payment, which could settle it for the first time while payments
@@ -103,11 +107,30 @@ def is_retry_of_possibly_charged(request) -> bool:
     from app.x402.middleware import X_PAYMENT_HEADER, decode_payment_header
     header = request.headers.get(X_PAYMENT_HEADER)
     if not header:
-        return False
+        return _is_v2_retry_of_possibly_charged(request)
     try:
         payload = decode_payment_header(header)
     except Exception:
         return False
+    return _is_retry_of(request, payload)
+
+
+def _is_v2_retry_of_possibly_charged(request) -> bool:
+    """is_retry_of_possibly_charged for a PAYMENT-SIGNATURE (x402 v2, #607)."""
+    from app.x402.payment_headers import PAYMENT_SIGNATURE_HEADER, version_enabled
+    header = request.headers.get(PAYMENT_SIGNATURE_HEADER)
+    if not header or not version_enabled(2):
+        return False
+    try:
+        from app.x402.codec_v2 import decode_payment_signature
+        payload = decode_payment_signature(header)
+    except Exception:
+        return False
+    return _is_retry_of(request, payload)
+
+
+def _is_retry_of(request, payload) -> bool:
+    """The lookups of is_retry_of_possibly_charged for a decoded payment of either version."""
     if payload is None:
         return False
     from app.x402.settlement import AFTER_WORK, authorization_key, outcome_unknown, replay_guard

@@ -615,3 +615,77 @@ def test_an_offer_that_cannot_be_dumped_gets_400_not_500(gw):
         r = client.post("/api/v1/stamps/", headers={"PAYMENT-SIGNATURE": "e30="})
     assert r.status_code == 400 and r.json()["code"] == "PAYMENT_HEADER_INVALID"
     assert fac.calls == []
+
+
+# --------------------------------------------------------------------------
+# The payment gate (#589) lets a v2 retry of a possibly-charged payment through
+# --------------------------------------------------------------------------
+
+def _gate_closed():
+    from tests.test_bee_unreachable_589 import _closed
+    _closed()
+
+
+@pytest.mark.parametrize("version", VERSIONS)
+def test_same_key_retry_gets_its_stored_result_while_payments_are_refused(gw, version):
+    client, fac = gw("1,2")
+    offer = _offer(client)
+    key = {"Idempotency-Key": "k-gate"}
+    first = client.post("/api/v1/stamps/", headers={**pay(version, offer), **key})
+    assert first.status_code == 200
+    _gate_closed()
+    retry = client.post("/api/v1/stamps/", headers={**pay(version, offer, nonce=nonce_hex("09")), **key})
+    assert retry.status_code == 200, retry.text
+    assert retry.headers["Idempotent-Replayed"] == "true"
+    assert receipt_header(version) in retry.headers
+    assert fac.paths().count("settle") == 1
+
+
+@pytest.mark.parametrize("version", VERSIONS)
+def test_after_work_unknown_outcome_retry_gets_its_409_while_payments_are_refused(gw, version):
+    from app.x402.settlement import AFTER_WORK, outcome_unknown
+    client, fac = gw("1,2")
+    offer = _offer(client)
+    nonce = nonce_hex("5e")
+    outcome_unknown.add((PAYER.lower(), nonce), AFTER_WORK)
+    _gate_closed()
+    r = client.post("/api/v1/stamps/", headers=pay(version, offer, nonce=nonce))
+    assert r.status_code == 409, r.text
+    assert r.json()["detail"]["code"] == "PAYMENT_AUTHORIZATION_OUTCOME_UNKNOWN"
+    assert "settle" not in fac.paths()
+
+
+@pytest.mark.parametrize("version", VERSIONS)
+def test_reserved_authorization_retry_gets_its_answer_while_payments_are_refused(gw, version):
+    client, fac = gw("1,2")
+    offer = _offer(client)
+    nonce = nonce_hex("7a")
+    assert replay_guard.reserve((PAYER.lower(), nonce))
+    _gate_closed()
+    r = client.post("/api/v1/stamps/", headers=pay(version, offer, nonce=nonce))
+    assert r.status_code == 402, r.text
+    assert "already been used" in r.json()["error"]
+    assert "settle" not in fac.paths()
+
+
+@pytest.mark.parametrize("headers", [
+    {"PAYMENT-SIGNATURE": "not base64!"},          # cannot be decoded: not a retry
+    {"PAYMENT-SIGNATURE": encode({"x402Version": 2})},
+])
+def test_undecodable_v2_header_is_not_a_retry(gw, headers):
+    client, fac = gw("1,2")
+    _gate_closed()
+    r = client.post("/api/v1/stamps/", headers=headers)
+    assert r.status_code == 503 and r.json()["detail"]["code"] == "PAYMENTS_UNAVAILABLE"
+    assert fac.calls == []
+
+
+def test_v2_header_is_not_read_while_v2_is_off(gw):
+    client, fac = gw("1")
+    offer = _offer(client)
+    nonce = nonce_hex("7c")
+    assert replay_guard.reserve((PAYER.lower(), nonce))
+    _gate_closed()
+    r = client.post("/api/v1/stamps/", headers=pay(2, offer, nonce=nonce))
+    assert r.status_code == 503 and r.json()["detail"]["code"] == "PAYMENTS_UNAVAILABLE"
+    assert fac.calls == []
