@@ -48,6 +48,29 @@ def test_paid_version_label_defaults_to_1():
     Req.state.x402_version = 2
     assert paid_version_label(Req()) == "2"
     assert paid_version_label(object()) == "1"
+    assert paid_version_label(None) == "1"
+
+
+def test_paid_version_label_reads_the_headers_before_verification():
+    """Before the dependency records the verified version, the headers decide."""
+    from starlette.datastructures import Headers
+
+    class State:
+        pass
+
+    def req(headers, version=None):
+        r = type("Req", (), {})()
+        r.state = State()
+        if version is not None:
+            r.state.x402_version = version
+        r.headers = Headers(headers)
+        return r
+
+    assert paid_version_label(req({"X-PAYMENT": "x"})) == "1"
+    assert paid_version_label(req({"PAYMENT-SIGNATURE": "x"})) == "2"
+    assert paid_version_label(req({"X-PAYMENT": "x", "PAYMENT-SIGNATURE": "x"})) == "2"
+    assert paid_version_label(req({})) == "1"
+    assert paid_version_label(req({"PAYMENT-SIGNATURE": "x"}, version=1)) == "1"   # recorded wins
 
 
 @pytest.mark.parametrize("headers,mode,version", [
@@ -135,3 +158,70 @@ def test_refusal_log_lines_say_version_2(gw, caplog, headers):  # noqa: F811
     with caplog.at_level(logging.WARNING, logger="app.x402.dependency"):
         client.post("/api/v1/stamps/", headers=headers)
     assert any("refusing" in r.getMessage() and "version=2" in r.getMessage() for r in caplog.records)
+
+
+def _refused_after_unknown_at_verify(client, fac):
+    from x402.types import VerifyResponse
+    fac.verify.return_value = VerifyResponse(isValid=False, invalidReason="invalid_nonce",
+                                             payer="0x" + "a1" * 20)
+    with patch("app.x402.settlement.outcome_unknown.state", return_value=(False, "before_work")):
+        return client.post("/api/v1/stamps/", headers=X_PAYMENT)
+
+
+def test_refused_after_unknown_at_verify_is_counted_as_version_1(gw):  # noqa: F811
+    client, fac, _, _ = gw
+    before = _settlements("refused_after_unknown", "1")
+    r = _refused_after_unknown_at_verify(client, fac)
+    assert r.status_code == 409, r.text
+    assert _settlements("refused_after_unknown", "1") == before + 1
+
+
+def test_refused_after_unknown_at_verify_takes_the_version_from_the_headers(gw):  # noqa: F811
+    """Not a hard-coded 1: the label is the one computed from the request's headers.
+
+    Only v1 reaches verify today, so the headers are made to read as v2 here.
+    """
+    client, fac, _, _ = gw
+    v1, v2 = _settlements("refused_after_unknown", "1"), _settlements("refused_after_unknown", "2")
+    with patch("app.x402.dependency.payment_version_label", return_value="2"):
+        r = _refused_after_unknown_at_verify(client, fac)
+    assert r.status_code == 409, r.text
+    assert _settlements("refused_after_unknown", "2") == v2 + 1
+    assert _settlements("refused_after_unknown", "1") == v1
+
+
+def test_audit_records_take_the_version_from_the_request(gw):  # noqa: F811
+    """Every payment_settled / payment_failed / payment_delivered record is written
+    with the request's version, not the audit module's default."""
+    client, fac, _, _ = gw
+    from x402.types import SettleResponse
+    start = len(_audit_events())
+    with patch("app.x402.payment_headers.paid_version_label", return_value="2"):
+        assert client.post("/api/v1/stamps/", headers=X_PAYMENT).status_code == 200
+        other = {"X-PAYMENT": create_valid_payment_header(payer="0x" + "c3" * 20)}
+        assert client.post("/api/v1/data/", headers=other).status_code == 200
+        fac.settle.return_value = SettleResponse(success=False, errorReason="invalid_transaction_state",
+                                                 transaction="", network="base-sepolia")
+        third = {"X-PAYMENT": create_valid_payment_header(payer="0x" + "d4" * 20)}
+        assert client.post("/api/v1/stamps/", headers=third).status_code == 402
+    events = [e for e in _audit_events()[start:]
+              if e["event_type"] in ("payment_settled", "payment_failed", "payment_delivered")]
+    assert {e["event_type"] for e in events} >= {"payment_settled", "payment_delivered"}
+    assert [e["data"]["x402_version"] for e in events] == [2] * len(events)
+
+
+def test_every_payment_audit_call_passes_the_version():
+    """No call site in app/ relies on the audit default (PAID_X402_VERSION)."""
+    import ast
+    from pathlib import Path
+    root = Path(__file__).resolve().parent.parent / "app"
+    missing, found = [], 0
+    for path in root.rglob("*.py"):
+        for node in ast.walk(ast.parse(path.read_text())):
+            if isinstance(node, ast.Call) and getattr(node.func, "id", None) in (
+                    "log_payment_settled", "log_payment_failed"):
+                found += 1
+                if "x402_version" not in {k.arg for k in node.keywords}:
+                    missing.append(f"{path.relative_to(root.parent)}:{node.lineno}")
+    assert found >= 14
+    assert missing == []

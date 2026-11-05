@@ -35,7 +35,7 @@ logger = logging.getLogger(__name__)
 # x402 protocol constants
 X402_VERSION = 1
 # One definition, with the v2 header, in app/x402/payment_headers.py (#600).
-from app.x402.payment_headers import X_PAYMENT_HEADER, paid_version_label  # noqa: E402,F401
+from app.x402.payment_headers import X_PAYMENT_HEADER, paid_version, paid_version_label  # noqa: E402,F401
 X_PAYMENT_RESPONSE_HEADER = "X-PAYMENT-RESPONSE"
 X_PAYMENT_MODE_HEADER = "X-Payment-Mode"
 
@@ -289,7 +289,7 @@ def _log_delivery(request: Request, settlement, body: bytes, client_ip: str, pay
             "network": to_v1(settings.X402_NETWORK),
             "resource": resource,
             "nonce": request_nonce(request),
-            "x402_version": int(paid_version_label(request)),
+            "x402_version": paid_version(request),
         },
         client_ip=client_ip,
         wallet_address=payer,
@@ -584,7 +584,8 @@ class X402Middleware(BaseHTTPMiddleware):
                     # the idempotency entry stays "settling" and the
                     # authorization stays reserved: its nonce may be spent.
                     log_payment_failed(client_ip=client_ip, reason=failure, stage="settle",
-                                       wallet_address=payer, nonce=request_nonce(request))
+                                       wallet_address=payer, nonce=request_nonce(request),
+                                       x402_version=paid_version(request))
                     x402_settlements_total.labels(result="error", version=paid_version_label(request)).inc()
                     # The write-ahead entry (AFTER_WORK, on disk) is the record:
                     # the dependency stops any later attempt with it before the
@@ -594,7 +595,7 @@ class X402Middleware(BaseHTTPMiddleware):
                     settlement_refused(request)
                     log_payment_settled(client_ip=client_ip, payer=payer, transaction_hash=None,
                                         network=to_v1(settings.X402_NETWORK), success=False, error_reason=failure,
-                                        nonce=request_nonce(request))
+                                        nonce=request_nonce(request), x402_version=paid_version(request))
                     remembered = prior is not None
                     x402_settlements_total.labels(
                         result="refused_after_unknown" if remembered else "refused",
@@ -625,7 +626,8 @@ class X402Middleware(BaseHTTPMiddleware):
                                     headers={"X-Payment-Mode": "failed"})
             log_payment_settled(client_ip=client_ip, payer=payer,
                                 transaction_hash=getattr(settlement, "transaction", None),
-                                network=to_v1(settings.X402_NETWORK), success=True, nonce=request_nonce(request))
+                                network=to_v1(settings.X402_NETWORK), success=True, nonce=request_nonce(request),
+                                x402_version=paid_version(request))
             from app.x402.idempotency import record_settlement
             record_settlement(request, settlement)
             x402_settlements_total.labels(result="settled", version=paid_version_label(request)).inc()
@@ -641,7 +643,7 @@ class X402Middleware(BaseHTTPMiddleware):
             log_payment_failed(client_ip=client_ip,
                                reason=f"HTTP {response.status_code} after settlement; tx={tx_hash}",
                                stage="delivery_after_settlement", wallet_address=payer,
-                               nonce=request_nonce(request))
+                               nonce=request_nonce(request), x402_version=paid_version(request))
             x402_settlements_total.labels(result="settled_not_delivered", version=paid_version_label(request)).inc()
 
         body = b""
@@ -696,7 +698,7 @@ class X402Middleware(BaseHTTPMiddleware):
                            reason=f"exception after settlement; tx={tx_hash}",
                            stage="delivery_after_settlement",
                            wallet_address=getattr(request.state, "x402_payer", None),
-                           nonce=request_nonce(request))
+                           nonce=request_nonce(request), x402_version=paid_version(request))
         return JSONResponse(
             status_code=500,
             content={

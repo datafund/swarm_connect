@@ -41,7 +41,6 @@ from app.x402.payment_headers import (
     HEADER_CONFLICT_MESSAGE,
     VERSION_UNSUPPORTED_MESSAGE,
     offered_payment_versions,
-    paid_version_label,
     payment_version_label,
 )
 
@@ -764,8 +763,9 @@ async def require_x402_payment(request: Request) -> None:
             # Counted like a refusal at settle (#553): probably the earlier
             # transfer spent the nonce.
             from app.services.metrics import x402_settlements_total
-            x402_settlements_total.labels(result="refused_after_unknown",
-                                         version=paid_version_label(request)).inc()
+            # The version of the payment header this request carried, computed
+            # above: request.state.x402_version is set only once verified.
+            x402_settlements_total.labels(result="refused_after_unknown", version=version).inc()
             raise outcome_unknown_refusal(
                 unknown_key, getattr(verify_response, 'invalid_reason', None) or 'unknown',
                 where="verify", request=request)
