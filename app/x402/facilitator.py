@@ -182,8 +182,8 @@ async def check_facilitator_v2_support(client: Optional[FacilitatorClient] = Non
     (eip155:84532, not base-sepolia), in a 2xx answer. Fails closed: an
     unreachable facilitator, a request that cannot be made (the credential
     hook raising, an invalid URL), a non-2xx answer whatever its body, or a
-    2xx answer that cannot be read (also one over 1 MiB, or nested deep
-    enough to exhaust the parser), is refused like one that does not list
+    2xx answer that cannot be read (also one over 1 MiB, or nested deeper
+    than MAX_SUPPORTED_DEPTH, checked before parsing), is refused like one that does not list
     it. x402Version must be the int 2, as the spec has it. Does nothing when
     x402 is off or 2 is not enabled, so the default configuration never
     calls /supported.
@@ -224,6 +224,13 @@ async def check_facilitator_v2_support(client: Optional[FacilitatorClient] = Non
         # plain text without valid credentials).
         raise _v2_refusal(f"the facilitator's /supported on {host} answered HTTP {status}, not a list "
                           f"of payment kinds (a 401 or 403 is an authentication error)")
+    if _nesting_depth(response.content) > MAX_SUPPORTED_DEPTH:
+        # Checked before parsing: CPython's JSON parser recurses per level, and
+        # on Python 3.10 (the image's) a deep enough body can crash the
+        # process instead of raising RecursionError.
+        raise _v2_refusal(f"the facilitator's /supported on {host} answered HTTP {status} with "
+                          f"something that is not a list of payment kinds (nested deeper than "
+                          f"{MAX_SUPPORTED_DEPTH} levels)")
     try:
         data = response.json()
         SupportedResponse(**data)       # the shape: an object with a list of kinds
@@ -250,6 +257,37 @@ async def check_facilitator_v2_support(client: Optional[FacilitatorClient] = Non
         f"the facilitator on {host} does not list x402Version 2, scheme exact, network {network} in "
         f"/supported (it lists v2 exact for {v2_exact or 'no network'}; for {network}, in either "
         f"name form: {on_network or 'nothing'})")
+
+
+# Deepest nesting of objects and arrays read in a /supported answer (#608).
+# A real answer is 4 deep (kinds[i].extra.x); codec_v2 allows 32 for headers.
+MAX_SUPPORTED_DEPTH = 32
+
+
+def _nesting_depth(body: bytes) -> int:
+    """The deepest nesting of [ and { in a JSON text, outside strings, without
+    parsing it. Linear in the body, which is at most 1 MiB."""
+    depth = deepest = 0
+    in_string = escaped = False
+    for byte in body:
+        if in_string:
+            if escaped:
+                escaped = False
+            elif byte == 0x5C:          # backslash
+                escaped = True
+            elif byte == 0x22:          # quote
+                in_string = False
+        elif byte == 0x22:
+            in_string = True
+        elif byte in (0x5B, 0x7B):      # [ {
+            depth += 1
+            if depth > deepest:
+                deepest = depth
+                if deepest > MAX_SUPPORTED_DEPTH:
+                    return deepest
+        elif byte in (0x5D, 0x7D):      # ] }
+            depth -= 1
+    return deepest
 
 
 # What a refusal may repeat from a facilitator's answer (#608). The message

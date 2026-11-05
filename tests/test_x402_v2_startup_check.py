@@ -317,8 +317,40 @@ def test_supported_client_still_parses_whatever_the_status():
 DEEP = '{"kinds": ' + "[" * 100_000 + "]" * 100_000 + "}"
 
 
+DEEP_REFUSAL = "answered HTTP 200 with something that is not a list of payment kinds (nested deeper than 32 levels)"
+
+
 def test_a_deeply_nested_answer_is_a_refusal(x402):
+    # Refused before it is parsed: on Python 3.10 (the image's) parsing a body
+    # this deep can crash the interpreter rather than raise RecursionError.
     msg = refused(Supported(httpx.Response(200, text=DEEP)))
+    assert DEEP_REFUSAL in msg
+
+
+@pytest.mark.parametrize("text,depth", [
+    ('{"kinds": []}', 2),
+    ('{"kinds": [{"extra": {"a": [1]}}]}', 5),
+    ('{"s": "[[[[{{{{\\"[[[["}', 1),          # brackets in strings do not count
+    ("[" * 40 + "]" * 40, 33),                  # stops counting past the limit
+])
+def test_nesting_depth_is_counted_outside_strings(text, depth):
+    assert facilitator._nesting_depth(text.encode()) == depth
+
+
+def test_an_answer_at_the_depth_limit_is_read(x402):
+    nested = {"a": 1}
+    for _ in range(28):
+        nested = {"n": nested}
+    check(Supported(kinds(dict(V2_EXACT, extra=nested))))
+
+
+def test_a_recursion_error_while_parsing_is_a_refusal(x402, monkeypatch):
+    # Any parse exception, RecursionError (a RuntimeError) included.
+    def deep(self, **kw):
+        raise RecursionError("maximum recursion depth exceeded")
+
+    monkeypatch.setattr(httpx.Response, "json", deep)
+    msg = refused(Supported(kinds(V2_EXACT)))
     assert "answered HTTP 200 with something that is not a list of payment kinds (RecursionError)" in msg
 
 
@@ -332,15 +364,14 @@ def test_a_deeply_nested_answer_stops_startup_cleanly(x402):
 
     with pytest.raises(RuntimeError) as exc:
         asyncio.run(run())
-    assert str(exc.value).startswith(PREFIX) and "RecursionError" in str(exc.value)
-    assert exc.value.__cause__ is None and exc.value.__suppress_context__
+    assert str(exc.value).startswith(PREFIX) and "nested deeper than 32 levels" in str(exc.value)
 
 
 def test_deploy_check_refuses_a_deeply_nested_answer(x402, capsys):
     x402.setattr(facilitator, "_client", Supported(httpx.Response(200, text=DEEP)).client())
     assert check_config.main() == check_config.EXIT_REFUSED
     err = capsys.readouterr().err
-    assert "not a list of payment kinds (RecursionError)" in err and "Traceback" not in err
+    assert DEEP_REFUSAL in err and "Traceback" not in err
 
 
 def _safe(text):
