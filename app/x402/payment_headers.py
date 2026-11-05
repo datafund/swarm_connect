@@ -47,6 +47,27 @@ def offered_payment_versions(headers) -> Set[int]:
     return found
 
 
+def payment_version_label(versions) -> str:
+    """The `version` label of a payment metric for the headers a request carried (#601).
+
+    "none" without a payment header, "2" when PAYMENT-SIGNATURE is present
+    (alone, or with X-PAYMENT: a client attempting v2), else "1".
+    """
+    if not versions:
+        return "none"
+    return "2" if 2 in versions else "1"
+
+
+def paid_version_label(request) -> str:
+    """The `version` label of a verified payment's settlement (#601).
+
+    The dependency records the version of a verified payment on the request.
+    Only v1 is verified until v2 is enabled (#609), so that is the default.
+    """
+    version = getattr(getattr(request, "state", None), "x402_version", None)
+    return "2" if version == 2 else "1"
+
+
 def offers_payment(headers) -> bool:
     """The request carries an x402 payment header of any version, so it could be charged."""
     return bool(offered_payment_versions(headers))

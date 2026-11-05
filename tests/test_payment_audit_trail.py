@@ -54,7 +54,7 @@ def _run(settle, path="/api/v1/stamps/"):
 
 
 def _count(result):
-    return x402_settlements_total.labels(result=result)._value.get()
+    return x402_settlements_total.labels(result=result, version="1")._value.get()
 
 
 def test_delivery_is_linked_to_the_settlement_transaction():

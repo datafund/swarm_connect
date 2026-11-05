@@ -35,7 +35,7 @@ logger = logging.getLogger(__name__)
 # x402 protocol constants
 X402_VERSION = 1
 # One definition, with the v2 header, in app/x402/payment_headers.py (#600).
-from app.x402.payment_headers import X_PAYMENT_HEADER  # noqa: E402
+from app.x402.payment_headers import X_PAYMENT_HEADER, paid_version_label  # noqa: E402,F401
 X_PAYMENT_RESPONSE_HEADER = "X-PAYMENT-RESPONSE"
 X_PAYMENT_MODE_HEADER = "X-Payment-Mode"
 
@@ -289,6 +289,7 @@ def _log_delivery(request: Request, settlement, body: bytes, client_ip: str, pay
             "network": to_v1(settings.X402_NETWORK),
             "resource": resource,
             "nonce": request_nonce(request),
+            "x402_version": int(paid_version_label(request)),
         },
         client_ip=client_ip,
         wallet_address=payer,
@@ -584,7 +585,7 @@ class X402Middleware(BaseHTTPMiddleware):
                     # authorization stays reserved: its nonce may be spent.
                     log_payment_failed(client_ip=client_ip, reason=failure, stage="settle",
                                        wallet_address=payer, nonce=request_nonce(request))
-                    x402_settlements_total.labels(result="error").inc()
+                    x402_settlements_total.labels(result="error", version=paid_version_label(request)).inc()
                     # The write-ahead entry (AFTER_WORK, on disk) is the record:
                     # the dependency stops any later attempt with it before the
                     # work runs again, also once the reservation has lapsed.
@@ -596,7 +597,8 @@ class X402Middleware(BaseHTTPMiddleware):
                                         nonce=request_nonce(request))
                     remembered = prior is not None
                     x402_settlements_total.labels(
-                        result="refused_after_unknown" if remembered else "refused").inc()
+                        result="refused_after_unknown" if remembered else "refused",
+                        version=paid_version_label(request)).inc()
                     if not remembered:
                         # Last: records first, then the removal write.
                         await outcome_unknown.aresolve(auth_key, None, settled=False, gen=gen, release=True)
@@ -626,7 +628,7 @@ class X402Middleware(BaseHTTPMiddleware):
                                 network=to_v1(settings.X402_NETWORK), success=True, nonce=request_nonce(request))
             from app.x402.idempotency import record_settlement
             record_settlement(request, settlement)
-            x402_settlements_total.labels(result="settled").inc()
+            x402_settlements_total.labels(result="settled", version=paid_version_label(request)).inc()
             # Last: records first, then the removal write (shielded).
             await outcome_unknown.aresolve(auth_key, prior, settled=True, gen=gen, release=True)
 
@@ -640,7 +642,7 @@ class X402Middleware(BaseHTTPMiddleware):
                                reason=f"HTTP {response.status_code} after settlement; tx={tx_hash}",
                                stage="delivery_after_settlement", wallet_address=payer,
                                nonce=request_nonce(request))
-            x402_settlements_total.labels(result="settled_not_delivered").inc()
+            x402_settlements_total.labels(result="settled_not_delivered", version=paid_version_label(request)).inc()
 
         body = b""
         async for chunk in response.body_iterator:
@@ -688,7 +690,7 @@ class X402Middleware(BaseHTTPMiddleware):
             return JSONResponse(status_code=500, content={"detail": "Internal server error. You were not charged."})
 
         tx_hash = getattr(settlement, "transaction", None) or "unknown"
-        x402_settlements_total.labels(result="settled_not_delivered").inc()
+        x402_settlements_total.labels(result="settled_not_delivered", version=paid_version_label(request)).inc()
         logger.error(f"x402: payment {tx_hash} settled but {request.url.path} raised; refund needed", exc_info=True)
         log_payment_failed(client_ip=get_client_ip(request),
                            reason=f"exception after settlement; tx={tx_hash}",

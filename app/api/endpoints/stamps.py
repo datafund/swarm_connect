@@ -12,6 +12,7 @@ import secrets
 from app.x402.settlement import settle_payment
 from app.core.config import settings
 from app.x402.networks import to_v1
+from app.x402.payment_headers import paid_version_label
 from app.services import swarm_api
 from app.services.bee_errors import error_cause, public_bee_text
 from app.services.http_client import exc_text
@@ -821,7 +822,8 @@ async def _finish_pending_purchase(request: Request, label: str, depth: int, amo
         log_audit_event(event_type=AuditEventType.PAYMENT_DELIVERED, client_ip=client_ip, wallet_address=payer,
                         data={"transaction_hash": tx, "method": "POST", "path": request.url.path,
                               "network": to_v1(settings.X402_NETWORK), "resource": {"batchID": batch_id},
-                              "late": True, "nonce": request_nonce(request)})
+                              "late": True, "nonce": request_nonce(request),
+                              "x402_version": int(paid_version_label(request))})
         # Estimated from the amount funded at today's price (#383), like the
         # 201 answered in time; None when the price cannot be read in time
         # (#468). The 201 is stored for the Idempotency-Key in `finally`, so a

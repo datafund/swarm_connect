@@ -334,7 +334,7 @@ def test_refusal_of_a_remembered_authorization_has_its_own_metric(env):
     from app.services.metrics import x402_settlements_total
 
     def count(result):
-        return x402_settlements_total.labels(result=result)._value.get()
+        return x402_settlements_total.labels(result=result, version="1")._value.get()
 
     refused_before, after_before = count("refused"), count("refused_after_unknown")
     fac = _facilitator(RuntimeError("down"), refused("nonce_used"))
@@ -741,7 +741,7 @@ def test_cancel_during_the_resolution_keeps_the_records(env, state, monkeypatch,
     monkeypatch.setattr(reg, "_remove", slow_remove)
     fac = _facilitator(ok() if outcome == "settled" else refused("insufficient_funds"))
     record = MagicMock()
-    metric_before = x402_settlements_total.labels(result=outcome)._value.get()
+    metric_before = x402_settlements_total.labels(result=outcome, version="1")._value.get()
     audit_before = _audit_len()
 
     async def go():
@@ -757,7 +757,7 @@ def test_cancel_during_the_resolution_keeps_the_records(env, state, monkeypatch,
     settled = [e for e in _new_events(audit_before) if e["event_type"] == "payment_settled"]
     assert settled and settled[0]["data"]["success"] is (outcome == "settled")
     assert settled[0]["data"]["nonce"] == KEY[1]
-    assert x402_settlements_total.labels(result=outcome)._value.get() == metric_before + 1
+    assert x402_settlements_total.labels(result=outcome, version="1")._value.get() == metric_before + 1
     if outcome == "settled":
         record.assert_called_once()
     # The shielded resolution still finishes.
@@ -924,14 +924,14 @@ def test_a_saturated_default_executor_does_not_delay_settlement(env, state):
 
 def test_a_refusal_at_verify_counts_as_refused_after_unknown(env, state):
     from app.services.metrics import x402_settlements_total
-    before = x402_settlements_total.labels(result="refused_after_unknown")._value.get()
+    before = x402_settlements_total.labels(result="refused_after_unknown", version="1")._value.get()
     fac = _facilitator(RuntimeError("down"))
     good = VerifyResponse(isValid=True, payer="0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1")
     fac.verify = AsyncMock(side_effect=[good, VerifyResponse(isValid=False, invalidReason="nonce_used", payer=None)])
     header = create_valid_payment_header()
     assert _run(fac, header=header).status_code == 502
     assert _run(fac, header=header).status_code == 409
-    assert x402_settlements_total.labels(result="refused_after_unknown")._value.get() == before + 1
+    assert x402_settlements_total.labels(result="refused_after_unknown", version="1")._value.get() == before + 1
 
 
 def test_shutdown_waits_for_registry_io_bounded():

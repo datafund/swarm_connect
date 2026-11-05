@@ -123,8 +123,13 @@ def _send(client, route, headers):
     return client.request(method, path, headers=headers)
 
 
+# The `version` label each mode is counted under here (#601): v2 refusals and
+# header conflicts as 2, the free tier (no payment header) as none.
+_VERSION = {"version_unsupported": "2", "header_conflict": "2", "free": "none"}
+
+
 def _count(mode):
-    return x402_payments_total.labels(mode=mode)._value.get()
+    return x402_payments_total.labels(mode=mode, version=_VERSION[mode])._value.get()
 
 
 def _assert_version_unsupported(r):

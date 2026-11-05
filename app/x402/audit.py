@@ -34,6 +34,11 @@ from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
+# The x402 version of every payment that reaches verify or settle, so of every
+# payment_settled, payment_failed and payment_delivered record (#601). Only v1
+# is verified until v2 is enabled (#609); v2 requests are refused before.
+PAID_X402_VERSION = 1
+
 
 class AuditEventType(Enum):
     """Types of audit events that can be logged."""
@@ -305,9 +310,11 @@ def log_payment_settled(
     error_reason: Optional[str] = None,
     request_id: Optional[str] = None,
     nonce: Optional[str] = None,
+    x402_version: int = PAID_X402_VERSION,
 ) -> Optional[str]:
     """Log a payment settlement event. `nonce`: the payment authorization's,
-    which identifies the on-chain transfer whatever its transaction hash."""
+    which identifies the on-chain transfer whatever its transaction hash.
+    `x402_version`: the protocol version of the payment (#601)."""
     return log_audit_event(
         event_type=AuditEventType.PAYMENT_SETTLED,
         data={
@@ -316,6 +323,7 @@ def log_payment_settled(
             "network": network,
             "error_reason": error_reason,
             "nonce": nonce,
+            "x402_version": x402_version,
         },
         client_ip=client_ip,
         wallet_address=payer,
@@ -330,14 +338,17 @@ def log_payment_failed(
     wallet_address: Optional[str] = None,
     request_id: Optional[str] = None,
     nonce: Optional[str] = None,
+    x402_version: int = PAID_X402_VERSION,
 ) -> Optional[str]:
-    """Log a payment failure event. `nonce`: the payment authorization's."""
+    """Log a payment failure event. `nonce`: the payment authorization's.
+    `x402_version`: the protocol version of the payment (#601)."""
     return log_audit_event(
         event_type=AuditEventType.PAYMENT_FAILED,
         data={
             "reason": reason,
             "stage": stage,
             "nonce": nonce,
+            "x402_version": x402_version,
         },
         client_ip=client_ip,
         wallet_address=wallet_address,

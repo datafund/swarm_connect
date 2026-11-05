@@ -203,7 +203,7 @@ def test_fallback_settlement_error_is_audited_and_counted_as_error(env):
     from app.x402.audit import read_audit_log
 
     def count(result):
-        return x402_settlements_total.labels(result=result)._value.get()
+        return x402_settlements_total.labels(result=result, version="1")._value.get()
 
     error, refused_before = count("error"), count("refused")
     fac = _facilitator(RuntimeError("facilitator down"))

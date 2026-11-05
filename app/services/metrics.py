@@ -401,24 +401,33 @@ x402_settlements_total = Counter(
     "x402 settlement outcomes (#375): settled, refused (nothing delivered), error "
     "(outcome unknown, nothing delivered), settled_not_delivered (refund needed), "
     "refused_after_unknown (a retry of an authorization whose earlier settlement got no "
-    "answer was refused: the earlier transfer probably went through)",
-    ["result"],
+    "answer was refused: the earlier transfer probably went through). version: the x402 "
+    "protocol version of the payment (#601)",
+    ["result", "version"],
 )
 # Every result exists from startup. A series first seen at 1 gives increase() of
 # 0 for that event, and the process restarts on every deploy, so without this
-# the first failure of each kind after a restart would never alert.
+# the first failure of each kind after a restart would never alert. Only v1 is
+# settled until v2 is enabled (#609), which must add its version="2" series.
 for _result in ("settled", "refused", "error", "settled_not_delivered", "refused_after_unknown"):
-    x402_settlements_total.labels(result=_result)
+    x402_settlements_total.labels(result=_result, version="1")
 x402_payments_total = Counter(
-    "gateway_x402_payments_total", "x402 payment mode breakdown", ["mode"]
+    "gateway_x402_payments_total",
+    "x402 payment mode breakdown. version: the x402 version of the payment header the "
+    "request carried, 1 (X-PAYMENT), 2 (PAYMENT-SIGNATURE, also with both headers) or "
+    "none (#601)",
+    ["mode", "version"],
 )
 # Paid requests refused before payment while the gateway cannot accept them
-# (#589): a rare event, so the series exists from startup.
-x402_payments_total.labels(mode="unavailable")
+# (#589): a rare event, so the series exists from startup, for every version
+# such a request can carry.
+for _version in ("1", "2", "none"):
+    x402_payments_total.labels(mode="unavailable", version=_version)
 # Payment headers refused before payment (#600): x402 v2 (PAYMENT-SIGNATURE)
-# while only v1 is accepted, and both versions in one request. Rare as well.
-x402_payments_total.labels(mode="version_unsupported")
-x402_payments_total.labels(mode="header_conflict")
+# while only v1 is accepted, and both versions in one request. Rare as well;
+# both are counted as version 2.
+x402_payments_total.labels(mode="version_unsupported", version="2")
+x402_payments_total.labels(mode="header_conflict", version="2")
 rate_limit_hits_total = Counter(
     "gateway_rate_limit_hits_total", "Rate limit rejections"
 )
