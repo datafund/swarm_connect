@@ -54,7 +54,7 @@ Add these to your `.env` file:
 X402_ENABLED=true                                    # Enable x402 payments
 X402_FACILITATOR_URL=https://x402.org/facilitator   # Testnet facilitator
 X402_PAY_TO_ADDRESS=0xYourBaseSepoliaAddress        # Your USDC receiving wallet
-X402_NETWORK=base-sepolia                            # Network identifier
+X402_NETWORK=base-sepolia                            # base-sepolia or base (or eip155:84532 / eip155:8453)
 
 # === Pricing ===
 X402_BZZ_USD_RATE=0.50               # Manual BZZ/USD rate

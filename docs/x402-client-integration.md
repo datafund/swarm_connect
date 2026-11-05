@@ -9,7 +9,7 @@ This document describes how to integrate x402 payment support into CLI tools and
 **This gateway implements x402 protocol version 1 (v1).**
 
 Key v1 characteristics:
-- Uses string network identifiers: `"base-sepolia"`, `"base"` (not CAIP-2 format like `eip155:84532`)
+- Uses string network identifiers: `"base-sepolia"`, `"base"` (not CAIP-2 format like `eip155:84532`). This holds also when the operator configured the gateway with the CAIP-2 id: v1 output always carries the v1 name
 - Response includes `"x402Version": 1`
 - Payment scheme: `"exact"` with EIP-3009 `transferWithAuthorization`
 - Asset: USDC on Base chain
