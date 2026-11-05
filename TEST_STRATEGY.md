@@ -37,15 +37,28 @@ uv pip check --python .venv
 ```
 
 The `lock-sync` job (pull requests only) runs `scripts/check_lock_sync.sh` with
-uv pinned to 0.11.x. It reruns the command in each lock's header on a copy,
-the runtime lock first, and fails if the result differs from the committed
-lock. Because uv keeps an existing lock's pins wherever they still satisfy the
-input, the check moves nothing that is valid; it fails on a package added to or
-removed from `requirements.txt` or `requirements-dev.txt`, or a floor raised
-above the locked version, without regenerating. It needs PyPI, so it does not
-run when `deploy.yml` calls the workflow. Run it locally the same way; to fix a
-failure, run the two commands in the header of `requirements.txt` and commit
-both locks.
+uv 0.11.17, installed from `.github/uv-pin.txt` with `--require-hashes`. The
+script checks each lock twice, the runtime lock first:
+
+1. It reruns the command in the lock's header on a copy and fails if the result
+   differs from the committed lock. Because uv keeps an existing lock's pins
+   wherever they still satisfy the input, this moves nothing that is valid; it
+   fails on a package added to or removed from `requirements.txt` or
+   `requirements-dev.txt`, or a floor raised above the locked version, without
+   regenerating.
+2. uv also keeps an existing lock's hashes, so the first pass cannot see a
+   changed or deleted `--hash` line. The script therefore compiles each input
+   again into a new file, with no lock to start from, constrained to the
+   committed pins without their hashes, and fails unless every package has
+   exactly the hashes the committed lock lists.
+
+The second pass takes the hashes from PyPI, so it also fails when a pinned
+version gains a file after the lock was made, although the lock is not wrong.
+That, and the need for PyPI at all, is why the job does not run when
+`deploy.yml` calls the workflow. Run the script locally the same way (it needs
+uv 0.11.x and python3, and does not change the working tree). To fix a failure,
+run the two commands in the header of `requirements.txt` and commit both locks;
+for a hash failure, first find out why the hashes differ.
 
 `tests/test_ci_workflow.py` keeps the workflow on both locks and the image on
 the runtime lock, keeps the sync check in place, and keeps CI, the Dockerfile
@@ -64,7 +77,7 @@ within 30 tries, 2 s apart: about a minute when the port refuses, and at most
 about 6 minutes when the app accepts connections but never answers (each try
 waits up to 10 s), inside the job's 20-minute timeout. `/` answers 200 with `status: degraded` while Bee is
 unreachable, and a refused port builds the first health snapshot at once, so
-the check never waits for `HEALTH_SNAPSHOT_FIRST_WAIT_SECONDS`. Once `/` answers, it runs `python -m app.x402.check_config` in the container (x402 off by default), which must exit 0 (#617). Then it checks TLS trust offline in the container (#595): httpx2 verifies against the OS CA bundle from `ca-certificates`, not certifi, so the step fails unless `/etc/ssl/certs/ca-certificates.crt` holds certificates and an httpx2 transport's context verifies and has them loaded. Last, it checks offline that pytest, pytest-asyncio, pluggy and iniconfig cannot be imported in the image (#430). On failure the
+the check never waits for `HEALTH_SNAPSHOT_FIRST_WAIT_SECONDS`. Once `/` answers, it runs `python -m app.x402.check_config` in the container (x402 off by default), which must exit 0 (#617). Then it checks TLS trust offline in the container (#595): httpx2 verifies against the OS CA bundle from `ca-certificates`, not certifi, so the step fails unless `/etc/ssl/certs/ca-certificates.crt` holds certificates and an httpx2 transport's context verifies and has them loaded. Last, it checks offline that pytest, pytest-asyncio, pluggy, iniconfig and packaging cannot be imported in the image (#430). On failure the
 job prints the container log; the container is always removed.
 `deploy.yml` does not call it: each deploy host builds the image itself before
 stopping the running gateway, so a broken build there already stops the deploy
