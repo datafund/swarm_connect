@@ -15,11 +15,11 @@ python-multipart>=0.0.20  # For file upload support in FastAPI
 # For timezone handling if needed beyond basic UTC
 # pytz
 
-# x402 payment protocol (v1 - v2 under development)
-x402==1.0.0               # Official x402 Python SDK (pinned - v2.x has breaking API changes)
+# x402 payment protocol. The gateway owns its v1 models and facilitator client
+# (app/x402/models_v1.py, facilitator_client.py); it does not import x402.
 cdp-sdk==1.51.0           # Coinbase CDP facilitator auth (X402_FACILITATOR_CDP_API_KEY_ID/_SECRET)
 eth-account>=0.8.0        # For wallet signature verification
-web3>=6.0.0               # Gnosis chain client (Flow B: createBatch for an external owner). Already pulled in by x402.
+web3>=6.0.0               # Gnosis chain client (Flow B: createBatch for an external owner).
 
 # Prometheus monitoring
 prometheus-fastapi-instrumentator>=6.0.0
@@ -29,3 +29,6 @@ prometheus_client>=0.19.0
 pytest>=7.0.0
 pytest-asyncio>=0.21.0
 requests>=2.28.0          # Used in integration/live tests as HTTP client
+x402==1.0.0               # Test oracle only (#604): the goldens and the differential tests compare the
+                          # gateway's own x402 v1 code against it. app/ must not import it
+                          # (tests/test_x402_no_library_import.py). Pinned: 2.x changed the API.
