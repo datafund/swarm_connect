@@ -2,7 +2,7 @@
 import asyncio
 import datetime
 import time
-import httpx
+import httpx2
 import logging
 import sys
 from typing import List, Dict, Any, Optional
@@ -66,7 +66,7 @@ async def get_all_stamps() -> List[Dict[str, Any]]:
         Returns an empty list if the request fails or no stamps are found.
 
     Raises:
-        httpx.HTTPError: If the HTTP request to the Swarm API fails.
+        httpx2.HTTPError: If the HTTP request to the Swarm API fails.
     """
     api_url = urljoin(str(settings.SWARM_BEE_API_URL), "batches")
     try:
@@ -91,7 +91,7 @@ async def get_all_stamps() -> List[Dict[str, Any]]:
              return []
 
 
-    except httpx.HTTPError as e:
+    except httpx2.HTTPError as e:
         _record_bee_error("batches")
         logger.error(f"Error fetching stamps from Swarm API ({api_url}): {exc_text(e)}")
         raise
@@ -114,7 +114,7 @@ async def get_local_stamps() -> List[Dict[str, Any]]:
         Returns an empty list if the request fails or no stamps are found.
 
     Raises:
-        httpx.HTTPError: If the HTTP request to the Swarm API fails.
+        httpx2.HTTPError: If the HTTP request to the Swarm API fails.
     """
     api_url = urljoin(str(settings.SWARM_BEE_API_URL), "stamps")
     try:
@@ -137,7 +137,7 @@ async def get_local_stamps() -> List[Dict[str, Any]]:
             logger.warning(f"Unexpected data structure from local stamps API: {type(data)}")
             return []
 
-    except httpx.HTTPError as e:
+    except httpx2.HTTPError as e:
         logger.warning(f"Error fetching local stamps from Swarm API ({api_url}): {exc_text(e)}")
         # Don't re-raise here - we want to continue even if local stamps fail
         return []
@@ -161,7 +161,7 @@ async def purchase_postage_stamp(amount: int, depth: int, label: Optional[str] =
         The batchID of the purchased stamp
 
     Raises:
-        httpx.HTTPError: If the HTTP request to the Swarm API fails
+        httpx2.HTTPError: If the HTTP request to the Swarm API fails
         ValueError: If the response is malformed or missing expected fields
     """
     # Ensure amount is an integer to prevent string multiplication in URL
@@ -191,7 +191,7 @@ async def purchase_postage_stamp(amount: int, depth: int, label: Optional[str] =
         logger.info(f"Successfully purchased stamp with batch ID: {batch_id}")
         return batch_id
 
-    except httpx.HTTPError as e:
+    except httpx2.HTTPError as e:
         _record_bee_error("purchase")
         logger.error(f"Error purchasing stamp from Swarm API ({api_url}): {exc_text(e)}")
         raise
@@ -255,7 +255,7 @@ async def extend_postage_stamp(stamp_id: str, amount: int) -> str:
         The batchID of the extended stamp (should be same as input stamp_id)
 
     Raises:
-        httpx.HTTPError: If the HTTP request to the Swarm API fails
+        httpx2.HTTPError: If the HTTP request to the Swarm API fails
         ValueError: If the response is malformed or missing expected fields
     """
     # Ensure amount is an integer to prevent string multiplication in URL
@@ -279,7 +279,7 @@ async def extend_postage_stamp(stamp_id: str, amount: int) -> str:
         logger.info(f"Successfully extended stamp {stamp_id} with amount {amount}")
         return batch_id
 
-    except httpx.HTTPError as e:
+    except httpx2.HTTPError as e:
         logger.error(f"Error extending stamp {stamp_id} from Swarm API ({api_url}): {exc_text(e)}")
         raise
     except (ValueError, KeyError) as e:
@@ -572,7 +572,7 @@ async def get_all_stamps_processed() -> List[Dict[str, Any]]:
         calculated expiration times, and accurate usable status.
 
     Raises:
-        httpx.HTTPError: If the HTTP request to the Swarm API fails.
+        httpx2.HTTPError: If the HTTP request to the Swarm API fails.
     """
     # Get stamps data from both endpoints in parallel
     global_stamps, local_stamps = await asyncio.gather(
@@ -784,7 +784,7 @@ async def upload_data_to_swarm(
         The Swarm reference hash of the uploaded data
 
     Raises:
-        httpx.HTTPError: If the HTTP request to the Swarm API fails
+        httpx2.HTTPError: If the HTTP request to the Swarm API fails
         ValueError: If the response is malformed, missing expected fields, or redundancy level invalid
     """
     # Determine and validate redundancy level
@@ -812,7 +812,7 @@ async def upload_data_to_swarm(
         logger.info(f"Successfully uploaded data to Swarm with reference: {reference}")
         return reference
 
-    except httpx.HTTPError as e:
+    except httpx2.HTTPError as e:
         _record_bee_error("upload")
         logger.error(f"Error uploading data to Swarm API ({api_url}): {exc_text(e)}")
         raise
@@ -846,7 +846,7 @@ async def upload_chunk_to_swarm(
         The Swarm reference hash of the uploaded chunk.
 
     Raises:
-        httpx.HTTPError: If the HTTP request to the Swarm API fails.
+        httpx2.HTTPError: If the HTTP request to the Swarm API fails.
         ValueError: If the response is malformed or missing the reference.
     """
     api_url = urljoin(str(settings.SWARM_BEE_API_URL), "chunks")
@@ -869,7 +869,7 @@ async def upload_chunk_to_swarm(
         logger.info(f"Successfully forwarded chunk to Swarm with reference: {reference}")
         return reference
 
-    except httpx.HTTPError as e:
+    except httpx2.HTTPError as e:
         _record_bee_error("chunk_upload")
         logger.error(f"Error forwarding chunk to Swarm API ({api_url}): {exc_text(e)}")
         raise
@@ -900,7 +900,7 @@ async def download_data_from_swarm(reference: str) -> bytes:
         The downloaded data as bytes
 
     Raises:
-        httpx.HTTPError: If the HTTP request to the Swarm API fails
+        httpx2.HTTPError: If the HTTP request to the Swarm API fails
         FileNotFoundError: If the data is not found (404)
         DownloadTooLargeError: If the content exceeds the download limit
     """
@@ -929,12 +929,12 @@ async def download_data_from_swarm(reference: str) -> bytes:
             return bytes(body)
 
     try:
-        # One deadline for the whole transfer: httpx timeouts apply per read.
+        # One deadline for the whole transfer: httpx2 timeouts apply per read.
         content = await asyncio.wait_for(fetch(), timeout=settings.DOWNLOAD_TIMEOUT_SECONDS)
         logger.info(f"Successfully downloaded {len(content)} bytes from Swarm reference: {reference}")
         return content
 
-    except httpx.HTTPError as e:
+    except httpx2.HTTPError as e:
         _record_bee_error("download")
         logger.error(f"Error downloading data from Swarm API ({api_url}): {exc_text(e)}")
         raise
@@ -1112,7 +1112,7 @@ async def get_wallet_info() -> Dict[str, Any]:
         Dictionary containing wallet address, BZZ balance, and other wallet data
 
     Raises:
-        httpx.HTTPError: If the HTTP request to the Swarm API fails
+        httpx2.HTTPError: If the HTTP request to the Swarm API fails
         ValueError: If the response is malformed or missing expected fields
     """
     api_url = urljoin(str(settings.SWARM_BEE_API_URL), "wallet")
@@ -1131,7 +1131,7 @@ async def get_wallet_info() -> Dict[str, Any]:
         logger.info(f"Successfully retrieved wallet info: {wallet_address}, balance: {bzz_balance}")
         return response_json
 
-    except httpx.HTTPError as e:
+    except httpx2.HTTPError as e:
         _record_bee_error("wallet")
         logger.error(f"Error fetching wallet info from Swarm API ({api_url}): {exc_text(e)}")
         raise
@@ -1150,7 +1150,7 @@ async def get_wallet_address() -> str:
         The wallet address of the Bee node
 
     Raises:
-        httpx.HTTPError: If the HTTP request to the Swarm API fails
+        httpx2.HTTPError: If the HTTP request to the Swarm API fails
         ValueError: If the response is malformed or missing expected fields
     """
     wallet_info = await get_wallet_info()
@@ -1165,7 +1165,7 @@ async def get_chequebook_balance() -> Dict[str, Any]:
         Dictionary containing totalBalance and availableBalance
 
     Raises:
-        httpx.HTTPError: If the HTTP request to the Swarm API fails
+        httpx2.HTTPError: If the HTTP request to the Swarm API fails
         ValueError: If the response is malformed or missing expected fields
     """
     api_url = urljoin(str(settings.SWARM_BEE_API_URL), "chequebook/balance")
@@ -1183,7 +1183,7 @@ async def get_chequebook_balance() -> Dict[str, Any]:
         logger.info(f"Successfully retrieved chequebook balance: {available_balance}")
         return response_json
 
-    except httpx.HTTPError as e:
+    except httpx2.HTTPError as e:
         logger.error(f"Error fetching chequebook balance from Swarm API ({api_url}): {exc_text(e)}")
         raise
     except (ValueError, KeyError) as e:
@@ -1199,7 +1199,7 @@ async def get_chequebook_info() -> Dict[str, Any]:
         Dictionary containing chequebook address and balance information
 
     Raises:
-        httpx.HTTPError: If the HTTP request to the Swarm API fails
+        httpx2.HTTPError: If the HTTP request to the Swarm API fails
         ValueError: If the response is malformed or missing expected fields
     """
     try:
@@ -1227,7 +1227,7 @@ async def get_chequebook_info() -> Dict[str, Any]:
         logger.info(f"Successfully retrieved chequebook info: {chequebook_address}, available: {balance_info.get('availableBalance')}")
         return chequebook_info
 
-    except httpx.HTTPError as e:
+    except httpx2.HTTPError as e:
         logger.error(f"Error fetching chequebook info from Swarm API: {exc_text(e)}")
         raise
     except (ValueError, KeyError) as e:
@@ -1245,7 +1245,7 @@ async def get_chequebook_address() -> str:
         The chequebook address of the Bee node
 
     Raises:
-        httpx.HTTPError: If the HTTP request to the Swarm API fails
+        httpx2.HTTPError: If the HTTP request to the Swarm API fails
         ValueError: If the response is malformed or missing expected fields
     """
     chequebook_info = await get_chequebook_info()
@@ -1261,7 +1261,7 @@ async def get_chainstate() -> Dict[str, Any]:
         Dictionary containing chainTip, block, totalAmount, and currentPrice
 
     Raises:
-        httpx.HTTPError: If the HTTP request to the Swarm API fails
+        httpx2.HTTPError: If the HTTP request to the Swarm API fails
         ValueError: If the response is malformed or missing expected fields
     """
     api_url = urljoin(str(settings.SWARM_BEE_API_URL), "chainstate")
@@ -1279,7 +1279,7 @@ async def get_chainstate() -> Dict[str, Any]:
         logger.info(f"Successfully retrieved chainstate: currentPrice={current_price}")
         return response_json
 
-    except httpx.HTTPError as e:
+    except httpx2.HTTPError as e:
         logger.error(f"Error fetching chainstate from Swarm API ({api_url}): {exc_text(e)}")
         raise
     except (ValueError, KeyError) as e:
@@ -1432,7 +1432,7 @@ async def check_sufficient_funds(required_plur: int) -> Dict[str, Any]:
             - shortfall_bzz: amount missing (if insufficient)
 
     Raises:
-        httpx.HTTPError: If the HTTP request to the Swarm API fails
+        httpx2.HTTPError: If the HTTP request to the Swarm API fails
     """
     wallet_info = await get_wallet_info()
     wallet_balance_plur = int(wallet_info.get("bzzBalance", 0))
@@ -1517,7 +1517,7 @@ async def upload_collection_to_swarm(
         The Swarm manifest reference hash
 
     Raises:
-        httpx.HTTPError: If the HTTP request to the Swarm API fails
+        httpx2.HTTPError: If the HTTP request to the Swarm API fails
         ValueError: If the response is malformed, missing expected fields, or redundancy level invalid
     """
     # Determine and validate redundancy level
@@ -1547,7 +1547,7 @@ async def upload_collection_to_swarm(
         logger.info(f"Successfully uploaded collection to Swarm with manifest reference: {reference}")
         return reference
 
-    except httpx.HTTPError as e:
+    except httpx2.HTTPError as e:
         logger.error(f"Error uploading collection to Swarm API ({api_url}): {exc_text(e)}")
         raise
     except (ValueError, KeyError) as e:
@@ -1626,7 +1626,7 @@ async def validate_stamp_for_upload(stamp_id: str, local_only: bool = False) -> 
 
     Raises:
         StampValidationError: If stamp fails any blocking validation check
-        httpx.HTTPError: If unable to reach Swarm API
+        httpx2.HTTPError: If unable to reach Swarm API
     """
     if local_only:
         # Just the one batch on the connected node. Used before settling a paid

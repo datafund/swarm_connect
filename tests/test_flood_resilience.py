@@ -16,7 +16,7 @@ import time
 from collections import Counter, defaultdict
 from unittest.mock import patch
 
-import httpx
+import httpx2
 import pytest
 import pytest_asyncio
 
@@ -80,9 +80,9 @@ async def gateway():
     bee_call_gate.reset()
     await hc.init_client()
     from app.main import app
-    transport = httpx.ASGITransport(app=app, raise_app_exceptions=False)
+    transport = httpx2.ASGITransport(app=app, raise_app_exceptions=False)
     try:
-        async with httpx.AsyncClient(transport=transport, base_url="http://gw", timeout=30) as client:
+        async with httpx2.AsyncClient(transport=transport, base_url="http://gw", timeout=30) as client:
             yield client, stub
     finally:
         await hc.close_client()

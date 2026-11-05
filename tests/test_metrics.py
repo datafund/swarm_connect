@@ -166,9 +166,9 @@ class TestUploadCounters:
     @patch("app.api.endpoints.data.stamp_ownership_manager")
     def test_upload_error_increments_counter(self, mock_ownership, mock_upload):
         """Failed upload increments gateway_uploads_total{status=error}."""
-        import httpx
+        import httpx2
         from app.services.metrics import uploads_total
-        mock_upload.side_effect = httpx.HTTPError("Bee node down")
+        mock_upload.side_effect = httpx2.HTTPError("Bee node down")
         mock_ownership.check_access.return_value = (True, "ok")
 
         before = uploads_total.labels(status="error")._value.get()
@@ -286,11 +286,11 @@ class TestBeeApiErrorCounter:
     @patch("app.api.endpoints.data.download_data_from_swarm", new_callable=AsyncMock)
     def test_download_bee_error_increments_bee_api_counter(self, mock_download):
         """502 from Bee node increments gateway_bee_api_errors_total."""
-        import httpx
+        import httpx2
         from app.services.metrics import bee_api_errors_total
 
         # Simulate a Bee API error that goes through swarm_api
-        mock_download.side_effect = httpx.HTTPError("Connection refused")
+        mock_download.side_effect = httpx2.HTTPError("Connection refused")
 
         before = bee_api_errors_total.labels(endpoint="download")._value.get()
 

@@ -9,7 +9,7 @@ client's transport.
 import asyncio
 from unittest.mock import AsyncMock, patch
 
-import httpx
+import httpx2
 import pytest
 import pytest_asyncio
 from fastapi import FastAPI, HTTPException
@@ -218,7 +218,7 @@ class TestRelease:
     async def test_released_on_error(self, shared):
         await shared.stop()  # nothing listening any more
         client = hc.get_client()
-        with pytest.raises(httpx.ConnectError):
+        with pytest.raises(httpx2.ConnectError):
             await client.get(url("wallet"))
         assert sum(bee_call_gate.held.values()) == 0
 
@@ -278,6 +278,89 @@ class TestRelease:
 
 
 # --------------------------------------------------------------------------
+# A slot granted in the same moment the wait ends is never lost (#588, #617)
+# --------------------------------------------------------------------------
+
+@pytest.fixture
+def one_slot(monkeypatch):
+    """A gate of its own with one slot; waits long enough never to run out by
+    themselves, so each test ends the wait itself, at a chosen moment."""
+    monkeypatch.setattr(settings, "BEE_CALL_GATE_ENABLED", True)
+    monkeypatch.setattr(settings, "BEE_MAX_CONCURRENT_CALLS", 1)
+    monkeypatch.setattr(settings, "BEE_RESERVED_BACKGROUND_CALLS", 0)
+    monkeypatch.setattr(settings, "BEE_BACKGROUND_SLOT_WAIT_SECONDS", 30.0)
+    return bee_gate.BeeCallGate()
+
+
+async def _waiting(gate):
+    """A task waiting in gate.acquire for the slot the caller holds."""
+    task = asyncio.get_running_loop().create_task(gate.acquire("background"))
+    await until(lambda: len(gate._waiters) == 1)
+    return task
+
+
+class TestGrantRace:
+    """asyncio.wait_for was reimplemented on asyncio.timeout() in Python 3.12.
+    acquire() must still keep a slot that is granted in the same loop step as
+    its wait ends, or give it back: never refuse or cancel while holding it."""
+
+    @pytest.mark.asyncio
+    async def test_slot_granted_as_the_wait_times_out_is_kept(self, one_slot, monkeypatch):
+        import asyncio.timeouts
+        import sys
+        gate = one_slot
+        blocker = await gate.acquire("background")
+        timeouts = []
+        real_timeout = asyncio.timeouts.timeout
+
+        def spy(delay):
+            t = real_timeout(delay)
+            timeouts.append(t)
+            return t
+
+        # wait_for opens its deadline through asyncio.timeouts.timeout().
+        monkeypatch.setattr(asyncio.timeouts, "timeout", spy)
+        waiter = await _waiting(gate)
+        assert len(timeouts) == 1, "acquire() no longer waits through asyncio.wait_for"
+        deadline = timeouts[0]
+        if not callable(getattr(deadline, "_on_timeout", None)):
+            pytest.fail("asyncio.timeouts.Timeout._on_timeout is missing on Python "
+                        f"{sys.version.split()[0]}; this test fires the deadline through it "
+                        "and must be adapted", pytrace=False)
+
+        def grant_and_expire():
+            blocker.release()           # grants the slot to the waiter
+            deadline.reschedule(None)   # drop the real timer: it fires here instead
+            deadline._on_timeout()      # the wait runs out in the same loop step
+
+        asyncio.get_running_loop().call_soon(grant_and_expire)
+        slot = await waiter
+        assert slot.cls == "background" and not slot.released
+        assert gate.held["background"] == 1
+        slot.release()
+        assert gate.held["background"] == 0
+
+    @pytest.mark.asyncio
+    async def test_slot_granted_as_the_waiter_is_cancelled_is_released(self, one_slot):
+        gate = one_slot
+        blocker = await gate.acquire("background")
+        waiter = await _waiting(gate)
+
+        def grant_and_cancel():
+            blocker.release()           # grants the slot to the waiter
+            waiter.cancel()             # and its request is cut off in the same loop step
+
+        asyncio.get_running_loop().call_soon(grant_and_cancel)
+        with pytest.raises(asyncio.CancelledError):
+            await waiter
+        assert gate.held["background"] == 0
+        # The slot is usable again at once.
+        again = await asyncio.wait_for(gate.acquire("background"), timeout=1)
+        assert gate.held["background"] == 1
+        again.release()
+
+
+# --------------------------------------------------------------------------
 # A refusal is not a Bee error and not a pool timeout
 # --------------------------------------------------------------------------
 
@@ -323,7 +406,7 @@ def _gate_app():
     async def bee_then_502():
         try:
             await hc.get_client().get(url("wallet"))
-        except httpx.HTTPError:
+        except httpx2.HTTPError:
             raise HTTPException(status_code=502, detail="Bee node request failed")
         return {"ok": True}
 
@@ -331,7 +414,7 @@ def _gate_app():
     async def bee_swallowed():
         try:
             await hc.get_client().get(url("wallet"))
-        except httpx.HTTPError:
+        except httpx2.HTTPError:
             pass
         return {"ok": True, "partial": True}
 
@@ -349,7 +432,7 @@ def _gate_app():
         bee_gate.mark_committed()
         try:
             await hc.get_client().get(url("wallet"))
-        except httpx.HTTPError:
+        except httpx2.HTTPError:
             raise HTTPException(status_code=502, detail={"code": "PAID_BUT_FAILED", "message": "refund"})
         return {"ok": True}
 
@@ -371,8 +454,8 @@ def _fill_request_slots():
 
 @pytest_asyncio.fixture
 async def gate_client(shared):
-    transport = httpx.ASGITransport(app=_gate_app(), raise_app_exceptions=False)
-    async with httpx.AsyncClient(transport=transport, base_url="http://gw") as c:
+    transport = httpx2.ASGITransport(app=_gate_app(), raise_app_exceptions=False)
+    async with httpx2.AsyncClient(transport=transport, base_url="http://gw") as c:
         yield c
 
 
@@ -438,8 +521,8 @@ class TestRewrite:
     @pytest.mark.asyncio
     async def test_another_requests_refusal_does_not_touch_this_one(self, shared):
         """Two requests at once: one refused, one fine. Only the refused one is 503."""
-        transport = httpx.ASGITransport(app=_gate_app(), raise_app_exceptions=False)
-        async with httpx.AsyncClient(transport=transport, base_url="http://gw") as c:
+        transport = httpx2.ASGITransport(app=_gate_app(), raise_app_exceptions=False)
+        async with httpx2.AsyncClient(transport=transport, base_url="http://gw") as c:
             shared.release.clear()
             busy = [asyncio.create_task(c.get("/bee")) for _ in range(3)]
             await until(lambda: shared.in_flight == 3)

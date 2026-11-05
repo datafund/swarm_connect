@@ -7,6 +7,19 @@ installed for tests only) and through app.x402.facilitator_client, and
 asserts that the two sent identical requests and came back with identical
 results: the same parsed answer (dumped by alias), or the same exception type.
 
+Two differences are expected, because the gateway's client is on httpx2
+(#595, #626) and x402 1.0.0 on encode's httpx; both are normalised here and
+asserted on their own, so nothing else can hide behind them:
+
+- User-Agent: python-httpx2/<version> instead of python-httpx/<version>. Its
+  position in the header order is still compared. Not set by hand: no
+  facilitator reads it (it is no part of x402 or of cdp-sdk's signed JWT),
+  and copying another library's name would be a false claim that changes
+  with that library's version.
+- Transport errors are httpx2's classes, with the same names (ReadTimeout,
+  ConnectError). Every caller catches them as Exception, so the
+  classification is unchanged.
+
 supported() has no 1.0.0 counterpart: its request shape and parsing are
 tested on their own at the end.
 """
@@ -20,6 +33,7 @@ import types
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import httpx
+import httpx2
 import pytest
 from pydantic import ValidationError
 
@@ -118,6 +132,9 @@ def _answer(data, status=200, delay=0):
 def _outcome(coro_fn):
     try:
         result = asyncio.run(coro_fn())
+    except (httpx.HTTPError, httpx2.HTTPError) as e:
+        # Same class name in either library (see the module docstring).
+        return ("raised", "transport", type(e).__name__)
     except Exception as e:
         return ("raised", type(e))
     return ("result", type(result).__name__, json.dumps(result.model_dump(by_alias=True)))
@@ -134,7 +151,7 @@ def run_both(stub, path, config_extra=None, timeout=None, monkeypatch=None):
     lib_client = lib_facilitator.FacilitatorClient(config=dict(config))
     lib_payment = lib_types.PaymentPayload.model_validate(PAYLOAD)
     lib_req = lib_types.PaymentRequirements.model_validate(REQUIREMENTS)
-    own_kwargs = {} if timeout is None else {"timeout": httpx.Timeout(timeout)}
+    own_kwargs = {} if timeout is None else {"timeout": httpx2.Timeout(timeout)}
     own_client = FacilitatorClient(config=dict(config), **own_kwargs)
     own_payment = own_types.PaymentPayload.model_validate(PAYLOAD)
     own_req = own_types.PaymentRequirements.model_validate(REQUIREMENTS)
@@ -145,7 +162,22 @@ def run_both(stub, path, config_extra=None, timeout=None, monkeypatch=None):
     stub.requests.clear()
     own_out = _outcome(lambda: getattr(own_client, path)(payment=own_payment, payment_requirements=own_req))
     own_requests = list(stub.requests)
-    return lib_out, own_out, lib_requests, own_requests
+    return lib_out, own_out, _without_ua(lib_requests, LIB_UA), _without_ua(own_requests, OWN_UA)
+
+
+LIB_UA = f"python-httpx/{httpx.__version__}"
+OWN_UA = f"python-httpx2/{httpx2.__version__}"
+
+
+def _without_ua(requests, expected):
+    """The requests with the User-Agent value replaced, after checking it."""
+    out = []
+    for r in requests:
+        uas = [v for k, v in r["headers"] if k.lower() == "user-agent"]
+        assert uas == [expected]
+        out.append({**r, "headers": [(k, "<user-agent>" if k.lower() == "user-agent" else v)
+                                     for k, v in r["headers"]]})
+    return out
 
 
 VALID = {"isValid": True, "payer": PAYER}
@@ -209,6 +241,9 @@ def test_classification_is_what_settlement_relies_on(stub):
     assert run_both(stub, "settle")[1][0] == "raised"
     stub.answers["verify"] = SCENARIOS["verify"]["malformed_json"]
     assert run_both(stub, "verify")[1] == ("raised", json.JSONDecodeError)
+    stub.answers["verify"] = _answer(VALID)
+    assert [k.lower() for k, _ in run_both(stub, "verify")[3][0]["headers"]] == [
+        "host", "accept", "accept-encoding", "connection", "user-agent", "content-type", "content-length"]
     body = json.loads(reqs[0]["body"])
     assert list(body) == ["x402Version", "paymentPayload", "paymentRequirements"]
     assert "unknownInPayload" not in json.dumps(body)
@@ -218,15 +253,28 @@ def test_classification_is_what_settlement_relies_on(stub):
 def test_timeout(stub, path, monkeypatch):
     stub.answers[path] = _answer(VALID if path == "verify" else SETTLED, delay=0.6)
     lib_out, own_out, lib_requests, own_requests = run_both(stub, path, timeout=0.1, monkeypatch=monkeypatch)
-    assert own_out == lib_out == ("raised", httpx.ReadTimeout)
+    assert own_out == lib_out == ("raised", "transport", "ReadTimeout")
     assert own_requests == lib_requests
 
 
 def test_default_timeout_is_what_1_0_0_used():
-    """x402 1.0.0 used a bare httpx.AsyncClient(): its default timeout."""
-    assert DEFAULT_TIMEOUT == httpx.AsyncClient().timeout == httpx.Timeout(5.0)
-    assert FacilitatorClient(config={"url": "https://f.example"}).timeout == DEFAULT_TIMEOUT
-    assert FacilitatorClient(config={"url": "https://f.example"})._client().timeout == httpx.Timeout(5.0)
+    """x402 1.0.0 used a bare httpx.AsyncClient(): its default timeout, 5 s.
+    The gateway's client sets it explicitly; httpx2's own defaults agree."""
+    assert httpx.AsyncClient().timeout.as_dict() == DEFAULT_TIMEOUT.as_dict() == httpx2.Timeout(5.0).as_dict()
+    assert httpx2.AsyncClient().timeout == DEFAULT_TIMEOUT
+    own = FacilitatorClient(config={"url": "https://f.example"})._client()
+    assert own.timeout == DEFAULT_TIMEOUT
+    assert own.trust_env is True and httpx.AsyncClient().trust_env is True
+    assert own.follow_redirects is False      # both pass follow_redirects=True per request
+
+
+def test_transport_errors_are_httpx2s(stub):
+    """The client is on httpx2 like the rest of app/ (#626)."""
+    stub.answers["verify"] = _answer(VALID, delay=0.6)
+    client = FacilitatorClient(config={"url": stub.url}, timeout=httpx2.Timeout(0.1))
+    with pytest.raises(httpx2.ReadTimeout):
+        asyncio.run(client.verify(payment=own_types.PaymentPayload.model_validate(PAYLOAD),
+                                  payment_requirements=own_types.PaymentRequirements.model_validate(REQUIREMENTS)))
 
 
 @pytest.mark.parametrize("path", ["verify", "settle"])
@@ -237,7 +285,7 @@ def test_connection_refused(path):
     sock.close()
     dead = types.SimpleNamespace(url=f"http://127.0.0.1:{port}/facilitator", requests=[])
     lib_out, own_out, _, _ = run_both(dead, path)
-    assert own_out == lib_out == ("raised", httpx.ConnectError)
+    assert own_out == lib_out == ("raised", "transport", "ConnectError")
 
 
 def _bearer_hook():
@@ -348,5 +396,5 @@ def test_supported_parses_whatever_the_status(stub):
 
 def test_supported_timeout(stub):
     stub.answers["supported"] = _answer(SUPPORTED, delay=0.6)
-    with pytest.raises(httpx.ReadTimeout):
-        asyncio.run(FacilitatorClient(config={"url": stub.url}, timeout=httpx.Timeout(0.1)).supported())
+    with pytest.raises(httpx2.ReadTimeout):
+        asyncio.run(FacilitatorClient(config={"url": stub.url}, timeout=httpx2.Timeout(0.1)).supported())
