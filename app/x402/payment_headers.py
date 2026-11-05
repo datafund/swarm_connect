@@ -111,6 +111,10 @@ VERSION_UNSUPPORTED_MESSAGE = (
     "Nothing was charged. Pay with x402 v1: sign a payment for accepts[0] and send it "
     "in the X-PAYMENT header instead."
 )
+V1_UNSUPPORTED_MESSAGE = (
+    "This gateway accepts x402 v2 payments only (the PAYMENT-SIGNATURE header), not x402 v1 "
+    "(X-PAYMENT). Nothing was charged."
+)
 HEADER_CONFLICT_MESSAGE = (
     "The request carries both X-PAYMENT (x402 v1) and PAYMENT-SIGNATURE (x402 v2). "
     "Send exactly one payment header. Nothing was charged."
