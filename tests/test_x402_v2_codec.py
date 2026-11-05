@@ -1,0 +1,350 @@
+"""The x402 v2 header codecs: PAYMENT-REQUIRED, PAYMENT-SIGNATURE, PAYMENT-RESPONSE (#606).
+
+Valid values round-trip; anything that is not canonical base64 of a JSON
+object that passes the v2 model is refused with a typed error whose code #607
+maps to a 400 or 402. No error text may carry the header or a decoded value.
+"""
+import base64
+import json
+
+import pytest
+
+from app.x402.codec_v2 import (
+    MAX_HEADER_CHARS,
+    PAYMENT_REQUIRED_HEADER,
+    PAYMENT_RESPONSE_HEADER,
+    PaymentHeaderInvalid,
+    PaymentHeaderMalformed,
+    PaymentHeaderTooLarge,
+    PaymentHeaderVersionMismatch,
+    X402HeaderError,
+    decode_payment_required,
+    decode_payment_response,
+    decode_payment_signature,
+    encode_payment_required,
+    encode_payment_response,
+    encode_payment_signature,
+)
+from app.x402.models_v2 import PaymentPayloadV2, PaymentRequired, SettleResponseV2
+from app.x402.payment_headers import PAYMENT_SIGNATURE_HEADER
+from tests.test_x402_v2_models import OFFER, PAYER, payment_msg, required_msg
+
+# Appears in every bad input below; must never appear in an error.
+MARKER = "SECRETMARKER"
+
+SETTLE = {"success": True, "transaction": "0x" + "00" * 32, "network": "eip155:84532", "payer": PAYER}
+
+
+def b64(obj_or_text):
+    text = obj_or_text if isinstance(obj_or_text, str) else json.dumps(obj_or_text, separators=(",", ":"))
+    return base64.b64encode(text.encode("utf-8")).decode("ascii")
+
+
+DECODERS = [
+    (decode_payment_required, PAYMENT_REQUIRED_HEADER, required_msg),
+    (decode_payment_signature, PAYMENT_SIGNATURE_HEADER, payment_msg),
+    (decode_payment_response, PAYMENT_RESPONSE_HEADER, lambda **o: dict(SETTLE, **o)),
+]
+DECODER_IDS = ["required", "signature", "response"]
+
+
+def assert_no_leak(exc, *secrets):
+    text = str(exc) + repr(exc) + exc.reason + repr(exc.errors) + repr(exc.args)
+    for s in (MARKER,) + secrets:
+        assert s not in text
+
+
+# --- round trips ----------------------------------------------------------------
+
+def test_payment_required_round_trip():
+    m = PaymentRequired.model_validate(required_msg())
+    value = encode_payment_required(m)
+    assert decode_payment_required(value) == m
+
+
+def test_payment_signature_round_trip():
+    m = PaymentPayloadV2.model_validate(payment_msg())
+    assert decode_payment_signature(encode_payment_signature(m)) == m
+
+
+def test_payment_response_round_trip():
+    m = SettleResponseV2.model_validate(SETTLE)
+    assert decode_payment_response(encode_payment_response(m)) == m
+
+
+def test_encoding_is_base64_of_compact_json_without_none():
+    m = PaymentRequired.model_validate(required_msg())
+    value = encode_payment_required(m)
+    text = base64.b64decode(value).decode("utf-8")
+    assert text == json.dumps(required_msg(), separators=(",", ":"))
+    assert " " not in text.replace("Payment required", "").replace("Postage stamp purchase", "")
+    assert "null" not in text
+
+
+def test_encoding_writes_utf8_not_escapes_like_json_stringify():
+    m = PaymentRequired.model_validate(required_msg(error="Zahlung erforderlich ü"))
+    text = base64.b64decode(encode_payment_required(m)).decode("utf-8")
+    assert "ü" in text and "\\u00fc" not in text
+
+
+@pytest.mark.parametrize("encoder,wrong", [
+    (encode_payment_required, SettleResponseV2.model_validate(SETTLE)),
+    (encode_payment_signature, PaymentRequired.model_validate(required_msg())),
+    (encode_payment_response, dict(SETTLE)),
+])
+def test_encoder_refuses_the_wrong_type(encoder, wrong):
+    with pytest.raises(TypeError):
+        encoder(wrong)
+
+
+# --- size -------------------------------------------------------------------------
+
+def test_header_limit_value():
+    assert MAX_HEADER_CHARS == 8192
+
+
+@pytest.mark.parametrize("decode,name,_", DECODERS, ids=DECODER_IDS)
+def test_oversized_value_is_refused_before_decoding(decode, name, _):
+    value = "A" * (MAX_HEADER_CHARS + 1)  # valid base64 alphabet, would decode
+    with pytest.raises(PaymentHeaderTooLarge) as exc:
+        decode(value)
+    assert exc.value.code == "PAYMENT_HEADER_TOO_LARGE"
+    assert exc.value.header_name == name
+    assert str(MAX_HEADER_CHARS + 1) in str(exc.value)
+
+
+def test_value_at_the_limit_passes_the_size_check():
+    # 8192 characters of base64 is not a valid message, but it gets past the
+    # size check and fails later, as malformed.
+    value = "A" * MAX_HEADER_CHARS
+    with pytest.raises(PaymentHeaderMalformed):
+        decode_payment_required(value)
+
+
+def test_real_message_near_the_limit_decodes():
+    # Grow the description until the header is just under the limit.
+    lo, hi = 0, MAX_HEADER_CHARS
+    while lo < hi:
+        mid = (lo + hi + 1) // 2
+        msg = required_msg(error="e" * mid)
+        if len(b64(msg)) <= MAX_HEADER_CHARS:
+            lo = mid
+        else:
+            hi = mid - 1
+    value = b64(required_msg(error="e" * lo))
+    assert MAX_HEADER_CHARS - 4 < len(value) <= MAX_HEADER_CHARS
+    assert decode_payment_required(value).error == "e" * lo
+    with pytest.raises(PaymentHeaderTooLarge):
+        decode_payment_required(b64(required_msg(error="e" * (lo + 3))))
+
+
+def test_encoder_refuses_a_header_over_the_limit():
+    m = PaymentRequired.model_validate(required_msg(accepts=[dict(OFFER)] * 40))
+    with pytest.raises(PaymentHeaderTooLarge) as exc:
+        encode_payment_required(m)
+    assert exc.value.code == "PAYMENT_HEADER_TOO_LARGE"
+
+
+# --- bad base64 ---------------------------------------------------------------------
+
+GOOD = b64(required_msg())
+
+
+@pytest.mark.parametrize("value", [
+    "",
+    "!!!!",
+    MARKER + "$",
+    "e30",                                  # "{}" with its padding removed
+    GOOD[:10] + " " + GOOD[10:],            # embedded space
+    GOOD[:10] + "\n" + GOOD[10:],           # embedded newline
+    " " + GOOD,
+    GOOD + "\n",
+    GOOD.replace("+", "-").replace("/", "_") if ("+" in GOOD or "/" in GOOD) else GOOD[:-4] + "-_-_",
+    "QQ==QQ==",                             # data after padding
+    "QR==",                                 # non-zero padding bits: not canonical
+])
+def test_bad_base64_is_malformed(value):
+    with pytest.raises(PaymentHeaderMalformed) as exc:
+        decode_payment_required(value)
+    assert exc.value.code == "PAYMENT_HEADER_MALFORMED"
+    assert_no_leak(exc.value)
+
+
+def test_url_safe_alphabet_is_refused():
+    raw = b"\xfb\xff\xfe" + json.dumps(required_msg()).encode()
+    with pytest.raises(PaymentHeaderMalformed):
+        decode_payment_required(base64.urlsafe_b64encode(raw).decode())
+
+
+@pytest.mark.parametrize("decode,_name,_msg", DECODERS, ids=DECODER_IDS)
+def test_non_text_value_is_malformed(decode, _name, _msg):
+    with pytest.raises(PaymentHeaderMalformed):
+        decode(GOOD.encode())
+    with pytest.raises(PaymentHeaderMalformed):
+        decode(None)
+
+
+# --- not a JSON object ----------------------------------------------------------------
+
+@pytest.mark.parametrize("raw", [
+    b"\xff\xfe" + MARKER.encode(),           # not UTF-8
+    MARKER.encode(),                          # not JSON
+    b'{"x402Version": 2,',                    # truncated JSON
+    b"\xef\xbb\xbf{}",                        # UTF-8 BOM
+    b"[]", b"[" + json.dumps(MARKER).encode() + b"]", b'"' + MARKER.encode() + b'"', b"2", b"null", b"true",
+    b'{"x402Version":2,"error":"' + MARKER.encode() + b'","error":"x"}',  # duplicate key
+    b'{"a":NaN}', b'{"a":Infinity}', b'{"a":-Infinity}',
+    b"[" * 100000,                           # deep nesting (also over the size limit once encoded)
+])
+@pytest.mark.parametrize("decode,_name,_msg", DECODERS, ids=DECODER_IDS)
+def test_not_a_json_object_is_malformed(decode, _name, _msg, raw):
+    value = base64.b64encode(raw).decode()
+    with pytest.raises((PaymentHeaderMalformed, PaymentHeaderTooLarge)) as exc:
+        decode(value)
+    assert_no_leak(exc.value)
+
+
+def test_deep_nesting_within_the_limit_is_malformed():
+    value = base64.b64encode(b"[" * 6000).decode()
+    assert len(value) <= MAX_HEADER_CHARS
+    with pytest.raises(PaymentHeaderMalformed):
+        decode_payment_signature(value)
+
+
+# --- validation -------------------------------------------------------------------------
+
+def _invalid(decode, msg):
+    with pytest.raises(PaymentHeaderInvalid) as exc:
+        decode(b64(msg))
+    assert exc.value.code == "PAYMENT_HEADER_INVALID"
+    return exc.value
+
+
+def test_missing_required_field_is_invalid_and_names_it():
+    msg = required_msg()
+    del msg["accepts"][0]["payTo"]
+    err = _invalid(decode_payment_required, msg)
+    assert err.errors == [("accepts.0.payTo", "missing")]
+    assert "accepts.0.payTo (missing)" in str(err)
+
+
+def test_missing_payload_field_is_invalid():
+    msg = payment_msg()
+    del msg["payload"]["authorization"]["nonce"]
+    err = _invalid(decode_payment_signature, msg)
+    assert err.errors == [("payload.authorization.nonce", "missing")]
+
+
+def test_settle_response_without_network_is_invalid():
+    msg = dict(SETTLE)
+    del msg["network"]
+    assert _invalid(decode_payment_response, msg).errors == [("network", "missing")]
+
+
+def test_bad_caip2_network_is_invalid_without_echoing_it():
+    err = _invalid(decode_payment_required, required_msg(accepts=[dict(OFFER, network="base-" + MARKER)]))
+    assert err.errors == [("accepts.0.network", "value_error")]
+    assert_no_leak(err)
+    err = _invalid(decode_payment_signature, payment_msg(accepted=dict(OFFER, network=MARKER.lower())))
+    assert err.errors[0][0] == "accepted.network"
+    assert_no_leak(err, MARKER.lower())
+
+
+@pytest.mark.parametrize("accepts", [[], [dict(OFFER)] * 1025])
+def test_accepts_out_of_range_is_invalid(accepts):
+    # 1025 offers do not fit in 8192 characters: the size limit answers first.
+    with pytest.raises((PaymentHeaderInvalid, PaymentHeaderTooLarge)) as exc:
+        decode_payment_required(b64(required_msg(accepts=accepts)))
+    if not accepts:
+        assert exc.value.errors == [("accepts", "too_short")]
+    else:
+        assert isinstance(exc.value, PaymentHeaderTooLarge)
+
+
+def test_accepts_over_1024_is_invalid_at_the_model_even_without_the_header_limit():
+    from pydantic import ValidationError
+    with pytest.raises(ValidationError):
+        PaymentRequired.model_validate(required_msg(accepts=[dict(OFFER)] * 1025))
+
+
+@pytest.mark.parametrize("amount", ["1.5", "-1", "1e6", "abc", "", MARKER])
+def test_invalid_amount_string_is_invalid_without_echoing_it(amount):
+    err = _invalid(decode_payment_required, required_msg(accepts=[dict(OFFER, amount=amount)]))
+    assert err.errors == [("accepts.0.amount", "value_error")]
+    assert_no_leak(err)
+    err = _invalid(decode_payment_signature, payment_msg(accepted=dict(OFFER, amount=amount)))
+    assert err.errors == [("accepted.amount", "value_error")]
+
+
+def test_many_errors_are_summarised():
+    msg = payment_msg()
+    msg["payload"]["authorization"] = {}
+    err = _invalid(decode_payment_signature, msg)
+    assert len(err.errors) == 6
+    assert "and 1 more" in str(err)
+
+
+def test_invalid_error_never_echoes_values():
+    msg = payment_msg()
+    msg["payload"]["signature"] = 12345678  # wrong type
+    msg["payload"]["authorization"]["value"] = MARKER
+    msg["accepted"]["payTo"] = ["0x" + MARKER]
+    err = _invalid(decode_payment_signature, msg)
+    assert_no_leak(err, "12345678")
+
+
+# --- version ----------------------------------------------------------------------------
+
+@pytest.mark.parametrize("decode,_name,make", DECODERS[:2], ids=DECODER_IDS[:2])
+@pytest.mark.parametrize("version", [1, 3, 0])
+def test_other_x402_version_is_a_version_mismatch(decode, _name, make, version):
+    with pytest.raises(PaymentHeaderVersionMismatch) as exc:
+        decode(b64(make(x402Version=version)))
+    assert exc.value.code == "X402_VERSION_UNSUPPORTED"
+    assert isinstance(exc.value, X402HeaderError)
+
+
+@pytest.mark.parametrize("version", ["2", True, None, 2.5])
+def test_non_integer_version_is_invalid(version):
+    with pytest.raises(PaymentHeaderInvalid):
+        decode_payment_signature(b64(payment_msg(x402Version=version)))
+
+
+def test_version_written_as_2_point_0_is_2():
+    # JSON.parse reads 2.0 as the number 2, so @x402/core accepts it; so do we.
+    m = decode_payment_signature(base64.b64encode(
+        json.dumps(payment_msg()).replace('"x402Version": 2', '"x402Version": 2.0').encode()).decode())
+    assert m.x402_version == 2 and type(m.x402_version) is int
+
+
+def test_missing_version_is_invalid():
+    msg = payment_msg()
+    del msg["x402Version"]
+    assert _invalid(decode_payment_signature, msg).errors == [("x402Version", "missing")]
+
+
+def test_v1_payment_in_the_v2_header_is_a_version_mismatch():
+    v1 = {"x402Version": 1, "scheme": "exact", "network": "base-sepolia",
+          "payload": payment_msg()["payload"]}
+    with pytest.raises(PaymentHeaderVersionMismatch):
+        decode_payment_signature(b64(v1))
+
+
+# --- the error type -------------------------------------------------------------------------
+
+def test_every_error_is_a_value_error_with_a_code_and_header_name():
+    for cls, code in [(PaymentHeaderTooLarge, "PAYMENT_HEADER_TOO_LARGE"),
+                      (PaymentHeaderMalformed, "PAYMENT_HEADER_MALFORMED"),
+                      (PaymentHeaderInvalid, "PAYMENT_HEADER_INVALID"),
+                      (PaymentHeaderVersionMismatch, "X402_VERSION_UNSUPPORTED")]:
+        assert issubclass(cls, X402HeaderError) and issubclass(cls, ValueError)
+        assert cls.code == code
+
+
+def test_errors_carry_no_exception_chain():
+    # A chained pydantic or json error would carry the input in its text.
+    for value in ["!!", b64(MARKER), b64(payment_msg(accepted=dict(OFFER, network=MARKER)))]:
+        with pytest.raises(X402HeaderError) as exc:
+            decode_payment_signature(value)
+        assert exc.value.__cause__ is None
+        assert exc.value.__suppress_context__
