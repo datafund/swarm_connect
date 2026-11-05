@@ -22,8 +22,9 @@ deploy.yml labels 3 as a refusal and anything else as a check that could not
 run, so a compose or daemon error is not reported as a bad configuration.
 
 It loads settings the way the app does (importing app.core.config) and calls
-the same validate_x402_config() the app's startup calls, so the two cannot
-disagree. Nothing else from startup runs: no Bee, no HTTP client, no pool, no
+the same validate_x402_config() the app's startup calls, and with x402 v2
+enabled the same check_facilitator_v2_support() (one GET /supported to the
+facilitator, #608), so the two cannot disagree. Nothing else from startup runs: no Bee, no HTTP client, no pool, no
 state files.
 
 The output goes to the deploy log, which is public for this repository. It
@@ -42,10 +43,12 @@ REFUSAL_PREFIX = "Refusing to start with x402 enabled"
 
 
 def main() -> int:
+    import asyncio
     from app.core.config import settings
     from app.x402 import facilitator
     try:
         facilitator.validate_x402_config()
+        asyncio.run(facilitator.check_facilitator_v2_support())
     except RuntimeError as e:
         if str(e).startswith(REFUSAL_PREFIX):
             # Its messages name settings, never their secret values.

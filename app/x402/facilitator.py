@@ -165,3 +165,54 @@ def validate_x402_config() -> None:
     used = get_facilitator_client().config["url"] if uses_cdp else url
     logger.info(f"x402 configuration OK: network={network}, facilitator={used}"
                 + (" (CDP auth)" if uses_cdp else " (bearer auth)" if settings.X402_FACILITATOR_BEARER_TOKEN else ""))
+
+
+def _v2_refusal(reason: str) -> RuntimeError:
+    return RuntimeError(
+        "Refusing to start with x402 enabled: " + f"X402_PROTOCOL_VERSIONS includes 2, but {reason}. The gateway advertises and "
+        f"accepts x402 v2 only with a facilitator that settles it; fix the facilitator, or set "
+        f"X402_PROTOCOL_VERSIONS=1")
+
+
+async def check_facilitator_v2_support(client: Optional[FacilitatorClient] = None) -> None:
+    """With x402 v2 enabled, refuse to start unless the facilitator settles it (#608, D3 in #596).
+
+    Calls GET {facilitator}/supported once and requires a kind with
+    x402Version 2, scheme "exact" and the configured network as its CAIP-2 id
+    (eip155:84532, not base-sepolia). Fails closed: an unreachable facilitator,
+    or an answer that cannot be read, is refused like one that does not list
+    it. Does nothing when x402 is off or 2 is not enabled, so the default
+    configuration never calls /supported.
+
+    Messages name the facilitator host and what it lists, never a credential.
+    """
+    if not settings.X402_ENABLED or 2 not in settings.x402_protocol_versions():
+        return
+    from app.x402.networks import to_caip2
+    network = to_caip2(settings.X402_NETWORK)
+    client = client or get_facilitator_client()
+    host = _host(client.config["url"]) or "the facilitator"
+    import httpx
+    from pydantic import ValidationError
+    try:
+        answer = await client.supported()
+    except httpx.HTTPError as e:
+        raise _v2_refusal(f"the facilitator's /supported on {host} could not be reached "
+                          f"({type(e).__name__}), so it is unknown whether it settles x402 v2 exact "
+                          f"on {network}") from None
+    except (ValidationError, ValueError, TypeError) as e:
+        # ValueError covers a body that is not JSON; TypeError one that is not an object.
+        raise _v2_refusal(f"the facilitator's /supported on {host} answered with something that is not "
+                          f"a list of payment kinds ({type(e).__name__}; an authentication error "
+                          f"answers like this)") from None
+    kinds = answer.kinds
+    if any(k.x402_version == 2 and k.scheme == "exact" and k.network == network for k in kinds):
+        logger.info(f"x402 v2: the facilitator on {host} settles x402 v2 exact on {network}")
+        return
+    v2_exact = sorted({k.network for k in kinds if k.x402_version == 2 and k.scheme == "exact"})
+    on_network = sorted({f"v{k.x402_version} {k.scheme}" for k in kinds
+                         if to_caip2(k.network) == network})
+    raise _v2_refusal(
+        f"the facilitator on {host} does not list x402Version 2, scheme exact, network {network} in "
+        f"/supported (it lists v2 exact for {v2_exact or 'no network'}; for {network}, in either "
+        f"name form: {on_network or 'nothing'})")

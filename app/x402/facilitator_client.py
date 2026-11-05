@@ -39,8 +39,8 @@ facilitator-side switches it never priced. Answers are classified by status
 
 tests/test_x402_facilitator_differential.py runs verify and settle through
 this client and through x402 1.0.0 against a stub server and compares the
-requests and results. supported() has no 1.0.0 counterpart; nothing in app/
-calls it yet (#608).
+requests and results. supported() has no 1.0.0 counterpart; the startup
+check for x402 v2 calls it (facilitator.check_facilitator_v2_support, #608).
 """
 import inspect
 from typing import Any, Callable, Optional
@@ -153,8 +153,8 @@ class FacilitatorClient:
     async def supported(self) -> SupportedResponse:
         """GET {url}/supported: the payment kinds the facilitator settles.
 
-        Same headers, timeout and parsing rule as verify and settle. Not called
-        by the gateway yet (#608)."""
+        Same headers, timeout and parsing rule as verify and settle. Called at
+        startup when x402 v2 is enabled (facilitator.check_facilitator_v2_support, #608)."""
         headers = await self._headers("supported")
         async with self._client() as client:
             response = await client.get(f"{self.config['url']}/supported", headers=headers,
