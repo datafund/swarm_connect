@@ -166,6 +166,22 @@ def test_image_smoke_checks_root_with_curl_fail_and_a_timeout():
     assert smoke.rstrip().endswith("exit 1")
 
 
+def test_image_runs_the_x402_config_check_in_the_running_container():
+    """The issue's verification step: python -m app.x402.check_config inside the
+    built image, after GET / answered, and before the container is removed."""
+    blocks = _run_blocks(IMAGE_YML.read_text())
+    checks = [i for i, b in enumerate(blocks)
+              if re.fullmatch(r'docker exec "?\$CONTAINER"? python -m app\.x402\.check_config', b)]
+    assert len(checks) == 1, f"expected one x402 config check in image.yml, found {checks}"
+    smoke = next(i for i, b in enumerate(blocks) if "docker run" in b)
+    remove = next(i for i, b in enumerate(blocks) if b.startswith("docker rm -f "))
+    assert smoke < checks[0] < remove
+    swallow = re.compile(r"\|\|\s*(true|:|exit 0)\b|;\s*(true|:|exit 0)\s*$")
+    assert not swallow.search(blocks[checks[0]])
+    # Its step is not allowed to fail quietly.
+    assert "continue-on-error" not in IMAGE_YML.read_text()
+
+
 def test_image_smoke_always_removes_the_container():
     text = IMAGE_YML.read_text()
     assert re.search(r"if:\s*always\(\)\s*\n\s*run:\s*docker rm -f ", text)
