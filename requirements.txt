@@ -13,7 +13,7 @@
 fastapi>=0.95.0
 uvicorn[standard]>=0.24.0  # ASGI server with performance extras; --timeout-graceful-shutdown
 httpx2>=2.16.0             # The gateway's own HTTP client (Bee API, Base RPC, price feed; #595)
-httpx>=0.24.0              # The gateway's facilitator client (app/x402/facilitator_client.py), fastapi-cloud-cli and scripts/flood_replay.py
+httpx>=0.24.0              # Not used by app/: x402 1.0.0 (test oracle), fastapi-cloud-cli and scripts/flood_replay.py
 python-dotenv>=1.0.0      # For loading .env files
 pydantic[email]>=1.10.0   # Used by FastAPI, explicitly listed
 pydantic-settings>=2.0.0  # Separate settings for pydantic
