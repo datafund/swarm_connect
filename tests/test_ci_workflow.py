@@ -27,7 +27,7 @@ import textwrap
 from pathlib import Path
 
 import pytest
-import yaml
+import yaml  # declared in requirements-dev.txt (#430)
 
 REPO = Path(__file__).resolve().parent.parent
 TESTS_YML = REPO / ".github" / "workflows" / "tests.yml"
@@ -243,7 +243,19 @@ def test_image_checks_tls_trust_offline_in_the_running_container():
         assert not re.search(swallow, shell), swallow
 
     script = _tls_check_script()
-    compile(script, "image.yml TLS check", "exec")
+    tree = ast.parse(script, "image.yml TLS check")
+    # No way out before the checks run: no sys.exit/os._exit/exit/quit call,
+    # and no SystemExit raised.
+    early_exits = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call):
+            f = node.func
+            name = f.attr if isinstance(f, ast.Attribute) else getattr(f, "id", "")
+            if name in ("exit", "_exit", "quit"):
+                early_exits.append(f"line {node.lineno}: {ast.unparse(node)}")
+        if isinstance(node, ast.Raise) and node.exc is not None and "SystemExit" in ast.unparse(node.exc):
+            early_exits.append(f"line {node.lineno}: {ast.unparse(node)}")
+    assert not early_exits, early_exits
     # Offline: the container runs with --network none, and the check reaches
     # nothing but its own server on 127.0.0.1.
     assert re.findall(r"https?://[^\s\"'/{]*", script) == ["https://127.0.0.1:"]
