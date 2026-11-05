@@ -689,3 +689,46 @@ def test_v2_header_is_not_read_while_v2_is_off(gw):
     r = client.post("/api/v1/stamps/", headers=pay(2, offer, nonce=nonce))
     assert r.status_code == 503 and r.json()["detail"]["code"] == "PAYMENTS_UNAVAILABLE"
     assert fac.calls == []
+
+
+# --------------------------------------------------------------------------
+# A pruned v2 claim leaves no version behind (#645 review)
+# --------------------------------------------------------------------------
+
+def test_pruned_v2_claim_does_not_label_a_later_v1_entry(monkeypatch):
+    from starlette.responses import Response
+    from app.x402 import idempotency
+    from app.x402.idempotency import DONE, IN_FLIGHT_TIMEOUT_SECONDS, idempotency_store as store
+    eid = idempotency.entry_id(PAYER, "POST", "/api/v1/stamps/", "k-pruned")
+    now = [1_000_000.0]
+    monkeypatch.setattr(idempotency.time, "time", lambda: now[0])
+    state, _, _ = store.begin(eid, "h", "auth-v2", version=2)       # a v2 claim that never ends
+    assert state == "new"
+    now[0] += IN_FLIGHT_TIMEOUT_SECONDS + 1                           # its claim is pruned
+    state, _, token = store.begin(eid, "h", "auth-v1", version=1)
+    assert state == "new"
+    assert eid not in store._versions
+    store.mark_settled(eid, token, "auth-v1", "0x" + "ab" * 32, persist="none")
+    store.complete(eid, token, Response(b"{}", status_code=200, headers={"X-PAYMENT-RESPONSE": "r1"}),
+                   persist="none")
+    entry = store._entries[eid]
+    assert entry["state"] == DONE and "version" not in entry
+    assert entry["headers"]["x-payment-response"] == "r1" and "payment-response" not in entry["headers"]
+    # A v1 retry is replayed with the v1 receipt, not refused as another version.
+    state, replay, _ = store.begin(eid, "h", "auth-v1-retry", version=1)
+    assert state == DONE
+    assert idempotency._replay_response(replay, PAYER).headers["x-payment-response"] == "r1"
+
+
+def test_prune_drops_markers_of_expired_claims(monkeypatch):
+    from app.x402 import idempotency
+    from app.x402.idempotency import IN_FLIGHT_TIMEOUT_SECONDS, idempotency_store as store
+    now = [2_000_000.0]
+    monkeypatch.setattr(idempotency.time, "time", lambda: now[0])
+    eid = idempotency.entry_id(PAYER, "POST", "/api/v1/stamps/", "k-prune-2")
+    store.begin(eid, "h", "a", version=2)
+    assert store._versions[eid] == 2
+    now[0] += IN_FLIGHT_TIMEOUT_SECONDS + 1
+    other = idempotency.entry_id(PAYER, "POST", "/api/v1/stamps/", "k-other")
+    store.begin(other, "h", "b", version=1)                            # prunes on the way
+    assert eid not in store._versions

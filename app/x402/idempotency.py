@@ -377,6 +377,9 @@ class IdempotencyStore:
         # A final result whose interim one was never stored has nothing to replace.
         for k in [k for k in self._resolved if k not in self._pending]:
             del self._resolved[k]
+        # A version marker belongs to a pending claim only (#607).
+        for k in [k for k in self._versions if k not in self._pending]:
+            del self._versions[k]
         return bool(expired)
 
     def _enforce_cap(self) -> None:
@@ -430,8 +433,11 @@ class IdempotencyStore:
             return entry["state"], entry, None
         token = secrets.token_hex(8)
         self._pending[eid] = (request_hash, now + IN_FLIGHT_TIMEOUT_SECONDS, token)
+        # Set for this claim, or cleared, so no earlier claim's marker survives.
         if version == 2:
             self._versions[eid] = 2
+        else:
+            self._versions.pop(eid, None)
         return "new", None, token
 
     def _note_version(self, eid: str, previous: Optional[dict] = None) -> None:
