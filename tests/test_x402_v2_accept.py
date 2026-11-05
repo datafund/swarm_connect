@@ -29,8 +29,8 @@ from app.x402.settlement import replay_guard
 from tests import test_x402_v1_golden as golden
 from tests import test_x402_v2_payment_header as v2h
 from tests.x402_v2_builders import (
-    PAYER, authorization, encode, header_for, nonce_hex, other_receipt_header, pay,
-    receipt_header, v1_payload, v2_accepted, v2_payload,
+    PAYER, advertised, authorization, encode, expected_payment_required, header_for, nonce_hex,
+    other_receipt_header, pay, receipt_header, v1_payload, v2_accepted, v2_payload,
 )
 
 URL = "https://facilitator.example"
@@ -126,10 +126,15 @@ def _settled(version):
 
 
 def _v1_body_402(r):
+    """The v1 body of a 402, and with v2 enabled (#608) its PAYMENT-REQUIRED
+    header advertising the same offer."""
     body = r.json()
     assert body["x402Version"] == 1 and len(body["accepts"]) == 1
     assert body["accepts"][0]["network"] == "base-sepolia"
-    assert "PAYMENT-REQUIRED" not in r.headers      # #608
+    if 2 in settings.x402_protocol_versions():
+        assert advertised(r) == expected_payment_required(body)
+    else:
+        assert "PAYMENT-REQUIRED" not in r.headers
     return body
 
 

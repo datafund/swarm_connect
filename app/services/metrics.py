@@ -430,6 +430,18 @@ for _version in ("1", "2", "none"):
 x402_payments_total.labels(mode="version_unsupported", version="2")
 x402_payments_total.labels(mode="header_conflict", version="2")
 
+# A 402 sent without its PAYMENT-REQUIRED header although x402 v2 is enabled
+# (#608): the header would exceed codec_v2.MAX_HEADER_CHARS (too_large), or the
+# offer cannot be expressed in v2 (invalid). v2 clients cannot pay that 402.
+x402_payment_required_header_failures_total = Counter(
+    "gateway_x402_payment_required_header_failures_total",
+    "x402 402 answers sent without the PAYMENT-REQUIRED header while x402 v2 is enabled "
+    "(#608). reason: too_large (over the 8192-character limit) or invalid (the offer "
+    "cannot be expressed in v2)",
+    ["reason"],
+)
+X402_PAYMENT_REQUIRED_HEADER_FAILURES = ("too_large", "invalid")
+
 
 def ensure_x402_version_series(versions) -> None:
     """Pre-create the series of the enabled x402 versions (#607).
@@ -437,12 +449,16 @@ def ensure_x402_version_series(versions) -> None:
     With 2 enabled, every settlement result for version="2" (the "x402
     settlement problems" alert relies on increase(), which misses a series
     first seen at 1). With 1 not enabled ("2" alone), the X-PAYMENT refusal,
-    version_unsupported for version="1". Called at import with the setting."""
+    version_unsupported for version="1". With 2 enabled, the PAYMENT-REQUIRED
+    header failures too (#608). Called at import with the setting."""
     if 2 in versions:
         for result in X402_SETTLEMENT_RESULTS:
             x402_settlements_total.labels(result=result, version="2")
     if 1 not in versions:
         x402_payments_total.labels(mode="version_unsupported", version="1")
+    if 2 in versions:
+        for reason in X402_PAYMENT_REQUIRED_HEADER_FAILURES:
+            x402_payment_required_header_failures_total.labels(reason=reason)
 
 
 ensure_x402_version_series(settings.x402_protocol_versions())
