@@ -21,7 +21,7 @@ import time
 from typing import Optional
 from urllib.parse import urljoin
 
-import httpx
+import httpx2
 from fastapi import APIRouter, Header, HTTPException, Request, status
 from fastapi.responses import Response
 
@@ -89,7 +89,7 @@ async def debug_bee(
     try:
         client = get_client()
         resp = await client.get(url, timeout=15)
-    except httpx.HTTPError as e:
+    except httpx2.HTTPError as e:
         logger.warning(f"debug proxy: Bee request failed ({url}): {exc_text(e)}")
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="Bee node request failed")
 

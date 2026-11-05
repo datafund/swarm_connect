@@ -226,19 +226,13 @@ _RESOURCE_FIELDS = ("batchID", "batch_id", "reference", "credited_bytes")
 def _task_is_being_cancelled() -> bool:
     """Whether this request's own task is being cancelled.
 
-    Task.cancelling() exists from Python 3.11. Python 3.10 offers no reliable
-    way to tell a cancellation of this task from an inner CancelledError, so
-    there every CancelledError counts as a real cancellation and is re-raised:
-    the safe choice, since swallowing a real one would keep a cancelled task
-    running. The outcome is recorded either way (settlement_interrupted).
+    Tells a cancellation of this task (which must be re-raised, or the task
+    would keep running) from an inner CancelledError, such as a cancelled
+    facilitator call (which gets the structured 502). The outcome is recorded
+    either way (settlement_interrupted).
     """
     task = asyncio.current_task()
-    if task is None:
-        return False
-    cancelling = getattr(task, "cancelling", None)
-    if cancelling is None:          # Python 3.10
-        return True
-    return bool(cancelling())
+    return task is not None and task.cancelling() > 0
 
 
 def _settlement_unknown_response(request: Request) -> JSONResponse:

@@ -137,8 +137,10 @@ proxy; an agent on the same host or network reaches it directly.
 
 **Every Bee call fails with `PoolTimeout` while Bee itself answers.** The
 shared HTTP client's pool can fill with slots that hold no connection: httpcore
-keeps a slot when a request is cancelled (a client disconnect, a timeout) right
-after the pool gave it a new connection. The gateway replaces the client by
+1.0.9 kept a slot when a request is cancelled (a client disconnect, a timeout)
+right after the pool gave it a new connection. Since #595 the gateway uses
+httpx2/httpcore2, which fixed that leak; the recovery below stays as a backstop.
+The gateway replaces the client by
 itself when there were `BEE_HTTP_POOL_RECOVERY_THRESHOLD` `PoolTimeout`s in a
 row, at least `BEE_HTTP_POOL_STUCK_FRACTION` of the pool is stuck, and Bee
 answers `GET /health` on a new connection. Watch
@@ -153,8 +155,15 @@ the pool.
 **The shared HTTP client ignores proxy environment variables.** Bee API and
 Base RPC calls go out directly even when `HTTP_PROXY`, `HTTPS_PROXY` or
 `ALL_PROXY` is set in the container: the client is built with its own
-transport (#587), and httpx applies those variables only to clients without
+transport (#587), and httpx2 applies those variables only to clients without
 one. Bee is on the compose network and must not go through a proxy.
+
+**HTTPS calls fail certificate verification.** The gateway's HTTP client
+(httpx2, #595) does not bundle certifi: in the image it verifies against the OS
+CA bundle from Debian's `ca-certificates` package
+(`/etc/ssl/certs/ca-certificates.crt`), which the pull request's image build
+checks. A custom base image needs that package, or `SSL_CERT_FILE` pointing at
+a CA bundle. Outbound calls carry `User-Agent: python-httpx2/<version>`.
 
 **Floods (#588).** Three things keep a flood of cheap requests from turning
 into load on Bee:

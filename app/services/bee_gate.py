@@ -38,7 +38,7 @@ from collections import deque
 from typing import Deque, Dict, Optional, Tuple
 from urllib.parse import urlsplit
 
-import httpx
+import httpx2
 
 from app.core.config import settings
 
@@ -50,10 +50,10 @@ REQUEST_CLASSES = ("user", "transfer", "committed")
 TRANSFER_PATHS = ("bzz", "bytes", "chunks")
 
 
-class BeeBusyError(httpx.TransportError):
+class BeeBusyError(httpx2.TransportError):
     """No Bee call slot was free in time.
 
-    A TransportError, so the existing `except httpx.HTTPError` paths fail the
+    A TransportError, so the existing `except httpx2.HTTPError` paths fail the
     call as they would for any other transport failure. It is not a
     PoolTimeout, so the #587 recovery does not count it.
     """
@@ -126,13 +126,13 @@ def _bee_base_path() -> str:
     return urlsplit(str(settings.SWARM_BEE_API_URL)).path.rstrip("/")
 
 
-def is_bee_request(request: httpx.Request) -> bool:
+def is_bee_request(request: httpx2.Request) -> bool:
     url = request.url
     port = url.port or (443 if url.scheme == "https" else 80)
     return (url.scheme, (url.host or "").lower(), port) == _bee_origin()
 
 
-def is_transfer(request: httpx.Request) -> bool:
+def is_transfer(request: httpx2.Request) -> bool:
     path = request.url.path
     base = _bee_base_path()
     if base and path.startswith(base):
@@ -141,7 +141,7 @@ def is_transfer(request: httpx.Request) -> bool:
     return first in TRANSFER_PATHS
 
 
-def slot_class(request: httpx.Request) -> str:
+def slot_class(request: httpx2.Request) -> str:
     state = _request_state.get()
     if state is None:
         return "background"
@@ -290,7 +290,7 @@ def _count_rejection(cls: str) -> None:
 # --- Transport wrapper -------------------------------------------------------
 
 
-class _ReleasingStream(httpx.AsyncByteStream):
+class _ReleasingStream(httpx2.AsyncByteStream):
     """A response body that gives its slot back when closed."""
 
     def __init__(self, stream, slot: Slot) -> None:
@@ -308,13 +308,13 @@ class _ReleasingStream(httpx.AsyncByteStream):
             self._slot.release()
 
 
-class GatedTransport(httpx.AsyncBaseTransport):
+class GatedTransport(httpx2.AsyncBaseTransport):
     """Takes a gate slot for each Bee request, then hands it to `inner`."""
 
-    def __init__(self, inner: httpx.AsyncBaseTransport) -> None:
+    def __init__(self, inner: httpx2.AsyncBaseTransport) -> None:
         self.inner = inner
 
-    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+    async def handle_async_request(self, request: httpx2.Request) -> httpx2.Response:
         if not settings.BEE_CALL_GATE_ENABLED or not is_bee_request(request):
             return await self.inner.handle_async_request(request)
         slot = await bee_call_gate.acquire(slot_class(request))
@@ -334,5 +334,5 @@ class GatedTransport(httpx.AsyncBaseTransport):
         await self.inner.aclose()
 
 
-def wrap(transport: httpx.AsyncBaseTransport) -> GatedTransport:
+def wrap(transport: httpx2.AsyncBaseTransport) -> GatedTransport:
     return GatedTransport(transport)

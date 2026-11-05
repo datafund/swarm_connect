@@ -1,6 +1,6 @@
 # app/api/endpoints/wallet.py
 from fastapi import APIRouter, HTTPException
-import httpx
+import httpx2
 import logging
 
 from app.services.http_client import exc_text
@@ -31,7 +31,7 @@ async def get_wallet() -> WalletResponse:
             bzzBalance=wallet_info.get("bzzBalance")
         )
 
-    except httpx.HTTPError as e:
+    except httpx2.HTTPError as e:
         logger.error(f"Failed to fetch wallet information: {exc_text(e)}")
         raise HTTPException(
             status_code=502,
@@ -71,7 +71,7 @@ async def get_chequebook() -> ChequebookResponse:
             totalBalance=chequebook_info.get("totalBalance")
         )
 
-    except httpx.HTTPError as e:
+    except httpx2.HTTPError as e:
         logger.error(f"Failed to fetch chequebook information: {exc_text(e)}")
         raise HTTPException(
             status_code=502,

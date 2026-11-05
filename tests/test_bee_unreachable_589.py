@@ -16,7 +16,8 @@ What clients rely on, and these tests keep:
 import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import httpx
+import httpx  # x402's own facilitator client raises httpx errors, not httpx2 ones (#595)
+import httpx2
 import pytest
 import pytest_asyncio
 from fastapi import APIRouter, Depends, FastAPI
@@ -44,7 +45,7 @@ class RaisingBee:
 
     async def _fail(self, *a, **k):
         self.calls += 1
-        raise httpx.ConnectError("connection refused")
+        raise httpx2.ConnectError("connection refused")
 
     get = post = patch_ = delete = _fail
 
@@ -71,8 +72,8 @@ def x402_on(monkeypatch):
 @pytest_asyncio.fixture
 async def gw():
     from app.main import app
-    transport = httpx.ASGITransport(app=app)
-    async with httpx.AsyncClient(transport=transport, base_url="http://gw") as c:
+    transport = httpx2.ASGITransport(app=app)
+    async with httpx2.AsyncClient(transport=transport, base_url="http://gw") as c:
         yield c
 
 
@@ -107,8 +108,8 @@ class TestPreflight:
         monkeypatch.setattr(preflight, "get_wallet_info", AsyncMock(return_value={
             "walletAddress": "0xBee", "bzzBalance": str(100 * preflight.PLUR_PER_BZZ),
             "nativeTokenBalance": str(10 * preflight.WEI_PER_XDAI)}))
-        monkeypatch.setattr(preflight, "get_chequebook_info", AsyncMock(side_effect=httpx.ConnectError("x")))
-        monkeypatch.setattr(preflight, "get_chequebook_balance", AsyncMock(side_effect=httpx.ConnectError("x")))
+        monkeypatch.setattr(preflight, "get_chequebook_info", AsyncMock(side_effect=httpx2.ConnectError("x")))
+        monkeypatch.setattr(preflight, "get_chequebook_balance", AsyncMock(side_effect=httpx2.ConnectError("x")))
         r = await preflight.check_preflight_balances()
         assert r["chequebook_ok"] is False
         assert r["can_accept"] is True
@@ -334,8 +335,8 @@ class TestPaymentGate:
         router = APIRouter(dependencies=[Depends(require_x402_payment)])
         router.add_api_route("/api/v1/stamps/", _bought, methods=["POST"])
         app.include_router(router)
-        transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(transport=transport, base_url="http://gw") as c:
+        transport = httpx2.ASGITransport(app=app)
+        async with httpx2.AsyncClient(transport=transport, base_url="http://gw") as c:
             for _ in range(20):
                 r = await c.post("/api/v1/stamps/", headers=PAYMENT)
                 assert r.status_code == 503
@@ -646,7 +647,7 @@ class TestBeeBusyNeverHidesPaymentsUnavailable:
         async def refused_bee_call_then_payment(request: "Request"):
             try:
                 raise bee_call_gate._refuse("user", 0.0)
-            except httpx.HTTPError:
+            except httpx2.HTTPError:
                 pass
             await require_x402_payment(request)
 

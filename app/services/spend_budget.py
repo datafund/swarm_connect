@@ -79,7 +79,7 @@ def spend_certainly_did_not_happen(exc: BaseException) -> bool:
     anything unrecognised may have spent money, so the hold is kept and the
     limits fail closed.
     """
-    import httpx
+    import httpx2
     from fastapi import HTTPException
     from app.services.bee_gate import BeeBusyError
     if isinstance(exc, HTTPException):
@@ -87,9 +87,9 @@ def spend_certainly_did_not_happen(exc: BaseException) -> bool:
     # Refused by the gateway's own Bee call gate (#588): never sent to Bee.
     if isinstance(exc, BeeBusyError):
         return True
-    if isinstance(exc, (httpx.ConnectError, httpx.ConnectTimeout)):
+    if isinstance(exc, (httpx2.ConnectError, httpx2.ConnectTimeout)):
         return True
-    if isinstance(exc, httpx.HTTPStatusError):
+    if isinstance(exc, httpx2.HTTPStatusError):
         return 400 <= exc.response.status_code < 500
     return False
 
