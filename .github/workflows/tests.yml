@@ -56,8 +56,8 @@ jobs:
     # the file it is compiled from (#430): someone edited requirements.txt or
     # requirements-dev.txt and did not regenerate. The script reruns the
     # command in each lock's header on a copy and diffs; see its header for
-    # what it catches. uv is pinned: another version can format a lock
-    # differently, and the script refuses anything but 0.11.x.
+    # what it catches. uv is pinned by version and hash: another version can
+    # format a lock differently, and the script refuses anything but 0.11.x.
     # Pull requests only: the check needs PyPI, and a pinned version that later
     # gains a wheel changes its hash list, so a deploy (deploy.yml calls this
     # workflow on push) must not fail on it. A lock that passed on its pull
@@ -71,7 +71,9 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: install uv (pinned)
-        run: python -m pip install "uv==0.11.17"
+      - name: install uv (pinned, hash-checked)
+        # .github/uv-pin.txt pins the version with the hash of every
+        # file PyPI has for it.
+        run: python -m pip install --no-deps --require-hashes -r .github/uv-pin.txt
       - name: locks match their inputs
         run: scripts/check_lock_sync.sh
