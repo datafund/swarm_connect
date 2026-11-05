@@ -10,6 +10,7 @@ import logging
 import secrets
 
 from app.x402.settlement import settle_payment
+from app.x402.openapi_docs import paid_route_openapi
 from app.core.config import settings
 from app.x402.networks import to_v1
 from app.x402.payment_headers import paid_version
@@ -848,7 +849,8 @@ async def _finish_pending_purchase(request: Request, label: str, depth: int, amo
     "/",
     response_model=StampPurchaseResponse,
     status_code=status.HTTP_201_CREATED,
-    summary="Purchase a New Swarm Postage Stamp"
+    summary="Purchase a New Swarm Postage Stamp",
+    openapi_extra=paid_route_openapi([201]),
 )
 async def purchase_stamp(
     request: Request,
@@ -1123,7 +1125,8 @@ def stamp_not_found(stamp_id: str) -> HTTPException:
 @router.patch(
     "/{stamp_id}/extend",
     response_model=StampExtensionResponse,
-    summary="Extend an Existing Swarm Postage Stamp"
+    summary="Extend an Existing Swarm Postage Stamp",
+    openapi_extra=paid_route_openapi([200]),
 )
 async def extend_stamp(
     request: Request,

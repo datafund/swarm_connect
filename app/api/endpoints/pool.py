@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 import logging
 
 from app.x402.settlement import settle_payment
+from app.x402.openapi_docs import paid_route_openapi
 from app.core.config import settings
 from app.services.stamp_pool import stamp_pool_manager, PoolStampStatus
 from app.services.swarm_api import get_batch_expiry
@@ -291,7 +292,9 @@ async def _refuse_allowance(
         "Acquire a stamp from the pool for immediate use. "
         "This is much faster than purchasing a new stamp (~5 seconds vs >1 minute). "
         "The stamp is released from the pool and becomes the caller's responsibility."
-    )
+    ),
+    # Payment is optional here (settle_payment_if_offered in app/main.py).
+    openapi_extra=paid_route_openapi([200], payment_optional=True),
 )
 async def acquire_stamp(
     request: AcquireStampRequest,
