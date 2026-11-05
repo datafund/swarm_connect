@@ -72,6 +72,38 @@ jobs:
         # x402 configuration code fails the pull request (#617).
         run: docker exec "$CONTAINER" python -m app.x402.check_config
 
+      - name: TLS trust inside the image (offline)
+        # httpx2 (#595) does not use certifi. On Linux it builds a verifying
+        # context from OpenSSL's default CA file, the OS bundle that Debian's
+        # ca-certificates package provides; truststore is used on macOS and
+        # Windows only. An image without that bundle would fail every HTTPS
+        # call (Base RPC, the price feed) at runtime, so this checks offline,
+        # in the running container, that the gateway's transport gets a
+        # verifying context with the OS CAs loaded. The live check against
+        # real hosts is on staging (#618).
+        run: |
+          docker exec -i "$CONTAINER" python - <<'PY'
+          import os, ssl
+          import httpx2, httpcore2
+          BUNDLE = "/etc/ssl/certs/ca-certificates.crt"
+          paths = ssl.get_default_verify_paths()
+          print(f"httpx2 {httpx2.__version__}, httpcore2 {httpcore2.__version__}, {ssl.OPENSSL_VERSION}")
+          print(f"OpenSSL default CA file: {paths.openssl_cafile}")
+          assert os.path.isfile(BUNDLE), f"{BUNDLE} is missing: is ca-certificates installed?"
+          with open(BUNDLE) as f:
+              in_bundle = f.read().count("-----BEGIN CERTIFICATE-----")
+          assert in_bundle >= 50, f"{BUNDLE} holds only {in_bundle} certificates"
+          # The gateway's shared client builds its transport this way (app/services/http_client.py).
+          ctx = httpx2.AsyncHTTPTransport()._pool._ssl_context
+          assert ctx.verify_mode == ssl.CERT_REQUIRED and ctx.check_hostname, "httpx2's context does not verify"
+          loaded = ctx.cert_store_stats()["x509_ca"]
+          assert loaded >= 50, f"httpx2's default context loaded {loaded} CA certificates"
+          bundle_ctx = ssl.create_default_context(cafile=BUNDLE)
+          assert bundle_ctx.verify_mode == ssl.CERT_REQUIRED
+          assert bundle_ctx.cert_store_stats()["x509_ca"] >= 50
+          print(f"OK: {in_bundle} certificates in {BUNDLE}; httpx2's verifying context has {loaded} CAs loaded")
+          PY
+
       - name: remove the container
         if: always()
         run: docker rm -f "$CONTAINER" || true

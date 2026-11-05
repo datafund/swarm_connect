@@ -13,6 +13,7 @@ CI, the image and the lock name one Python minor version, and the image's
 base is pinned by digest (#617).
 """
 import re
+import textwrap
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
@@ -185,6 +186,40 @@ def test_image_runs_the_x402_config_check_in_the_running_container():
 def test_image_smoke_always_removes_the_container():
     text = IMAGE_YML.read_text()
     assert re.search(r"if:\s*always\(\)\s*\n\s*run:\s*docker rm -f ", text)
+
+
+TLS_EXEC = 'docker exec -i "$CONTAINER" python - <<\'PY\''
+
+
+def _tls_check_script():
+    """The Python the TLS step feeds into the running container, indentation kept."""
+    text = IMAGE_YML.read_text()
+    m = re.search(r"^([ \t]*)" + re.escape(TLS_EXEC) + r"\n(.*?)^\1PY$", text, re.M | re.S)
+    assert m, "image.yml has no TLS trust check fed to python in the container"
+    return textwrap.dedent(m.group(2))
+
+
+def test_image_checks_tls_trust_offline_in_the_running_container():
+    """httpx2 trusts the OS CA bundle on Linux, not certifi (#595): the built
+    image must have it and httpx2 must load it, checked without any network."""
+    blocks = _run_blocks(IMAGE_YML.read_text())
+    tls = [i for i, b in enumerate(blocks) if b.startswith(TLS_EXEC)]
+    assert len(tls) == 1, f"expected one TLS trust check in image.yml, found {tls}"
+    smoke = next(i for i, b in enumerate(blocks) if "docker run" in b)
+    remove = next(i for i, b in enumerate(blocks) if b.startswith("docker rm -f "))
+    assert smoke < tls[0] < remove
+    swallow = re.compile(r"\|\|\s*(true|:|exit 0)\b")
+    assert not swallow.search(blocks[tls[0]])
+
+    script = _tls_check_script()
+    compile(script, "image.yml TLS check", "exec")
+    for needed in ('"/etc/ssl/certs/ca-certificates.crt"', "-----BEGIN CERTIFICATE-----",
+                   "httpx2.AsyncHTTPTransport()", "ssl.CERT_REQUIRED", "check_hostname",
+                   'cert_store_stats()["x509_ca"]', "ssl.create_default_context(cafile=BUNDLE)"):
+        assert needed in script, needed
+    # Offline: the container runs with --network none, and the check names no host.
+    assert not re.search(r"https?://", script)
+    assert "assert " in script and "except" not in script, "a failed check must fail the step"
 
 
 # --- one Python version everywhere, and a base image pinned by digest (#617)
