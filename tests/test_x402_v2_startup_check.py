@@ -43,6 +43,14 @@ def x402(monkeypatch):
     facilitator.reset_facilitator_client()
 
 
+class _Raw(httpx.AsyncByteStream):
+    def __init__(self, data: bytes):
+        self.data = data
+
+    async def __aiter__(self):
+        yield self.data
+
+
 class Supported:
     """A /supported that answers `answer` (a response, or an exception to raise)."""
 
@@ -54,7 +62,12 @@ class Supported:
         self.calls.append((request.method, request.url.path))
         if isinstance(self.answer, Exception):
             raise self.answer
-        return self.answer
+        # A fresh, unread answer each time, as a real transport gives: the
+        # startup check reads the raw stream (aiter_raw).
+        a = self.answer
+        if isinstance(a, httpx.Response) and not isinstance(a.stream, _Raw):
+            return httpx.Response(a.status_code, headers=a.headers, stream=_Raw(a.content))
+        return a
 
     def client(self):
         return FacilitatorClient({"url": URL}, transport=httpx.MockTransport(self.handler))
@@ -334,7 +347,7 @@ def test_a_deeply_nested_answer_is_a_refusal(x402):
     ("[" * 40 + "]" * 40, 33),                  # stops counting past the limit
 ])
 def test_nesting_depth_is_counted_outside_strings(text, depth):
-    assert facilitator._nesting_depth(text.encode()) == depth
+    assert facilitator._nesting_depth(text) == depth
 
 
 def test_an_answer_at_the_depth_limit_is_read(x402):
@@ -346,10 +359,10 @@ def test_an_answer_at_the_depth_limit_is_read(x402):
 
 def test_a_recursion_error_while_parsing_is_a_refusal(x402, monkeypatch):
     # Any parse exception, RecursionError (a RuntimeError) included.
-    def deep(self, **kw):
+    def deep(*a, **kw):
         raise RecursionError("maximum recursion depth exceeded")
 
-    monkeypatch.setattr(httpx.Response, "json", deep)
+    monkeypatch.setattr(facilitator.json, "loads", deep)
     msg = refused(Supported(kinds(V2_EXACT)))
     assert "answered HTTP 200 with something that is not a list of payment kinds (RecursionError)" in msg
 
@@ -435,19 +448,250 @@ def test_a_large_answer_under_the_cap_is_read(x402):
     check(Supported(httpx.Response(200, json={"kinds": [V2_EXACT], "pad": "x" * 900_000})))
 
 
-def test_the_cap_applies_to_the_decoded_body(x402):
-    import gzip
-    body = json.dumps({"kinds": [V2_EXACT], "pad": "x" * (4 * 1024 * 1024)}).encode()
-    packed = gzip.compress(body)
-    assert len(packed) < 64 * 1024
-    msg = refused(Supported(httpx.Response(200, content=packed, headers={"Content-Encoding": "gzip"})))
-    assert "larger than 1048576 bytes" in msg
+def _no_inflating(monkeypatch):
+    """Fail the test if httpx ever inflates a /supported answer."""
+    from httpx import _decoders
+
+    def boom(self, data):
+        raise AssertionError("the /supported answer was inflated")
+
+    for cls in (_decoders.GZipDecoder, _decoders.DeflateDecoder):
+        monkeypatch.setattr(cls, "decode", boom)
 
 
-def test_a_gzip_answer_under_the_cap_is_read(x402):
+def _gzip_bomb(layers: int) -> bytes:
     import gzip
-    packed = gzip.compress(json.dumps({"kinds": [V2_EXACT]}).encode())
-    check(Supported(httpx.Response(200, content=packed, headers={"Content-Encoding": "gzip"})))
+    data = json.dumps({"kinds": [V2_EXACT], "pad": "x" * (64 * 1024 * 1024)}).encode()
+    for _ in range(layers):
+        data = gzip.compress(data, compresslevel=9)
+    return data
+
+
+@pytest.mark.parametrize("encoding,body", [
+    ("gzip", lambda: _gzip_bomb(1)),
+    ("gzip, gzip", lambda: _gzip_bomb(2)),
+    ("deflate", lambda: __import__("zlib").compress(json.dumps({"kinds": [V2_EXACT]}).encode())),
+    ("br", lambda: b"\x00" * 16),
+    ("identity, gzip", lambda: _gzip_bomb(1)),
+])
+def test_a_content_encoded_answer_is_refused_without_inflating(x402, monkeypatch, encoding, body):
+    import tracemalloc
+    _no_inflating(monkeypatch)
+    packed = body()
+    assert len(packed) < 128 * 1024
+    seen = {}
+
+    def handler(request):
+        seen["accept"] = request.headers.get("accept-encoding")
+        return httpx.Response(200, headers={"Content-Encoding": encoding}, stream=_Raw(packed))
+
+    client = FacilitatorClient({"url": URL}, transport=httpx.MockTransport(handler))
+    tracemalloc.start()
+    try:
+        with pytest.raises(RuntimeError) as exc:
+            asyncio.run(facilitator.check_facilitator_v2_support(client))
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    msg = str(exc.value)
+    assert msg.startswith(PREFIX)
+    assert "answered HTTP 200 with something that is not a list of payment kinds (content-encoded" in msg
+    assert seen["accept"] == "identity"
+    assert peak < 16 * 1024 * 1024, peak        # the bombs inflate to 64 MiB and more
+
+
+def test_identity_encoding_is_read(x402, monkeypatch):
+    _no_inflating(monkeypatch)
+    check(Supported(httpx.Response(200, headers={"Content-Encoding": "identity"},
+                                   json={"kinds": [V2_EXACT]})))
+
+
+def test_the_raw_stream_is_capped_and_read_with_aiter_raw(x402, monkeypatch):
+    calls = []
+    real = httpx.Response.aiter_raw
+
+    def spy(self, *a, **kw):
+        calls.append(1)
+        return real(self, *a, **kw)
+
+    monkeypatch.setattr(httpx.Response, "aiter_raw", spy)
+    monkeypatch.setattr(httpx.Response, "aiter_bytes",
+                        lambda self, *a, **kw: (_ for _ in ()).throw(AssertionError("decoded read")))
+    check(Supported(kinds(V2_EXACT)))
+    assert calls
+
+
+def test_a_deployment_check_refuses_a_gzip_answer(x402, monkeypatch, capsys):
+    _no_inflating(monkeypatch)
+    packed = _gzip_bomb(2)
+    client = FacilitatorClient({"url": URL}, transport=httpx.MockTransport(
+        lambda r: httpx.Response(200, headers={"Content-Encoding": "gzip, gzip"}, stream=_Raw(packed))))
+    x402.setattr(facilitator, "_client", client)
+    assert check_config.main() == check_config.EXIT_REFUSED
+    assert "content-encoded" in capsys.readouterr().err
+
+
+# --- review round 3: text encodings ---------------------------------------
+
+def _deep_kinds_text(levels: int) -> str:
+    # The reviewer's shape: kinds whose string holds U+2200, nested deep.
+    return '{"kinds": [{"x402Version": 2, "scheme": "∀", "network": "eip155:84532", "extra": ' \
+           + "[" * levels + "]" * levels + "}]}"
+
+
+DEEP_TEXT = _deep_kinds_text(200_000)
+
+ENCODED = {
+    "utf-16-le": DEEP_TEXT.encode("utf-16-le"),
+    "utf-16-be": DEEP_TEXT.encode("utf-16-be"),
+    "utf-16 (BOM)": DEEP_TEXT.encode("utf-16"),
+    "utf-32-le": DEEP_TEXT.encode("utf-32-le"),
+    "utf-8 BOM": b"\xef\xbb\xbf" + DEEP_TEXT.encode("utf-8"),
+}
+
+
+def test_the_utf16_body_used_to_pass_a_byte_count():
+    # Why the count runs on decoded UTF-8 text: in UTF-16LE, U+2200 is the
+    # bytes 00 22, and 0x22 is a quote to a byte-level scanner.
+    assert "∀".encode("utf-16-le") == b"\x00\x22"
+
+
+@pytest.mark.parametrize("name", list(ENCODED))
+def test_a_deep_body_in_any_encoding_is_refused(x402, name):
+    body = ENCODED[name]
+    assert len(body) <= 1024 * 1024 or name == "utf-32-le"
+    from app.x402 import facilitator_client
+    x402.setattr(facilitator_client, "MAX_SUPPORTED_BYTES", 4 * 1024 * 1024)   # reach the decode step
+    msg = refused(Supported(httpx.Response(200, content=body)))
+    if name == "utf-8 BOM":
+        assert "nested deeper than 32 levels" in msg
+    else:
+        assert "not a list of payment kinds (not UTF-8" in msg
+
+
+@pytest.mark.parametrize("name", list(ENCODED))
+def test_deploy_check_refuses_a_deep_body_in_any_encoding(x402, capsys, name):
+    from app.x402 import facilitator_client
+    x402.setattr(facilitator_client, "MAX_SUPPORTED_BYTES", 4 * 1024 * 1024)
+    x402.setattr(facilitator, "_client", Supported(httpx.Response(200, content=ENCODED[name])).client())
+    assert check_config.main() == check_config.EXIT_REFUSED
+    err = capsys.readouterr().err
+    assert "not a list of payment kinds" in err and "Traceback" not in err
+
+
+LIFESPAN_DRIVER = r"""
+import asyncio, sys
+import httpx
+from app.core.config import settings
+from app.x402 import facilitator, facilitator_client
+from app import main
+
+body = open(sys.argv[1], "rb").read()
+
+class Raw(httpx.AsyncByteStream):
+    async def __aiter__(self):
+        yield body
+
+settings.X402_ENABLED = True
+settings.X402_PROTOCOL_VERSIONS = "1,2"
+settings.X402_NETWORK = "base-sepolia"
+facilitator_client.MAX_SUPPORTED_BYTES = 4 * 1024 * 1024
+facilitator._client = facilitator_client.FacilitatorClient(
+    {"url": "https://facilitator.example/x402"},
+    transport=httpx.MockTransport(lambda r: httpx.Response(200, stream=Raw())))
+facilitator.validate_x402_config = lambda: None
+
+async def run():
+    async with main.lifespan(main.app):
+        pass
+
+try:
+    asyncio.run(run())
+except RuntimeError as e:
+    print("REFUSED:", e)
+    sys.exit(3)
+print("STARTED")
+"""
+
+
+@pytest.mark.parametrize("name", list(ENCODED))
+def test_lifespan_refuses_a_deep_body_in_any_encoding(tmp_path, name):
+    """In a subprocess, on the running Python (the 3.10 gate runs it on 3.10),
+    so a crash would show as a return code rather than end the test run."""
+    import os
+    import subprocess
+    import sys
+    from pathlib import Path
+    body = tmp_path / "body"
+    body.write_bytes(ENCODED[name])
+    repo = Path(__file__).resolve().parent.parent
+    out = subprocess.run([sys.executable, "-c", LIFESPAN_DRIVER, str(body)], cwd=repo,
+                         env={**os.environ, "SWARM_BEE_API_URL": "http://localhost:1"},
+                         capture_output=True, text=True, timeout=120)
+    assert out.returncode == 3, (out.returncode, out.stderr[-2000:])
+    assert "REFUSED: " + PREFIX in out.stdout and "not a list of payment kinds" in out.stdout
+
+
+def test_invalid_utf8_is_refused(x402):
+    msg = refused(Supported(httpx.Response(200, content=b'{"kinds": ["\xff"]}')))
+    assert "(not UTF-8)" in msg
+
+
+@pytest.mark.parametrize("ch", ["\x00", "\x01", "\x1f", "\x0b"])
+def test_a_raw_control_character_is_refused(x402, ch):
+    body = ('{"kinds": [{"x402Version": 2, "scheme": "exact", "network": "eip155:84532"}]' + ch + "}").encode()
+    msg = refused(Supported(httpx.Response(200, content=body)))
+    assert "control character" in msg
+
+
+def test_a_utf8_bom_is_stripped_and_the_answer_read(x402):
+    check(Supported(httpx.Response(200, content=b"\xef\xbb\xbf" + json.dumps({"kinds": [V2_EXACT]}).encode())))
+
+
+def test_non_ascii_utf8_is_read(x402):
+    check(Supported(httpx.Response(200, content=json.dumps(
+        {"kinds": [V2_EXACT], "note": "∀ é"}, ensure_ascii=False).encode("utf-8"))))
+
+
+# --- review round 3: an overall deadline ----------------------------------
+
+class _Drip(httpx.AsyncByteStream):
+    """One byte, then another every `gap` seconds, forever."""
+
+    def __init__(self, gap):
+        self.gap = gap
+
+    async def __aiter__(self):
+        yield b'{"kinds": ['
+        while True:
+            await asyncio.sleep(self.gap)
+            yield b" "
+
+
+def test_a_slow_drip_answer_hits_the_overall_deadline(x402):
+    import time
+    x402.setattr(facilitator, "SUPPORTED_DEADLINE_SECONDS", 0.5)
+    client = FacilitatorClient({"url": URL}, transport=httpx.MockTransport(
+        lambda r: httpx.Response(200, stream=_Drip(0.05))))
+    started = time.monotonic()
+    with pytest.raises(RuntimeError) as exc:
+        asyncio.run(facilitator.check_facilitator_v2_support(client))
+    assert time.monotonic() - started < 5
+    msg = str(exc.value)
+    assert msg.startswith(PREFIX)
+    assert "could not be reached (timed out after 0.5 s)" in msg
+
+
+def test_the_default_deadline_is_15_seconds():
+    assert facilitator.SUPPORTED_DEADLINE_SECONDS == 15.0
+
+
+def test_deploy_check_refuses_a_slow_drip(x402, capsys):
+    x402.setattr(facilitator, "SUPPORTED_DEADLINE_SECONDS", 0.3)
+    x402.setattr(facilitator, "_client", FacilitatorClient({"url": URL}, transport=httpx.MockTransport(
+        lambda r: httpx.Response(200, stream=_Drip(0.05)))))
+    assert check_config.main() == check_config.EXIT_REFUSED
+    assert "timed out after 0.3 s" in capsys.readouterr().err
 
 
 def test_an_oversized_non_2xx_answer_names_its_status(x402):

@@ -154,25 +154,31 @@ class FacilitatorClient:
         return SettleResponse(**data)
 
     async def supported_response(self) -> httpx.Response:
-        """GET {url}/supported, unparsed: the HTTP answer with its status.
+        """GET {url}/supported for the v2 startup check, unparsed (#608).
 
-        Same headers ("supported" entry) and timeout as verify and settle. The
-        v2 startup check (facilitator.check_facilitator_v2_support, #608) uses
-        this, so it can refuse a non-2xx answer before reading any kinds.
-
-        The body is read up to MAX_SUPPORTED_BYTES (after any content
-        decoding); a longer one raises SupportedAnswerTooLarge, so a
-        facilitator cannot make startup read an unbounded answer."""
+        Same headers ("supported" entry) and per-read timeout as verify and
+        settle, plus Accept-Encoding: identity. The answer is never inflated:
+        one that still carries a Content-Encoding other than identity raises
+        SupportedAnswerEncoded, so a small compressed answer cannot make
+        startup allocate a large one. The raw body is read up to
+        MAX_SUPPORTED_BYTES; a longer one raises SupportedAnswerTooLarge.
+        The returned Response holds the raw bytes and the status; the caller
+        (facilitator.check_facilitator_v2_support) decodes them itself, and
+        puts an overall deadline around this call."""
         headers = await self._headers("supported")
+        headers["Accept-Encoding"] = "identity"
         async with self._client() as client:
             async with client.stream("GET", f"{self.config['url']}/supported", headers=headers,
                                      follow_redirects=True) as response:
+                encodings = [e.strip().lower() for v in response.headers.get_list("content-encoding")
+                             for e in v.split(",") if e.strip()]
+                if any(e != "identity" for e in encodings):
+                    raise SupportedAnswerEncoded(response.status_code)
                 body = bytearray()
-                async for chunk in response.aiter_bytes():
+                async for chunk in response.aiter_raw():
                     body += chunk
                     if len(body) > MAX_SUPPORTED_BYTES:
                         raise SupportedAnswerTooLarge(response.status_code)
-                # The decoded body, without the headers that described the encoded one.
                 kept = [(k, v) for k, v in response.headers.multi_items()
                         if k.lower() not in ("content-encoding", "content-length", "transfer-encoding")]
                 return httpx.Response(response.status_code, headers=kept, content=bytes(body),
@@ -183,9 +189,13 @@ class FacilitatorClient:
 
         Same headers, timeout and parsing rule as v1 verify and settle: the
         body is parsed whatever the HTTP status. The startup check does not
-        rely on this; it reads supported_response() and requires a 2xx."""
-        response = await self.supported_response()
-        return SupportedResponse(**response.json())
+        use this; it reads supported_response() and requires a 2xx."""
+        headers = await self._headers("supported")
+        async with self._client() as client:
+            response = await client.get(f"{self.config['url']}/supported", headers=headers,
+                                        follow_redirects=True)
+            data = response.json()
+        return SupportedResponse(**data)
 
 
 def v2_request_body(payment: PaymentPayloadV2, payment_requirements: PaymentRequirementsV2) -> dict:
@@ -208,6 +218,15 @@ class SupportedAnswerTooLarge(Exception):
 
     def __init__(self, status: int):
         super().__init__(f"facilitator /supported answer over {MAX_SUPPORTED_BYTES} bytes (HTTP {status})")
+        self.status = status
+
+
+class SupportedAnswerEncoded(Exception):
+    """A /supported answer with a Content-Encoding other than identity,
+    refused without being inflated. Never carries the body."""
+
+    def __init__(self, status: int):
+        super().__init__(f"facilitator /supported answer is content-encoded (HTTP {status})")
         self.status = status
 
 

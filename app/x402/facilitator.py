@@ -24,6 +24,7 @@ Two ways to authenticate, both optional:
 validate_x402_config() runs at startup and refuses a configuration that would
 otherwise fail on the first payment, or take payment in the wrong asset (#370).
 """
+import json
 import logging
 import re
 from typing import Optional
@@ -198,11 +199,24 @@ async def check_facilitator_v2_support(client: Optional[FacilitatorClient] = Non
     network = to_caip2(settings.X402_NETWORK)
     client = client or get_facilitator_client()
     host = _host(client.config["url"]) or "the facilitator"
+    import asyncio
     import httpx
-    from app.x402.facilitator_client import MAX_SUPPORTED_BYTES, SupportedAnswerTooLarge
+    from app.x402.facilitator_client import (MAX_SUPPORTED_BYTES, SupportedAnswerEncoded,
+                                             SupportedAnswerTooLarge)
     from app.x402.models_v1 import SupportedResponse
+    unreadable = (f"the facilitator's /supported on {host} answered HTTP {{status}} with something "
+                  f"that is not a list of payment kinds ({{why}})")
     try:
-        response = await client.supported_response()
+        # One deadline for the whole call: httpx's timeout is per read, so a
+        # facilitator dripping a byte per read could otherwise stall startup.
+        response = await asyncio.wait_for(client.supported_response(), SUPPORTED_DEADLINE_SECONDS)
+    except asyncio.TimeoutError:
+        raise _v2_refusal(f"the facilitator's /supported on {host} could not be reached (timed out "
+                          f"after {SUPPORTED_DEADLINE_SECONDS:g} s), so it is unknown whether it "
+                          f"settles x402 v2 exact on {network}") from None
+    except SupportedAnswerEncoded as e:
+        raise _v2_refusal(unreadable.format(status=e.status, why="content-encoded; the gateway asks "
+                                            "for identity and never inflates this answer")) from None
     except SupportedAnswerTooLarge as e:
         raise _v2_refusal(f"the facilitator's /supported on {host} answered HTTP {e.status} with "
                           f"something that is not a list of payment kinds (larger than "
@@ -224,15 +238,31 @@ async def check_facilitator_v2_support(client: Optional[FacilitatorClient] = Non
         # plain text without valid credentials).
         raise _v2_refusal(f"the facilitator's /supported on {host} answered HTTP {status}, not a list "
                           f"of payment kinds (a 401 or 403 is an authentication error)")
-    if _nesting_depth(response.content) > MAX_SUPPORTED_DEPTH:
-        # Checked before parsing: CPython's JSON parser recurses per level, and
-        # on Python 3.10 (the image's) a deep enough body can crash the
-        # process instead of raising RecursionError.
-        raise _v2_refusal(f"the facilitator's /supported on {host} answered HTTP {status} with "
-                          f"something that is not a list of payment kinds (nested deeper than "
-                          f"{MAX_SUPPORTED_DEPTH} levels)")
+    # The body as JSON text, decoded here and nowhere else: httpx's
+    # Response.json() lets json.loads guess UTF-16 or UTF-32, and then the
+    # byte-level depth count below would read another text than the parser.
+    # RFC 8259 requires UTF-8 on the wire. A leading byte order mark is
+    # stripped (the RFC lets a parser ignore it); anything that is not strict
+    # UTF-8, or that holds a control character JSON never allows unescaped
+    # (UTF-16 and UTF-32 bodies always do: NUL), is unreadable.
+    raw = response.content
+    if raw.startswith(b"\xef\xbb\xbf"):
+        raw = raw[3:]
     try:
-        data = response.json()
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        raise _v2_refusal(unreadable.format(status=status, why="not UTF-8")) from None
+    if _CONTROL_RE.search(text):
+        raise _v2_refusal(unreadable.format(status=status, why="not UTF-8 JSON text: a control "
+                                            "character, as in a UTF-16 or UTF-32 body")) from None
+    if _nesting_depth(text) > MAX_SUPPORTED_DEPTH:
+        # Checked before parsing, on the same text: CPython's JSON parser
+        # recurses per level, and on Python 3.10 (the image's) a deep enough
+        # body can crash the process instead of raising RecursionError.
+        raise _v2_refusal(unreadable.format(status=status,
+                                            why=f"nested deeper than {MAX_SUPPORTED_DEPTH} levels"))
+    try:
+        data = json.loads(text)
         SupportedResponse(**data)       # the shape: an object with a list of kinds
         kinds = [k for k in data["kinds"] if isinstance(k, dict)]
     except Exception as e:
@@ -264,28 +294,37 @@ async def check_facilitator_v2_support(client: Optional[FacilitatorClient] = Non
 MAX_SUPPORTED_DEPTH = 32
 
 
-def _nesting_depth(body: bytes) -> int:
+# The whole /supported call at startup, connect to last byte (#608).
+SUPPORTED_DEADLINE_SECONDS = 15.0
+
+# Characters JSON text never holds unescaped: control characters other than
+# the whitespace tab, LF and CR (RFC 8259 sections 2 and 7).
+_CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
+
+
+def _nesting_depth(text: str) -> int:
     """The deepest nesting of [ and { in a JSON text, outside strings, without
-    parsing it. Linear in the body, which is at most 1 MiB."""
+    parsing it. Linear in the text, which is at most 1 MiB. It must be given
+    the exact text json.loads parses."""
     depth = deepest = 0
     in_string = escaped = False
-    for byte in body:
+    for ch in text:
         if in_string:
             if escaped:
                 escaped = False
-            elif byte == 0x5C:          # backslash
+            elif ch == "\\":
                 escaped = True
-            elif byte == 0x22:          # quote
+            elif ch == '"':
                 in_string = False
-        elif byte == 0x22:
+        elif ch == '"':
             in_string = True
-        elif byte in (0x5B, 0x7B):      # [ {
+        elif ch in "[{":
             depth += 1
             if depth > deepest:
                 deepest = depth
                 if deepest > MAX_SUPPORTED_DEPTH:
                     return deepest
-        elif byte in (0x5D, 0x7D):      # ] }
+        elif ch in "]}":
             depth -= 1
     return deepest
 
