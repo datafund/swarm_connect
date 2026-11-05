@@ -44,6 +44,8 @@ REFUSAL_PREFIX = "Refusing to start with x402 enabled"
 
 def main() -> int:
     import asyncio
+    from app.core import http_log
+    http_log.install()
     from app.core.config import settings
     from app.x402 import facilitator
     try:
