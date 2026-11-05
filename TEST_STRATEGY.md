@@ -18,15 +18,39 @@ python -m pytest tests/test_stamp_pool.py -v    # one area
 `.github/workflows/tests.yml` runs the default (hermetic) suite on every pull
 request, and `deploy.yml` calls it as its gate, so nothing deploys unless it
 passes. It runs on Python 3.12, the image's interpreter, and installs exactly
-what the image ships: `pip install --no-deps --require-hashes -r
-requirements.lock`, then `pip check`, which fails the run if the lock misses a
-dependency or pins a conflicting one (#523). A local venv built from
-`requirements.txt` resolves whatever is current, so it can differ from CI; to
-reproduce CI, build a Python 3.12 venv the same way (for example `uv venv -p 3.12`,
-then `uv pip install --no-deps --require-hashes -r requirements.lock` and
-`uv pip check`). `tests/test_ci_workflow.py` keeps the workflow on the lock, and
-CI, the Dockerfile base image and the lock on one Python version, with the base
-image pinned by digest.
+what the image ships plus the test-only packages: `pip install --no-deps
+--require-hashes -r requirements.lock -r requirements-dev.lock`, then `pip
+check`, which fails the run if a lock misses a dependency or pins a conflicting
+one (#523). The image installs `requirements.lock` only, so pytest and
+pytest-asyncio are not in production (#430). `requirements-dev.lock` is
+compiled with `-c requirements.lock`, so a package in both locks has the same
+pin.
+
+A local venv built from `requirements.txt` and `requirements-dev.txt` resolves
+whatever is current, so it can differ from CI. To reproduce CI, build a Python
+3.12 venv from the locks:
+
+```bash
+uv venv -p 3.12 .venv
+uv pip install --python .venv --no-deps --require-hashes -r requirements.lock -r requirements-dev.lock
+uv pip check --python .venv
+```
+
+The `lock-sync` job (pull requests only) runs `scripts/check_lock_sync.sh` with
+uv pinned to 0.11.x. It reruns the command in each lock's header on a copy,
+the runtime lock first, and fails if the result differs from the committed
+lock. Because uv keeps an existing lock's pins wherever they still satisfy the
+input, the check moves nothing that is valid; it fails on a package added to or
+removed from `requirements.txt` or `requirements-dev.txt`, or a floor raised
+above the locked version, without regenerating. It needs PyPI, so it does not
+run when `deploy.yml` calls the workflow. Run it locally the same way; to fix a
+failure, run the two commands in the header of `requirements.txt` and commit
+both locks.
+
+`tests/test_ci_workflow.py` keeps the workflow on both locks and the image on
+the runtime lock, keeps the sync check in place, and keeps CI, the Dockerfile
+base image and the locks on one Python version, with the base image pinned by
+digest.
 
 `.github/workflows/image.yml` builds the Docker image on every pull request
 (#486): `docker build --pull --no-cache --platform linux/amd64`, so neither a
@@ -40,7 +64,7 @@ within 30 tries, 2 s apart: about a minute when the port refuses, and at most
 about 6 minutes when the app accepts connections but never answers (each try
 waits up to 10 s), inside the job's 20-minute timeout. `/` answers 200 with `status: degraded` while Bee is
 unreachable, and a refused port builds the first health snapshot at once, so
-the check never waits for `HEALTH_SNAPSHOT_FIRST_WAIT_SECONDS`. Once `/` answers, it runs `python -m app.x402.check_config` in the container (x402 off by default), which must exit 0 (#617). Then it checks TLS trust offline in the container (#595): httpx2 verifies against the OS CA bundle from `ca-certificates`, not certifi, so the step fails unless `/etc/ssl/certs/ca-certificates.crt` holds certificates and an httpx2 transport's context verifies and has them loaded. On failure the
+the check never waits for `HEALTH_SNAPSHOT_FIRST_WAIT_SECONDS`. Once `/` answers, it runs `python -m app.x402.check_config` in the container (x402 off by default), which must exit 0 (#617). Then it checks TLS trust offline in the container (#595): httpx2 verifies against the OS CA bundle from `ca-certificates`, not certifi, so the step fails unless `/etc/ssl/certs/ca-certificates.crt` holds certificates and an httpx2 transport's context verifies and has them loaded. Last, it checks offline that pytest, pytest-asyncio, pluggy and iniconfig cannot be imported in the image (#430). On failure the
 job prints the container log; the container is always removed.
 `deploy.yml` does not call it: each deploy host builds the image itself before
 stopping the running gateway, so a broken build there already stops the deploy
