@@ -75,6 +75,28 @@ def test_the_gateway_offer_is_the_one_the_fixture_signed(run):
     assert SIGNED["accepted"] == OFFER
 
 
+def test_the_advertised_header_is_the_offer_the_fixture_signed(run):
+    """PAYMENT-REQUIRED (#608) is what @x402/evm signs from: its offer must be
+    exactly the one the recorded payment was made for, and it must read the
+    way @x402/core read the gateway's header when the fixtures were recorded
+    (ts_decoded_gateway_payment_required.json)."""
+    from app.x402 import codec_v2
+    value = run["offer"]["headers"]["payment-required"]
+    decoded = codec_v2.decode_payment_required(value).model_dump(mode="json", by_alias=True,
+                                                                 exclude_none=True)
+    plain = json.loads(base64.b64decode(value, validate=True))      # decodePaymentRequiredHeader
+    assert decoded == plain
+    assert plain["x402Version"] == 2
+    assert plain["accepts"] == [OFFER] == [SIGNED["accepted"]]
+    recorded = json.loads((FIXTURES / "ts_decoded_gateway_payment_required.json").read_text())
+    assert plain["accepts"] == recorded["clientParsed"]["accepts"]
+    assert recorded["paymentAccepted"] == OFFER
+    assert plain["resource"] == recorded["paymentResource"] == SIGNED["resource"]
+    # The v1 body is unchanged beside it (D2).
+    body = run["offer"]["body"]
+    assert body["x402Version"] == 1 and plain["error"] == body["error"]
+
+
 def test_recorded_v2_payment_is_verified_settled_and_delivered(run):
     first = run["first"]
     assert first["status"] == 201, first
