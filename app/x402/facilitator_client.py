@@ -157,7 +157,7 @@ class FacilitatorClient:
         data = await self._post("settle", payment, payment_requirements)
         return SettleResponse(**data)
 
-    async def supported_response(self) -> httpx.Response:
+    async def supported_response(self) -> httpx2.Response:
         """GET {url}/supported for the v2 startup check, unparsed (#608).
 
         Same headers ("supported" entry) and per-read timeout as verify and
@@ -185,7 +185,7 @@ class FacilitatorClient:
                         raise SupportedAnswerTooLarge(response.status_code)
                 kept = [(k, v) for k, v in response.headers.multi_items()
                         if k.lower() not in ("content-encoding", "content-length", "transfer-encoding")]
-                return httpx.Response(response.status_code, headers=kept, content=bytes(body),
+                return httpx2.Response(response.status_code, headers=kept, content=bytes(body),
                                       request=response.request)
 
     async def supported(self) -> SupportedResponse:

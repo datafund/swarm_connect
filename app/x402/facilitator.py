@@ -200,14 +200,14 @@ async def check_facilitator_v2_support(client: Optional[FacilitatorClient] = Non
     client = client or get_facilitator_client()
     host = _host(client.config["url"]) or "the facilitator"
     import asyncio
-    import httpx
+    import httpx2
     from app.x402.facilitator_client import (MAX_SUPPORTED_BYTES, SupportedAnswerEncoded,
                                              SupportedAnswerTooLarge)
     from app.x402.models_v1 import SupportedResponse
     unreadable = (f"the facilitator's /supported on {host} answered HTTP {{status}} with something "
                   f"that is not a list of payment kinds ({{why}})")
     try:
-        # One deadline for the whole call: httpx's timeout is per read, so a
+        # One deadline for the whole call: httpx2's timeout is per read, so a
         # facilitator dripping a byte per read could otherwise stall startup.
         response = await asyncio.wait_for(client.supported_response(), SUPPORTED_DEADLINE_SECONDS)
     except asyncio.TimeoutError:
@@ -221,13 +221,13 @@ async def check_facilitator_v2_support(client: Optional[FacilitatorClient] = Non
         raise _v2_refusal(f"the facilitator's /supported on {host} answered HTTP {e.status} with "
                           f"something that is not a list of payment kinds (larger than "
                           f"{MAX_SUPPORTED_BYTES} bytes)") from None
-    except httpx.HTTPError as e:
+    except httpx2.HTTPError as e:
         raise _v2_refusal(f"the facilitator's /supported on {host} could not be reached "
                           f"({type(e).__name__}), so it is unknown whether it settles x402 v2 exact "
                           f"on {network}") from None
     except Exception as e:
         # Anything else before an answer: the CDP header hook raising, an
-        # httpx error outside HTTPError (InvalidURL), a bad header value. A
+        # httpx2 error outside HTTPError (InvalidURL), a bad header value. A
         # refusal, not a traceback, and never the error text (it may hold a
         # credential or the URL).
         raise _v2_refusal(f"the request to the facilitator's /supported on {host} could not be made "
@@ -238,7 +238,7 @@ async def check_facilitator_v2_support(client: Optional[FacilitatorClient] = Non
         # plain text without valid credentials).
         raise _v2_refusal(f"the facilitator's /supported on {host} answered HTTP {status}, not a list "
                           f"of payment kinds (a 401 or 403 is an authentication error)")
-    # The body as JSON text, decoded here and nowhere else: httpx's
+    # The body as JSON text, decoded here and nowhere else: httpx2's
     # Response.json() lets json.loads guess UTF-16 or UTF-32, and then the
     # byte-level depth count below would read another text than the parser.
     # RFC 8259 requires UTF-8 on the wire. A leading byte order mark is

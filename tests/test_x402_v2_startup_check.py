@@ -10,7 +10,7 @@ transport here; nothing is sent anywhere.
 import asyncio
 import json
 
-import httpx
+import httpx2
 import pytest
 
 # Imported with the default settings, not under the fixture's x402 settings:
@@ -43,7 +43,7 @@ def x402(monkeypatch):
     facilitator.reset_facilitator_client()
 
 
-class _Raw(httpx.AsyncByteStream):
+class _Raw(httpx2.AsyncByteStream):
     def __init__(self, data: bytes):
         self.data = data
 
@@ -65,16 +65,16 @@ class Supported:
         # A fresh, unread answer each time, as a real transport gives: the
         # startup check reads the raw stream (aiter_raw).
         a = self.answer
-        if isinstance(a, httpx.Response) and not isinstance(a.stream, _Raw):
-            return httpx.Response(a.status_code, headers=a.headers, stream=_Raw(a.content))
+        if isinstance(a, httpx2.Response) and not isinstance(a.stream, _Raw):
+            return httpx2.Response(a.status_code, headers=a.headers, stream=_Raw(a.content))
         return a
 
     def client(self):
-        return FacilitatorClient({"url": URL}, transport=httpx.MockTransport(self.handler))
+        return FacilitatorClient({"url": URL}, transport=httpx2.MockTransport(self.handler))
 
 
 def kinds(*k):
-    return httpx.Response(200, json={"kinds": list(k)})
+    return httpx2.Response(200, json={"kinds": list(k)})
 
 
 def check(sup):
@@ -118,7 +118,7 @@ def test_mainnet_needs_v2_on_mainnet(x402):
 def test_extra_fields_in_the_answer_are_ignored(x402):
     body = {"kinds": [{**V2_EXACT, "extra": {"feePayer": "0x" + "00" * 20}}],
             "extensions": [], "signers": {"eip155:*": []}}
-    check(Supported(httpx.Response(200, json=body)))
+    check(Supported(httpx2.Response(200, json=body)))
 
 
 # --- not listed -------------------------------------------------------------
@@ -151,8 +151,8 @@ def test_an_empty_list_refuses(x402):
 
 # --- unreachable ------------------------------------------------------------
 
-@pytest.mark.parametrize("error", [httpx.ConnectError("refused"), httpx.ReadTimeout("slow"),
-                                   httpx.ConnectTimeout("slow")])
+@pytest.mark.parametrize("error", [httpx2.ConnectError("refused"), httpx2.ReadTimeout("slow"),
+                                   httpx2.ConnectTimeout("slow")])
 def test_unreachable_refuses(x402, error):
     msg = refused(Supported(error))
     assert "could not be reached" in msg
@@ -163,11 +163,11 @@ def test_unreachable_refuses(x402, error):
 # --- malformed --------------------------------------------------------------
 
 @pytest.mark.parametrize("answer", [
-    httpx.Response(200, text="<html>not json</html>"),
-    httpx.Response(200, json=[V2_EXACT]),
-    httpx.Response(200, json={"items": [V2_EXACT]}),
-    httpx.Response(200, json={"kinds": [{"scheme": "exact"}]}),
-    httpx.Response(401, json={"errorType": "unauthorized", "errorMessage": "missing token"}),
+    httpx2.Response(200, text="<html>not json</html>"),
+    httpx2.Response(200, json=[V2_EXACT]),
+    httpx2.Response(200, json={"items": [V2_EXACT]}),
+    httpx2.Response(200, json={"kinds": [{"scheme": "exact"}]}),
+    httpx2.Response(401, json={"errorType": "unauthorized", "errorMessage": "missing token"}),
 ])
 def test_malformed_answer_refuses(x402, answer):
     msg = refused(Supported(answer))
@@ -180,7 +180,7 @@ def test_malformed_answer_refuses(x402, answer):
 def test_not_called_unless_x402_and_v2_are_enabled(x402, enabled, versions):
     x402.setattr(settings, "X402_ENABLED", enabled)
     x402.setattr(settings, "X402_PROTOCOL_VERSIONS", versions)
-    sup = Supported(httpx.ConnectError("must not be called"))
+    sup = Supported(httpx2.ConnectError("must not be called"))
     check(sup)
     assert sup.calls == []
 
@@ -195,7 +195,7 @@ def test_uses_the_shared_authenticated_client(x402):
         return sup.handler(request)
 
     real = facilitator.get_facilitator_client()
-    shared = FacilitatorClient(real.config, transport=httpx.MockTransport(handler))
+    shared = FacilitatorClient(real.config, transport=httpx2.MockTransport(handler))
     x402.setattr(facilitator, "_client", shared)
     asyncio.run(facilitator.check_facilitator_v2_support())
     assert seen == ["Bearer tok"]
@@ -234,14 +234,14 @@ def test_deploy_check_runs_the_v2_check(x402, capsys):
 
 
 def test_deploy_check_refuses_an_unreachable_facilitator(x402, capsys):
-    x402.setattr(facilitator, "_client", Supported(httpx.ConnectError("down")).client())
+    x402.setattr(facilitator, "_client", Supported(httpx2.ConnectError("down")).client())
     assert check_config.main() == check_config.EXIT_REFUSED
     assert "could not be reached" in capsys.readouterr().err
 
 
 def test_deploy_check_does_not_call_supported_with_v2_off(x402, capsys):
     x402.setattr(settings, "X402_PROTOCOL_VERSIONS", "1")
-    sup = Supported(httpx.ConnectError("must not be called"))
+    sup = Supported(httpx2.ConnectError("must not be called"))
     x402.setattr(facilitator, "_client", sup.client())
     assert check_config.main() == check_config.EXIT_OK
     assert sup.calls == []
@@ -252,28 +252,28 @@ def test_deploy_check_does_not_call_supported_with_v2_off(x402, capsys):
 @pytest.mark.parametrize("status", [500, 401, 503, 302, 404])
 def test_a_non_2xx_answer_is_refused_whatever_its_body(x402, status):
     # A valid kinds list in the body is not trusted on a non-2xx answer.
-    msg = refused(Supported(httpx.Response(status, json={"kinds": [V2_EXACT]})))
+    msg = refused(Supported(httpx2.Response(status, json={"kinds": [V2_EXACT]})))
     assert f"answered HTTP {status}" in msg
 
 
 def test_cdp_text_401_names_the_status(x402):
-    msg = refused(Supported(httpx.Response(401, text="Unauthorized")))
+    msg = refused(Supported(httpx2.Response(401, text="Unauthorized")))
     assert "answered HTTP 401" in msg and "authentication" in msg
 
 
 def test_a_2xx_answer_that_is_not_kinds_names_the_status(x402):
-    msg = refused(Supported(httpx.Response(200, text="<html>")))
+    msg = refused(Supported(httpx2.Response(200, text="<html>")))
     assert "answered HTTP 200 with something that is not a list of payment kinds" in msg
 
 
 def test_a_2xx_other_than_200_with_v2_is_accepted(x402):
-    check(Supported(httpx.Response(203, json={"kinds": [V2_EXACT]})))
+    check(Supported(httpx2.Response(203, json={"kinds": [V2_EXACT]})))
 
 
 @pytest.mark.parametrize("status", [500, 401, 503])
 def test_deploy_check_refuses_a_non_2xx_answer(x402, capsys, status):
     x402.setattr(facilitator, "_client",
-                 Supported(httpx.Response(status, json={"kinds": [V2_EXACT]})).client())
+                 Supported(httpx2.Response(status, json={"kinds": [V2_EXACT]})).client())
     assert check_config.main() == check_config.EXIT_REFUSED
     assert f"answered HTTP {status}" in capsys.readouterr().err
 
@@ -285,7 +285,7 @@ def _hook_raises():
 def test_a_raising_credential_hook_is_a_refusal(x402, capsys):
     sup = Supported(kinds(V2_EXACT))
     client = FacilitatorClient({"url": URL, "create_headers": _hook_raises},
-                               transport=httpx.MockTransport(sup.handler))
+                               transport=httpx2.MockTransport(sup.handler))
     with pytest.raises(RuntimeError) as exc:
         asyncio.run(facilitator.check_facilitator_v2_support(client))
     msg = str(exc.value)
@@ -304,11 +304,11 @@ def test_a_raising_credential_hook_is_a_refusal(x402, capsys):
 ])
 def test_an_httpx_error_outside_http_error_is_a_refusal(x402, capsys, client):
     if client == "raised by the transport":
-        c = Supported(httpx.InvalidURL("bad")).client()
+        c = Supported(httpx2.InvalidURL("bad")).client()
     else:
         c = FacilitatorClient({"url": "https://ho\x00st/x402"},
-                              transport=httpx.MockTransport(Supported(kinds(V2_EXACT)).handler))
-    assert not issubclass(httpx.InvalidURL, httpx.HTTPError)
+                              transport=httpx2.MockTransport(Supported(kinds(V2_EXACT)).handler))
+    assert not issubclass(httpx2.InvalidURL, httpx2.HTTPError)
     with pytest.raises(RuntimeError) as exc:
         asyncio.run(facilitator.check_facilitator_v2_support(c))
     assert str(exc.value).startswith(PREFIX) and "could not be made (InvalidURL" in str(exc.value)
@@ -320,7 +320,7 @@ def test_an_httpx_error_outside_http_error_is_a_refusal(x402, capsys, client):
 def test_supported_client_still_parses_whatever_the_status():
     # The client method keeps its documented rule; only the startup check
     # requires a 2xx.
-    c = Supported(httpx.Response(500, json={"kinds": [V2_EXACT]})).client()
+    c = Supported(httpx2.Response(500, json={"kinds": [V2_EXACT]})).client()
     assert [k.x402_version for k in asyncio.run(c.supported()).kinds] == [2]
     assert asyncio.run(c.supported_response()).status_code == 500
 
@@ -336,7 +336,7 @@ DEEP_REFUSAL = "answered HTTP 200 with something that is not a list of payment k
 def test_a_deeply_nested_answer_is_a_refusal(x402):
     # Refused before it is parsed: on Python 3.10 (the image's) parsing a body
     # this deep can crash the interpreter rather than raise RecursionError.
-    msg = refused(Supported(httpx.Response(200, text=DEEP)))
+    msg = refused(Supported(httpx2.Response(200, text=DEEP)))
     assert DEEP_REFUSAL in msg
 
 
@@ -368,7 +368,7 @@ def test_a_recursion_error_while_parsing_is_a_refusal(x402, monkeypatch):
 
 
 def test_a_deeply_nested_answer_stops_startup_cleanly(x402):
-    x402.setattr(facilitator, "_client", Supported(httpx.Response(200, text=DEEP)).client())
+    x402.setattr(facilitator, "_client", Supported(httpx2.Response(200, text=DEEP)).client())
     x402.setattr(facilitator, "validate_x402_config", lambda: None)
 
     async def run():
@@ -381,7 +381,7 @@ def test_a_deeply_nested_answer_stops_startup_cleanly(x402):
 
 
 def test_deploy_check_refuses_a_deeply_nested_answer(x402, capsys):
-    x402.setattr(facilitator, "_client", Supported(httpx.Response(200, text=DEEP)).client())
+    x402.setattr(facilitator, "_client", Supported(httpx2.Response(200, text=DEEP)).client())
     assert check_config.main() == check_config.EXIT_REFUSED
     err = capsys.readouterr().err
     assert DEEP_REFUSAL in err and "Traceback" not in err
@@ -440,23 +440,43 @@ def test_an_answer_over_one_mib_is_a_refusal(x402):
     from app.x402.facilitator_client import MAX_SUPPORTED_BYTES
     assert MAX_SUPPORTED_BYTES == 1024 * 1024
     big = {"kinds": [V2_EXACT], "pad": "x" * MAX_SUPPORTED_BYTES}
-    msg = refused(Supported(httpx.Response(200, json=big)))
+    msg = refused(Supported(httpx2.Response(200, json=big)))
     assert "answered HTTP 200 with something that is not a list of payment kinds (larger than 1048576 bytes)" in msg
 
 
 def test_a_large_answer_under_the_cap_is_read(x402):
-    check(Supported(httpx.Response(200, json={"kinds": [V2_EXACT], "pad": "x" * 900_000})))
+    check(Supported(httpx2.Response(200, json={"kinds": [V2_EXACT], "pad": "x" * 900_000})))
 
 
 def _no_inflating(monkeypatch):
-    """Fail the test if httpx ever inflates a /supported answer."""
-    from httpx import _decoders
+    """Fail the test if httpx2 ever inflates a /supported answer."""
+    from httpx2 import _decoders
 
     def boom(self, data):
         raise AssertionError("the /supported answer was inflated")
 
-    for cls in (_decoders.GZipDecoder, _decoders.DeflateDecoder):
-        monkeypatch.setattr(cls, "decode", boom)
+    for name in ("GZipDecoder", "DeflateDecoder", "BrotliDecoder", "ZStandardDecoder"):
+        monkeypatch.setattr(getattr(_decoders, name), "decode", boom)
+
+
+def test_the_patched_decoders_are_the_ones_the_client_would_use(monkeypatch):
+    """The gateway's client is httpx2 (#626), so httpx2's decoders are the ones
+    to patch: an ordinary decoded read through the same client and transport
+    does reach the patched GZipDecoder."""
+    import gzip
+    _no_inflating(monkeypatch)
+    packed = gzip.compress(b'{"kinds": []}')
+    client = FacilitatorClient({"url": URL}, transport=httpx2.MockTransport(
+        lambda r: httpx2.Response(200, headers={"Content-Encoding": "gzip"}, stream=_Raw(packed))))
+    assert isinstance(client._client(), httpx2.AsyncClient)
+
+    async def decoded_read():
+        async with client._client() as c:
+            async with c.stream("GET", URL + "/supported") as r:
+                await r.aread()
+
+    with pytest.raises(AssertionError, match="inflated"):
+        asyncio.run(decoded_read())
 
 
 def _gzip_bomb(layers: int) -> bytes:
@@ -483,9 +503,9 @@ def test_a_content_encoded_answer_is_refused_without_inflating(x402, monkeypatch
 
     def handler(request):
         seen["accept"] = request.headers.get("accept-encoding")
-        return httpx.Response(200, headers={"Content-Encoding": encoding}, stream=_Raw(packed))
+        return httpx2.Response(200, headers={"Content-Encoding": encoding}, stream=_Raw(packed))
 
-    client = FacilitatorClient({"url": URL}, transport=httpx.MockTransport(handler))
+    client = FacilitatorClient({"url": URL}, transport=httpx2.MockTransport(handler))
     tracemalloc.start()
     try:
         with pytest.raises(RuntimeError) as exc:
@@ -502,20 +522,20 @@ def test_a_content_encoded_answer_is_refused_without_inflating(x402, monkeypatch
 
 def test_identity_encoding_is_read(x402, monkeypatch):
     _no_inflating(monkeypatch)
-    check(Supported(httpx.Response(200, headers={"Content-Encoding": "identity"},
+    check(Supported(httpx2.Response(200, headers={"Content-Encoding": "identity"},
                                    json={"kinds": [V2_EXACT]})))
 
 
 def test_the_raw_stream_is_capped_and_read_with_aiter_raw(x402, monkeypatch):
     calls = []
-    real = httpx.Response.aiter_raw
+    real = httpx2.Response.aiter_raw
 
     def spy(self, *a, **kw):
         calls.append(1)
         return real(self, *a, **kw)
 
-    monkeypatch.setattr(httpx.Response, "aiter_raw", spy)
-    monkeypatch.setattr(httpx.Response, "aiter_bytes",
+    monkeypatch.setattr(httpx2.Response, "aiter_raw", spy)
+    monkeypatch.setattr(httpx2.Response, "aiter_bytes",
                         lambda self, *a, **kw: (_ for _ in ()).throw(AssertionError("decoded read")))
     check(Supported(kinds(V2_EXACT)))
     assert calls
@@ -524,8 +544,8 @@ def test_the_raw_stream_is_capped_and_read_with_aiter_raw(x402, monkeypatch):
 def test_a_deployment_check_refuses_a_gzip_answer(x402, monkeypatch, capsys):
     _no_inflating(monkeypatch)
     packed = _gzip_bomb(2)
-    client = FacilitatorClient({"url": URL}, transport=httpx.MockTransport(
-        lambda r: httpx.Response(200, headers={"Content-Encoding": "gzip, gzip"}, stream=_Raw(packed))))
+    client = FacilitatorClient({"url": URL}, transport=httpx2.MockTransport(
+        lambda r: httpx2.Response(200, headers={"Content-Encoding": "gzip, gzip"}, stream=_Raw(packed))))
     x402.setattr(facilitator, "_client", client)
     assert check_config.main() == check_config.EXIT_REFUSED
     assert "content-encoded" in capsys.readouterr().err
@@ -562,7 +582,7 @@ def test_a_deep_body_in_any_encoding_is_refused(x402, name):
     assert len(body) <= 1024 * 1024 or name == "utf-32-le"
     from app.x402 import facilitator_client
     x402.setattr(facilitator_client, "MAX_SUPPORTED_BYTES", 4 * 1024 * 1024)   # reach the decode step
-    msg = refused(Supported(httpx.Response(200, content=body)))
+    msg = refused(Supported(httpx2.Response(200, content=body)))
     if name == "utf-8 BOM":
         assert "nested deeper than 32 levels" in msg
     else:
@@ -573,7 +593,7 @@ def test_a_deep_body_in_any_encoding_is_refused(x402, name):
 def test_deploy_check_refuses_a_deep_body_in_any_encoding(x402, capsys, name):
     from app.x402 import facilitator_client
     x402.setattr(facilitator_client, "MAX_SUPPORTED_BYTES", 4 * 1024 * 1024)
-    x402.setattr(facilitator, "_client", Supported(httpx.Response(200, content=ENCODED[name])).client())
+    x402.setattr(facilitator, "_client", Supported(httpx2.Response(200, content=ENCODED[name])).client())
     assert check_config.main() == check_config.EXIT_REFUSED
     err = capsys.readouterr().err
     assert "not a list of payment kinds" in err and "Traceback" not in err
@@ -581,14 +601,14 @@ def test_deploy_check_refuses_a_deep_body_in_any_encoding(x402, capsys, name):
 
 LIFESPAN_DRIVER = r"""
 import asyncio, sys
-import httpx
+import httpx2
 from app.core.config import settings
 from app.x402 import facilitator, facilitator_client
 from app import main
 
 body = open(sys.argv[1], "rb").read()
 
-class Raw(httpx.AsyncByteStream):
+class Raw(httpx2.AsyncByteStream):
     async def __aiter__(self):
         yield body
 
@@ -598,7 +618,7 @@ settings.X402_NETWORK = "base-sepolia"
 facilitator_client.MAX_SUPPORTED_BYTES = 4 * 1024 * 1024
 facilitator._client = facilitator_client.FacilitatorClient(
     {"url": "https://facilitator.example/x402"},
-    transport=httpx.MockTransport(lambda r: httpx.Response(200, stream=Raw())))
+    transport=httpx2.MockTransport(lambda r: httpx2.Response(200, stream=Raw())))
 facilitator.validate_x402_config = lambda: None
 
 async def run():
@@ -633,29 +653,29 @@ def test_lifespan_refuses_a_deep_body_in_any_encoding(tmp_path, name):
 
 
 def test_invalid_utf8_is_refused(x402):
-    msg = refused(Supported(httpx.Response(200, content=b'{"kinds": ["\xff"]}')))
+    msg = refused(Supported(httpx2.Response(200, content=b'{"kinds": ["\xff"]}')))
     assert "(not UTF-8)" in msg
 
 
 @pytest.mark.parametrize("ch", ["\x00", "\x01", "\x1f", "\x0b"])
 def test_a_raw_control_character_is_refused(x402, ch):
     body = ('{"kinds": [{"x402Version": 2, "scheme": "exact", "network": "eip155:84532"}]' + ch + "}").encode()
-    msg = refused(Supported(httpx.Response(200, content=body)))
+    msg = refused(Supported(httpx2.Response(200, content=body)))
     assert "control character" in msg
 
 
 def test_a_utf8_bom_is_stripped_and_the_answer_read(x402):
-    check(Supported(httpx.Response(200, content=b"\xef\xbb\xbf" + json.dumps({"kinds": [V2_EXACT]}).encode())))
+    check(Supported(httpx2.Response(200, content=b"\xef\xbb\xbf" + json.dumps({"kinds": [V2_EXACT]}).encode())))
 
 
 def test_non_ascii_utf8_is_read(x402):
-    check(Supported(httpx.Response(200, content=json.dumps(
+    check(Supported(httpx2.Response(200, content=json.dumps(
         {"kinds": [V2_EXACT], "note": "∀ é"}, ensure_ascii=False).encode("utf-8"))))
 
 
 # --- review round 3: an overall deadline ----------------------------------
 
-class _Drip(httpx.AsyncByteStream):
+class _Drip(httpx2.AsyncByteStream):
     """One byte, then another every `gap` seconds, forever."""
 
     def __init__(self, gap):
@@ -671,8 +691,8 @@ class _Drip(httpx.AsyncByteStream):
 def test_a_slow_drip_answer_hits_the_overall_deadline(x402):
     import time
     x402.setattr(facilitator, "SUPPORTED_DEADLINE_SECONDS", 0.5)
-    client = FacilitatorClient({"url": URL}, transport=httpx.MockTransport(
-        lambda r: httpx.Response(200, stream=_Drip(0.05))))
+    client = FacilitatorClient({"url": URL}, transport=httpx2.MockTransport(
+        lambda r: httpx2.Response(200, stream=_Drip(0.05))))
     started = time.monotonic()
     with pytest.raises(RuntimeError) as exc:
         asyncio.run(facilitator.check_facilitator_v2_support(client))
@@ -688,14 +708,14 @@ def test_the_default_deadline_is_15_seconds():
 
 def test_deploy_check_refuses_a_slow_drip(x402, capsys):
     x402.setattr(facilitator, "SUPPORTED_DEADLINE_SECONDS", 0.3)
-    x402.setattr(facilitator, "_client", FacilitatorClient({"url": URL}, transport=httpx.MockTransport(
-        lambda r: httpx.Response(200, stream=_Drip(0.05)))))
+    x402.setattr(facilitator, "_client", FacilitatorClient({"url": URL}, transport=httpx2.MockTransport(
+        lambda r: httpx2.Response(200, stream=_Drip(0.05)))))
     assert check_config.main() == check_config.EXIT_REFUSED
     assert "timed out after 0.3 s" in capsys.readouterr().err
 
 
 def test_an_oversized_non_2xx_answer_names_its_status(x402):
-    msg = refused(Supported(httpx.Response(503, text="x" * (2 * 1024 * 1024))))
+    msg = refused(Supported(httpx2.Response(503, text="x" * (2 * 1024 * 1024))))
     assert "HTTP 503" in msg
 
 
