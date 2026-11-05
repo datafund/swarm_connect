@@ -30,10 +30,10 @@ STAMP_ID = "a" * 64
 
 
 def _bee_refusal():
-    import httpx
-    return httpx.HTTPStatusError(
-        "400", request=httpx.Request("POST", "http://bee/stamps"),
-        response=httpx.Response(400, json={"message": "insufficient amount"}))
+    import httpx2
+    return httpx2.HTTPStatusError(
+        "400", request=httpx2.Request("POST", "http://bee/stamps"),
+        response=httpx2.Response(400, json={"message": "insufficient amount"}))
 
 # depth 17 at this price is a fraction of a BZZ; the tests set costs explicitly
 # via the chainstate price where the exact figure matters.
@@ -265,7 +265,7 @@ class TestPurchaseEndpoint:
     def test_an_uncertain_failure_stays_charged(self, tracker, monkeypatch):
         """A timeout after the request was sent may have bought the batch:
         the limits fail closed rather than hand the budget back."""
-        import httpx
+        import httpx2
         monkeypatch.setattr(settings, "X402_MAX_STAMP_BZZ", 0.0)
         monkeypatch.setattr(settings, "STAMP_DAILY_BZZ_PER_CALLER", 10.0)
         with patch("app.services.swarm_api.get_chainstate",
@@ -273,7 +273,7 @@ class TestPurchaseEndpoint:
              patch("app.services.swarm_api.check_sufficient_funds",
                    new=AsyncMock(return_value=FUNDS_OK)), \
              patch("app.services.swarm_api.purchase_postage_stamp",
-                   new=AsyncMock(side_effect=httpx.ReadTimeout("mining"))):
+                   new=AsyncMock(side_effect=httpx2.ReadTimeout("mining"))):
             TestClient(app).post("/api/v1/stamps/", json={"depth": 17, "duration_hours": 24})
         snap = tracker.snapshot()
         assert snap["spent"] != {}
@@ -722,7 +722,7 @@ class TestReservation:
     def test_concurrent_extends_cannot_overrun_the_budget(self, tracker, monkeypatch):
         """The audit PoC, inverted: many parallel extends from one IP."""
         import asyncio
-        import httpx
+        import httpx2
         monkeypatch.setattr(settings, "X402_MAX_STAMP_BZZ", 5.0)
         monkeypatch.setattr(settings, "STAMP_DAILY_BZZ_PER_CALLER", 0.5)
         extended = []
@@ -733,8 +733,8 @@ class TestReservation:
             return stamp_id
 
         async def run():
-            transport = httpx.ASGITransport(app=app, client=("203.0.113.7", 1234))
-            async with httpx.AsyncClient(transport=transport, base_url="http://t") as c:
+            transport = httpx2.ASGITransport(app=app, client=("203.0.113.7", 1234))
+            async with httpx2.AsyncClient(transport=transport, base_url="http://t") as c:
                 return await asyncio.gather(*[
                     c.patch(f"/api/v1/stamps/{STAMP_ID}/extend", json={"duration_hours": 24})
                     for _ in range(20)])
@@ -852,20 +852,20 @@ class TestCeilingOnEveryPath:
 class TestClassification:
     @staticmethod
     def _status(code):
-        import httpx
-        return httpx.HTTPStatusError(str(code), request=httpx.Request("POST", "http://bee/x"),
-                                     response=httpx.Response(code))
+        import httpx2
+        return httpx2.HTTPStatusError(str(code), request=httpx2.Request("POST", "http://bee/x"),
+                                     response=httpx2.Response(code))
 
     def test_what_counts_as_certainly_unspent(self):
         import asyncio
-        import httpx
+        import httpx2
         from fastapi import HTTPException
         from app.services.spend_budget import spend_certainly_did_not_happen as unspent
-        req = httpx.Request("POST", "http://bee/x")
-        released = [HTTPException(status_code=400), httpx.ConnectError("x", request=req),
-                    httpx.ConnectTimeout("x", request=req), self._status(400), self._status(429)]
-        kept = [httpx.ReadTimeout("x", request=req), httpx.WriteTimeout("x", request=req),
-                httpx.RemoteProtocolError("x", request=req), self._status(500), self._status(503),
+        req = httpx2.Request("POST", "http://bee/x")
+        released = [HTTPException(status_code=400), httpx2.ConnectError("x", request=req),
+                    httpx2.ConnectTimeout("x", request=req), self._status(400), self._status(429)]
+        kept = [httpx2.ReadTimeout("x", request=req), httpx2.WriteTimeout("x", request=req),
+                httpx2.RemoteProtocolError("x", request=req), self._status(500), self._status(503),
                 asyncio.CancelledError(), ValueError("?"), RuntimeError("?")]
         assert all(unspent(e) for e in released)
         assert not any(unspent(e) for e in kept)

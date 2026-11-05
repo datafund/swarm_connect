@@ -1225,21 +1225,21 @@ class TestBeeErrorSurfaced:
     """Bee's own message must reach the log and the response."""
 
     def test_extracts_message_from_json_body(self):
-        import httpx
+        import httpx2
         from app.services.stamp_pool import _bee_error_message
 
-        request = httpx.Request("POST", "http://bee:1633/stamps/1/20")
-        response = httpx.Response(400, json={"code": 400, "message": "out of funds"},
+        request = httpx2.Request("POST", "http://bee:1633/stamps/1/20")
+        response = httpx2.Response(400, json={"code": 400, "message": "out of funds"},
                                   request=request)
-        exc = httpx.HTTPStatusError("err", request=request, response=response)
+        exc = httpx2.HTTPStatusError("err", request=request, response=response)
         assert _bee_error_message(exc) == "out of funds"
 
     def test_returns_none_without_a_response(self):
-        import httpx
+        import httpx2
         from app.services.stamp_pool import _bee_error_message
 
-        request = httpx.Request("POST", "http://bee:1633/stamps/1/20")
-        assert _bee_error_message(httpx.ConnectError("refused", request=request)) is None
+        request = httpx2.Request("POST", "http://bee:1633/stamps/1/20")
+        assert _bee_error_message(httpx2.ConnectError("refused", request=request)) is None
 
 
 class TestPoolInventoryIsRegisteredAsOwned:
@@ -2311,12 +2311,12 @@ class TestTopUpRespectsTheSpendCeiling:
         """Recorded when Bee accepts the extension, because that is when the
         money is spent. Counting attempts would let a failing extend exhaust the
         ceiling and block the purchases the pool actually needs."""
-        import httpx
+        import httpx2
         manager = StampPoolManager(state_file=state_file)
         self._in_pool(manager, 3)
-        refused = httpx.HTTPStatusError(
-            "400", request=httpx.Request("PATCH", "http://bee/stamps/topup"),
-            response=httpx.Response(400, json={"message": "insufficient funds"}))
+        refused = httpx2.HTTPStatusError(
+            "400", request=httpx2.Request("PATCH", "http://bee/stamps/topup"),
+            response=httpx2.Response(400, json={"message": "insufficient funds"}))
 
         with patch('app.services.stamp_pool.settings.STAMP_POOL_MAX_PURCHASES_PER_HOUR', 3):
             with patch('app.services.stamp_pool.swarm_api.get_chainstate',
@@ -2324,7 +2324,7 @@ class TestTopUpRespectsTheSpendCeiling:
                 with patch('app.services.stamp_pool.swarm_api.extend_postage_stamp',
                            side_effect=refused):
                     for i in range(3):
-                        with pytest.raises(httpx.HTTPStatusError):
+                        with pytest.raises(httpx2.HTTPStatusError):
                             await manager._topup_stamp(f"{i:064x}")
 
         # Asserted on the recorded spends rather than the remaining budget, which
@@ -2334,15 +2334,15 @@ class TestTopUpRespectsTheSpendCeiling:
     @pytest.mark.asyncio
     async def test_an_uncertain_topup_failure_stays_counted(self, state_file):
         """A timeout after the call was sent may have spent money: fail closed."""
-        import httpx
+        import httpx2
         manager = StampPoolManager(state_file=state_file)
         self._in_pool(manager, 1)
         with patch('app.services.stamp_pool.settings.STAMP_POOL_MAX_PURCHASES_PER_HOUR', 3):
             with patch('app.services.stamp_pool.swarm_api.get_chainstate',
                        new=AsyncMock(return_value={"currentPrice": "24000"})):
                 with patch('app.services.stamp_pool.swarm_api.extend_postage_stamp',
-                           side_effect=httpx.ReadTimeout("waiting for the transaction")):
-                    with pytest.raises(httpx.ReadTimeout):
+                           side_effect=httpx2.ReadTimeout("waiting for the transaction")):
+                    with pytest.raises(httpx2.ReadTimeout):
                         await manager._topup_stamp(f"{0:064x}")
         assert len(manager._spend_times) == 1
 
@@ -2675,18 +2675,18 @@ class TestSpendReservation:
         from app.core.config import settings as real
         monkeypatch.setattr(real, "STAMP_POOL_MAX_PURCHASES_PER_HOUR", 1)
         mgr = StampPoolManager(state_file=str(tmp_path / "pool.json"))
-        import httpx
+        import httpx2
         from app.services import spend_budget
         tracker = spend_budget.SpendBudgetTracker(state_file=str(tmp_path / "s.json"))
         monkeypatch.setattr(spend_budget, "spend_budget_tracker", tracker)
         monkeypatch.setattr(real, "GATEWAY_DAILY_BZZ_CEILING", 1.0)
-        refused = httpx.HTTPStatusError(
-            "400", request=httpx.Request("POST", "http://bee/stamps"),
-            response=httpx.Response(400, json={"message": "insufficient funds"}))
+        refused = httpx2.HTTPStatusError(
+            "400", request=httpx2.Request("POST", "http://bee/stamps"),
+            response=httpx2.Response(400, json={"message": "insufficient funds"}))
         with patch("app.services.swarm_api.get_chainstate",
                    new=AsyncMock(return_value={"currentPrice": "24000"})), \
              patch("app.services.swarm_api.purchase_postage_stamp", new=AsyncMock(side_effect=refused)):
-            with pytest.raises(httpx.HTTPStatusError):
+            with pytest.raises(httpx2.HTTPStatusError):
                 asyncio.run(mgr._purchase_stamp(17))
         assert mgr._spend_budget_remaining() == 1
         assert tracker.snapshot()["gateway_spent"] == 0.0
@@ -2722,12 +2722,12 @@ class TestPoolSpendOutcomes:
 
     def test_a_read_timeout_during_purchase_stays_counted(self, tmp_path, monkeypatch):
         import asyncio
-        import httpx
+        import httpx2
         mgr, tracker = self._mgr(tmp_path, monkeypatch)
         with patch("app.services.swarm_api.get_chainstate", new=AsyncMock(return_value={"currentPrice": "24000"})), \
              patch("app.services.swarm_api.purchase_postage_stamp",
-                   new=AsyncMock(side_effect=httpx.ReadTimeout("mining"))):
-            with pytest.raises(httpx.ReadTimeout):
+                   new=AsyncMock(side_effect=httpx2.ReadTimeout("mining"))):
+            with pytest.raises(httpx2.ReadTimeout):
                 asyncio.run(mgr._purchase_stamp(17))
         assert tracker.snapshot()["gateway_spent"] > 0
         assert mgr._spend_budget_remaining() == 4
@@ -2985,7 +2985,7 @@ class TestSkippedReplenishmentErrors:
 class TestPoolStatusHidesBeeAddress:
     """/pool/status must not reveal the internal Bee API address (#534).
 
-    /pool/status has no authentication. httpx's HTTPStatusError text names the
+    /pool/status has no authentication. httpx2's HTTPStatusError text names the
     request URL ("Server error '503 Service Unavailable' for url '...'"), so
     copying str(e) into errors published the Bee node's address. The entry
     there carries the HTTP status or the exception class; the full text goes
@@ -3006,12 +3006,12 @@ class TestPoolStatusHidesBeeAddress:
             json.dump(["batch_aaa"], f)
 
     def _status_error(self, path, status=503, body=None):
-        import httpx
-        request = httpx.Request("GET", f"{self.BEE}/{path}")
-        response = httpx.Response(status, json=body or {}, request=request)
+        import httpx2
+        request = httpx2.Request("GET", f"{self.BEE}/{path}")
+        response = httpx2.Response(status, json=body or {}, request=request)
         try:
             response.raise_for_status()
-        except httpx.HTTPStatusError as e:
+        except httpx2.HTTPStatusError as e:
             return e
         raise AssertionError("raise_for_status did not raise")
 
@@ -3022,7 +3022,7 @@ class TestPoolStatusHidesBeeAddress:
     @pytest.mark.asyncio
     async def test_bee_sync_error_hides_bee_url(self, state_file):
         exc = self._status_error("batches")
-        assert self.BEE in str(exc)  # the premise: httpx names the URL
+        assert self.BEE in str(exc)  # the premise: httpx2 names the URL
         self._write_known(state_file)
         manager = StampPoolManager(state_file=state_file)
 
@@ -3043,9 +3043,9 @@ class TestPoolStatusHidesBeeAddress:
 
     @pytest.mark.asyncio
     async def test_bee_sync_connect_error_names_the_class(self, state_file):
-        import httpx
-        request = httpx.Request("GET", f"{self.BEE}/batches")
-        exc = httpx.ConnectError(f"cannot connect to {self.BEE}", request=request)
+        import httpx2
+        request = httpx2.Request("GET", f"{self.BEE}/batches")
+        exc = httpx2.ConnectError(f"cannot connect to {self.BEE}", request=request)
         self._write_known(state_file)
         manager = StampPoolManager(state_file=state_file)
 
@@ -3143,10 +3143,10 @@ class TestPoolStatusHidesBeeAddress:
                 "message": 'Post "http://rpc.internal.example:8545": dial tcp: refused'}
 
     def _raw_status_error(self, status, **response_kwargs):
-        import httpx
-        request = httpx.Request("POST", f"{self.BEE}/stamps/1000/17")
-        response = httpx.Response(status, request=request, **response_kwargs)
-        return httpx.HTTPStatusError("err", request=request, response=response)
+        import httpx2
+        request = httpx2.Request("POST", f"{self.BEE}/stamps/1000/17")
+        response = httpx2.Response(status, request=request, **response_kwargs)
+        return httpx2.HTTPStatusError("err", request=request, response=response)
 
     async def _purchase_errors(self, state_file, exc):
         manager = StampPoolManager(state_file=state_file)

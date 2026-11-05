@@ -8,7 +8,7 @@ and the Base RPC itself: about five upstream calls per anonymous request.
 import asyncio
 from unittest.mock import AsyncMock, patch
 
-import httpx
+import httpx2
 import pytest
 import pytest_asyncio
 
@@ -75,8 +75,8 @@ def upstreams(monkeypatch):
 @pytest_asyncio.fixture
 async def gw():
     from app.main import app
-    transport = httpx.ASGITransport(app=app)
-    async with httpx.AsyncClient(transport=transport, base_url="http://gw") as c:
+    transport = httpx2.ASGITransport(app=app)
+    async with httpx2.AsyncClient(transport=transport, base_url="http://gw") as c:
         yield c
 
 

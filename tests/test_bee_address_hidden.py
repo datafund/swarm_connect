@@ -1,7 +1,7 @@
 # tests/test_bee_address_hidden.py
 """Unauthenticated responses must not reveal the internal Bee API address (#549).
 
-httpx's HTTPStatusError text names the request URL, and Go network errors name
+httpx2's HTTPStatusError text names the request URL, and Go network errors name
 the address they dialled or the host they failed to resolve. /health x402
 warnings, stamp purchase and extend errors, and /pool/status used to copy such
 text into the response. Each response now names the failure by HTTP status or
@@ -14,7 +14,7 @@ fd00::/8).
 import json
 from unittest.mock import AsyncMock, patch
 
-import httpx
+import httpx2
 import pytest
 from fastapi.testclient import TestClient
 
@@ -52,20 +52,20 @@ def configured_hosts():
 
 
 def _status_error(path, status=503, method="GET", **response_kwargs):
-    """An HTTPStatusError exactly as httpx raises it for a Bee answer."""
-    request = httpx.Request(method, f"{BEE}/{path}")
-    response = httpx.Response(status, request=request, **response_kwargs)
+    """An HTTPStatusError exactly as httpx2 raises it for a Bee answer."""
+    request = httpx2.Request(method, f"{BEE}/{path}")
+    response = httpx2.Response(status, request=request, **response_kwargs)
     try:
         response.raise_for_status()
-    except httpx.HTTPStatusError as e:
-        assert BEE in str(e)  # the premise: httpx names the URL
+    except httpx2.HTTPStatusError as e:
+        assert BEE in str(e)  # the premise: httpx2 names the URL
         return e
     raise AssertionError("raise_for_status did not raise")
 
 
 def _connect_error(path):
-    request = httpx.Request("GET", f"{BEE}/{path}")
-    return httpx.ConnectError(
+    request = httpx2.Request("GET", f"{BEE}/{path}")
+    return httpx2.ConnectError(
         "dial tcp 10.0.0.1:1633: connect: connection refused", request=request)
 
 
@@ -106,8 +106,8 @@ class TestHealthWarningsHideBeeAddress:
 
     @pytest.mark.parametrize("exc, name", [
         (_connect_error("wallet"), "ConnectError"),
-        (httpx.ReadTimeout(f"timed out reading {BEE}/wallet",
-                           request=httpx.Request("GET", f"{BEE}/wallet")), "ReadTimeout"),
+        (httpx2.ReadTimeout(f"timed out reading {BEE}/wallet",
+                           request=httpx2.Request("GET", f"{BEE}/wallet")), "ReadTimeout"),
     ])
     def test_bee_transport_error_names_class(self, exc, name):
         body, logged = self._health(exc)
@@ -125,10 +125,10 @@ class TestBaseBalanceWarningHidesRpcUrl:
     async def test_rpc_status_error_hides_url_and_key(self):
         from app.x402 import base_balance
         rpc = "https://base-rpc.internal/v2/not-a-real-key-123"
-        request = httpx.Request("POST", rpc)
-        exc = httpx.HTTPStatusError(
+        request = httpx2.Request("POST", rpc)
+        exc = httpx2.HTTPStatusError(
             f"Client error '401 Unauthorized' for url '{rpc}'", request=request,
-            response=httpx.Response(401, request=request))
+            response=httpx2.Response(401, request=request))
         base_balance.clear_balance_cache()
 
         with patch.object(base_balance.settings, "X402_PAY_TO_ADDRESS",

@@ -4,7 +4,7 @@ Tests for stamped-chunk forwarding: service + endpoint + toggle (issue #219).
 """
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import httpx
+import httpx2
 import pytest
 from fastapi.testclient import TestClient
 
@@ -72,9 +72,9 @@ class TestUploadChunkService:
         from app.services.swarm_api import upload_chunk_to_swarm
 
         mock_client = MagicMock()
-        mock_client.post = AsyncMock(side_effect=httpx.HTTPError("boom"))
+        mock_client.post = AsyncMock(side_effect=httpx2.HTTPError("boom"))
         with patch("app.services.swarm_api.get_client", return_value=mock_client):
-            with pytest.raises(httpx.HTTPError):
+            with pytest.raises(httpx2.HTTPError):
                 await upload_chunk_to_swarm(b"x", VALID_STAMP)
 
     @pytest.mark.asyncio
@@ -169,7 +169,7 @@ class TestUploadChunkEndpoint:
     def test_bee_error_returns_502(self, client):
         with patch("app.api.endpoints.chunks.settings", _enabled_settings()):
             with patch("app.api.endpoints.chunks.upload_chunk_to_swarm",
-                       new=AsyncMock(side_effect=httpx.HTTPError("bee down"))):
+                       new=AsyncMock(side_effect=httpx2.HTTPError("bee down"))):
                 r = client.post(
                     "/api/v1/chunks/",
                     content=b"data",
