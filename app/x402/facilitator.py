@@ -182,10 +182,15 @@ async def check_facilitator_v2_support(client: Optional[FacilitatorClient] = Non
     (eip155:84532, not base-sepolia), in a 2xx answer. Fails closed: an
     unreachable facilitator, a request that cannot be made (the credential
     hook raising, an invalid URL), a non-2xx answer whatever its body, or a
-    2xx answer that cannot be read, is refused like one that does not list it. Does nothing when x402 is off or 2 is not enabled, so the default
-    configuration never calls /supported.
+    2xx answer that cannot be read (also one over 1 MiB, or nested deeper
+    than MAX_SUPPORTED_DEPTH, checked before parsing), is refused like one that does not list
+    it. x402Version must be the int 2, as the spec has it. Does nothing when
+    x402 is off or 2 is not enabled, so the default configuration never
+    calls /supported.
 
-    Messages name the facilitator host and what it lists, never a credential.
+    Messages name the facilitator host and, of what it lists, only values of
+    a safe form (CAIP-2 ids, v1 names, short lower-case schemes; anything
+    else as <invalid>), at most 10 of each: the deploy log is public.
     """
     if not settings.X402_ENABLED or 2 not in settings.x402_protocol_versions():
         return
@@ -194,10 +199,14 @@ async def check_facilitator_v2_support(client: Optional[FacilitatorClient] = Non
     client = client or get_facilitator_client()
     host = _host(client.config["url"]) or "the facilitator"
     import httpx
-    from pydantic import ValidationError
+    from app.x402.facilitator_client import MAX_SUPPORTED_BYTES, SupportedAnswerTooLarge
     from app.x402.models_v1 import SupportedResponse
     try:
         response = await client.supported_response()
+    except SupportedAnswerTooLarge as e:
+        raise _v2_refusal(f"the facilitator's /supported on {host} answered HTTP {e.status} with "
+                          f"something that is not a list of payment kinds (larger than "
+                          f"{MAX_SUPPORTED_BYTES} bytes)") from None
     except httpx.HTTPError as e:
         raise _v2_refusal(f"the facilitator's /supported on {host} could not be reached "
                           f"({type(e).__name__}), so it is unknown whether it settles x402 v2 exact "
@@ -215,20 +224,100 @@ async def check_facilitator_v2_support(client: Optional[FacilitatorClient] = Non
         # plain text without valid credentials).
         raise _v2_refusal(f"the facilitator's /supported on {host} answered HTTP {status}, not a list "
                           f"of payment kinds (a 401 or 403 is an authentication error)")
+    if _nesting_depth(response.content) > MAX_SUPPORTED_DEPTH:
+        # Checked before parsing: CPython's JSON parser recurses per level, and
+        # on Python 3.10 (the image's) a deep enough body can crash the
+        # process instead of raising RecursionError.
+        raise _v2_refusal(f"the facilitator's /supported on {host} answered HTTP {status} with "
+                          f"something that is not a list of payment kinds (nested deeper than "
+                          f"{MAX_SUPPORTED_DEPTH} levels)")
     try:
-        answer = SupportedResponse(**response.json())
-    except (ValidationError, ValueError, TypeError) as e:
-        # ValueError covers a body that is not JSON; TypeError one that is not an object.
+        data = response.json()
+        SupportedResponse(**data)       # the shape: an object with a list of kinds
+        kinds = [k for k in data["kinds"] if isinstance(k, dict)]
+    except Exception as e:
+        # Any parse failure: not JSON (ValueError), not an object (TypeError),
+        # the wrong shape (ValidationError), nesting deep enough to exhaust the
+        # parser (RecursionError, a RuntimeError).
         raise _v2_refusal(f"the facilitator's /supported on {host} answered HTTP {status} with "
                           f"something that is not a list of payment kinds ({type(e).__name__})") from None
-    kinds = answer.kinds
-    if any(k.x402_version == 2 and k.scheme == "exact" and k.network == network for k in kinds):
+    # Exact types, as the spec has them: x402Version the int 2 (not "2", 2.0
+    # or true), scheme and network strings. Read from the JSON itself, since
+    # the v1 model coerces.
+    def _v2_exact(k):
+        v = k.get("x402Version")
+        return type(v) is int and v == 2 and k.get("scheme") == "exact"
+    if any(_v2_exact(k) and k.get("network") == network for k in kinds):
         logger.info(f"x402 v2: the facilitator on {host} settles x402 v2 exact on {network}")
         return
-    v2_exact = sorted({k.network for k in kinds if k.x402_version == 2 and k.scheme == "exact"})
-    on_network = sorted({f"v{k.x402_version} {k.scheme}" for k in kinds
-                         if to_caip2(k.network) == network})
+    v2_exact = _shown(_safe_network(k.get("network")) for k in kinds if _v2_exact(k))
+    on_network = _shown(_kind_label(k) for k in kinds
+                        if isinstance(k.get("network"), str) and to_caip2(k["network"]) == network)
     raise _v2_refusal(
         f"the facilitator on {host} does not list x402Version 2, scheme exact, network {network} in "
         f"/supported (it lists v2 exact for {v2_exact or 'no network'}; for {network}, in either "
         f"name form: {on_network or 'nothing'})")
+
+
+# Deepest nesting of objects and arrays read in a /supported answer (#608).
+# A real answer is 4 deep (kinds[i].extra.x); codec_v2 allows 32 for headers.
+MAX_SUPPORTED_DEPTH = 32
+
+
+def _nesting_depth(body: bytes) -> int:
+    """The deepest nesting of [ and { in a JSON text, outside strings, without
+    parsing it. Linear in the body, which is at most 1 MiB."""
+    depth = deepest = 0
+    in_string = escaped = False
+    for byte in body:
+        if in_string:
+            if escaped:
+                escaped = False
+            elif byte == 0x5C:          # backslash
+                escaped = True
+            elif byte == 0x22:          # quote
+                in_string = False
+        elif byte == 0x22:
+            in_string = True
+        elif byte in (0x5B, 0x7B):      # [ {
+            depth += 1
+            if depth > deepest:
+                deepest = depth
+                if deepest > MAX_SUPPORTED_DEPTH:
+                    return deepest
+        elif byte in (0x5D, 0x7D):      # ] }
+            depth -= 1
+    return deepest
+
+
+# What a refusal may repeat from a facilitator's answer (#608). The message
+# goes to the deploy log, which is public, so only values of a known safe
+# form are shown, at most _SHOWN_MAX of them.
+_SCHEME_RE = re.compile(r"^[a-z0-9-]{1,32}\Z")
+_SHOWN_MAX = 10
+
+
+def _safe_network(value) -> str:
+    from app.x402.models_v2 import CAIP2_RE
+    from app.x402.networks import V1_TO_CAIP2
+    if isinstance(value, str) and (CAIP2_RE.match(value) or value in V1_TO_CAIP2):
+        return value
+    return "<invalid>"
+
+
+def _kind_label(kind: dict) -> str:
+    v = kind.get("x402Version")
+    version = str(v) if type(v) is int and 0 <= v < 1000 else "?"
+    scheme = kind.get("scheme")
+    scheme = scheme if isinstance(scheme, str) and _SCHEME_RE.match(scheme) else "<invalid>"
+    return f"v{version} {scheme}"
+
+
+def _shown(labels) -> str:
+    """Sanitised labels as a short list for a message, or '' when there are none."""
+    unique = sorted(set(labels))
+    if not unique:
+        return ""
+    head = ", ".join(unique[:_SHOWN_MAX])
+    more = len(unique) - _SHOWN_MAX
+    return f"[{head}]" if more <= 0 else f"[{head}, and {more} more]"
