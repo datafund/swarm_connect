@@ -600,11 +600,11 @@ class X402Middleware(BaseHTTPMiddleware):
                                     headers={"Retry-After": "60"})
             outcome_unknown.mark_asked(auth_key, gen)
             try:
-                from app.x402.settlement import facilitator_requirements
-                settlement = await self.facilitator_client.settle(
+                from app.x402.settlement import checked_settlement, facilitator_requirements
+                settlement = checked_settlement(await self.facilitator_client.settle(
                     payment=payment_payload,
                     payment_requirements=facilitator_requirements(request),
-                )
+                ))
                 failure = None if settlement.success else (settlement.error_reason or "unknown")
             except Exception as e:
                 outcome_unknown.release(auth_key)    # an unknown outcome now

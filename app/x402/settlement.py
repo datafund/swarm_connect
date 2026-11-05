@@ -928,6 +928,48 @@ def facilitator_requirements(request):
     return getattr(state, "x402_requirements", None)
 
 
+# A settled transaction as the gateway passes it on: a 32-byte hex hash.
+_TX_HASH = re.compile(r"^0x[0-9a-fA-F]{64}\Z")
+
+
+def valid_transaction(value) -> Optional[str]:
+    """`value` if it is a 0x-prefixed 32-byte hex transaction hash, else None.
+
+    Anything a facilitator sends is checked with this before it reaches a
+    header, a body, a log line or a stored record: a non-ASCII value made
+    Starlette raise on the X-Payment-Transaction header, and a CR/LF or a
+    huge value broke the response, each after the payment had settled.
+    """
+    if isinstance(value, str) and _TX_HASH.match(value):
+        return value
+    return None
+
+
+def checked_settlement(result):
+    """The facilitator's settle answer with an unusable `transaction` taken
+    as unknown (#607): None on a v1 SettleResponse, "" on a v2
+    SettleResponseV2 (its required field). Everything else is kept, so a paid
+    result is still delivered with its receipt; readers show an unknown
+    transaction as "unknown", as v1 always has. One place, applied where
+    each settle call returns (settle_payment and the middleware fallback)."""
+    tx = getattr(result, "transaction", None)
+    if tx is None or tx == "" or valid_transaction(tx) is not None:
+        return result
+    length = len(tx) if isinstance(tx, str) else -1
+    logger.warning(f"x402: facilitator transaction is not a 32-byte hex hash "
+                   f"(type {type(tx).__name__}, length {length}); treated as unknown")
+    from app.x402.models_v2 import SettleResponseV2
+    unknown = "" if isinstance(result, SettleResponseV2) else None
+    try:
+        return result.model_copy(update={"transaction": unknown})
+    except Exception:
+        try:
+            result.transaction = unknown
+        except Exception:
+            pass
+        return result
+
+
 def _facilitator():
     # Resolved through the dependency module so there is one client, and tests
     # that patch dependency._get_facilitator_client cover settlement too.
@@ -983,8 +1025,8 @@ async def settle_payment(request: Request) -> None:
                             detail=payment_state_unavailable_detail())
     outcome_unknown.mark_asked(auth_key, gen)
     try:
-        result = await _facilitator().settle(payment=payment,
-                                             payment_requirements=facilitator_requirements(request))
+        result = checked_settlement(await _facilitator().settle(
+            payment=payment, payment_requirements=facilitator_requirements(request)))
     except Exception as e:
         # The outcome is unknown: the facilitator may or may not have submitted
         # the transfer. Deliver nothing. The middleware then releases the

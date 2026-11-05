@@ -145,6 +145,14 @@ class IdempotentReplay(Exception):
         self.response = response
 
 
+def _stored_transaction(entry: dict) -> Optional[str]:
+    """An entry's transaction, only if it is a valid hash (#607). Entries hold
+    only checked ones (settlement.checked_settlement); this also covers an
+    entry stored before that check existed."""
+    from app.x402.settlement import valid_transaction
+    return valid_transaction(entry.get("transaction"))
+
+
 def _sha(value) -> str:
     return hashlib.sha256(json.dumps(value).encode()).hexdigest()
 
@@ -572,8 +580,8 @@ class IdempotencyStore:
         if entry.get("state") != DONE:
             entry["state"] = DONE
             entry["headers"] = {"content-type": "application/json"}
-            if entry.get("transaction"):
-                entry["headers"]["x-payment-transaction"] = entry["transaction"]
+            if _stored_transaction(entry):
+                entry["headers"]["x-payment-transaction"] = _stored_transaction(entry)
         entry["status"] = status
         entry["body"] = base64.b64encode(body).decode("ascii")
 
@@ -668,7 +676,7 @@ def _log_replay(request: Request, payer: str, entry: dict, retry_nonce: Optional
     log_audit_event(
         event_type=AuditEventType.PAYMENT_IDEMPOTENT_REPLAY,
         data={"method": request.method, "path": request.url.path,
-              "transaction_hash": entry.get("transaction"), "network": to_v1(settings.X402_NETWORK),
+              "transaction_hash": _stored_transaction(entry), "network": to_v1(settings.X402_NETWORK),
               # The retry's own authorization: verified, never settled.
               "nonce": retry_nonce},
         client_ip=get_client_ip(request),
@@ -767,7 +775,7 @@ async def begin_idempotent_request(request: Request, payer: str,
     if state == SETTLING:
         raise _settlement_unknown_409(entry)
     if state == DELIVERED:
-        tx = entry.get("transaction") or "unknown"
+        tx = _stored_transaction(entry) or "unknown"
         raise HTTPException(status_code=409, headers={"X-Payment-Transaction": tx}, detail={
             "code": "IDEMPOTENCY_KEY_DELIVERED_NOT_STORED",
             "message": ("The first request with this Idempotency-Key succeeded and was paid once, "
@@ -777,7 +785,7 @@ async def begin_idempotent_request(request: Request, payer: str,
             "x402_status": "delivered",
         })
     if state == SETTLED:
-        tx = entry.get("transaction") or "unknown"
+        tx = _stored_transaction(entry) or "unknown"
         raise HTTPException(status_code=409, headers={"X-Payment-Transaction": tx}, detail={
             "code": "IDEMPOTENCY_KEY_SETTLED_PENDING",
             "message": ("The first request with this Idempotency-Key was paid, but its result is "
