@@ -16,6 +16,8 @@ Thanks for your interest in contributing! Here's how to get started.
    python3 -m venv venv
    source venv/bin/activate
    pip install -r requirements.txt   # CI and the image install requirements.lock (see TEST_STRATEGY.md)
+   # An existing venv needs the same command after a dependency change: since #595
+   # the gateway imports httpx2, and an older venv fails with "No module named 'httpx2'".
    cp .env.example .env
    ```
 
