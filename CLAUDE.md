@@ -354,7 +354,7 @@ X402_FREE_TIER_RATE_LIMIT=3  # Requests/minute for free tier (default: 3)
 
 1. `MAX_HEADER_CHARS = 8192`, checked first. The ADR's largest headers are about 1.5 KB, and 8192 is nginx's per-field default and the MCP client's limit. The encoder refuses to go over it too.
 2. Canonical standard base64.
-3. UTF-8, then a JSON object with no duplicate keys, no NaN, and no lone surrogate escape such as `\ud800`. Such an escape would decode, but the model could then not be re-encoded.
+3. UTF-8, then a JSON object with no duplicate keys, no NaN, no number that overflows to infinity (`1e400`), no lone surrogate escape such as `\ud800`, and no nesting deeper than `MAX_JSON_DEPTH = 32`. The deepest real path is depth 3, and pydantic's serialiser fails at a few hundred levels. All of these would decode, but the model could then not be re-encoded (or, for `1e400`, would silently be re-encoded as null). The invariant, tested over the fixtures and edge cases: a header either raises `X402HeaderError` at decode, or its model encodes every way without error.
 4. `x402Version` must be 2.
 5. The v2 model.
 
