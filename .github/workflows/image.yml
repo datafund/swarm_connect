@@ -104,6 +104,19 @@ jobs:
           print(f"OK: {in_bundle} certificates in {BUNDLE}; httpx2's verifying context has {loaded} CAs loaded")
           PY
 
+      - name: no test packages in the image (offline)
+        # The image installs requirements.lock only; pytest and the other
+        # test-only packages are in requirements-dev.lock (#430). This fails
+        # if any of them can be imported in the built image.
+        run: |
+          docker exec -i "$CONTAINER" python - <<'TESTPKGS'
+          import importlib.util
+          TEST_ONLY = ("pytest", "_pytest", "pytest_asyncio", "pluggy", "iniconfig")
+          found = [name for name in TEST_ONLY if importlib.util.find_spec(name) is not None]
+          assert not found, f"test-only packages are importable in the image: {found}"
+          print(f"OK: none of {', '.join(TEST_ONLY)} is importable")
+          TESTPKGS
+
       - name: remove the container
         if: always()
         run: docker rm -f "$CONTAINER" || true
