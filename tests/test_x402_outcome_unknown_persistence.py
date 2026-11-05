@@ -591,7 +591,7 @@ def test_a_failed_write_ahead_on_the_fallback_is_rolled_back_in_the_same_process
 def test_a_parallel_duplicate_during_settlement_is_told_it_is_in_progress(env, state):
     """Not "no answer came back": the first request's settlement is still running."""
     import asyncio
-    import httpx
+    import httpx2
     from unittest.mock import patch
     from app.x402.audit import read_audit_log
 
@@ -607,8 +607,8 @@ def test_a_parallel_duplicate_during_settlement_is_told_it_is_in_progress(env, s
         fac.settle = AsyncMock(side_effect=slow_settle)
         header = create_valid_payment_header()
         with patch("app.x402.dependency._get_facilitator_client", return_value=fac):
-            transport = httpx.ASGITransport(app=_app(fac))
-            async with httpx.AsyncClient(transport=transport, base_url="http://t") as c:
+            transport = httpx2.ASGITransport(app=_app(fac))
+            async with httpx2.AsyncClient(transport=transport, base_url="http://t") as c:
                 first = asyncio.ensure_future(c.post("/api/v1/stamps/", headers={"X-PAYMENT": header}))
                 await started.wait()
                 dup = await c.post("/api/v1/stamps/", headers={"X-PAYMENT": header})
@@ -1000,7 +1000,7 @@ def test_a_duplicate_during_the_resolution_write_is_in_progress_not_unknown(env,
     until its resolution is written."""
     import asyncio
     import threading
-    import httpx
+    import httpx2
     from unittest.mock import patch
     reg = st.outcome_unknown
     started = threading.Event()
@@ -1017,8 +1017,8 @@ def test_a_duplicate_during_the_resolution_write_is_in_progress_not_unknown(env,
 
     async def run():
         with patch("app.x402.dependency._get_facilitator_client", return_value=fac):
-            transport = httpx.ASGITransport(app=_app(fac))
-            async with httpx.AsyncClient(transport=transport, base_url="http://t") as c:
+            transport = httpx2.ASGITransport(app=_app(fac))
+            async with httpx2.AsyncClient(transport=transport, base_url="http://t") as c:
                 first = asyncio.ensure_future(c.post("/api/v1/stamps/", headers={"X-PAYMENT": header}))
                 await asyncio.to_thread(started.wait, 2)
                 dup = await c.post("/api/v1/stamps/", headers={"X-PAYMENT": header})

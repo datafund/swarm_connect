@@ -9,7 +9,7 @@ client's transport.
 import asyncio
 from unittest.mock import AsyncMock, patch
 
-import httpx
+import httpx2
 import pytest
 import pytest_asyncio
 from fastapi import FastAPI, HTTPException
@@ -218,7 +218,7 @@ class TestRelease:
     async def test_released_on_error(self, shared):
         await shared.stop()  # nothing listening any more
         client = hc.get_client()
-        with pytest.raises(httpx.ConnectError):
+        with pytest.raises(httpx2.ConnectError):
             await client.get(url("wallet"))
         assert sum(bee_call_gate.held.values()) == 0
 
@@ -406,7 +406,7 @@ def _gate_app():
     async def bee_then_502():
         try:
             await hc.get_client().get(url("wallet"))
-        except httpx.HTTPError:
+        except httpx2.HTTPError:
             raise HTTPException(status_code=502, detail="Bee node request failed")
         return {"ok": True}
 
@@ -414,7 +414,7 @@ def _gate_app():
     async def bee_swallowed():
         try:
             await hc.get_client().get(url("wallet"))
-        except httpx.HTTPError:
+        except httpx2.HTTPError:
             pass
         return {"ok": True, "partial": True}
 
@@ -432,7 +432,7 @@ def _gate_app():
         bee_gate.mark_committed()
         try:
             await hc.get_client().get(url("wallet"))
-        except httpx.HTTPError:
+        except httpx2.HTTPError:
             raise HTTPException(status_code=502, detail={"code": "PAID_BUT_FAILED", "message": "refund"})
         return {"ok": True}
 
@@ -454,8 +454,8 @@ def _fill_request_slots():
 
 @pytest_asyncio.fixture
 async def gate_client(shared):
-    transport = httpx.ASGITransport(app=_gate_app(), raise_app_exceptions=False)
-    async with httpx.AsyncClient(transport=transport, base_url="http://gw") as c:
+    transport = httpx2.ASGITransport(app=_gate_app(), raise_app_exceptions=False)
+    async with httpx2.AsyncClient(transport=transport, base_url="http://gw") as c:
         yield c
 
 
@@ -521,8 +521,8 @@ class TestRewrite:
     @pytest.mark.asyncio
     async def test_another_requests_refusal_does_not_touch_this_one(self, shared):
         """Two requests at once: one refused, one fine. Only the refused one is 503."""
-        transport = httpx.ASGITransport(app=_gate_app(), raise_app_exceptions=False)
-        async with httpx.AsyncClient(transport=transport, base_url="http://gw") as c:
+        transport = httpx2.ASGITransport(app=_gate_app(), raise_app_exceptions=False)
+        async with httpx2.AsyncClient(transport=transport, base_url="http://gw") as c:
             shared.release.clear()
             busy = [asyncio.create_task(c.get("/bee")) for _ in range(3)]
             await until(lambda: shared.in_flight == 3)

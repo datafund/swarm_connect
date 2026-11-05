@@ -5,7 +5,7 @@ import tarfile
 from datetime import datetime, timezone
 from unittest.mock import AsyncMock, patch
 
-import httpx
+import httpx2
 import pytest
 from fastapi.testclient import TestClient
 
@@ -30,14 +30,14 @@ def test_expiry_from_amount_is_duration_at_todays_price():
 
 def _run_expiry(handler, **kw):
     async def go():
-        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        async with httpx2.AsyncClient(transport=httpx2.MockTransport(handler)) as client:
             with patch("app.services.swarm_api.get_client", return_value=client):
                 return await swarm_api.get_batch_expiry(BATCH, **kw)
     return asyncio.run(go())
 
 
 def test_batch_expiry_from_the_nodes_ttl():
-    iso = _run_expiry(lambda r: httpx.Response(200, json={"batchTTL": 7200}))
+    iso = _run_expiry(lambda r: httpx2.Response(200, json={"batchTTL": 7200}))
     assert 1.9 < _hours_until(iso) < 2.1
 
 
@@ -45,13 +45,13 @@ def test_batch_expiry_from_the_nodes_ttl():
     ({}, 404), ({"batchTTL": -1}, 200), ({"batchTTL": 0}, 200), ({"batchTTL": "soon"}, 200),
 ])
 def test_batch_expiry_unknown_is_none(body, status):
-    assert _run_expiry(lambda r: httpx.Response(status, json=body)) is None
+    assert _run_expiry(lambda r: httpx2.Response(status, json=body)) is None
 
 
 def test_batch_expiry_never_holds_up_the_response():
     async def slow(request):
         await asyncio.sleep(2)
-        return httpx.Response(200, json={"batchTTL": 60})
+        return httpx2.Response(200, json={"batchTTL": 60})
     started = datetime.now()
     assert _run_expiry(slow, timeout=0.2) is None
     assert (datetime.now() - started).total_seconds() < 1.5

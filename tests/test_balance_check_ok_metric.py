@@ -13,7 +13,7 @@ import subprocess
 import sys
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import httpx
+import httpx2
 import pytest
 from prometheus_client import REGISTRY
 
@@ -85,7 +85,7 @@ async def test_failed_read_sets_ok_to_zero_and_keeps_the_last_balance():
     good_time = _last("xbzz")
     errors_before = _poll("error")
 
-    await _run(httpx.PoolTimeout(""), httpx.PoolTimeout(""))
+    await _run(httpx2.PoolTimeout(""), httpx2.PoolTimeout(""))
 
     for check in ("xbzz", "xdai", "chequebook"):
         assert _ok(check) == 0.0, check
@@ -110,7 +110,7 @@ async def test_a_balance_read_below_threshold_is_a_successful_check():
 
 @pytest.mark.asyncio
 async def test_one_failed_read_does_not_skip_the_others():
-    await _run(WALLET, httpx.ConnectError("refused"))
+    await _run(WALLET, httpx2.ConnectError("refused"))
     assert _ok("xbzz") == 1.0
     assert _ok("xdai") == 1.0
     assert _ok("chequebook") == 0.0
@@ -144,7 +144,7 @@ async def test_base_balance_check_reports_fetched():
          patch.object(base_balance, "_get_eth_balance_from_rpc", new_callable=AsyncMock) as rpc:
         rpc.return_value = 0
         assert (await base_balance.check_base_eth_balance())["fetched"] is True
-        rpc.side_effect = httpx.ConnectError("refused")
+        rpc.side_effect = httpx2.ConnectError("refused")
         result = await base_balance.check_base_eth_balance()
         assert result["fetched"] is False
 

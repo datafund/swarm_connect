@@ -9,7 +9,8 @@ import json
 import secrets
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import httpx
+import httpx  # x402's own facilitator client raises httpx errors, not httpx2 ones (#595)
+import httpx2
 import pytest
 from fastapi import APIRouter, Depends, FastAPI, File, Request, UploadFile
 from fastapi.testclient import TestClient
@@ -187,7 +188,7 @@ def test_retry_while_first_is_running_gets_409_and_is_not_charged(fac):
     app, bought = _app(fac, gate=gate)
 
     async def run():
-        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t") as c:
+        async with httpx2.AsyncClient(transport=httpx2.ASGITransport(app=app), base_url="http://t") as c:
             h = lambda: {"X-PAYMENT": pay(), "Idempotency-Key": "k1"}
             first = asyncio.create_task(c.post("/api/v1/stamps/", json={"depth": 17}, headers=h()))
             while fac.settle.await_count == 0:
