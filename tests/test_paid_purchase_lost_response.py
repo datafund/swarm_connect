@@ -11,7 +11,7 @@ import json
 import secrets
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import httpx
+import httpx2
 import pytest
 from fastapi import Depends, FastAPI
 from fastapi.testclient import TestClient
@@ -50,7 +50,7 @@ def env(monkeypatch):
     fac.verify = AsyncMock(side_effect=lambda payment, **kw: VerifyResponse(
         isValid=True, payer=payment.payload.authorization.from_))
     fac.settle = AsyncMock(return_value=SettleResponse(success=True, transaction="0x" + "ab" * 32))
-    buy = AsyncMock(side_effect=httpx.ReadTimeout("slow chain"))
+    buy = AsyncMock(side_effect=httpx2.ReadTimeout("slow chain"))
     find = AsyncMock(return_value=BATCH)
     with patch("app.x402.dependency._get_facilitator_client", return_value=fac), \
          patch("app.x402.dependency._calculate_price_for_request",
@@ -115,8 +115,8 @@ def test_lookup_error_is_not_found_yet(env):
 @pytest.mark.parametrize("bee_status,looked_up", [(502, True), (504, True), (500, False)])
 def test_proxy_gateway_errors_are_unknown_outcomes(env, bee_status, looked_up):
     app, fac, buy, find = env
-    req = httpx.Request("POST", "http://bee/stamps/1/17")
-    buy.side_effect = httpx.HTTPStatusError("x", request=req, response=httpx.Response(bee_status, request=req))
+    req = httpx2.Request("POST", "http://bee/stamps/1/17")
+    buy.side_effect = httpx2.HTTPStatusError("x", request=req, response=httpx2.Response(bee_status, request=req))
     r = TestClient(app).post("/api/v1/stamps/", json=BODY, headers={"X-PAYMENT": pay()})
     assert (r.status_code == 201) == looked_up
     assert find.await_count == (1 if looked_up else 0)
@@ -127,7 +127,7 @@ def _run_pending(app, find_results, key="k"):
     from app.api.endpoints import stamps
 
     async def run():
-        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t") as c:
+        async with httpx2.AsyncClient(transport=httpx2.ASGITransport(app=app), base_url="http://t") as c:
             h = lambda: {"X-PAYMENT": pay(), "Idempotency-Key": key}
             first = await c.post("/api/v1/stamps/", json=BODY, headers=h())
             for _ in range(200):
@@ -204,7 +204,7 @@ def test_interrupted_background_search_records_a_refund(env):
     find.side_effect = lookup
 
     async def run():
-        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t") as c:
+        async with httpx2.AsyncClient(transport=httpx2.ASGITransport(app=app), base_url="http://t") as c:
             r = await c.post("/api/v1/stamps/", json=BODY, headers={"X-PAYMENT": pay()})
             await asyncio.sleep(0.05)
             assert stamps._PENDING_TASKS, "the running search is held"
@@ -221,7 +221,7 @@ def test_not_found_answers_202_then_registers_and_resolves_the_key(env):
     find.side_effect = [None, BATCH]      # in the request, then in the background
 
     async def run():
-        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t") as c:
+        async with httpx2.AsyncClient(transport=httpx2.ASGITransport(app=app), base_url="http://t") as c:
             h = lambda: {"X-PAYMENT": pay(), "Idempotency-Key": "k"}
             first = await c.post("/api/v1/stamps/", json=BODY, headers=h())
             for _ in range(100):
@@ -265,7 +265,7 @@ def test_batch_is_registered_even_if_bookkeeping_fails(env):
 # --- swarm_api ------------------------------------------------------------
 
 def _bee(handler):
-    return httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    return httpx2.AsyncClient(transport=httpx2.MockTransport(handler))
 
 
 def test_label_is_sent_as_query_parameter():
@@ -274,7 +274,7 @@ def test_label_is_sent_as_query_parameter():
 
     def handler(request):
         seen.append(request)
-        return httpx.Response(201, json={"batchID": BATCH})
+        return httpx2.Response(201, json={"batchID": BATCH})
 
     with patch("app.services.swarm_api.get_client", return_value=_bee(handler)):
         asyncio.run(swarm_api.purchase_postage_stamp(1000, 17, label="lbl"))
@@ -354,9 +354,9 @@ def test_slow_bee_is_awaited_not_cut_off(env, monkeypatch):
 def test_slow_bee_refusal_is_recorded_as_such(env, monkeypatch):
     app, fac, buy, find = env
     monkeypatch.setattr(settings, "SWARM_STAMP_PURCHASE_TIMEOUT_SECONDS", 0.05)
-    req = httpx.Request("POST", "http://bee/stamps/1/17")
-    buy.side_effect = _slow_bee(httpx.HTTPStatusError(
-        "x", request=req, response=httpx.Response(400, json={"message": "insufficient funds"}, request=req)))
+    req = httpx2.Request("POST", "http://bee/stamps/1/17")
+    buy.side_effect = _slow_bee(httpx2.HTTPStatusError(
+        "x", request=req, response=httpx2.Response(400, json={"message": "insufficient funds"}, request=req)))
     first, retry = _run_pending(app, None, key="k-refused")
     assert first.status_code == 202
     assert "refused by Bee" in _audit("payment_failed")[0]["data"]["reason"]
@@ -373,10 +373,10 @@ def test_slow_bee_refusal_hides_the_bee_address(env, monkeypatch, bee_response):
     any response names the internal Bee address (#549)."""
     app, fac, buy, find = env
     monkeypatch.setattr(settings, "SWARM_STAMP_PURCHASE_TIMEOUT_SECONDS", 0.05)
-    req = httpx.Request("POST", "http://bee.internal:1633/stamps/1/17")
-    buy.side_effect = _slow_bee(httpx.HTTPStatusError(
+    req = httpx2.Request("POST", "http://bee.internal:1633/stamps/1/17")
+    buy.side_effect = _slow_bee(httpx2.HTTPStatusError(
         "Client error '400 Bad Request' for url 'http://bee.internal:1633/stamps/1/17'",
-        request=req, response=httpx.Response(400, request=req, **bee_response)))
+        request=req, response=httpx2.Response(400, request=req, **bee_response)))
     first, retry = _run_pending(app, None, key="k-refused-hidden")
     reason = _audit("payment_failed")[0]["data"]["reason"]
     assert "refused by Bee" in reason
@@ -388,7 +388,7 @@ def test_slow_bee_refusal_hides_the_bee_address(env, monkeypatch, bee_response):
 def test_slow_bee_connection_lost_falls_back_to_the_label(env, monkeypatch):
     app, fac, buy, find = env
     monkeypatch.setattr(settings, "SWARM_STAMP_PURCHASE_TIMEOUT_SECONDS", 0.05)
-    buy.side_effect = _slow_bee(httpx.RemoteProtocolError("bee restarted"))
+    buy.side_effect = _slow_bee(httpx2.RemoteProtocolError("bee restarted"))
     first, retry = _run_pending(app, None, key="k-lost")
     assert first.status_code == 202
     assert find.await_count == 1
@@ -416,7 +416,7 @@ def test_paid_purchases_waiting_on_bee_are_capped_before_payment(env, monkeypatc
     buy.side_effect = slow
 
     async def run():
-        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t") as c:
+        async with httpx2.AsyncClient(transport=httpx2.ASGITransport(app=app), base_url="http://t") as c:
             first = await c.post("/api/v1/stamps/", json=BODY, headers={"X-PAYMENT": pay()})
             second = await c.post("/api/v1/stamps/", json=BODY, headers={"X-PAYMENT": pay()})
             gate.set()
@@ -442,7 +442,7 @@ def test_shutdown_waits_then_records_a_purchase_still_at_bee(env, monkeypatch):
     buy.side_effect = hung
 
     async def run():
-        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t") as c:
+        async with httpx2.AsyncClient(transport=httpx2.ASGITransport(app=app), base_url="http://t") as c:
             r = await c.post("/api/v1/stamps/", json=BODY, headers={"X-PAYMENT": pay()})
             await stamps.drain_pending_purchases(0.05)
             return r
@@ -459,7 +459,7 @@ def test_shutdown_lets_a_purchase_finish_within_the_grace(env, monkeypatch):
     buy.side_effect = _slow_bee(BATCH, delay=0.2)
 
     async def run():
-        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t") as c:
+        async with httpx2.AsyncClient(transport=httpx2.ASGITransport(app=app), base_url="http://t") as c:
             await c.post("/api/v1/stamps/", json=BODY, headers={"X-PAYMENT": pay()})
             await stamps.drain_pending_purchases(5)
     asyncio.run(run())
@@ -512,8 +512,8 @@ def test_pending_paid_purchase_keeps_its_spend_hold(env):
 def test_refused_paid_purchase_releases_its_spend_hold(env):
     """Bee's own 4xx answer: nothing was bought, so nothing stays reserved."""
     app, fac, buy, find = env
-    req = httpx.Request("POST", "http://bee/stamps/1/17")
-    buy.side_effect = httpx.HTTPStatusError("x", request=req, response=httpx.Response(400, request=req))
+    req = httpx2.Request("POST", "http://bee/stamps/1/17")
+    buy.side_effect = httpx2.HTTPStatusError("x", request=req, response=httpx2.Response(400, request=req))
     r = TestClient(app).post("/api/v1/stamps/", json=BODY, headers={"X-PAYMENT": pay()})
     assert r.status_code == 400
     find.assert_not_called()
@@ -569,9 +569,9 @@ def test_background_bee_4xx_releases_the_hold(env, monkeypatch):
     goes back now instead of at midnight, and nothing is counted as spent."""
     app, fac, buy, find = env
     monkeypatch.setattr(settings, "SWARM_STAMP_PURCHASE_TIMEOUT_SECONDS", 0.05)
-    req = httpx.Request("POST", "http://bee/stamps/1/17")
-    buy.side_effect = _slow_bee(httpx.HTTPStatusError(
-        "x", request=req, response=httpx.Response(400, json={"message": "insufficient funds"}, request=req)))
+    req = httpx2.Request("POST", "http://bee/stamps/1/17")
+    buy.side_effect = _slow_bee(httpx2.HTTPStatusError(
+        "x", request=req, response=httpx2.Response(400, json={"message": "insufficient funds"}, request=req)))
     before = _spend_recorded()
     first, retry = _run_pending(app, None, key="k-refused-hold")
     assert first.status_code == 202
@@ -585,9 +585,9 @@ def test_background_bee_5xx_keeps_the_hold(env, monkeypatch):
     from prometheus_client import REGISTRY
     app, fac, buy, find = env
     monkeypatch.setattr(settings, "SWARM_STAMP_PURCHASE_TIMEOUT_SECONDS", 0.05)
-    req = httpx.Request("POST", "http://bee/stamps/1/17")
-    buy.side_effect = _slow_bee(httpx.HTTPStatusError(
-        "x", request=req, response=httpx.Response(500, request=req)))
+    req = httpx2.Request("POST", "http://bee/stamps/1/17")
+    buy.side_effect = _slow_bee(httpx2.HTTPStatusError(
+        "x", request=req, response=httpx2.Response(500, request=req)))
     uncertain = lambda: REGISTRY.get_sample_value(
         "gateway_spend_uncertain_bzz_total", {"operation": "stamp purchase"}) or 0.0
     before = uncertain()
@@ -655,7 +655,7 @@ def _cancelled_request_then_background(app, key):
     from app.api.endpoints import stamps
 
     async def run():
-        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t") as c:
+        async with httpx2.AsyncClient(transport=httpx2.ASGITransport(app=app), base_url="http://t") as c:
             h = {"X-PAYMENT": pay(), "Idempotency-Key": key}
             req = asyncio.ensure_future(c.post("/api/v1/stamps/", json=BODY, headers=h))
             for _ in range(200):           # until Bee's request is running
@@ -688,9 +688,9 @@ def test_cancelled_request_then_delivered_is_counted_once_as_spent(env, monkeypa
 def test_cancelled_request_then_bee_4xx_releases_without_counting(env, monkeypatch):
     app, fac, buy, find = env
     monkeypatch.setattr(settings, "SWARM_STAMP_PURCHASE_TIMEOUT_SECONDS", 30)
-    req = httpx.Request("POST", "http://bee/stamps/1/17")
-    buy.side_effect = _slow_bee(httpx.HTTPStatusError(
-        "x", request=req, response=httpx.Response(400, request=req)), delay=0.1)
+    req = httpx2.Request("POST", "http://bee/stamps/1/17")
+    buy.side_effect = _slow_bee(httpx2.HTTPStatusError(
+        "x", request=req, response=httpx2.Response(400, request=req)), delay=0.1)
     before = _uncertain()
     _cancelled_request_then_background(app, "k-cancel-4xx")
     assert _gateway_spent() == 0
@@ -714,7 +714,7 @@ def test_shutdown_during_the_late_expiry_read_still_stores_the_201(env, monkeypa
 
     async def run():
         with patch("app.services.swarm_api.get_chainstate", new=chainstate):
-            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t") as c:
+            async with httpx2.AsyncClient(transport=httpx2.ASGITransport(app=app), base_url="http://t") as c:
                 h = lambda: {"X-PAYMENT": pay(), "Idempotency-Key": "k-late-cancel"}
                 first = await c.post("/api/v1/stamps/", json=BODY, headers=h())
                 for _ in range(200):       # until the batch is registered
@@ -751,7 +751,7 @@ def test_background_cancelled_at_shutdown_counts_the_hold_once(env):
     before, spent_before = _uncertain(), _spend_recorded()
 
     async def run():
-        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t") as c:
+        async with httpx2.AsyncClient(transport=httpx2.ASGITransport(app=app), base_url="http://t") as c:
             r = await c.post("/api/v1/stamps/", json=BODY, headers={"X-PAYMENT": pay()})
             for _ in range(200):
                 if len(calls) > 1:
@@ -773,7 +773,7 @@ def _cancel_request_while(app, started):
     from app.api.endpoints import stamps
 
     async def run():
-        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t") as c:
+        async with httpx2.AsyncClient(transport=httpx2.ASGITransport(app=app), base_url="http://t") as c:
             req = asyncio.ensure_future(c.post("/api/v1/stamps/", json=BODY, headers={"X-PAYMENT": pay()}))
             for _ in range(400):
                 if started():

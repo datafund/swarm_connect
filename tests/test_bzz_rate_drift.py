@@ -4,7 +4,7 @@ import json
 import os
 from unittest.mock import patch
 
-import httpx
+import httpx2
 import pytest
 
 from app.core.config import settings
@@ -39,9 +39,9 @@ def _fresh(monkeypatch):
 
 def _feed(price_doc):
     def handler(request):
-        return httpx.Response(200, json=price_doc)
-    real = httpx.AsyncClient
-    return patch("httpx.AsyncClient", lambda **kw: real(transport=httpx.MockTransport(handler), **kw))
+        return httpx2.Response(200, json=price_doc)
+    real = httpx2.AsyncClient
+    return patch("httpx2.AsyncClient", lambda **kw: real(transport=httpx2.MockTransport(handler), **kw))
 
 
 def test_rates_are_exported(monkeypatch):
@@ -56,14 +56,14 @@ def test_rates_are_exported(monkeypatch):
 
 def test_no_feed_means_no_request(monkeypatch):
     monkeypatch.setattr(settings, "X402_BZZ_PRICE_FEED_URL", "")
-    with patch("httpx.AsyncClient", side_effect=AssertionError("fetched")):
+    with patch("httpx2.AsyncClient", side_effect=AssertionError("fetched")):
         asyncio.run(metrics._update_bzz_rates())
 
 
 def test_a_failing_feed_is_harmless(monkeypatch):
     monkeypatch.setattr(settings, "X402_BZZ_PRICE_FEED_URL", "https://feed.example/price")
     monkeypatch.setattr(metrics, "_last_price_fetch", None)
-    with patch("httpx.AsyncClient", side_effect=RuntimeError("down")):
+    with patch("httpx2.AsyncClient", side_effect=RuntimeError("down")):
         asyncio.run(metrics._update_bzz_rates())
 
 
@@ -90,9 +90,9 @@ def test_reads_are_throttled(monkeypatch):
 
     def handler(request):
         calls.append(1)
-        return httpx.Response(200, json={"usd": 0.04})
-    real = httpx.AsyncClient
-    with patch("httpx.AsyncClient", lambda **kw: real(transport=httpx.MockTransport(handler), **kw)):
+        return httpx2.Response(200, json={"usd": 0.04})
+    real = httpx2.AsyncClient
+    with patch("httpx2.AsyncClient", lambda **kw: real(transport=httpx2.MockTransport(handler), **kw)):
         asyncio.run(metrics._update_bzz_rates())
         asyncio.run(metrics._update_bzz_rates())
     assert len(calls) == 1
@@ -119,9 +119,9 @@ def test_non_finite_price_is_rejected(monkeypatch):
     monkeypatch.setattr(settings, "X402_BZZ_PRICE_FEED_URL", "https://feed.example/price")
 
     def handler(request):
-        return httpx.Response(200, content=b'{"usd": Infinity}', headers={"content-type": "application/json"})
-    real = httpx.AsyncClient
-    with patch("httpx.AsyncClient", lambda **kw: real(transport=httpx.MockTransport(handler), **kw)):
+        return httpx2.Response(200, content=b'{"usd": Infinity}', headers={"content-type": "application/json"})
+    real = httpx2.AsyncClient
+    with patch("httpx2.AsyncClient", lambda **kw: real(transport=httpx2.MockTransport(handler), **kw)):
         asyncio.run(metrics._update_bzz_rates())
     assert metrics.bzz_usd_rate_market._value.get() == 0
 
@@ -131,7 +131,7 @@ def test_a_dead_feed_stops_reporting_a_stale_price(monkeypatch):
     with _feed({"usd": 0.04}):
         asyncio.run(metrics._update_bzz_rates())
     assert metrics.bzz_usd_rate_market._value.get() == 0.04
-    with patch("httpx.AsyncClient", side_effect=RuntimeError("down")):
+    with patch("httpx2.AsyncClient", side_effect=RuntimeError("down")):
         for _ in range(metrics.PRICE_FEED_MAX_FAILURES):
             monkeypatch.setattr(metrics, "_last_price_fetch", None)
             asyncio.run(metrics._update_bzz_rates())
@@ -153,14 +153,14 @@ def test_the_first_read_is_not_throttled_on_a_freshly_booted_host(monkeypatch):
 
     def handler(request):
         calls.append(request.url)
-        return httpx.Response(200, json={"swarm-bzz": {"usd": 0.041}})
+        return httpx2.Response(200, json={"swarm-bzz": {"usd": 0.041}})
 
     monkeypatch.setattr(settings, "X402_BZZ_PRICE_FEED_URL", "https://feed.example/p")
     monkeypatch.setattr(settings, "X402_BZZ_PRICE_FEED_INTERVAL_SECONDS", 900)
     monkeypatch.setattr(metrics.time, "monotonic", lambda: 42.0)  # 42s since boot
 
-    real = httpx.AsyncClient
-    with patch("httpx.AsyncClient", lambda **kw: real(transport=httpx.MockTransport(handler), **kw)):
+    real = httpx2.AsyncClient
+    with patch("httpx2.AsyncClient", lambda **kw: real(transport=httpx2.MockTransport(handler), **kw)):
         asyncio.run(metrics._update_bzz_rates())
 
     assert calls, "the first read was throttled on a host with 42s of uptime"
@@ -173,14 +173,14 @@ def test_the_second_read_is_still_throttled(monkeypatch):
 
     def handler(request):
         calls.append(request.url)
-        return httpx.Response(200, json={"swarm-bzz": {"usd": 0.041}})
+        return httpx2.Response(200, json={"swarm-bzz": {"usd": 0.041}})
 
     monkeypatch.setattr(settings, "X402_BZZ_PRICE_FEED_URL", "https://feed.example/p")
     monkeypatch.setattr(settings, "X402_BZZ_PRICE_FEED_INTERVAL_SECONDS", 900)
     monkeypatch.setattr(metrics.time, "monotonic", lambda: 42.0)
 
-    real = httpx.AsyncClient
-    with patch("httpx.AsyncClient", lambda **kw: real(transport=httpx.MockTransport(handler), **kw)):
+    real = httpx2.AsyncClient
+    with patch("httpx2.AsyncClient", lambda **kw: real(transport=httpx2.MockTransport(handler), **kw)):
         asyncio.run(metrics._update_bzz_rates())
         asyncio.run(metrics._update_bzz_rates())
 

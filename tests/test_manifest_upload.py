@@ -4,7 +4,7 @@ Tests for manifest/collection upload functionality.
 Tests TAR archive uploads with Swarm-Collection header.
 """
 import pytest
-import httpx
+import httpx2
 import io
 import tarfile
 from unittest.mock import patch
@@ -211,7 +211,7 @@ class TestManifestUploadErrors:
     @patch('app.api.endpoints.data.upload_collection_to_swarm')
     def test_swarm_api_error(self, mock_upload, mock_check):
         """Test handling of Swarm API errors."""
-        mock_upload.side_effect = httpx.HTTPError("Swarm API unavailable")
+        mock_upload.side_effect = httpx2.HTTPError("Swarm API unavailable")
 
         files = {"file.txt": b"content"}
         tar_bytes = create_tar_archive(files)

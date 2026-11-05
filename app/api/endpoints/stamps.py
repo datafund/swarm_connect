@@ -4,7 +4,7 @@ from fastapi.responses import JSONResponse
 from typing import Any, Optional, Union
 import asyncio
 import datetime
-import httpx
+import httpx2
 import json
 import logging
 import secrets
@@ -206,7 +206,7 @@ def _enforce_spend_limits(request: Request, cost_bzz: float, operation: str) -> 
     )
 
 
-def _bee_error_detail(exc: httpx.HTTPError):
+def _bee_error_detail(exc: httpx2.HTTPError):
     """Extract (status_code, message) from a failed Bee request.
 
     Bee reports refusals as JSON like {"code": 400, "message": "insufficient
@@ -216,7 +216,7 @@ def _bee_error_detail(exc: httpx.HTTPError):
     Returns (None, None) when there is no response to read — a timeout or a
     connection failure, which genuinely is the node being unreachable.
 
-    The message reaches the caller, so it never quotes str(exc): httpx puts
+    The message reaches the caller, so it never quotes str(exc): httpx2 puts
     the request URL, the internal Bee API address, in that text. An empty
     body gives "HTTP <status>", and URLs, IPs, host:port and resolved host
     names in Bee's own text are replaced (#549). Callers log the full error.
@@ -349,7 +349,7 @@ async def list_stamps(
             total_count=len(stamp_details)
         )
 
-    except httpx.HTTPError as e:
+    except httpx2.HTTPError as e:
         logger.error(f"Failed to retrieve stamps from Swarm API: {exc_text(e)}")
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
@@ -447,7 +447,7 @@ async def check_stamp_health(
             )
         )
 
-    except httpx.HTTPError as e:
+    except httpx2.HTTPError as e:
         logger.error(f"Failed to check stamp health from Swarm API: {exc_text(e)}")
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
@@ -480,7 +480,7 @@ async def get_stamp_details(
     stamp_id = stamp_id.lower()
     try:
         all_stamps = await swarm_api.get_all_stamps_processed()
-    except httpx.HTTPError as e:
+    except httpx2.HTTPError as e:
         logger.error(f"Failed to retrieve data from upstream Swarm API: {exc_text(e)}")
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
@@ -606,7 +606,7 @@ def _register_purchase(request: Request, batch_id: str, payer: Optional[str] = N
         only_if_unowned=only_if_unowned)
 
 
-def _outcome_unknown(e: httpx.HTTPError) -> bool:
+def _outcome_unknown(e: httpx2.HTTPError) -> bool:
     """Bee (or a proxy in front of it) gave no answer about the purchase.
 
     A timeout or dropped connection, or a 502/504 from a proxy, says nothing
@@ -618,9 +618,9 @@ def _outcome_unknown(e: httpx.HTTPError) -> bool:
     from app.services.bee_gate import BeeBusyError
     if isinstance(e, BeeBusyError):
         return False
-    if isinstance(e, httpx.TransportError):
+    if isinstance(e, httpx2.TransportError):
         return True
-    return isinstance(e, httpx.HTTPStatusError) and e.response.status_code in (502, 504)
+    return isinstance(e, httpx2.HTTPStatusError) and e.response.status_code in (502, 504)
 
 
 def _purchase_pending(request: Request, label: str, depth: int, amount: int,
@@ -754,7 +754,7 @@ async def _finish_pending_purchase(request: Request, label: str, depth: int, amo
                 in_flight = True
                 batch_id = await asyncio.shield(purchase)
                 in_flight = False
-            except httpx.HTTPError as e:
+            except httpx2.HTTPError as e:
                 if not _outcome_unknown(e):
                     # The full text, which _bee_error_detail leaves out (#549).
                     logger.error(f"Bee refused a paid purchase (label {label}, tx {tx}): {e}")
@@ -1010,7 +1010,7 @@ async def purchase_stamp(
                         _purchase_pending(request, label, effective_depth, amount, start_block, purchase=purchase,
                                           reservation=reservation)
                         raise
-            except httpx.HTTPError as e:
+            except httpx2.HTTPError as e:
                 # No answer about the purchase. It may still have happened. Unpaid,
                 # the caller just retries; paid, look for the batch rather than keep
                 # the money and report a failure.
@@ -1072,7 +1072,7 @@ async def purchase_stamp(
         size_label = stamp_request.size or "custom"
         stamp_purchases_total.labels(size=size_label, status="error").inc()
         raise  # Re-raise HTTP exceptions as-is
-    except httpx.HTTPError as e:
+    except httpx2.HTTPError as e:
         stamp_purchases_total.labels(size=stamp_request.size or "custom", status="error").inc()
         logger.error(f"Failed to purchase stamp from Swarm API: {exc_text(e)}")
         # A 4xx from Bee is the caller's request being wrong (an amount below the
@@ -1279,7 +1279,7 @@ async def extend_stamp(
 
     except HTTPException:
         raise  # Re-raise HTTP exceptions as-is
-    except httpx.HTTPError as e:
+    except httpx2.HTTPError as e:
         logger.error(f"Failed to extend stamp {stamp_id} from Swarm API: {exc_text(e)}")
         # Same reasoning as the purchase path: a 4xx from Bee describes the
         # request, not the node's availability, and its message names the cause.

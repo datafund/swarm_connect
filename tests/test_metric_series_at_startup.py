@@ -16,7 +16,7 @@ import subprocess
 import sys
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import httpx
+import httpx2
 import pytest
 from fastapi.testclient import TestClient
 
@@ -136,7 +136,7 @@ class TestNotarySuccessCountedAfterUpload:
     def test_not_counted_when_upload_fails(self, mock_upload, mock_ownership):
         from app.services.metrics import notary_signatures_total, uploads_total
         mock_ownership.check_access.return_value = (True, "ok")
-        mock_upload.side_effect = httpx.HTTPError("Bee node down")
+        mock_upload.side_effect = httpx2.HTTPError("Bee node down")
         notary_before = _count(notary_signatures_total, "success")
         notary_err_before = _count(notary_signatures_total, "error")
         upload_err_before = _count(uploads_total, "error")
@@ -168,7 +168,7 @@ class TestNotarySuccessCountedAfterUpload:
         notary_before = _count(notary_signatures_total, "success")
         upload_before = _count(uploads_total, "success")
 
-        mock_upload.side_effect = [httpx.HTTPError("down"), "d" * 64, httpx.HTTPError("down")]
+        mock_upload.side_effect = [httpx2.HTTPError("down"), "d" * 64, httpx2.HTTPError("down")]
         for _ in range(3):
             self._post_signed()
 

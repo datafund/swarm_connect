@@ -1,19 +1,24 @@
 # app/services/http_client.py
 """
-Shared httpx.AsyncClient for all outbound HTTP requests.
+Shared httpx2.AsyncClient for all outbound HTTP requests.
 
 Initialized during FastAPI lifespan startup, closed on shutdown.
 Provides connection pooling and non-blocking I/O for Swarm Bee API calls.
 
-Self-recovery (#587). httpcore 1.0.9 (the latest release when this was
-written) leaks a pool slot when a request is cancelled, or its pool wait times
-out, after the pool has handed it a NEW connection but before the request has
-used it. The connection stays in the pool in the CONNECTING state (no socket)
-or NEW state, is never idle, closed or expired, so nothing removes it, and it
-counts against max_connections forever. Under load with client disconnects and
-asyncio.wait_for timeouts the pool fills with such slots and every call fails
-with PoolTimeout while almost no sockets are open. tests/test_bee_pool_recovery.py
-reproduces it.
+Self-recovery (#587), kept as a backstop. httpcore 1.0.9, which the gateway
+used until #595, leaks a pool slot when a request is cancelled, or its pool
+wait times out, after the pool has handed it a NEW connection but before the
+request has used it. The connection stays in the pool in the CONNECTING state
+(no socket) or NEW state, is never idle, closed or expired, so nothing removes
+it, and it counts against max_connections forever. Under load with client
+disconnects and asyncio.wait_for timeouts the pool fills with such slots and
+every call fails with PoolTimeout while almost no sockets are open.
+
+The gateway now uses httpx2/httpcore2, Pydantic's maintained fork, which drops
+such connections (pydantic/httpx2#983, in 2.6.0 and later).
+tests/test_bee_pool_recovery.py reproduces the leak on httpcore 1.0.9 and shows
+httpcore2 staying healthy. The recovery below stays until a soak on the new
+client decides whether it can go (#618).
 
 The shared client's transport counts PoolTimeouts. After
 BEE_HTTP_POOL_RECOVERY_THRESHOLD in a row, and when the pool shows enough stuck
@@ -29,11 +34,11 @@ import time
 from typing import Optional, Set
 from urllib.parse import urljoin
 
-import httpx
+import httpx2
 
 logger = logging.getLogger(__name__)
 
-_client: Optional[httpx.AsyncClient] = None
+_client: Optional[httpx2.AsyncClient] = None
 _transport: Optional["ObservedTransport"] = None
 _generation = 0
 _replace_lock: Optional[asyncio.Lock] = None
@@ -41,7 +46,7 @@ _recovery_task: Optional[asyncio.Task] = None
 _last_recovery_attempt: Optional[float] = None
 # Old clients waiting for their in-flight requests before they are closed.
 _retiring: Set[asyncio.Task] = set()
-_retired_clients: Set[httpx.AsyncClient] = set()
+_retired_clients: Set[httpx2.AsyncClient] = set()
 
 # How often a retiring client is checked for in-flight requests.
 RETIRE_POLL_SECONDS = 1.0
@@ -54,7 +59,7 @@ PROBE_TIMEOUT_SECONDS = 5.0
 def exc_text(e: BaseException) -> str:
     """The exception for a log line: its type, then its message if it has one.
 
-    str() of an httpx timeout (PoolTimeout, ReadTimeout, ...) is empty, which
+    str() of an httpx2 timeout (PoolTimeout, ReadTimeout, ...) is empty, which
     left log lines such as "Error fetching wallet info ...: " during #587.
     """
     message = str(e)
@@ -62,7 +67,7 @@ def exc_text(e: BaseException) -> str:
     return f"{name}: {message}" if message else name
 
 
-class _CountedStream(httpx.AsyncByteStream):
+class _CountedStream(httpx2.AsyncByteStream):
     """A response body that marks its request finished when it is closed."""
 
     def __init__(self, stream, transport: "ObservedTransport") -> None:
@@ -83,21 +88,21 @@ class _CountedStream(httpx.AsyncByteStream):
                 self._transport.in_flight -= 1
 
 
-class ObservedTransport(httpx.AsyncBaseTransport):
-    """httpx's transport, counting PoolTimeouts and requests in flight."""
+class ObservedTransport(httpx2.AsyncBaseTransport):
+    """httpx2's transport, counting PoolTimeouts and requests in flight."""
 
-    def __init__(self, limits: httpx.Limits, generation: int) -> None:
-        self.inner = httpx.AsyncHTTPTransport(limits=limits)
+    def __init__(self, limits: httpx2.Limits, generation: int) -> None:
+        self.inner = httpx2.AsyncHTTPTransport(limits=limits)
         self.limits = limits
         self.generation = generation
         self.in_flight = 0
         self.consecutive_pool_timeouts = 0
 
-    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+    async def handle_async_request(self, request: httpx2.Request) -> httpx2.Response:
         self.in_flight += 1
         try:
             response = await self.inner.handle_async_request(request)
-        except httpx.PoolTimeout:
+        except httpx2.PoolTimeout:
             self.in_flight -= 1
             self.consecutive_pool_timeouts += 1
             _on_pool_timeout(self)
@@ -115,9 +120,9 @@ class ObservedTransport(httpx.AsyncBaseTransport):
 
 
 def pool_snapshot(transport: Optional[ObservedTransport]) -> Optional[dict]:
-    """Connections and requests in the transport's httpcore pool, or None.
+    """Connections and requests in the transport's httpcore2 pool, or None.
 
-    Reads httpx's private AsyncHTTPTransport._pool and httpcore's
+    Reads httpx2's private AsyncHTTPTransport._pool and httpcore2's
     pool._requests; any change there makes this return None instead of
     raising. A connection is "stuck" when it is neither idle nor closed and no
     request in the pool holds it: the slots leaked by #587.
@@ -156,17 +161,17 @@ def current_pool_snapshot() -> Optional[dict]:
 
 def _limits():
     from app.core.config import settings
-    return httpx.Limits(
+    return httpx2.Limits(
         max_connections=settings.BEE_HTTP_MAX_CONNECTIONS,
         max_keepalive_connections=settings.BEE_HTTP_MAX_KEEPALIVE_CONNECTIONS,
         keepalive_expiry=settings.BEE_HTTP_KEEPALIVE_EXPIRY_SECONDS,
     )
 
 
-def _new_client() -> "tuple[httpx.AsyncClient, ObservedTransport]":
+def _new_client() -> "tuple[httpx2.AsyncClient, ObservedTransport]":
     """A new shared client and its transport.
 
-    Passing transport= means httpx does not apply proxies from the
+    Passing transport= means httpx2 does not apply proxies from the
     HTTP_PROXY, HTTPS_PROXY or ALL_PROXY environment variables to this
     client. That is intended: Bee is on the compose network and must be
     reached directly.
@@ -175,8 +180,8 @@ def _new_client() -> "tuple[httpx.AsyncClient, ObservedTransport]":
     _generation += 1
     transport = ObservedTransport(_limits(), _generation)
     from app.services import bee_gate  # cap on Bee calls in flight (#588)
-    client = httpx.AsyncClient(
-        timeout=httpx.Timeout(10.0, connect=5.0),
+    client = httpx2.AsyncClient(
+        timeout=httpx2.Timeout(10.0, connect=5.0),
         follow_redirects=True,
         transport=bee_gate.wrap(transport),
     )
@@ -189,7 +194,7 @@ async def init_client():
     _client, _transport = _new_client()
     _replace_lock = asyncio.Lock()
     _last_recovery_attempt = None
-    logger.info("Initialized shared httpx.AsyncClient")
+    logger.info("Initialized shared httpx2.AsyncClient")
 
 
 async def close_client():
@@ -224,10 +229,10 @@ async def close_client():
         await _client.aclose()
         _client = None
         _transport = None
-        logger.info("Closed shared httpx.AsyncClient")
+        logger.info("Closed shared httpx2.AsyncClient")
 
 
-def get_client() -> httpx.AsyncClient:
+def get_client() -> httpx2.AsyncClient:
     """Get the shared HTTP client instance."""
     if _client is None:
         raise RuntimeError("HTTP client not initialized — call init_client() first")
@@ -279,7 +284,7 @@ async def probe_bee() -> bool:
     try:
         # trust_env=False: no proxy from HTTP(S)_PROXY/ALL_PROXY, the same
         # path as the shared client, whose explicit transport ignores them.
-        async with httpx.AsyncClient(timeout=httpx.Timeout(PROBE_TIMEOUT_SECONDS),
+        async with httpx2.AsyncClient(timeout=httpx2.Timeout(PROBE_TIMEOUT_SECONDS),
                                      trust_env=False) as probe:
             response = await probe.get(url)
         return response.status_code < 500
@@ -347,7 +352,7 @@ async def recover_pool(generation: int) -> str:
         return result
 
 
-def _retire(client: httpx.AsyncClient, transport: ObservedTransport) -> None:
+def _retire(client: httpx2.AsyncClient, transport: ObservedTransport) -> None:
     """Close an old client once its in-flight requests finish, without blocking."""
     _retired_clients.add(client)
     task = asyncio.get_running_loop().create_task(_close_when_drained(client, transport))
@@ -355,7 +360,7 @@ def _retire(client: httpx.AsyncClient, transport: ObservedTransport) -> None:
     task.add_done_callback(_retiring.discard)
 
 
-async def _close_when_drained(client: httpx.AsyncClient, transport: ObservedTransport) -> None:
+async def _close_when_drained(client: httpx2.AsyncClient, transport: ObservedTransport) -> None:
     from app.core.config import settings
     cap = max(
         float(settings.STAMP_PURCHASE_BEE_TIMEOUT_SECONDS),

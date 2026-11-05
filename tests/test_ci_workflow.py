@@ -12,8 +12,12 @@ checks that the built image answers GET / with Bee unreachable (#486).
 CI, the image and the lock name one Python minor version, and the image's
 base is pinned by digest (#617).
 """
+import ast
 import re
+import textwrap
 from pathlib import Path
+
+import yaml  # PyYAML reaches the lock only through uvicorn; if that ever goes, declare it as a test requirement (#430)
 
 REPO = Path(__file__).resolve().parent.parent
 TESTS_YML = REPO / ".github" / "workflows" / "tests.yml"
@@ -185,6 +189,69 @@ def test_image_runs_the_x402_config_check_in_the_running_container():
 def test_image_smoke_always_removes_the_container():
     text = IMAGE_YML.read_text()
     assert re.search(r"if:\s*always\(\)\s*\n\s*run:\s*docker rm -f ", text)
+
+
+TLS_EXEC = 'docker exec -i "$CONTAINER" python - <<\'PY\''
+
+
+def _tls_check_script():
+    """The Python the TLS step feeds into the running container, indentation kept."""
+    text = IMAGE_YML.read_text()
+    m = re.search(r"^([ \t]*)" + re.escape(TLS_EXEC) + r"\n(.*?)^\1PY$", text, re.M | re.S)
+    assert m, "image.yml has no TLS trust check fed to python in the container"
+    return textwrap.dedent(m.group(2))
+
+
+def test_image_checks_tls_trust_offline_in_the_running_container():
+    """httpx2 trusts the OS CA bundle on Linux, not certifi (#595): the built
+    image must have it and httpx2 must load it, and real handshakes with a local
+    server must refuse an untrusted certificate and a wrong host name, all
+    without any network."""
+    blocks = _run_blocks(IMAGE_YML.read_text())
+    tls = [i for i, b in enumerate(blocks) if b.startswith(TLS_EXEC)]
+    assert len(tls) == 1, f"expected one TLS trust check in image.yml, found {tls}"
+    smoke = next(i for i, b in enumerate(blocks) if "docker run" in b)
+    remove = next(i for i, b in enumerate(blocks) if b.startswith("docker rm -f "))
+    assert smoke < tls[0] < remove
+    assert "continue-on-error" not in IMAGE_YML.read_text()
+    # The step's own failure is not swallowed: it has no continue-on-error,
+    # and its shell part (the run without the Python fed to the container)
+    # neither ignores errors nor exits 0 on its own.
+    steps = yaml.safe_load(IMAGE_YML.read_text())["jobs"]["docker-build"]["steps"]
+    step = [s for s in steps if str(s.get("run", "")).startswith(TLS_EXEC)]
+    assert len(step) == 1 and "continue-on-error" not in step[0], step
+    shell = re.sub(r"<<'PY'\n.*?^PY$", "<<'PY'", step[0]["run"], flags=re.S | re.M)
+    assert shell.strip() == TLS_EXEC, f"shell commands around the TLS check: {shell!r}"
+    for swallow in (r"\|\|\s*(true|:)", r"\bset\s+\+e\b", r"\bexit\s+0\b"):
+        assert not re.search(swallow, shell), swallow
+
+    script = _tls_check_script()
+    tree = ast.parse(script, "image.yml TLS check")
+    # No way out before the checks run: no sys.exit/os._exit/exit/quit call,
+    # and no SystemExit raised.
+    early_exits = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call):
+            f = node.func
+            name = f.attr if isinstance(f, ast.Attribute) else getattr(f, "id", "")
+            if name in ("exit", "_exit", "quit"):
+                early_exits.append(f"line {node.lineno}: {ast.unparse(node)}")
+        if isinstance(node, ast.Raise) and node.exc is not None and "SystemExit" in ast.unparse(node.exc):
+            early_exits.append(f"line {node.lineno}: {ast.unparse(node)}")
+    assert not early_exits, early_exits
+    # Offline: the container runs with --network none, and the check reaches
+    # nothing but its own server on 127.0.0.1.
+    assert re.findall(r"https?://[^\s\"'/{]*", script) == ["https://127.0.0.1:"]
+    # The three handshakes: refused by default httpx2, accepted when the
+    # certificate is trusted, refused for another host name.
+    for handshake in (r"assert await refused\(default, url, HOST\) is not None",
+                      r"assert await refused\(trusting, url, HOST\) is None",
+                      r'assert wrong is not None and "mismatch" in wrong\.verify_message'):
+        assert re.search(handshake, script), handshake
+    # A failed check fails the step: the one except clause catches the refused
+    # handshake it then examines.
+    excepts = re.findall(r"^[ \t]*(except\b.*)$", script, re.M)
+    assert excepts == ["except httpx2.ConnectError as e:"], excepts
 
 
 # --- one Python version everywhere, and a base image pinned by digest (#617)

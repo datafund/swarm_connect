@@ -11,7 +11,7 @@ import threading
 import time
 from unittest.mock import AsyncMock, patch
 
-import httpx
+import httpx2
 import pytest
 from fastapi.testclient import TestClient
 
@@ -68,8 +68,8 @@ def test_a_hung_write_does_not_block_the_event_loop_and_fails_closed(fac, store,
                 await asyncio.sleep(0.02)
                 ticks.append(time.monotonic() - t0)
 
-        transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(transport=transport, base_url="http://t") as c:
+        transport = httpx2.ASGITransport(app=app)
+        async with httpx2.AsyncClient(transport=transport, base_url="http://t") as c:
             hb = asyncio.ensure_future(heartbeat())
             r = await c.post("/api/v1/stamps/", json={"depth": 17},
                              headers={"X-PAYMENT": pay(), "Idempotency-Key": "k-hung"})

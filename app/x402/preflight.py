@@ -86,7 +86,7 @@ async def check_xbzz_balance() -> Dict[str, Any]:
             "threshold_bzz": settings.X402_XBZZ_WARN_THRESHOLD,
             "wallet_address": None,
             # /health is unauthenticated and str(e) names the Bee API URL for an
-            # httpx error (#549); the full text is logged above.
+            # httpx2 error (#549); the full text is logged above.
             "warning": (f"Failed to fetch xBZZ balance from the Bee node "
                         f"({error_cause(e)}); see the gateway log for details."),
             # The balance could not be read at all (#589), as opposed to read
@@ -150,7 +150,7 @@ async def check_xdai_balance() -> Dict[str, Any]:
             "threshold_xdai": settings.X402_XDAI_WARN_THRESHOLD,
             "wallet_address": None,
             # /health is unauthenticated and str(e) names the Bee API URL for an
-            # httpx error (#549); the full text is logged above.
+            # httpx2 error (#549); the full text is logged above.
             "warning": (f"Failed to fetch xDAI balance from the Bee node "
                         f"({error_cause(e)}); see the gateway log for details."),
             # The balance could not be read at all (#589), as opposed to read
@@ -230,7 +230,7 @@ async def check_chequebook_balance() -> Dict[str, Any]:
             "threshold_bzz": settings.X402_CHEQUEBOOK_WARN_THRESHOLD,
             "chequebook_address": None,
             # /health is unauthenticated and str(e) names the Bee API URL for an
-            # httpx error (#549); the full text is logged above.
+            # httpx2 error (#549); the full text is logged above.
             "warning": (f"Failed to fetch chequebook balance from the Bee node "
                         f"({error_cause(e)}); see the gateway log for details."),
             # The balance could not be read at all (#589), as opposed to read

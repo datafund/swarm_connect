@@ -1,7 +1,7 @@
 # tests/test_http_client.py
-"""Tests for the shared httpx.AsyncClient lifecycle."""
+"""Tests for the shared httpx2.AsyncClient lifecycle."""
 import pytest
-import httpx
+import httpx2
 from unittest.mock import patch, AsyncMock
 
 from app.services.http_client import init_client, close_client, get_client, _client
@@ -27,12 +27,12 @@ class TestClientLifecycle:
 
     @pytest.mark.asyncio
     async def test_init_creates_client(self):
-        """init_client() should create an httpx.AsyncClient."""
+        """init_client() should create an httpx2.AsyncClient."""
         import app.services.http_client as mod
         await init_client()
         try:
             client = get_client()
-            assert isinstance(client, httpx.AsyncClient)
+            assert isinstance(client, httpx2.AsyncClient)
         finally:
             await close_client()
 
@@ -80,10 +80,10 @@ class TestGatherFailureBehavior:
         """When get_all_stamps raises, the error should propagate."""
         from app.services.swarm_api import get_all_stamps_processed
 
-        mock_global.side_effect = httpx.HTTPError("Bee node unreachable")
+        mock_global.side_effect = httpx2.HTTPError("Bee node unreachable")
         mock_local.return_value = [{"batchID": "abc", "usable": True}]
 
-        with pytest.raises(httpx.HTTPError):
+        with pytest.raises(httpx2.HTTPError):
             await get_all_stamps_processed()
 
     @pytest.mark.asyncio
@@ -94,9 +94,9 @@ class TestGatherFailureBehavior:
         from app.services.swarm_api import get_all_stamps_processed
 
         mock_global.return_value = [{"batchID": "abc", "depth": 17, "bucketDepth": 16, "batchTTL": 86400, "amount": "1000"}]
-        mock_local.side_effect = httpx.HTTPError("Stamps endpoint down")
+        mock_local.side_effect = httpx2.HTTPError("Stamps endpoint down")
 
-        with pytest.raises(httpx.HTTPError):
+        with pytest.raises(httpx2.HTTPError):
             await get_all_stamps_processed()
 
     @pytest.mark.asyncio

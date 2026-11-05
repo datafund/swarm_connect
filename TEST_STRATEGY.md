@@ -40,7 +40,7 @@ within 30 tries, 2 s apart: about a minute when the port refuses, and at most
 about 6 minutes when the app accepts connections but never answers (each try
 waits up to 10 s), inside the job's 20-minute timeout. `/` answers 200 with `status: degraded` while Bee is
 unreachable, and a refused port builds the first health snapshot at once, so
-the check never waits for `HEALTH_SNAPSHOT_FIRST_WAIT_SECONDS`. Once `/` answers, it runs `python -m app.x402.check_config` in the container (x402 off by default), which must exit 0 (#617). On failure the
+the check never waits for `HEALTH_SNAPSHOT_FIRST_WAIT_SECONDS`. Once `/` answers, it runs `python -m app.x402.check_config` in the container (x402 off by default), which must exit 0 (#617). Then it checks TLS trust offline in the container (#595): httpx2 verifies against the OS CA bundle from `ca-certificates`, not certifi, so the step fails unless `/etc/ssl/certs/ca-certificates.crt` holds certificates and an httpx2 transport's context verifies and has them loaded. It then runs three offline handshakes with a local TLS server and a fresh self-signed certificate, which must be refused by default httpx2, accepted by a client that trusts that certificate, and refused for another host name. On failure the
 job prints the container log; the container is always removed.
 `deploy.yml` does not call it: each deploy host builds the image itself before
 stopping the running gateway, so a broken build there already stops the deploy

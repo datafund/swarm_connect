@@ -11,7 +11,7 @@ the facilitator.
 """
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import httpx
+import httpx2
 import pytest
 from fastapi import Depends, FastAPI
 from fastapi.testclient import TestClient
@@ -160,7 +160,7 @@ def test_bee_unreachable_is_503_not_404(env, monkeypatch, headers):
     if "X-PAYMENT" in headers:
         headers = {"X-PAYMENT": create_valid_payment_header(payer=PAYER)}
     monkeypatch.setattr(settings, "X402_FREE_TIER_RATE_LIMIT", 1)
-    env["listing"].side_effect = httpx.ConnectError("bee down")
+    env["listing"].side_effect = httpx2.ConnectError("bee down")
     for _ in range(2):
         r = _extend(env, UNKNOWN, headers=headers)
         assert r.status_code == 503, r.text
