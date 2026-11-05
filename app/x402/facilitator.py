@@ -108,12 +108,14 @@ def validate_x402_config() -> None:
     if not settings.X402_ENABLED:
         return
     from app.x402.middleware import USDC_ADDRESSES
+    from app.x402.networks import accepted_network_values, to_caip2
 
     problems = []
     network = settings.X402_NETWORK or ""
-    if network not in USDC_ADDRESSES:
+    # A v1 name or a CAIP-2 id (#599); the asset table is keyed by CAIP-2.
+    if to_caip2(network) not in USDC_ADDRESSES:
         problems.append(
-            f"X402_NETWORK={network!r} is not one of {sorted(USDC_ADDRESSES)}; payments would "
+            f"X402_NETWORK={network!r} is not one of {accepted_network_values()}; payments would "
             f"be requested in an unknown asset"
         )
     pay_to = settings.X402_PAY_TO_ADDRESS or ""

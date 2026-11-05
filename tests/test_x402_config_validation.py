@@ -31,11 +31,33 @@ def test_testnet_with_public_facilitator_is_accepted(x402):
     facilitator.validate_x402_config()
 
 
-@pytest.mark.parametrize("network", ["base-mainnet", "eip155:8453", "Base", "", "polygon"])
+# eip155:8453 used to be in this list. Since #599 the CAIP-2 ids of the two
+# known networks are valid X402_NETWORK values (D6 in #596), so it moved to the
+# tests below; CAIP-2 ids of networks without a USDC entry are still refused.
+@pytest.mark.parametrize("network", ["base-mainnet", "Base", "", "polygon",
+                                     "eip155:1", "eip155:137", "EIP155:8453"])
 def test_unknown_networks_refuse_to_start(x402, network):
     x402.setattr(settings, "X402_NETWORK", network)
-    with pytest.raises(RuntimeError, match="X402_NETWORK"):
+    with pytest.raises(RuntimeError, match="X402_NETWORK=.* is not one of"):
         facilitator.validate_x402_config()
+
+
+def test_caip2_testnet_id_starts_like_its_v1_name(x402):
+    x402.setattr(settings, "X402_NETWORK", "eip155:84532")
+    facilitator.validate_x402_config()
+
+
+def test_caip2_mainnet_id_with_the_public_testnet_facilitator_refuses_to_start(x402):
+    x402.setattr(settings, "X402_NETWORK", "eip155:8453")
+    with pytest.raises(RuntimeError, match="mainnet") as exc:
+        facilitator.validate_x402_config()
+    assert "is not one of" not in str(exc.value)
+
+
+def test_caip2_mainnet_id_with_another_facilitator_is_accepted(x402):
+    x402.setattr(settings, "X402_NETWORK", "eip155:8453")
+    x402.setattr(settings, "X402_FACILITATOR_URL", "https://facilitator.example.com")
+    facilitator.validate_x402_config()
 
 
 @pytest.mark.parametrize("pay_to", [None, "", "0x0", "not-an-address"])

@@ -27,6 +27,7 @@ from x402.encoding import safe_base64_decode, safe_base64_encode
 
 from app.core.config import settings
 from app.x402.ratelimit import get_rate_limit_headers
+from app.x402.networks import to_caip2, to_v1
 from app.services.metrics import x402_settlements_total
 
 logger = logging.getLogger(__name__)
@@ -48,10 +49,12 @@ def is_free_tier_opt_in(request) -> bool:
     """
     return request.headers.get(X_PAYMENT_MODE_HEADER, "").strip().lower() in ("free", "free-tier")
 
-# USDC contract addresses by network
+# USDC contract addresses by network, keyed by CAIP-2 id (#599). Look a
+# configured X402_NETWORK up through app.x402.networks.to_caip2, which accepts
+# the v1 name as well.
 USDC_ADDRESSES = {
-    "base": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
-    "base-sepolia": "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+    "eip155:8453": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",   # base
+    "eip155:84532": "0x036CbD53842c5426634e7929541eC2318f3dCF7e",  # base-sepolia
 }
 
 # USDC token metadata for EIP-3009 signing, advertised in the 402's `extra`.
@@ -63,11 +66,11 @@ USDC_ADDRESSES = {
 # tests/test_x402_middleware.py pins each network's resulting DOMAIN_SEPARATOR
 # to the value read from the chain.
 USDC_TOKEN_METADATA = {
-    "base": {
+    "eip155:8453": {  # base
         "name": "USD Coin",  # name() of 0x8335...2913 on chain 8453
         "version": "2",
     },
-    "base-sepolia": {
+    "eip155:84532": {  # base-sepolia
         "name": "USDC",  # name() of 0x036C...CF7e on chain 84532
         "version": "2",
     },
@@ -146,7 +149,10 @@ def create_payment_requirements(
     Returns:
         PaymentRequirements object for the x402 response
     """
-    network = settings.X402_NETWORK
+    # X402_NETWORK may be a v1 name or a CAIP-2 id (#599). The tables are keyed
+    # by CAIP-2; the requirements are v1, so they carry the v1 name.
+    configured = settings.X402_NETWORK
+    network = to_v1(configured)
     pay_to = settings.X402_PAY_TO_ADDRESS
 
     if not pay_to:
@@ -160,8 +166,8 @@ def create_payment_requirements(
     # USDC address and EIP-712 domain for the configured network. No fallback:
     # an unknown network used to get the Base Sepolia asset silently (#370);
     # validate_x402_config() now refuses to start with one.
-    asset = USDC_ADDRESSES[network]
-    token_metadata = USDC_TOKEN_METADATA[network]
+    asset = USDC_ADDRESSES[to_caip2(configured)]
+    token_metadata = USDC_TOKEN_METADATA[to_caip2(configured)]
 
     resource = public_url(request)
 
@@ -280,7 +286,7 @@ def _log_delivery(request: Request, settlement, body: bytes, client_ip: str, pay
             "method": request.method,
             "path": request.url.path,
             "amount": getattr(requirements, "max_amount_required", None),
-            "network": settings.X402_NETWORK,
+            "network": to_v1(settings.X402_NETWORK),
             "resource": resource,
             "nonce": request_nonce(request),
         },
@@ -586,7 +592,7 @@ class X402Middleware(BaseHTTPMiddleware):
                 else:
                     settlement_refused(request)
                     log_payment_settled(client_ip=client_ip, payer=payer, transaction_hash=None,
-                                        network=settings.X402_NETWORK, success=False, error_reason=failure,
+                                        network=to_v1(settings.X402_NETWORK), success=False, error_reason=failure,
                                         nonce=request_nonce(request))
                     remembered = prior is not None
                     x402_settlements_total.labels(
@@ -617,7 +623,7 @@ class X402Middleware(BaseHTTPMiddleware):
                                     headers={"X-Payment-Mode": "failed"})
             log_payment_settled(client_ip=client_ip, payer=payer,
                                 transaction_hash=getattr(settlement, "transaction", None),
-                                network=settings.X402_NETWORK, success=True, nonce=request_nonce(request))
+                                network=to_v1(settings.X402_NETWORK), success=True, nonce=request_nonce(request))
             from app.x402.idempotency import record_settlement
             record_settlement(request, settlement)
             x402_settlements_total.labels(result="settled").inc()

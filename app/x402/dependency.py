@@ -20,6 +20,7 @@ from x402.types import PaymentPayload
 from x402.facilitator import FacilitatorClient
 
 from app.core.config import settings
+from app.x402.networks import to_v1
 from app.core.client_ip import client_key
 from app.services.http_client import exc_text
 from app.services.metrics import x402_payments_total
@@ -694,7 +695,7 @@ async def require_x402_payment(request: Request) -> None:
                     "message": "Free tier rate limit exceeded. Use x402 payment for higher limits.",
                     "payment_info": {
                         "price_usd": price_usd,
-                        "network": settings.X402_NETWORK,
+                        "network": to_v1(settings.X402_NETWORK),
                         "pay_to": settings.X402_PAY_TO_ADDRESS,
                     }
                 },

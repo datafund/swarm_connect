@@ -71,6 +71,7 @@ from starlette.responses import Response
 from app.core.atomic_io import atomic_write_json
 from app.core.io_lane import IOLane
 from app.core.config import settings
+from app.x402.networks import to_v1
 
 logger = logging.getLogger(__name__)
 
@@ -628,7 +629,7 @@ def _log_replay(request: Request, payer: str, entry: dict, retry_nonce: Optional
     log_audit_event(
         event_type=AuditEventType.PAYMENT_IDEMPOTENT_REPLAY,
         data={"method": request.method, "path": request.url.path,
-              "transaction_hash": entry.get("transaction"), "network": settings.X402_NETWORK,
+              "transaction_hash": entry.get("transaction"), "network": to_v1(settings.X402_NETWORK),
               # The retry's own authorization: verified, never settled.
               "nonce": retry_nonce},
         client_ip=get_client_ip(request),

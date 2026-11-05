@@ -40,6 +40,7 @@ from app.core.atomic_io import StateLoadError, atomic_write_json, load_json_stat
 from app.core.config import settings
 from app.core.client_ip import get_client_ip
 from app.x402.audit import log_payment_failed, log_payment_settled
+from app.x402.networks import to_v1
 from app.services.metrics import x402_settlements_total
 
 logger = logging.getLogger(__name__)
@@ -994,14 +995,14 @@ async def settle_payment(request: Request) -> None:
             logger.warning(f"x402: settlement refused ({reason}) for an authorization whose "
                            f"earlier settlement outcome is unknown")
             log_payment_settled(client_ip=client_ip, payer=payer, transaction_hash=None,
-                                network=settings.X402_NETWORK, success=False, error_reason=reason,
+                                network=to_v1(settings.X402_NETWORK), success=False, error_reason=reason,
                                 nonce=request_nonce(request))
             x402_settlements_total.labels(result="refused_after_unknown").inc()
             outcome_unknown.release(auth_key)    # nothing to resolve: the entry stays
             raise outcome_unknown_refusal(auth_key, reason, where="settle", request=request)
         logger.warning(f"x402: settlement refused before delivery: {reason}")
         log_payment_settled(client_ip=client_ip, payer=payer, transaction_hash=None,
-                            network=settings.X402_NETWORK, success=False, error_reason=reason,
+                            network=to_v1(settings.X402_NETWORK), success=False, error_reason=reason,
                             nonce=request_nonce(request))
         x402_settlements_total.labels(result="refused").inc()
         # Last: a cancellation while the removal is written loses no record.
@@ -1037,7 +1038,7 @@ async def settle_payment(request: Request) -> None:
     tx = getattr(result, "transaction", None)
     logger.info(f"x402: payment settled before delivery, tx={tx}")
     log_payment_settled(client_ip=client_ip, payer=payer, transaction_hash=tx,
-                        network=settings.X402_NETWORK, success=True, nonce=request_nonce(request))
+                        network=to_v1(settings.X402_NETWORK), success=True, nonce=request_nonce(request))
     x402_settlements_total.labels(result="settled").inc()
     # Last: the transfer happened once, by this attempt, so the write-ahead
     # entry goes. Records above come first, so a cancellation while this is

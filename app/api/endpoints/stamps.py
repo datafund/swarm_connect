@@ -11,6 +11,7 @@ import secrets
 
 from app.x402.settlement import settle_payment
 from app.core.config import settings
+from app.x402.networks import to_v1
 from app.services import swarm_api
 from app.services.bee_errors import error_cause, public_bee_text
 from app.services.http_client import exc_text
@@ -655,7 +656,7 @@ def _purchase_pending(request: Request, label: str, depth: int, amount: int,
         log_audit_event(event_type=AuditEventType.PURCHASE_PENDING, client_ip=get_client_ip(request),
                         wallet_address=payer,
                         data={"transaction_hash": tx, "label": label, "depth": depth, "amount": str(amount),
-                              "start_block": start_block, "network": settings.X402_NETWORK,
+                              "start_block": start_block, "network": to_v1(settings.X402_NETWORK),
                               "nonce": request_nonce(request)})
     except Exception as e:
         logger.error(f"Could not record a pending purchase (label {label}, tx {tx}): {e}", exc_info=True)
@@ -819,7 +820,7 @@ async def _finish_pending_purchase(request: Request, label: str, depth: int, amo
         logger.info(f"Pending purchase delivered: {batch_id[:16]} registered to {payer}")
         log_audit_event(event_type=AuditEventType.PAYMENT_DELIVERED, client_ip=client_ip, wallet_address=payer,
                         data={"transaction_hash": tx, "method": "POST", "path": request.url.path,
-                              "network": settings.X402_NETWORK, "resource": {"batchID": batch_id},
+                              "network": to_v1(settings.X402_NETWORK), "resource": {"batchID": batch_id},
                               "late": True, "nonce": request_nonce(request)})
         # Estimated from the amount funded at today's price (#383), like the
         # 201 answered in time; None when the price cannot be read in time
