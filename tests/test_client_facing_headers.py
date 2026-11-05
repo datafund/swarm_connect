@@ -40,13 +40,63 @@ class TestPublicResourceUrl:
         assert create_payment_requirements(req, 0.05).resource == "https://gateway.example/api/v1/stamps/"
 
 
+# Every header a browser client must be able to read. The x402 v2 names
+# (PAYMENT-REQUIRED, PAYMENT-RESPONSE) are listed before the gateway sends them,
+# so v2 browser clients can read them once it does (#603, epic #596).
+EXPOSED_HEADERS = (
+    "x-payment-response", "x-payment-mode", "x-payment-transaction",
+    "retry-after", "x-ratelimit-limit", "x-ratelimit-remaining", "x-ratelimit-reset",
+    "x-swarm-reference", "content-disposition",
+    "payment-required", "payment-response",
+)
+
+
+def _exposed(response):
+    return {h.strip().lower() for h in response.headers.get("access-control-expose-headers", "").split(",")}
+
+
 def test_cors_exposes_payment_and_rate_limit_headers():
     from app.main import app
     origin = settings.get_cors_origins()[0] if settings.get_cors_origins() != ["*"] else "https://app.example"
     r = TestClient(app).get("/", headers={"Origin": origin})
-    exposed = {h.strip().lower() for h in r.headers.get("access-control-expose-headers", "").split(",")}
-    for h in ("x-payment-response", "retry-after", "x-ratelimit-remaining", "x-payment-mode"):
+    exposed = _exposed(r)
+    for h in EXPOSED_HEADERS:
         assert h in exposed, h
+
+
+def test_cors_exposes_v2_payment_headers_on_402_and_success():
+    """With x402 on, a browser's 402 and its 200 both expose the v2 names (#603)."""
+    import json
+    import os
+    import subprocess
+    import sys
+    code = (
+        "import json\n"
+        "from fastapi.testclient import TestClient\n"
+        "from app.main import app\n"
+        "c = TestClient(app)\n"
+        "h = {'Origin': 'https://example.org'}\n"
+        "paid = c.post('/api/v1/data/?stamp_id=' + 'ab' * 32, headers=h,\n"
+        "              files={'file': ('a.txt', b'hi')})\n"
+        "ok = c.get('/', headers=h)\n"
+        "print(json.dumps([[r.status_code, r.headers.get('access-control-expose-headers', '')]\n"
+        "                  for r in (paid, ok)]))\n"
+    )
+    repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    env = {**os.environ, "X402_ENABLED": "true", "X402_PAY_TO_ADDRESS": "0xpayee",
+           "CORS_ALLOWED_ORIGINS": "*", "RATE_LIMIT_ENABLED": "false",
+           "STAMP_POOL_ENABLED": "false", "METRICS_ENABLED": "false",
+           "SWARM_BEE_API_URL": "http://localhost:1"}
+    out = subprocess.run([sys.executable, "-c", code], cwd=repo, env=env,
+                         capture_output=True, text=True, timeout=60)
+    assert out.returncode == 0, out.stderr[-2000:]
+    (paid_status, paid_exposed), (ok_status, ok_exposed) = json.loads(out.stdout.strip().splitlines()[-1])
+    assert paid_status == 402
+    assert ok_status == 200
+    for raw in (paid_exposed, ok_exposed):
+        exposed = {h.strip().lower() for h in raw.split(",")}
+        for h in EXPOSED_HEADERS:
+            assert h in exposed, (h, raw)
 
 
 @pytest.mark.parametrize("mode", ["free", "free-tier", "FREE-TIER"])

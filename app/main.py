@@ -271,10 +271,15 @@ app.add_middleware(
     # Browsers hide every response header not listed here from page scripts,
     # so a browser client could not read its settlement receipt, how long to
     # back off, or its remaining free-tier quota (#385).
+    # PAYMENT-REQUIRED and PAYMENT-RESPONSE are the x402 v2 names for the 402
+    # requirements and the settlement receipt. The gateway does not send them
+    # yet (epic #596); they are listed now so browser v2 clients can read them
+    # once it does (#603).
     expose_headers=[
         "X-PAYMENT-RESPONSE", "X-Payment-Mode", "X-Payment-Transaction",
         "Retry-After", "X-RateLimit-Limit", "X-RateLimit-Remaining", "X-RateLimit-Reset",
         "X-Swarm-Reference", "Content-Disposition",
+        "PAYMENT-REQUIRED", "PAYMENT-RESPONSE",
     ],
 )
 logger.info(f"CORS enabled for origins: {cors_origins}")
