@@ -542,7 +542,9 @@ def test_receipt_is_codec_v2_of_the_typed_settle_response(gw):
     offer = _offer(client)
     r = client.post("/api/v1/stamps/", headers=pay(2, offer))
     raw = json.loads(base64.b64decode(r.headers["PAYMENT-RESPONSE"]))
-    assert raw == {"success": True, "transaction": TX, "network": "eip155:84532", "payer": PAYER}
+    # The gateway's receipt: its own network and amount (#645 review round 4).
+    assert raw == {"success": True, "transaction": TX, "network": "eip155:84532", "payer": PAYER,
+                   "amount": offer["maxAmountRequired"]}
 
 
 # --------------------------------------------------------------------------
@@ -786,14 +788,31 @@ def test_large_facilitator_extra_still_gives_the_result_and_a_receipt(gw, route)
     assert codec_v2.decode_payment_response(r.headers["PAYMENT-RESPONSE"]).success is True
 
 
-def test_receipt_falls_back_to_the_minimal_fields_then_to_none():
+def test_receipt_falls_back_to_the_minimal_fields_then_to_none(monkeypatch):
+    from types import SimpleNamespace
+    from app.x402 import codec_v2 as codec
     from app.x402.middleware import encode_payment_response_v2
-    from app.x402.models_v2 import SettleResponseV2
-    big_payer = SettleResponseV2(success=True, transaction=TX, network="eip155:84532", payer="p" * 9000)
-    got = json.loads(base64.b64decode(encode_payment_response_v2(big_payer)))
+    from app.x402.models_v2 import PaymentRequirementsV2, SettleResponseV2
+    offer = PaymentRequirementsV2(scheme="exact", network="eip155:84532", asset="0x" + "11" * 20,
+                                  amount="20000", pay_to="0x" + "22" * 20, max_timeout_seconds=300)
+    request = SimpleNamespace(state=SimpleNamespace(x402_requirements_v2=offer, x402_payer=PAYER))
+    settled = SettleResponseV2(success=True, transaction=TX, network="eip155:84532")
+    real = codec.encode_payment_response
+    calls = []
+
+    def flaky(receipt):
+        calls.append(receipt)
+        if len(calls) == 1:
+            raise codec.PaymentHeaderTooLarge("PAYMENT-RESPONSE", "too large")
+        return real(receipt)
+    monkeypatch.setattr(codec, "encode_payment_response", flaky)
+    got = json.loads(base64.b64decode(encode_payment_response_v2(settled, request)))
     assert got == {"success": True, "transaction": TX, "network": "eip155:84532"}
-    hopeless = SettleResponseV2(success=True, transaction="t" * 9000, network="eip155:84532")
-    assert encode_payment_response_v2(hopeless) is None
+
+    def always(receipt):
+        raise codec.PaymentHeaderTooLarge("PAYMENT-RESPONSE", "too large")
+    monkeypatch.setattr(codec, "encode_payment_response", always)
+    assert encode_payment_response_v2(settled, request) is None
 
 
 def test_oversized_transaction_is_unknown_and_the_receipt_still_goes_out(gw):
@@ -1000,3 +1019,220 @@ def test_version_mismatch_still_points_to_the_original_header_while_it_is_accept
     r = client.post("/api/v1/stamps/", headers={**pay(2, offer, nonce=nonce_hex("0e")), **key})
     assert r.json()["detail"]["original_x402_version_accepted"] is True
     assert "X-PAYMENT header" in r.json()["detail"]["message"]
+
+
+
+# --------------------------------------------------------------------------
+# The v2 receipt carries the gateway's own values (#645 review round 4)
+# --------------------------------------------------------------------------
+
+FUZZED_SETTLE = {
+    "crlf-network": {"network": "x\r\nSet-Cookie: evil=1"},
+    "nul-bidi-network": {"network": "eip155:84532\u0000\u202e"},
+    "other-network": {"network": "eip155:1"},
+    "other-amount": {"amount": "999999999"},
+    "other-payer": {"payer": "0x" + "99" * 20},
+    "non-address-payer": {"payer": "not an address\r\n"},
+    "error-reason": {"errorReason": "x\r\nSet-Cookie: evil=1"},
+}
+
+
+@pytest.mark.parametrize("route", [("POST", "/api/v1/stamps/"), FALLBACK], ids=["settle_payment", "fallback"])
+@pytest.mark.parametrize("kind", list(FUZZED_SETTLE))
+def test_v2_receipt_is_built_from_the_gateways_values(gw, route, kind):
+    client, fac = gw("1,2")
+    offer = _offer(client)
+    fac.settle = {"success": True, "transaction": TX, "network": "eip155:84532", "payer": PAYER,
+                  "amount": "20000", **FUZZED_SETTLE[kind]}
+    r = _send(client, route, pay(2, offer))
+    assert r.status_code == 200, r.text
+    receipt = json.loads(base64.b64decode(r.headers["PAYMENT-RESPONSE"]))
+    assert receipt == {"success": True, "transaction": TX, "network": "eip155:84532",
+                       "payer": PAYER, "amount": offer["maxAmountRequired"]}
+
+
+def test_v2_receipt_payer_falls_back_to_the_signed_from(gw):
+    """A verified payer that is not an address never reaches the receipt."""
+    from tests.x402_v2_builders import authorization as auth_for
+    client, fac = gw("1,2")
+    offer = _offer(client)
+    from types import SimpleNamespace
+    from app.x402.middleware import _receipt_payer
+    from app.x402.models_v2 import PaymentPayloadV2
+    payment = PaymentPayloadV2.model_validate(v2_payload(offer, auth_for(offer)))
+    state = SimpleNamespace(x402_payer="0x" + "ab" * 20 + "\n", x402_payment=payment)
+    assert _receipt_payer(SimpleNamespace(state=state)) == PAYER
+    state.x402_payer = "0x" + "cd" * 20
+    assert _receipt_payer(SimpleNamespace(state=state)) == "0x" + "cd" * 20
+
+
+# --------------------------------------------------------------------------
+# A stored result is replayed only with safe headers (#645 review round 4)
+# --------------------------------------------------------------------------
+
+def _store_done(eid, **fields):
+    import hashlib
+    from app.x402.idempotency import idempotency_store
+    entry = {"state": "done", "request_hash": hashlib.sha256(b"\0").hexdigest(), "auth": "x",
+             "created": 1e12, "expires": 1e12, "status": 201,
+             "headers": {"content-type": "application/json"},
+             "body": base64.b64encode(b'{"batchID": "b"}').decode()}
+    entry.update(fields)
+    idempotency_store._entries[eid] = entry
+
+
+def _keyed_retry(client, offer, key, version=1):
+    return client.post("/api/v1/stamps/", headers={**pay(version, offer, nonce=nonce_hex("1f")),
+                                                   "Idempotency-Key": key})
+
+
+@pytest.mark.parametrize("version", VERSIONS)
+def test_replay_never_sends_an_unchecked_transaction_or_control_characters(gw, version):
+    from app.x402.idempotency import entry_id
+    client, fac = gw("1,2")
+    offer = _offer(client)
+    eid = entry_id(PAYER, "POST", "/api/v1/stamps/", "k-dirty")
+    receipt = receipt_header(version).lower()
+    _store_done(eid, headers={"content-type": "application/json",
+                              "x-payment-transaction": "0x" + "ab" * 32 + "\r\nSet-Cookie: x=1",
+                              receipt: "ok-receipt", "x-payment-mode": "pa\u0000id",
+                              "set-cookie": "never=1"},
+                **({"version": 2} if version == 2 else {}))
+    r = _keyed_retry(client, offer, "k-dirty", version)
+    assert r.status_code == 201, r.text
+    assert r.headers["Idempotent-Replayed"] == "true"
+    assert r.headers["X-Payment-Transaction"] == "unknown"
+    assert r.headers[receipt] == "ok-receipt"
+    assert "x-payment-mode" not in r.headers and "set-cookie" not in r.headers
+    for value in r.headers.values():
+        assert "\r" not in value and "\n" not in value and "\x00" not in value
+
+
+def test_replay_keeps_a_valid_stored_transaction(gw):
+    from app.x402.idempotency import entry_id
+    client, fac = gw("1,2")
+    offer = _offer(client)
+    eid = entry_id(PAYER, "POST", "/api/v1/stamps/", "k-clean")
+    _store_done(eid, headers={"content-type": "application/json", "x-payment-transaction": TX})
+    r = _keyed_retry(client, offer, "k-clean")
+    assert r.status_code == 201 and r.headers["X-Payment-Transaction"] == TX
+
+
+@pytest.mark.parametrize("damage", [
+    {"headers": ["not", "a", "dict"]},
+    {"status": "201"},
+    {"status": True},
+    {"status": 99},
+    {"body": None},
+    {"body": "!!! not base64"},
+    {"headers": {"content-type": 5}},          # skipped, not fatal
+])
+def test_damaged_stored_entry_never_gives_a_500(gw, damage):
+    from app.x402.idempotency import entry_id
+    client, fac = gw("1,2")
+    offer = _offer(client)
+    eid = entry_id(PAYER, "POST", "/api/v1/stamps/", "k-damaged")
+    _store_done(eid, transaction=TX, **damage)
+    r = _keyed_retry(client, offer, "k-damaged")
+    if damage == {"headers": {"content-type": 5}}:
+        assert r.status_code == 201 and r.headers["Idempotent-Replayed"] == "true"
+        return
+    assert r.status_code == 409, r.text
+    detail = r.json()["detail"]
+    assert detail["code"] == "IDEMPOTENCY_KEY_DELIVERED_NOT_STORED"
+    assert "not charged" in detail["message"]
+    assert r.headers["X-Payment-Transaction"] == TX
+    assert "settle" not in fac.paths()
+
+
+# --------------------------------------------------------------------------
+# Validation regexes end at the end of the text, not before a newline
+# (#645 review round 4)
+# --------------------------------------------------------------------------
+
+def test_authorization_key_refuses_a_trailing_newline():
+    from types import SimpleNamespace
+    from app.x402.settlement import authorization_key
+
+    def payload(frm, nonce):
+        return SimpleNamespace(payload=SimpleNamespace(authorization=SimpleNamespace(from_=frm, nonce=nonce)))
+    nonce = "0x" + "01" * 32
+    assert authorization_key(payload(PAYER, nonce)) == (PAYER.lower(), nonce)
+    assert authorization_key(payload(PAYER + "\n", nonce)) is None
+    assert authorization_key(payload(PAYER, nonce + "\n")) is None
+
+
+@pytest.mark.parametrize("version", VERSIONS)
+def test_trailing_newline_in_from_is_not_a_second_replay_key(gw, version):
+    """D5: one authorization, one key. PAYER + newline used to be a distinct
+    key, so the same signature could be presented twice."""
+    client, fac = gw("1,2")
+    offer = _offer(client)
+    assert client.post("/api/v1/stamps/", headers=pay(version, offer)).status_code == 200
+    auth = authorization(offer, payer=PAYER + "\n")
+    payload = v1_payload(offer, auth) if version == 1 else v2_payload(offer, auth)
+    r = client.post("/api/v1/stamps/", headers=header_for(version, payload))
+    assert r.status_code in (400, 402), r.text
+    assert fac.paths().count("settle") == 1
+
+
+def test_normalize_address_refuses_a_trailing_newline():
+    from app.services.stamp_ownership import normalize_address
+    assert normalize_address(PAYER) == PAYER
+    assert normalize_address(PAYER[2:]) == PAYER
+    assert normalize_address(PAYER + "\n") is None
+    assert normalize_address(PAYER[2:] + "\n") is None
+
+
+def test_marshaled_stamp_refuses_a_trailing_newline():
+    from fastapi import HTTPException
+    from app.api.endpoints.chunks import MARSHALED_STAMP_HEX_LEN, _validate_marshaled_stamp
+    good = "ab" * (MARSHALED_STAMP_HEX_LEN // 2)
+    assert _validate_marshaled_stamp(good) == good
+    with pytest.raises(HTTPException):
+        _validate_marshaled_stamp(good[:-1] + "\n")
+
+
+# --------------------------------------------------------------------------
+# The shape of the signed authorization is checked before verify
+# (#645 review round 4; v2 only)
+# --------------------------------------------------------------------------
+
+@pytest.mark.parametrize("where,value,field", [
+    ("from", "0x" + "a1" * 19, "payload.authorization.from"),
+    ("from", "not-an-address", "payload.authorization.from"),
+    ("from", PAYER + "\n", "payload.authorization.from"),
+    ("nonce", "0x" + "01" * 31, "payload.authorization.nonce"),
+    ("nonce", "01" * 32, "payload.authorization.nonce"),            # no 0x
+    ("nonce", "0x" + "zz" * 32, "payload.authorization.nonce"),
+    ("signature", "0x" + "ab" * 64, "payload.signature"),           # 64 bytes
+    ("signature", "0x" + "ab" * 65 + "a", "payload.signature"),     # half a byte
+    ("signature", "ab" * 65, "payload.signature"),                  # no 0x
+    ("signature", "0x" + "gg" * 65, "payload.signature"),
+])
+def test_malformed_authorization_gets_400_before_verify(gw, where, value, field):
+    client, fac = gw("1,2")
+    offer = _offer(client)
+    payload = v2_payload(offer, authorization(offer))
+    if where == "signature":
+        payload["payload"]["signature"] = value
+    else:
+        payload["payload"]["authorization"][where] = value
+    r = client.post("/api/v1/stamps/", headers=header_for(2, payload))
+    assert r.status_code == 400, r.text
+    body = r.json()
+    assert body["code"] == "PAYMENT_HEADER_INVALID"
+    assert body["detail"]["fields"] == [field]
+    assert value.strip() not in body["message"]
+    assert fac.calls == []
+
+
+@pytest.mark.parametrize("signature", ["0x" + "ab" * 65, "0x" + "cd" * 200])  # EOA, and a longer ERC-1271/6492 one
+def test_well_formed_signatures_go_on_to_verify(gw, signature):
+    client, fac = gw("1,2")
+    offer = _offer(client)
+    payload = v2_payload(offer, authorization(offer))
+    payload["payload"]["signature"] = signature
+    r = client.post("/api/v1/stamps/", headers=header_for(2, payload))
+    assert r.status_code == 200, r.text
+    assert fac.paths() == ["verify", "settle"]

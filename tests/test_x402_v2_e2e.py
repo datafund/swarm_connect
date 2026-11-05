@@ -105,7 +105,7 @@ def test_recorded_v2_payment_is_verified_settled_and_delivered(run):
     assert "x-payment-response" not in first["headers"]
     receipt = json.loads(base64.b64decode(first["headers"]["payment-response"]))
     assert receipt == {"success": True, "transaction": "0x" + "00" * 32, "network": "eip155:84532",
-                       "payer": SIGNED["payload"]["authorization"]["from"]}
+                       "payer": SIGNED["payload"]["authorization"]["from"], "amount": OFFER["amount"]}
 
 
 def test_exact_verify_and_settle_bodies(run):

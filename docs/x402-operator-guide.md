@@ -112,7 +112,7 @@ With 2 enabled:
 - A v2 settlement answers with the `PAYMENT-RESPONSE` header, a v1 settlement with `X-PAYMENT-RESPONSE`. Never both.
 - A v2 settle answer is a definite refusal only when it is a 4xx with `success: false`. A 5xx, or any answer the gateway cannot read, is an unknown outcome (502, the result withheld), as a timeout is.
 - A v2 verify answer counts only when it is a 2xx, or a 4xx with `isValid: false`. Anything else (a 5xx even if it says `isValid: true`) is answered 502, nothing charged.
-- The v2 receipt (`PAYMENT-RESPONSE`) carries `success`, `transaction`, `network`, `payer`, `errorReason` and `amount` only; the facilitator's `extra`, `extensions` and `extensionResponses` are not passed on.
+- The v2 receipt (`PAYMENT-RESPONSE`) is built by the gateway: `success`, the transaction hash (when it is a valid 32-byte hash), the network and amount of the gateway's own offer, and the payer. Nothing else from the facilitator's answer is passed on.
 - One signed authorization counts once across both versions. Re-wrapping it in the other version's header is refused like any replay. An `Idempotency-Key` result stored for one version is not served to a request paying in the other: it gets 409 `IDEMPOTENCY_KEY_VERSION_MISMATCH`, unpaid.
 - `gateway_x402_settlements_total{version="2"}` exists from startup for every result, so the "x402 settlement problems" alert sees the first v2 problem after a restart.
 
