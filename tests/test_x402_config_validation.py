@@ -93,6 +93,27 @@ def test_bearer_token_is_sent_on_verify_and_settle(x402):
     assert headers["settle"]["Authorization"] == "Bearer s3cret"
 
 
+def test_bearer_token_is_sent_on_supported(x402):
+    # The startup /supported check (#608) calls the facilitator with the same
+    # token; without a "supported" entry it went unauthenticated.
+    import httpx
+    x402.setattr(settings, "X402_FACILITATOR_BEARER_TOKEN", "s3cret")
+    seen = {}
+
+    def handler(request):
+        seen["path"] = request.url.path
+        seen["auth"] = request.headers.get("Authorization")
+        return httpx.Response(200, json={"kinds": []})
+
+    from app.x402.facilitator_client import FacilitatorClient
+    config = facilitator.get_facilitator_client().config
+    headers = asyncio.run(config["create_headers"]())
+    assert headers["supported"] == headers["verify"]
+    client = FacilitatorClient(config, transport=httpx.MockTransport(handler))
+    asyncio.run(client.supported())
+    assert seen == {"path": "/facilitator/supported", "auth": "Bearer s3cret"}
+
+
 def test_no_auth_by_default(x402):
     assert facilitator.get_facilitator_client().config.get("create_headers") is None
 

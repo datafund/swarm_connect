@@ -86,7 +86,8 @@ def _config() -> FacilitatorConfig:
     if token:
         async def create_headers():
             auth = {"Authorization": f"Bearer {token}"}
-            return {"verify": auth, "settle": auth, "list": auth}
+            # "supported": the startup /supported check (#608) is authenticated too.
+            return {"verify": auth, "settle": auth, "supported": auth, "list": auth}
         config["create_headers"] = create_headers
     return config
 
