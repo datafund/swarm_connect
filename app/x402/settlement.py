@@ -8,7 +8,7 @@ Three things used to go wrong between the two (#355, #356, #357):
 
 - the work was done first and settled afterwards, so a failed settlement left
   the gateway having bought a batch or granted credit for nothing;
-- the settlement result was never checked. x402's FacilitatorClient.settle()
+- the settlement result was never checked. FacilitatorClient.settle()
   returns SettleResponse(success=False, ...) rather than raising, so a failed
   settlement was reported, and delivered, as paid;
 - nothing remembered which authorizations had been accepted, so concurrent

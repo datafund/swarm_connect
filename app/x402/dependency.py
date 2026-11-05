@@ -16,8 +16,8 @@ from typing import Optional
 
 from fastapi import HTTPException, Request
 
-from x402.types import PaymentPayload
-from x402.facilitator import FacilitatorClient
+from app.x402.models_v1 import PaymentPayload
+from app.x402.facilitator_client import FacilitatorClient
 
 from app.core.config import settings
 from app.x402.networks import to_v1

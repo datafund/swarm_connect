@@ -16,8 +16,9 @@ hold it:
 - errors of the real shared client, through the real swarm_api call, are
   classified as before.
 
-x402 1.0.0 builds its own httpx client for facilitator calls; the gateway
-catches those errors only as Exception, so x402 stays on httpx.
+The gateway's own facilitator client (app/x402/facilitator_client.py, #604)
+is on httpx2 as well. x402 1.0.0, which builds its own httpx client, is only
+a test oracle now (tests/test_x402_facilitator_differential.py).
 """
 import ast
 import asyncio

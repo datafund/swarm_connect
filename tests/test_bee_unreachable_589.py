@@ -400,7 +400,7 @@ class TestRetriesOfPossiblyChargedRequests:
     @pytest.fixture
     def fac(self, monkeypatch):
         import secrets as _secrets
-        from x402.types import SettleResponse, VerifyResponse
+        from app.x402.models_v1 import SettleResponse, VerifyResponse
         from app.x402.ratelimit import reset_rate_limiter
         monkeypatch.setattr(settings, "X402_ENABLED", True)
         monkeypatch.setattr(settings, "X402_PAY_TO_ADDRESS", "0xpayee")
@@ -452,7 +452,7 @@ class TestRetriesOfPossiblyChargedRequests:
         assert fac.settle.await_count == 1 and len(bought) == 1
 
     def test_settling_key_gets_its_409_while_payments_are_refused(self, fac):
-        from x402.types import SettleResponse
+        from app.x402.models_v1 import SettleResponse
         c, bought = self._client(fac)
         fac.settle.side_effect = httpx.ReadTimeout("facilitator slow")
         r = c.post("/api/v1/stamps/", json={"depth": 17},

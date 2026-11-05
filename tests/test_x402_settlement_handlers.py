@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from fastapi import Depends, FastAPI
 from fastapi.testclient import TestClient
-from x402.types import SettleResponse, VerifyResponse
+from app.x402.models_v1 import SettleResponse, VerifyResponse
 
 from app.core.config import settings
 from app.x402.dependency import require_x402_payment, settle_payment_if_offered

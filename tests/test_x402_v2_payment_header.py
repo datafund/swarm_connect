@@ -18,7 +18,8 @@ import pytest
 from fastapi import APIRouter, Depends, FastAPI, Request
 from fastapi.testclient import TestClient
 from pydantic import BaseModel
-from x402.types import SettleResponse, VerifyResponse, x402PaymentRequiredResponse
+from app.x402.models_v1 import SettleResponse, VerifyResponse
+from x402.types import x402PaymentRequiredResponse
 
 from app.services.metrics import x402_payments_total
 from app.x402.dependency import require_x402_payment, settle_payment_if_offered

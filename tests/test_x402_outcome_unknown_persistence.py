@@ -12,7 +12,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 from fastapi.testclient import TestClient
-from x402.types import VerifyResponse
+from app.x402.models_v1 import VerifyResponse
 
 import app.x402.settlement as st
 from tests.test_x402_integration import create_valid_payment_header

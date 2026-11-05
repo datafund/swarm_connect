@@ -7,8 +7,8 @@ postage batch can be created with an ARBITRARY owner address (Bee's HTTP API alw
 makes the node the owner). The created `batchId` is returned so the owner can sign
 its own stamps off-node.
 
-Dependency note: uses web3.py, which is already present in the environment (pulled in
-by the x402 SDK), so this adds no new heavy dependency and avoids the raw-RPC plumbing.
+Dependency note: uses web3.py, which is a direct requirement (requirements.txt; it was
+first pulled in by the x402 SDK), so this adds no new heavy dependency and avoids the raw-RPC plumbing.
 web3 is synchronous, so the blocking calls run in a thread (asyncio.to_thread) to keep
 the event loop free.
 

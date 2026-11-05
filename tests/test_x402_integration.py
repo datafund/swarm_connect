@@ -21,8 +21,8 @@ from fastapi import FastAPI, Depends, APIRouter, Path
 from fastapi.testclient import TestClient
 from pydantic import BaseModel
 
-from x402.types import PaymentRequirements, PaymentPayload, VerifyResponse, SettleResponse
-from x402.encoding import safe_base64_encode
+from app.x402.models_v1 import PaymentRequirements, PaymentPayload, VerifyResponse, SettleResponse
+from app.x402.encoding import safe_base64_encode
 
 from app.x402.middleware import X402Middleware, PROTECTED_ENDPOINTS
 from app.x402.dependency import require_x402_payment

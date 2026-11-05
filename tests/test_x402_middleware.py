@@ -271,7 +271,7 @@ class TestEncodePaymentResponse:
     """Test X-PAYMENT-RESPONSE header encoding."""
 
     def test_encode_settle_response(self):
-        from x402.types import SettleResponse
+        from app.x402.models_v1 import SettleResponse
         settle_response = SettleResponse(
             success=True,
             transaction="0xabc123def456",
@@ -370,7 +370,7 @@ class TestX402MiddlewareFlow:
         mock_dep.X402_FACILITATOR_URL = "https://x402.org/facilitator"
         mock_price.return_value = {"price_usd": 0.05, "description": "Data upload"}
 
-        from x402.types import VerifyResponse
+        from app.x402.models_v1 import VerifyResponse
         mock_fac = MagicMock()
         mock_fac.verify = AsyncMock(return_value=VerifyResponse(
             is_valid=False, invalid_reason="insufficient_funds", payer=None

@@ -14,7 +14,7 @@ import httpx2
 import pytest
 from fastapi import APIRouter, Depends, FastAPI, File, Request, UploadFile
 from fastapi.testclient import TestClient
-from x402.types import SettleResponse, VerifyResponse
+from app.x402.models_v1 import SettleResponse, VerifyResponse
 
 from app.core.config import settings
 from app.x402.dependency import require_x402_payment

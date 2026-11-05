@@ -11,7 +11,7 @@ import logging
 from unittest.mock import AsyncMock
 
 import pytest
-from x402.types import VerifyResponse
+from app.x402.models_v1 import VerifyResponse
 
 from app.x402.audit import read_audit_log
 from app.x402.settlement import FACILITATOR_REASON_HIDDEN, public_facilitator_reason
