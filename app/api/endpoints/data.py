@@ -9,6 +9,7 @@ from fastapi.responses import Response
 import httpx2
 
 from app.x402.settlement import settle_payment
+from app.x402.openapi_docs import paid_route_openapi
 from app.api.models.data import (
     DataUploadRequest,
     DataUploadResponse,
@@ -231,7 +232,7 @@ _OWNER_SIG_DESC = (
 )
 
 
-@router.post("/", response_model=DataUploadResponse)
+@router.post("/", response_model=DataUploadResponse, openapi_extra=paid_route_openapi([200]))
 async def upload_data(
     request: Request,
     stamp_id: str = Query(..., pattern=r"^[a-fA-F0-9]{64}$"),
@@ -727,7 +728,7 @@ async def download_data_json(
         raise HTTPException(status_code=500, detail="Internal server error during download")
 
 
-@router.post("/manifest", response_model=ManifestUploadResponse)
+@router.post("/manifest", response_model=ManifestUploadResponse, openapi_extra=paid_route_openapi([200]))
 async def upload_manifest(
     request: Request,
     stamp_id: str = Query(..., pattern=r"^[a-fA-F0-9]{64}$"),

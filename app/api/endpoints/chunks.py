@@ -8,6 +8,7 @@ from fastapi import APIRouter, Header, HTTPException, Query, Request, status
 
 from app.core.client_ip import get_client_key
 from app.x402.settlement import request_nonce, settle_payment
+from app.x402.openapi_docs import paid_route_openapi
 from app.api.models.chunk import ChunkUploadResponse, CreditTopUpResponse, TokenRotationResponse
 from app.core.config import settings
 from app.services.bandwidth_credit import (
@@ -77,6 +78,7 @@ def _topup_info() -> dict:
     response_model=CreditTopUpResponse,
     status_code=status.HTTP_201_CREATED,
     summary="Top up prepaid bandwidth credit (x402)",
+    openapi_extra=paid_route_openapi([201]),
 )
 async def top_up_credit(
     request: Request,

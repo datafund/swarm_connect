@@ -93,6 +93,7 @@ jobs:
           X402_FACILITATOR_CDP_API_KEY_ID=${{ secrets.X402_FACILITATOR_CDP_API_KEY_ID || '' }}
           X402_FACILITATOR_CDP_API_KEY_SECRET=${{ secrets.X402_FACILITATOR_CDP_API_KEY_SECRET || '' }}
           X402_FACILITATOR_BEARER_TOKEN=${{ secrets.X402_FACILITATOR_BEARER_TOKEN || '' }}
+          X402_PROTOCOL_VERSIONS=${{ vars.X402_PROTOCOL_VERSIONS || '1' }}
           X402_FREE_TIER_ENABLED=${{ vars.X402_FREE_TIER_ENABLED || 'true' }}
           STAMP_POOL_ENABLED=${{ vars.STAMP_POOL_ENABLED || 'false' }}
           STAMP_POOL_RESERVE_SMALL=${{ vars.STAMP_POOL_RESERVE_SMALL || '1' }}
@@ -174,6 +175,10 @@ jobs:
           X402_FACILITATOR_CDP_API_KEY_ID=${{ secrets.X402_FACILITATOR_CDP_API_KEY_ID || '' }}
           X402_FACILITATOR_CDP_API_KEY_SECRET=${{ secrets.X402_FACILITATOR_CDP_API_KEY_SECRET || '' }}
           X402_FACILITATOR_BEARER_TOKEN=${{ secrets.X402_FACILITATOR_BEARER_TOKEN || '' }}
+          # Defaults to 1 (x402 v1 only) in both environments, unlike the network and
+          # facilitator above: 1 is the behaviour before x402 v2 existed. 1,2 turns on
+          # dual mode; the deploy check below then requires the facilitator to list v2.
+          X402_PROTOCOL_VERSIONS=${{ vars.X402_PROTOCOL_VERSIONS || '1' }}
           X402_BZZ_USD_RATE=${{ vars.X402_BZZ_USD_RATE || '0.50' }}
           X402_MARKUP_PERCENT=${{ vars.X402_MARKUP_PERCENT || '50' }}
           X402_MIN_PRICE_USD=${{ vars.X402_MIN_PRICE_USD || '0.01' }}
