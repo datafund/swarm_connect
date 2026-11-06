@@ -3,7 +3,7 @@ from contextlib import asynccontextmanager
 from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from app.core.config import settings
+from app.core.config import is_testnet_network, settings
 from app.core.version import VERSION
 from app.api.endpoints import stamps, data, wallet, pool, notary, chunks, debug, stamps_for_owner, pricing
 from fastapi.encoders import jsonable_encoder
@@ -133,10 +133,45 @@ async def lifespan(app: FastAPI):
     await close_client()
 
 
+# Network labels for the /docs description (#687); other networks show their id.
+_NETWORK_LABELS = {
+    "base": "Base mainnet", "base-mainnet": "Base mainnet", "eip155:8453": "Base mainnet",
+    "base-sepolia": "Base Sepolia", "eip155:84532": "Base Sepolia",
+}
+
+
+def build_api_description() -> str:
+    """The /docs description: alpha, and whether payments here are real money (#687).
+
+    From the configured x402 network: on a mainnet, payments are real USDC;
+    on a test network, test USDC with no real value. Links the alpha notice
+    (TERMS_URL) and the feedback contact (SUPPORT_CONTACT) when they are set.
+    """
+    parts = ["**Alpha software.**"]
+    if settings.X402_ENABLED:
+        network = (settings.X402_NETWORK or "").strip()
+        label = _NETWORK_LABELS.get(network.lower(), network or "an unknown network")
+        if is_testnet_network(network):
+            parts.append(f"Payments on this gateway use {label} test USDC, no real value.")
+        else:
+            parts.append(f"Payments on this gateway are real USDC on {label}; there are no "
+                         "guarantees, and refunds should not be expected. Spend small amounts, "
+                         "set a per-payment cap in your client, and test on the staging gateway "
+                         "or the free tier first.")
+    terms = (settings.TERMS_URL or "").strip()
+    contact = (settings.SUPPORT_CONTACT or "").strip()
+    if terms:
+        parts.append(f"Alpha notice: {terms}")
+    if contact:
+        parts.append(f"Feedback and problem reports: {contact}")
+    return "\n\n".join(parts)
+
+
 app = FastAPI(
     # "(alpha)" marks the API docs page (/docs) and the OpenAPI title as alpha
     # software; the "/" welcome message keeps the plain project name.
     title=f"{settings.PROJECT_NAME} (alpha)",
+    description=build_api_description(),
     version=VERSION,
     openapi_url=f"{settings.API_V1_STR}/openapi.json",  # Standard location for OpenAPI spec
     lifespan=lifespan
