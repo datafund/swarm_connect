@@ -308,7 +308,7 @@ app/x402/
 ├── facilitator_client.py # httpx facilitator client: verify, settle (v1 and v2, #607), supported (#604)
 ├── facilitator.py   # Builds the shared client (CDP / bearer auth), validate_x402_config, the v2 /supported startup check (#608)
 ├── networks.py      # v1 names <-> CAIP-2 ids (#599)
-├── base_balance.py  # Base ETH balance of the pay-to address (gates protected requests)
+├── base_balance.py  # Base ETH balance of the pay-to address, information only (needs no ETH, gates nothing, #663)
 ├── pricing.py       # Price calculation (BZZ → USD)
 ├── access.py        # IP whitelist/blacklist (not wired into requests yet, #379)
 ├── audit.py         # Audit log (JSON lines)
@@ -603,6 +603,8 @@ Query in Grafana Explore, or use the two dashboard panels:
 {job="swarm_connect/gateway", environment="main", level=~"WARNING|ERROR|CRITICAL"}
 {job="swarm_connect/gateway"} |= "connection"
 ```
+
+**Log delivery alerts (#672).** The log pipeline fails without affecting metrics, so two warning rules watch it. **Gateway logs dropped** reads Alloy's own counter `loki_write_dropped_entries_total{job="swarm_connect/alloy"}` (exported with `prometheus.exporter.self`; only it and `loki_write_sent_entries_total` are kept, `up` is dropped, and loki.write's `host` label, the Loki hostname, is moved to `loki_host`). **Gateway logs missing in Loki** is a Loki-datasource rule: `absent_over_time` of `{job="swarm_connect/gateway"}` over 15 minutes per environment. In #661 a token without `logs:write` made Loki answer 401 `invalid scope requested` and Alloy drop every batch, unnoticed. Operator steps: docs/mainnet-runbook.md section 5.
 
 **Credentials** (stored in GitHub secrets, injected at deploy):
 - `GRAFANA_CLOUD_PROM_USERNAME` — Prometheus instance ID

@@ -362,6 +362,59 @@ loki.write "grafana_cloud" {
   }
 }
 
+// ── Alloy's own log delivery metrics (#672) ─────────────────────────────────
+//
+// The log pipeline fails without a sound. In #661 the token lacked the
+// logs:write scope: Loki answered every push with 401, Alloy retried each batch,
+// dropped it and wrote an error into its own container log, and nothing
+// alerted, because metrics kept flowing through the separate pipeline above.
+// These two counters let the "Gateway logs dropped" alert see it:
+//   loki_write_dropped_entries_total{reason}  entries given up on (a refused
+//                                             token shows as ingester_error)
+//   loki_write_sent_entries_total             entries Loki accepted
+// Measured on the host during #661: 6,097 entries dropped with
+// reason="ingester_error", next to 594 pushes answered 401.
+//
+// Only those two series are kept; Alloy exposes hundreds about itself. `up` for
+// this scrape is dropped too, so it can never count as a gateway in "Gateway
+// Down" or keep the "No Data" watchdog quiet.
+//
+// LABELS. loki.write labels its series with host = the Loki hostname, which
+// would clash with the host label every series here carries. It is moved to
+// loki_host, and host is set from HOST_LABEL as everywhere else.
+
+prometheus.exporter.self "alloy" { }
+
+prometheus.scrape "alloy_self" {
+  targets         = prometheus.exporter.self.alloy.targets
+  scrape_interval = "60s"
+  forward_to      = [prometheus.relabel.alloy_self.receiver]
+}
+
+prometheus.relabel "alloy_self" {
+  rule {
+    action        = "keep"
+    source_labels = ["__name__"]
+    regex         = "loki_write_(dropped|sent)_entries_total"
+  }
+  rule {
+    action        = "replace"
+    source_labels = ["host"]
+    target_label  = "loki_host"
+  }
+  rule {
+    action       = "replace"
+    target_label = "host"
+    replacement  = sys.env("HOST_LABEL")
+  }
+  rule {
+    action       = "replace"
+    target_label = "job"
+    replacement  = "swarm_connect/alloy"
+  }
+  forward_to = [prometheus.remote_write.grafana_cloud.receiver]
+}
+
 // ── Push to Grafana Cloud ───────────────────────────────────────────────────
 
 prometheus.remote_write "grafana_cloud" {

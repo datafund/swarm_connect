@@ -398,7 +398,10 @@ async def read_root():
     - `x402.free_tier.enabled`: whether free tier access is available
     - `x402.free_tier.rate_limit_per_minute`: requests allowed per minute on free tier
     - `x402.free_tier.header`: the exact header to add for free tier access
-    - `x402.base_wallet`: USDC receiving wallet status
+    - `x402.base_wallet`: the USDC pay-to wallet and its Base ETH balance, as
+      information only (#663): the facilitator pays settlement gas, so the
+      balance never changes `status`; `ok` is always true, `is_critical` always
+      false, `informational` true, and `fetched` says whether it was read
     - `x402.bee_gnosis_wallet`: Bee node wallet balances
 
     **Integrator quick start** (when x402 is enabled and free tier is available):
@@ -543,9 +546,10 @@ def build_health_response(snapshot) -> dict:
         warnings = []
         errors = []
 
-        # The pay-to balance is informational only (#371): the facilitator pays
-        # settlement gas and the pay-to address never sends a transaction, so a
-        # low or zero balance (correct for a cold mainnet wallet) is not a fault.
+        # The pay-to balance is informational only (#371, #663): the facilitator
+        # pays settlement gas and the pay-to address never sends a transaction,
+        # so a low or zero balance (correct for a cold wallet or a new Safe) is
+        # not a fault and adds no warning or error.
         warnings.extend(gnosis.get("warnings", []))
         errors.extend(gnosis.get("errors", []))
 
@@ -589,13 +593,22 @@ def build_health_response(snapshot) -> dict:
                 "rate_limit_per_minute": settings.X402_FREE_TIER_RATE_LIMIT,
                 "header": "X-Payment-Mode: free",
             },
+            # Information only (#663): the pay-to wallet needs no ETH, so
+            # `ok` is always true and `is_critical` always false, and nothing
+            # here reaches `warnings`, `errors` or `status`. The keys are kept
+            # so existing readers keep parsing; there are no thresholds, so
+            # threshold_eth and critical_eth are null. `fetched` is false when
+            # the balance could not be read (balance_eth is then 0.0, not a
+            # real balance).
             "base_wallet": {
                 "address": base_eth.get("address"),
                 "balance_eth": base_eth.get("balance_eth"),
-                "threshold_eth": base_eth.get("threshold_eth"),
-                "critical_eth": base_eth.get("critical_eth"),
-                "ok": base_eth.get("ok"),
-                "is_critical": base_eth.get("is_critical"),
+                "threshold_eth": None,
+                "critical_eth": None,
+                "ok": True,
+                "is_critical": False,
+                "informational": True,
+                "fetched": bool(base_eth.get("fetched", False)),
             },
             "bee_gnosis_wallet": {
                 "wallet_address": gnosis.get("wallet_address"),

@@ -18,7 +18,8 @@ x402 enables pay-per-request access to the gateway without requiring user accoun
 ```
 
 The gateway operates with two separate wallets:
-1. **Base wallet**: Receives USDC payments from x402
+1. **Base wallet**: Receives USDC payments from x402. It needs no ETH: the facilitator
+   submits and pays for each transfer, so a wallet with 0 ETH (for example a new Safe) works
 2. **Gnosis wallet**: Holds xBZZ for stamp purchases and xDAI for gas
 
 There is no automatic bridging - you manually manage both treasuries.
@@ -29,7 +30,7 @@ There is no automatic bridging - you manually manage both treasuries.
 
 1. **Base Sepolia Wallet**
    - Create a new wallet or use existing
-   - This receives USDC payments
+   - This receives USDC payments. It needs no ETH
    - Save the address for `X402_PAY_TO_ADDRESS`
 
 2. **Get Testnet USDC**
@@ -68,9 +69,9 @@ X402_XBZZ_WARN_THRESHOLD=10          # Warn if xBZZ wallet < 10
 X402_XDAI_WARN_THRESHOLD=0.5         # Warn if xDAI wallet < 0.5
 X402_CHEQUEBOOK_WARN_THRESHOLD=5     # Warn if chequebook < 5 xBZZ
 
-# === Base Wallet Monitoring ===
-X402_BASE_ETH_WARN_THRESHOLD=0.005   # Warn if Base ETH < 0.005 (~50 txs)
-X402_BASE_ETH_CRITICAL_THRESHOLD=0.001  # Block if Base ETH < 0.001 (~10 txs)
+# The pay-to wallet's Base ETH balance is reported, as information only, and has no
+# thresholds. X402_BASE_ETH_WARN_THRESHOLD and X402_BASE_ETH_CRITICAL_THRESHOLD were
+# removed (#663) and are ignored if set.
 
 # === Limits ===
 X402_MAX_STAMP_BZZ=5                 # Max 5 BZZ per stamp purchase
@@ -402,10 +403,12 @@ curl http://localhost:8000/health | jq .
     "base_wallet": {
       "address": "0xYourAddress...",
       "balance_eth": 0.01,
-      "threshold_eth": 0.005,
-      "critical_eth": 0.001,
+      "threshold_eth": null,
+      "critical_eth": null,
       "ok": true,
-      "is_critical": false
+      "is_critical": false,
+      "informational": true,
+      "fetched": true
     },
     "bee_gnosis_wallet": {
       "wallet_address": "0xBeeNodeWallet...",
@@ -446,8 +449,11 @@ The gateway performs pre-flight checks before accepting payments:
 2. **xDAI Balance**: Do we have gas for transactions?
 3. **Chequebook Balance**: Can we pay for bandwidth?
 
-**Base Wallet (for x402 payments):**
-4. **ETH Balance**: Does facilitator have gas for USDC transfers?
+The pay-to wallet's Base ETH balance is not a check (#663). The facilitator pays settlement
+gas, so the pay-to wallet needs no ETH. `/health` reports the balance in `x402.base_wallet`
+as information only: `ok` is always true, `is_critical` always false, `informational` true,
+`fetched` says whether it could be read, and `threshold_eth`/`critical_eth` are null. It
+never changes `status`, adds no warning, fires no alert and blocks nothing.
 
 **Threshold Behavior:**
 - **Below warning threshold**: Log warning, accept payments. `status` does not change.
@@ -494,17 +500,11 @@ curl http://localhost:8000/api/v1/stamps/
 
 Since there's no automatic bridging, you need to manually manage:
 
-### Base Wallet (USDC receipts + ETH for gas)
-- Monitor USDC balance on Base Sepolia
-- **Monitor ETH balance** - needed for facilitator to execute USDC transfers
-- Top up ETH when `/health` shows `degraded` or `critical`
+### Base Wallet (USDC receipts)
+- Monitor USDC balance on Base
+- No ETH needed: the facilitator pays settlement gas. The ETH balance shown in `/health`
+  and the `gateway_base_eth_balance` metric is information only (#663)
 - Periodically withdraw USDC to exchange or bridge to Gnosis
-
-**ETH Thresholds (Base Sepolia):**
-| Level | Threshold | Runway | Action |
-|-------|-----------|--------|--------|
-| Warning | 0.005 ETH | ~50 transactions | Top up soon |
-| Critical | 0.001 ETH | ~10 transactions | Gateway blocks requests |
 
 ### Gnosis Wallet (xBZZ spending)
 - Monitor xBZZ and xDAI via Bee node API or `/health` endpoint
@@ -527,9 +527,9 @@ The health endpoint always returns HTTP 200 so the gateway stays reachable — c
 paid requests are getting `503 PAYMENTS_UNAVAILABLE` until the Bee wallet can be read again.
 
 1. Check health endpoint: `curl http://localhost:8000/health | jq .`
-2. Look at `x402.base_wallet.is_critical` and `x402.bee_gnosis_wallet.can_accept`
-3. If Base ETH is critical: Top up ETH on Base Sepolia
-4. If Gnosis balances are low: Top up xBZZ or xDAI on Gnosis
+2. Look at `x402.bee_gnosis_wallet.can_accept` (`x402.base_wallet` is information only and
+   never causes `degraded` or `critical`, #663)
+3. If Gnosis balances are low: Top up xBZZ or xDAI on Gnosis
 
 ### "Service temporarily unavailable" (legacy)
 

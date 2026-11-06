@@ -190,9 +190,10 @@ class Settings(BaseSettings):
     # === Base Chain Settings (for monitoring USDC receipts) ===
     BASE_RPC_URL: str = "https://sepolia.base.org"
 
-    # === Base Sepolia Gateway Wallet Monitoring ===
-    X402_BASE_ETH_WARN_THRESHOLD: float = 0.005  # Warn if ETH < threshold (~50 txs)
-    X402_BASE_ETH_CRITICAL_THRESHOLD: float = 0.001  # Block if ETH < critical (~10 txs)
+    # The pay-to wallet's Base ETH balance is read for /health and the
+    # gateway_base_eth_balance gauge as information only: the facilitator pays
+    # settlement gas, so the wallet needs no ETH (#663). X402_BASE_ETH_WARN_THRESHOLD
+    # and X402_BASE_ETH_CRITICAL_THRESHOLD were removed; set ones are ignored.
 
     # === Stamp Pool Settings ===
     # Stamp pool maintains pre-purchased stamps for low-latency provisioning.

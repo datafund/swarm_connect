@@ -232,83 +232,6 @@
   },
   {
     "annotations": {
-      "description": "Informational only, paused (#371). The x402 facilitator pays settlement gas; the pay-to wallet never sends a transaction, so its ETH balance does not affect payments. A cold mainnet pay-to wallet correctly holds 0 ETH.\n\nIf the balance cannot be read, this value is the last one read and may be old: check gateway_balance_check_ok, or the \"Balance check failing\" alert.",
-      "summary": "Pay-to wallet Base ETH (informational): {{ printf \"%.4f\" $values.B.Value }}"
-    },
-    "condition": "C",
-    "data": [
-      {
-        "datasourceUid": "grafanacloud-prom",
-        "model": {
-          "expr": "gateway_base_eth_balance",
-          "instant": true,
-          "intervalMs": 1000,
-          "maxDataPoints": 43200,
-          "refId": "A"
-        },
-        "queryType": "",
-        "refId": "A",
-        "relativeTimeRange": {
-          "from": 300,
-          "to": 0
-        }
-      },
-      {
-        "datasourceUid": "__expr__",
-        "model": {
-          "expression": "A",
-          "intervalMs": 1000,
-          "maxDataPoints": 43200,
-          "reducer": "last",
-          "refId": "B",
-          "type": "reduce"
-        },
-        "queryType": "",
-        "refId": "B",
-        "relativeTimeRange": {
-          "from": 0,
-          "to": 0
-        }
-      },
-      {
-        "datasourceUid": "__expr__",
-        "model": {
-          "conditions": [
-            {
-              "evaluator": {
-                "params": [
-                  0.05
-                ],
-                "type": "lt"
-              }
-            }
-          ],
-          "expression": "B",
-          "intervalMs": 1000,
-          "maxDataPoints": 43200,
-          "refId": "C",
-          "type": "threshold"
-        },
-        "queryType": "",
-        "refId": "C",
-        "relativeTimeRange": {
-          "from": 0,
-          "to": 0
-        }
-      }
-    ],
-    "execErrState": "Error",
-    "for": "1m",
-    "isPaused": true,
-    "labels": {
-      "severity": "warning"
-    },
-    "noDataState": "OK",
-    "ruleGroup": "warning",
-    "title": "Low Base ETH"
-  },
-  {
-    "annotations": {
       "description": "Bee node is running low on xDAI for gas. On-chain operations fail once it runs out.\n\nFund this wallet on Gnosis (chain 100):\n{{ if $labels.wallet }}{{ $labels.wallet }}{{ else }}not reported by this deployment yet \u2014 open the health URL below and read x402.bee_gnosis_wallet.wallet_address{{ end }}\n\nFull status: {{ if eq $labels.environment \"main\" }}https://provenance-gateway.datafund.io/health{{ else if eq $labels.environment \"development\" }}https://provenance-gateway.dev.datafund.io/health{{ else }}https://provenance-gateway.datafund.io/health (or the .dev. host \u2014 environment label was \"{{ $labels.environment }}\"){{ end }}\n\nIf the balance cannot be read, this value is the last one read and may be old: check gateway_balance_check_ok, or the \"Balance check failing\" alert.",
       "summary": "xDAI balance below 0.1 (current: {{ printf \"%.2f\" $values.B.Value }})"
     },
@@ -1924,5 +1847,160 @@
     "noDataState": "OK",
     "ruleGroup": "warning",
     "title": "Health snapshot stale"
+  },
+  {
+    "annotations": {
+      "summary": "{{ $labels.host }}: Alloy dropped gateway log lines ({{ $labels.reason }}), so they never reached Loki",
+      "description": "Alloy gave up on {{ printf \"%.0f\" $values.B.Value }} gateway log entries in the last 15 minutes (reason: {{ $labels.reason }}). They are lost: Alloy retries a batch a few times and then discards it (#672).\n\nThe log pipeline is independent of the metrics pipeline, so metrics and every other alert look normal while this happens. In #661 the cause was a token without the logs:write scope: Loki answered every push with 401 \"invalid scope requested\" and the logs of an unknown period were lost.\n\nFirst action, on the gateway host: docker logs of the Alloy container, searched for \"final error sending batch\". The status code in the line names the cause:\n- 401 \"invalid scope requested\": the access policy of GRAFANA_CLOUD_API_TOKEN lacks logs:write. Add it in Grafana Cloud (Access Policies, policy alloy-metrics-push); the existing token picks it up within 15 minutes, no redeploy needed.\n- 401 otherwise: wrong GRAFANA_CLOUD_LOKI_USERNAME (the Loki tenant id, not the Prometheus one) or a revoked token.\n- 429 or reason=rate_limited / stream_limited: Grafana Cloud Loki limits; check the usage of the stack.\n- reason=queue_is_full: Loki is slow or unreachable from the host.\n\nSee docs/mainnet-runbook.md section 5, \"Log delivery alerts\"."
+    },
+    "condition": "C",
+    "data": [
+      {
+        "datasourceUid": "grafanacloud-prom",
+        "model": {
+          "expr": "sum by (host, reason) (increase(loki_write_dropped_entries_total{job=\"swarm_connect/alloy\"}[15m]))",
+          "instant": true,
+          "intervalMs": 1000,
+          "maxDataPoints": 43200,
+          "refId": "A"
+        },
+        "queryType": "",
+        "refId": "A",
+        "relativeTimeRange": {
+          "from": 900,
+          "to": 0
+        }
+      },
+      {
+        "datasourceUid": "__expr__",
+        "model": {
+          "expression": "A",
+          "intervalMs": 1000,
+          "maxDataPoints": 43200,
+          "reducer": "last",
+          "refId": "B",
+          "type": "reduce"
+        },
+        "queryType": "",
+        "refId": "B",
+        "relativeTimeRange": {
+          "from": 0,
+          "to": 0
+        }
+      },
+      {
+        "datasourceUid": "__expr__",
+        "model": {
+          "conditions": [
+            {
+              "evaluator": {
+                "params": [
+                  0
+                ],
+                "type": "gt"
+              }
+            }
+          ],
+          "expression": "B",
+          "intervalMs": 1000,
+          "maxDataPoints": 43200,
+          "refId": "C",
+          "type": "threshold"
+        },
+        "queryType": "",
+        "refId": "C",
+        "relativeTimeRange": {
+          "from": 0,
+          "to": 0
+        }
+      }
+    ],
+    "execErrState": "Error",
+    "for": "5m",
+    "isPaused": false,
+    "labels": {
+      "severity": "warning"
+    },
+    "noDataState": "OK",
+    "ruleGroup": "warning",
+    "title": "Gateway logs dropped"
+  },
+  {
+    "annotations": {
+      "summary": "{{ $labels.environment }}: no gateway log lines reached Loki in 15 minutes",
+      "description": "Loki has received no line under {job=\"swarm_connect/gateway\", environment=\"{{ $labels.environment }}\"} for 15 minutes, for another 15 minutes (#672). Docker's healthcheck alone writes about 18 lines per 10 minutes per environment, so this gap is never normal while the gateway runs.\n\nThis rule reads Loki itself, so it also catches what \"Gateway logs dropped\" cannot see: Alloy not running, Alloy not finding the gateway containers through the Docker socket, or Alloy's own metrics not arriving.\n\nFirst action:\n1. Is the gateway container running? If not, \"Gateway Down\" fires as well and that is the problem to fix.\n2. Does \"Gateway logs dropped\" fire too? Then follow it: Loki refuses the pushes.\n3. Otherwise, on the gateway host: docker ps for the Alloy container, then docker logs of the Alloy container for a config error or a Docker discovery error. A deploy recreates Alloy from the branch it deployed (docs/mainnet-runbook.md section 5).\n\nAfter a gap, the lines Alloy never read are still in the container's json-file log until the container is replaced; read them with docker logs before the next deploy."
+    },
+    "condition": "C",
+    "data": [
+      {
+        "datasourceUid": "grafanacloud-logs",
+        "model": {
+          "expr": "absent_over_time({job=\"swarm_connect/gateway\", environment=\"main\"}[15m]) or absent_over_time({job=\"swarm_connect/gateway\", environment=\"development\"}[15m])",
+          "queryType": "instant",
+          "editorMode": "code",
+          "intervalMs": 1000,
+          "maxDataPoints": 43200,
+          "refId": "A"
+        },
+        "queryType": "instant",
+        "refId": "A",
+        "relativeTimeRange": {
+          "from": 900,
+          "to": 0
+        }
+      },
+      {
+        "datasourceUid": "__expr__",
+        "model": {
+          "expression": "A",
+          "intervalMs": 1000,
+          "maxDataPoints": 43200,
+          "reducer": "last",
+          "refId": "B",
+          "type": "reduce"
+        },
+        "queryType": "",
+        "refId": "B",
+        "relativeTimeRange": {
+          "from": 0,
+          "to": 0
+        }
+      },
+      {
+        "datasourceUid": "__expr__",
+        "model": {
+          "conditions": [
+            {
+              "evaluator": {
+                "params": [
+                  0
+                ],
+                "type": "gt"
+              }
+            }
+          ],
+          "expression": "B",
+          "intervalMs": 1000,
+          "maxDataPoints": 43200,
+          "refId": "C",
+          "type": "threshold"
+        },
+        "queryType": "",
+        "refId": "C",
+        "relativeTimeRange": {
+          "from": 0,
+          "to": 0
+        }
+      }
+    ],
+    "execErrState": "Error",
+    "for": "15m",
+    "isPaused": false,
+    "labels": {
+      "severity": "warning"
+    },
+    "noDataState": "OK",
+    "ruleGroup": "warning",
+    "title": "Gateway logs missing in Loki"
   }
 ]
