@@ -1,10 +1,15 @@
 """A settle refusal whose reason means "the transaction may have been sent" (#660).
 
-In @x402/evm (checked at 2.5.0) the exact EIP-3009 settle path answers
-`success: false` with `transaction_failed` (v2: `invalid_exact_evm_transaction_failed`)
-and an empty transaction from one catch around both writeContract and
-waitForTransactionReceipt. If only the wait for the receipt failed, the
-transfer can still be mined until validBefore. Such an answer is an unknown
+In @x402/evm 2.5.0 the exact EIP-3009 settle path answers `success: false`
+with plain `transaction_failed` (v1 and v2) and an empty transaction from one
+catch around both writeContract and waitForTransactionReceipt (its Permit2
+path: `transaction_failed: <message>`). In 2.30.0, which matches what the
+staging facilitator answered, a receipt wait that throws after the broadcast
+answers `settlement_pending` with the transaction, and a send or simulation
+failure answers `invalid_exact_evm_transaction_failed` (also used for a
+reverted receipt; kept in the family anyway). `unexpected_settle_error` is in
+neither version and is kept defensively. Either way the transfer can still be
+mined until validBefore has passed. Such an answer is an unknown
 outcome, not a refusal: at both settle sites (settle_payment before the work,
 the middleware fallback after it), in both x402 versions, it must take the
 path a facilitator exception takes. Definite refusals stay byte for byte as

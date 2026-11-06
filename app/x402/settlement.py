@@ -766,39 +766,58 @@ def public_facilitator_reason(reason) -> str:
 
 # Settle refusals that may not be refusals (#660). A parsed `success: false`
 # is normally definite: nothing was sent to the chain. Not for every reason.
-# In @x402/evm (checked at 2.5.0) the exact EIP-3009 settle path answers
-# `transaction_failed` (`invalid_exact_evm_transaction_failed` in v2) with an
-# empty transaction from one catch that covers both writeContract and
-# waitForTransactionReceipt: if the transaction was broadcast and only the wait
-# for its receipt failed (an RPC timeout), the transfer can still be mined
-# until the authorization's validBefore has passed. `unexpected_settle_error`
-# is that library's catch-all around settle. Such an answer is an unknown outcome, and
-# each settle site handles it exactly as it handles a facilitator exception.
+# Where they come from, in @x402/evm (the reference facilitator library):
+# - 2.5.0, the exact EIP-3009 path, v1 and v2: plain `transaction_failed`,
+#   with an empty transaction, from one catch around both writeContract and
+#   waitForTransactionReceipt. If only the wait for the receipt failed (an RPC
+#   timeout), the broadcast transfer can still be mined until the
+#   authorization's validBefore has passed. Its Permit2 path answers
+#   `transaction_failed: <message>`.
+# - 2.30.0 (what the staging facilitator's answers match):
+#   `settlement_pending`, with the broadcast transaction, when
+#   waitForTransactionReceipt throws after writeContract (the transfer is
+#   on its way); and `invalid_exact_evm_transaction_failed`, both for an
+#   exception from writeContract or its simulation (also as
+#   `<code>: <message>`) and for a receipt that was mined and REVERTED on the
+#   EIP-3009 path (not charged). That second use makes the code ambiguous; it
+#   stays in the family on purpose: erring toward "unknown" loses nothing
+#   (the payer is told to check the nonce on-chain, and a retry with the same
+#   authorization still settles at most once), while "refused" for a transfer
+#   that may be mined would charge for nothing delivered.
+# - `unexpected_settle_error` was found in neither version. It is kept
+#   defensively, as a facilitator's catch-all around settle.
+# Such an answer is an unknown outcome, and each settle site handles it
+# exactly as it handles a facilitator exception.
 #
 # The family, matched on the reason stripped and lowercased:
 # - the codes in _MAY_HAVE_BEEN_SENT;
 # - any machine code (the #576 grammar, [a-z0-9_]{1,64}) whose last
-#   underscore-separated words are `transaction_failed`, e.g.
+#   underscore-separated words are `transaction_failed` (whole words: so
+#   `a__transaction_failed` or `xtransaction_failed` does not match), e.g.
 #   `invalid_exact_evm_transaction_failed`. A longer code ending that way is
 #   deliberately definite: past 64 characters it is not a machine code by the
 #   #576 grammar (the caller sees it hidden as free text too), and the family
 #   is kept to codes we can name. The trade-off: a facilitator inventing such
 #   a long code would get the old refusal answer;
-# - a reason starting with `transaction_failed:` (that code followed by the
-#   error text).
+# - a reason starting with `transaction_failed:` or `settlement_pending:`
+#   (that code followed by the error text).
 # Everything else keeps its old meaning, a definite refusal: the codes decided
 # before anything is sent (insufficient_funds, invalid signature, nonce already
 # used, expired), and `invalid_transaction_state`, which @x402/evm returns for
 # a transaction that was mined and reverted (not charged). Reasons of other
 # facilitators (PayAI's exact strings could not be verified) that are not in
-# the family keep today's behaviour too.
+# the family keep today's behaviour too. Not a rule here: "any success:false
+# with a transaction hash is unknown", which would also make 2.30.0's
+# reverted-receipt and transfer-event-mismatch answers unknown (a follow-up
+# decision).
 #
 # Not done: reading authorizationState(from, nonce) on Base after such an
 # answer would turn many of these into definite answers; it needs a Base RPC.
 _MAY_HAVE_BEEN_SENT = frozenset({"transaction_failed", "invalid_exact_evm_transaction_failed",
-                                 "unexpected_settle_error"})
+                                 "settlement_pending", "unexpected_settle_error"})
 _TRANSACTION_FAILED_CODE_RE = re.compile(r"(?:[a-z0-9]+_)*transaction_failed")
-_TRANSACTION_FAILED_PREFIX = "transaction_failed:"
+_MAY_HAVE_BEEN_SENT_PREFIXES = ("transaction_failed:", "settlement_pending:")
+_PREFIX_SPAN = max(len(p) for p in _MAY_HAVE_BEEN_SENT_PREFIXES) + 64
 
 
 def settle_outcome_unknown(reason) -> bool:
@@ -808,8 +827,8 @@ def settle_outcome_unknown(reason) -> bool:
     if not isinstance(reason, str):
         return False
     # The prefix first: what follows it is free text of any length.
-    head = reason[:len(_TRANSACTION_FAILED_PREFIX) + 64].lstrip().lower()
-    if head.startswith(_TRANSACTION_FAILED_PREFIX):
+    head = reason[:_PREFIX_SPAN].lstrip().lower()
+    if head.startswith(_MAY_HAVE_BEEN_SENT_PREFIXES):
         return True
     if len(reason) > 256:
         return False
