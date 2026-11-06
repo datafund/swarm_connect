@@ -653,7 +653,9 @@ class X402Middleware(BaseHTTPMiddleware):
             # A definite answer stays in flight until its resolution is written
             # (aresolve releases it): a duplicate in between is "in progress".
             if failure is not None:
-                logger.error(f"x402: settlement failed after delivery on {request.url.path}: {failure}")
+                # !r: `failure` can be a facilitator's multi-line text (#660), and a
+                # log line must stay one line. The audit record keeps it as is.
+                logger.error(f"x402: settlement failed after delivery on {request.url.path}: {failure!r}")
                 if unknown_outcome:
                     # The facilitator may or may not have moved the money: not
                     # a refusal. Same record as settlement.py uses for it. Not

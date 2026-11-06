@@ -779,7 +779,11 @@ def public_facilitator_reason(reason) -> str:
 # - the codes in _MAY_HAVE_BEEN_SENT;
 # - any machine code (the #576 grammar, [a-z0-9_]{1,64}) whose last
 #   underscore-separated words are `transaction_failed`, e.g.
-#   `invalid_exact_evm_transaction_failed`;
+#   `invalid_exact_evm_transaction_failed`. A longer code ending that way is
+#   deliberately definite: past 64 characters it is not a machine code by the
+#   #576 grammar (the caller sees it hidden as free text too), and the family
+#   is kept to codes we can name. The trade-off: a facilitator inventing such
+#   a long code would get the old refusal answer;
 # - a reason starting with `transaction_failed:` (that code followed by the
 #   error text).
 # Everything else keeps its old meaning, a definite refusal: the codes decided
