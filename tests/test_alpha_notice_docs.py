@@ -71,12 +71,12 @@ def test_no_public_doc_promises_a_refund():
         rel = str(path.relative_to(REPO))
         if rel in NOT_FOR_PAYING_CALLERS:
             continue
-        for number, line in enumerate(path.read_text().splitlines(), 1):
-            text = line.lower()
-            for phrase in NOT_A_PROMISE:
-                text = text.replace(phrase, "")
-            if "refund" in text:
-                offending.append(f"{rel}:{number}: {line.strip()[:120]}")
+        # Whitespace collapsed, so wording wrapped across lines still matches.
+        text = " ".join(path.read_text().lower().split())
+        for phrase in NOT_A_PROMISE:
+            text = text.replace(phrase, "")
+        for m in re.finditer("refund", text):
+            offending.append(f"{rel}: ...{text[max(0, m.start() - 80):m.end() + 40]}...")
     assert not offending, "\n".join(offending)
 
 
