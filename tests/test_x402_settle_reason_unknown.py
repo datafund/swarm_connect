@@ -268,6 +268,68 @@ def test_after_work_retry_is_stopped_before_the_work_runs_again(gw, version):
 
 
 # --------------------------------------------------------------------------
+# settlement_pending (@x402/evm 2.30.0): broadcast, receipt not awaited
+# --------------------------------------------------------------------------
+
+@pytest.mark.parametrize("reason", ["settlement_pending", "SETTLEMENT_PENDING ",
+                                    "settlement_pending: request timed out"])
+def test_classifier_settlement_pending(reason):
+    assert st.settle_outcome_unknown(reason) is True
+
+
+@pytest.mark.parametrize("reason", ["settlement_pendingx", "xsettlement_pending", "pending",
+                                    "a_settlement_pending", "settlement_pending_later"])
+def test_classifier_settlement_pending_near_misses(reason):
+    assert st.settle_outcome_unknown(reason) is False
+
+
+def _pending_answer(version, with_tx):
+    """What @x402/evm 2.30.0 answers when waitForTransactionReceipt throws
+    after writeContract broadcast (settlementPendingResponse)."""
+    body = _answer(version, "settlement_pending")
+    body["errorMessage"] = "timed out waiting for the receipt"
+    if with_tx:
+        body["transaction"] = "0x" + "cd" * 32
+    return body
+
+
+@pytest.mark.parametrize("site", sorted(SITES))
+@pytest.mark.parametrize("version,status", [(1, 200), (2, 200), (2, 400)])
+@pytest.mark.parametrize("with_tx", [True, False])
+def test_settlement_pending_is_an_unknown_outcome(gw, site, version, status, with_tx):
+    client, fac = gw("1,2")
+    offer = _offer(client)
+    route = SITES[site]
+    fac.settle_status, fac.settle = 500, {"oops": True}
+    reference = _send(client, route, pay(version, offer, nonce=nonce_hex("0e")))
+    assert reference.status_code == 502, reference.text
+
+    fac.settle_status, fac.settle = status, _pending_answer(version, with_tx)
+    key = {"Idempotency-Key": f"k-pending-{site}-{version}-{status}-{with_tx}"}
+    before, audit = _counts(version), _audit_lines()
+    r = _send(client, route, {**pay(version, offer, nonce=nonce_hex("0a")), **key})
+    assert r.status_code == 502, r.text
+    assert r.headers["X-Payment-Mode"] == "failed"
+    assert r.headers["X-Payment-Status"] == "settlement_unknown"
+    assert receipt_header(version) not in r.headers and other_receipt_header(version) not in r.headers
+    assert "settlement_pending" not in r.text and "cd" * 32 not in r.text
+    assert _unknown_body(r) == _unknown_body(reference)
+    assert sorted(k for k in r.headers if k != "content-length") == \
+        sorted(k for k in reference.headers if k != "content-length")
+    assert _moved(before, _counts(version)) == {"error": 1}
+    _assert_unknown_audited(_new_audit(audit), "settlement_pending", nonce_hex("0a"), version)
+    expected_kind = st.BEFORE_WORK if site == "before_work" else st.AFTER_WORK
+    assert st.outcome_unknown.kind(_key(nonce_hex("0a"))) == expected_kind
+    # The Idempotency-Key stays taken: a new payment under it is not settled.
+    fac.settle_status, fac.settle = 200, None
+    settles = [c["path"] for c in fac.calls].count("settle")
+    again = _send(client, route, {**pay(version, offer, nonce=nonce_hex("0b")), **key})
+    assert again.status_code == 409, again.text
+    assert again.json()["detail"]["code"] == "IDEMPOTENCY_KEY_SETTLEMENT_UNKNOWN"
+    assert [c["path"] for c in fac.calls].count("settle") == settles
+
+
+# --------------------------------------------------------------------------
 # An already-unknown authorization answered transaction_failed again
 # --------------------------------------------------------------------------
 
