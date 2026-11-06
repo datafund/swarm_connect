@@ -238,8 +238,22 @@ def _recording_client(config, seen, answer=None):
         seen.append((request.method, request.url.path, request.headers.get("Authorization")))
         if request.url.path.endswith("/supported"):
             return _supported_answer()
+        if request.url.path.endswith("/settle"):
+            version = json.loads(request.content)["x402Version"]
+            network = "eip155:84532" if version == 2 else "base-sepolia"
+            return httpx2.Response(200, json={"success": True, "transaction": "0x" + "ab" * 32,
+                                              "network": network, "payer": "0x" + "a1" * 20})
         return httpx2.Response(200, json=answer or {"isValid": False, "invalidReason": "x", "payer": None})
     return FacilitatorClient(config, transport=httpx2.MockTransport(handler))
+
+
+def _v2_payment_and_requirements():
+    from app.x402.models_v2 import PaymentPayloadV2, PaymentRequirementsV2
+    from tests import x402_v2_builders as v2b
+    from tests.test_x402_facilitator_differential import REQUIREMENTS
+    payload = v2b.v2_payload(REQUIREMENTS, v2b.authorization(REQUIREMENTS))
+    return (PaymentPayloadV2.model_validate(payload),
+            PaymentRequirementsV2.model_validate(v2b.v2_accepted(REQUIREMENTS)))
 
 
 def test_requests_to_the_facilitator_carry_a_valid_jwt(payai):
@@ -249,7 +263,13 @@ def test_requests_to_the_facilitator_carry_a_valid_jwt(payai):
     asyncio.run(client.supported_response())
     payment, requirements = _payment_and_requirements()
     asyncio.run(client.verify(payment, requirements))
-    assert [p for _, p, _ in seen] == ["/x402/supported", "/x402/supported", "/x402/verify"]
+    assert asyncio.run(client.settle(payment, requirements)).success is True
+    # x402 v2 goes through its own request path (_post_v2).
+    payment_v2, requirements_v2 = _v2_payment_and_requirements()
+    asyncio.run(client.verify(payment_v2, requirements_v2))
+    assert asyncio.run(client.settle(payment_v2, requirements_v2)).success is True
+    assert [p for _, p, _ in seen] == ["/x402/supported", "/x402/supported", "/x402/verify",
+                                       "/x402/settle", "/x402/verify", "/x402/settle"]
     for _, _, auth in seen:
         assert_payai_jwt(auth[len("Bearer "):])
 
