@@ -134,7 +134,9 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(
-    title=settings.PROJECT_NAME,
+    # "(alpha)" marks the API docs page (/docs) and the OpenAPI title as alpha
+    # software; the "/" welcome message keeps the plain project name.
+    title=f"{settings.PROJECT_NAME} (alpha)",
     version=VERSION,
     openapi_url=f"{settings.API_V1_STR}/openapi.json",  # Standard location for OpenAPI spec
     lifespan=lifespan
