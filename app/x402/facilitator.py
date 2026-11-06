@@ -201,7 +201,9 @@ def _config() -> FacilitatorConfig:
     config: FacilitatorConfig = {"url": url}
     if _uses_payai():
         # The configured URL as is: a PayAI token is not bound to a path.
-        # validate_x402_config() has checked both values and https.
+        # validate_x402_config() has checked both values and https. The host
+        # is not pinned to PayAI's: the token (valid 120 s, not the key) goes
+        # to whichever facilitator is configured.
         auth = PayAIAuth(settings.X402_FACILITATOR_PAYAI_API_KEY_ID,
                          load_payai_private_key(settings.X402_FACILITATOR_PAYAI_API_KEY_SECRET))
         config["create_headers"] = auth.create_headers
