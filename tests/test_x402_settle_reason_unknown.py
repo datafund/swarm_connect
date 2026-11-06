@@ -134,6 +134,8 @@ DEFINITE_CODES = sorted([
     "invalid_exact_evm_payload_signature", "invalid_exact_evm_payload_undeployed_smart_wallet",
     "missing_eip712_domain", "network_mismatch", "unsupported_scheme", "invalid_network",
     "invalid_scheme",
+    # both versions, only after a broadcast: definite without a hash by decision
+    "invalid_transaction_state",
     # 2.30.0
     "invalid_exact_evm_payload", "invalid_exact_evm_scheme", "invalid_exact_evm_network_mismatch",
     "invalid_exact_evm_missing_eip712_domain", "invalid_exact_evm_recipient_mismatch",
@@ -169,7 +171,7 @@ def test_a_definite_code_without_a_valid_hash_is_definite(code, transaction):
     assert _definite("  " + code.upper() + "\n", transaction) is True
 
 
-@pytest.mark.parametrize("code", DEFINITE_CODES + ["invalid_transaction_state"])
+@pytest.mark.parametrize("code", DEFINITE_CODES)
 def test_any_answer_with_a_valid_hash_is_unknown(code):
     assert _definite(code, TX_HASH) is False
     assert _definite(code, "0x" + "CD" * 32) is False
@@ -180,8 +182,8 @@ def test_any_answer_with_a_valid_hash_is_unknown(code):
     "TRANSACTION_FAILED", "  invalid_exact_evm_transaction_failed\n", "Unexpected_Settle_Error",
     "invalid_exact_svm_transaction_failed", "invalid_exact_evm_transfer_event_mismatch",
     "transaction_failed:" + "x" * 100000, "Transaction_Failed: multi\nline\ntext",
-    # Never returned before a broadcast by either library version.
-    "invalid_transaction_state", "smart_wallet_deployment_failed", "erc20_approval_tx_failed",
+    # Returned after a broadcast (or a deployment), or not on the EIP-3009 path.
+    "smart_wallet_deployment_failed", "erc20_approval_tx_failed", "permit2_invalid_nonce",
     # Codes the libraries do not have, or near misses of listed ones.
     "invalid_signature", "expired", "unknown", "settle_failed", "nonce_used", "pending",
     "insufficient_funds_x", "xinsufficient_funds", "insufficient funds", "insufficient_funds:",
@@ -386,8 +388,6 @@ UNKNOWN_ANSWERS = {
     "empty_reason": ("", "", "unknown"),
     "invalid_transaction_state_with_hash": ("invalid_transaction_state", TX_HASH,
                                             "invalid_transaction_state"),
-    "invalid_transaction_state_without_hash": ("invalid_transaction_state", "",
-                                               "invalid_transaction_state"),
     "definite_code_with_hash": ("insufficient_funds", TX_HASH, "insufficient_funds"),
 }
 
@@ -524,14 +524,15 @@ def test_idempotency_key_stays_taken_after_an_unknown_reason(gw, site, version):
 # --------------------------------------------------------------------------
 
 # Reasons on the allowlist (definite without a transaction hash). Free text,
-# unverified codes, a missing reason and invalid_transaction_state left this
-# golden for the unknown-outcome tests above when the allowlist was adopted.
+# unverified codes and a missing reason left this golden for the
+# unknown-outcome tests above when the allowlist was adopted.
 DEFINITE = {
     "insufficient_funds": "insufficient_funds",
     "nonce_already_used": "invalid_exact_evm_nonce_already_used",
     "valid_before_expired": "invalid_exact_evm_payload_authorization_valid_before",
     "payload_signature": "invalid_exact_evm_payload_signature",
     "simulation_failed": "invalid_exact_evm_transaction_simulation_failed",
+    "invalid_transaction_state": "invalid_transaction_state",
 }
 
 
@@ -578,7 +579,7 @@ def _capture(gw):
                     out["definite"][f"v{version}/{site}/{name}/{status}"] = rec
             # A definite refusal of an authorization whose earlier outcome is
             # unknown (first a facilitator exception before the work).
-            for name in ("nonce_already_used", "insufficient_funds"):
+            for name in ("nonce_already_used", "invalid_transaction_state"):
                 client, fac = gw("1,2")
                 offer = _offer(client)
                 first = nonce()
