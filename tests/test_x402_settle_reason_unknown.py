@@ -71,6 +71,40 @@ def _key(nonce):
     return (PAYER.lower(), nonce)
 
 
+def _audit_lines():
+    from app.x402.audit import get_audit_log_path
+    path = get_audit_log_path()
+    return path.read_text().splitlines() if path.exists() else []
+
+
+def _new_audit(before_lines):
+    """The audit records written since `before_lines`, without the fields that
+    differ on every run (timestamp, request id)."""
+    out = []
+    for line in _audit_lines()[len(before_lines):]:
+        if line.strip():
+            event = json.loads(line)
+            event.pop("timestamp", None)
+            event.pop("request_id", None)
+            out.append(event)
+    return out
+
+
+def _unknown_audit(reason):
+    """The audit reason the #660 path writes; the runbook's refund procedure
+    matches on it (docs/mainnet-runbook.md)."""
+    return f"facilitator reported {reason} (the transaction may have been sent)"
+
+
+def _assert_unknown_audited(events, reason, nonce, version):
+    failed = [e for e in events if e["event_type"] == "payment_failed"]
+    assert [e["data"] for e in failed] == [
+        {"reason": _unknown_audit(reason), "stage": "settle", "nonce": nonce, "x402_version": version}]
+    assert failed[0]["wallet_address"].lower() == PAYER.lower()
+    # Not a refusal: no payment_settled record (success false) is written.
+    assert [e for e in events if e["event_type"] == "payment_settled"] == []
+
+
 def _unknown_body(r):
     """The JSON body without the per-request nonce, to compare two answers."""
     body = r.json()
@@ -127,9 +161,10 @@ def test_before_work_unknown_reason_is_an_unknown_outcome(gw, version, status, r
     assert reference.status_code == 502, reference.text
 
     fac.settle_status, fac.settle = status, _answer(version, reason)
-    before = _counts(version)
+    before, audit = _counts(version), _audit_lines()
     r = _send(client, BEFORE, pay(version, offer, nonce=nonce_hex("01")))
     assert r.status_code == 502, r.text
+    _assert_unknown_audited(_new_audit(audit), reason, nonce_hex("01"), version)
     assert r.json()["detail"]["code"] == "PAYMENT_SETTLEMENT_UNAVAILABLE"
     assert r.json()["detail"]["nonce"] == nonce_hex("01")
     assert r.headers["X-Payment-Mode"] == "failed"
@@ -195,9 +230,10 @@ def test_after_work_unknown_reason_is_an_unknown_outcome(gw, version, status, re
     assert reference.status_code == 502, reference.text
 
     fac.settle_status, fac.settle = status, _answer(version, reason)
-    before = _counts(version)
+    before, audit = _counts(version), _audit_lines()
     r = _send(client, AFTER, pay(version, offer, nonce=nonce_hex("04")))
     assert r.status_code == 502, r.text
+    _assert_unknown_audited(_new_audit(audit), reason, nonce_hex("04"), version)
     body = r.json()
     assert body["code"] == body["detail"]["code"] == "PAYMENT_SETTLEMENT_UNKNOWN"
     assert body["nonce"] == nonce_hex("04")
@@ -229,6 +265,49 @@ def test_after_work_retry_is_stopped_before_the_work_runs_again(gw, version):
     assert r.headers["X-Payment-Status"] == "settlement_unknown"
     assert v2h.RAN == ran
     assert [c["path"] for c in fac.calls].count("settle") == 1
+
+
+# --------------------------------------------------------------------------
+# An already-unknown authorization answered transaction_failed again
+# --------------------------------------------------------------------------
+
+@pytest.mark.parametrize("version", VERSIONS)
+def test_retry_answered_transaction_failed_again_is_unknown_again(gw, version):
+    """The retry's own transfer may have been sent too: 502 again, the entry
+    stays, never a 409 that treats it as a refusal."""
+    client, fac = gw("1,2")
+    offer = _offer(client)
+    fac.settle = _answer(version, "invalid_exact_evm_transaction_failed")
+    headers = pay(version, offer, nonce=nonce_hex("08"))
+    assert _send(client, BEFORE, headers).status_code == 502
+    before, audit = _counts(version), _audit_lines()
+    r = _send(client, BEFORE, headers)
+    assert r.status_code == 502, r.text
+    assert r.json()["detail"]["code"] == "PAYMENT_SETTLEMENT_UNAVAILABLE"
+    assert r.headers["X-Payment-Status"] == "settlement_unknown"
+    assert _moved(before, _counts(version)) == {"error": 1}
+    _assert_unknown_audited(_new_audit(audit), "invalid_exact_evm_transaction_failed",
+                            nonce_hex("08"), version)
+    assert st.outcome_unknown.kind(_key(nonce_hex("08"))) == st.BEFORE_WORK
+    assert v2h.RAN == []
+
+
+@pytest.mark.parametrize("version", VERSIONS)
+def test_retry_on_a_fallback_route_answered_transaction_failed_is_unknown_after_the_work(gw, version):
+    """A before-the-work unknown outcome, then the same authorization on a route
+    the middleware settles: answered transaction_failed again, it is the
+    fallback's unknown outcome, and the entry becomes after_work."""
+    client, fac = gw("1,2")
+    offer = _offer(client)
+    fac.settle = _answer(version, "transaction_failed")
+    headers = pay(version, offer, nonce=nonce_hex("09"))
+    assert _send(client, BEFORE, headers).status_code == 502
+    before = _counts(version)
+    r = _send(client, AFTER, headers)
+    assert r.status_code == 502, r.text
+    assert r.json()["code"] == "PAYMENT_SETTLEMENT_UNKNOWN"
+    assert _moved(before, _counts(version)) == {"error": 1}
+    assert st.outcome_unknown.kind(_key(nonce_hex("09"))) == st.AFTER_WORK
 
 
 # --------------------------------------------------------------------------
@@ -267,9 +346,29 @@ DEFINITE = {
 }
 
 
+def _record(client, r, before, audit, version, nonce):
+    """Everything a refusal leaves behind: the answer, the metric, whether the
+    handler ran, the audit records, and the outcome-unknown registry entry."""
+    return {
+        "status": r.status_code,
+        "body": r.text,
+        "headers": sorted([k, v] for k, v in r.headers.items()),
+        "metric": _moved(before, _counts(version)),
+        "ran": list(v2h.RAN),
+        "audit": _new_audit(audit),
+        "registry": st.outcome_unknown.kind(_key(nonce)),
+    }
+
+
 def _capture(gw):
-    out = {}
-    nonce = 0x10
+    out = {"definite": {}, "refused_after_unknown": {}}
+    n = 0x10
+
+    def nonce():
+        nonlocal n
+        n += 1
+        return nonce_hex(f"{n - 1:02x}")
+
     for version in VERSIONS:
         for site, route in sorted(SITES.items()):
             for name, reason in sorted(DEFINITE.items()):
@@ -277,27 +376,53 @@ def _capture(gw):
                     client, fac = gw("1,2")
                     offer = _offer(client)
                     fac.settle_status, fac.settle = status, _answer(version, reason)
-                    before = _counts(version)
-                    r = _send(client, route, pay(version, offer, nonce=nonce_hex(f"{nonce:02x}")))
-                    nonce += 1
-                    out[f"v{version}/{site}/{name}/{status}"] = {
-                        "status": r.status_code,
-                        "body": r.text,
-                        "headers": sorted([k, v] for k, v in r.headers.items()),
-                        "metric": _moved(before, _counts(version)),
-                        "ran": list(v2h.RAN),
-                    }
+                    key = {"Idempotency-Key": f"golden-{version}-{site}-{name}-{status}"}
+                    first = nonce()
+                    before, audit = _counts(version), _audit_lines()
+                    r = _send(client, route, {**pay(version, offer, nonce=first), **key})
+                    rec = _record(client, r, before, audit, version, first)
+                    # The Idempotency-Key afterwards: a new payment under the
+                    # same key, which the facilitator now settles.
+                    fac.settle_status, fac.settle = 200, None
+                    retry = _send(client, route, {**pay(version, offer, nonce=nonce()), **key})
+                    rec["idempotency_retry_status"] = retry.status_code
+                    out["definite"][f"v{version}/{site}/{name}/{status}"] = rec
+            # A definite refusal of an authorization whose earlier outcome is
+            # unknown (first a facilitator exception before the work).
+            for name in ("nonce_already_used", "invalid_transaction_state"):
+                client, fac = gw("1,2")
+                offer = _offer(client)
+                first = nonce()
+                headers = pay(version, offer, nonce=first)
+                fac.settle_status, fac.settle = 500, {"oops": True}
+                assert _send(client, BEFORE, headers).status_code == 502
+                fac.settle_status, fac.settle = 200, _answer(version, DEFINITE[name])
+                before, audit = _counts(version), _audit_lines()
+                r = _send(client, route, headers)
+                out["refused_after_unknown"][f"v{version}/{site}/{name}"] = _record(
+                    client, r, before, audit, version, first)
     return out
 
 
 def test_definite_refusals_match_the_golden(gw):
+    """Captured on the code before #660 (app/ of origin/dev), never edited by hand."""
     got = _capture(gw)
     if REGENERATE:
         GOLDEN.parent.mkdir(parents=True, exist_ok=True)
         GOLDEN.write_text(json.dumps(got, indent=1, sort_keys=True) + "\n")
     expected = json.loads(GOLDEN.read_text())
     assert sorted(got) == sorted(expected)
-    for key in expected:
-        assert got[key] == expected[key], f"{key} differs from the golden"
-    # Sanity: the golden really holds refusals.
-    assert all(v["metric"] == {"refused": 1} for v in expected.values())
+    for section in expected:
+        assert sorted(got[section]) == sorted(expected[section]), section
+        for key in expected[section]:
+            assert got[section][key] == expected[section][key], f"{section} {key} differs from the golden"
+    # Sanity: the golden really holds what it claims to.
+    for rec in expected["definite"].values():
+        assert rec["metric"] == {"refused": 1}
+        assert rec["registry"] is None                     # no outcome-unknown entry left
+        assert rec["idempotency_retry_status"] == 200      # the key was freed
+        settled = [e for e in rec["audit"] if e["event_type"] == "payment_settled"]
+        assert len(settled) == 1 and settled[0]["data"]["success"] is False
+    for rec in expected["refused_after_unknown"].values():
+        assert rec["metric"] == {"refused_after_unknown": 1}
+        assert rec["status"] == 409 and rec["registry"] is not None
