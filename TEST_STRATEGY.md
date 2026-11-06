@@ -156,6 +156,23 @@ in `tests/test_backup_bee_keys.py` and run by default.
 RUN_BEE_DRILL=1 pytest tests/test_bee_keys_drill.py -s
 ```
 
+`tests/test_backup_s3_minio.py`, the S3 off-host copy of `backup_state.sh`
+against a real object store (#493), is opt-in on `RUN_S3_BACKUP_TEST=1`. It
+needs a local Docker daemon. It builds a small runner image (Debian with `age`,
+plus the pinned rclone binary copied from the `rclone/rclone` image), then runs
+MinIO and the runner on a `docker network create --internal` network that
+reaches nothing else. It covers success with a full restore (checksum, `age -d`,
+unpack, compare), wrong credentials and an unreachable endpoint. The MinIO image
+is `bitnamilegacy/minio`, pinned by digest: MinIO's own images
+(`minio/minio`, `quay.io/minio/minio`) could no longer be pulled when this was
+checked on 2026-11-06. Every image is pinned by digest and runs natively on
+amd64 or arm64. The hermetic checks of the same script, with stand-in binaries,
+are in `tests/test_backup_state.py` and run by default.
+
+```bash
+RUN_S3_BACKUP_TEST=1 pytest tests/test_backup_s3_minio.py -s
+```
+
 ### Why staging, and why not the branch you are on
 
 Production is never a default and has to be named. That is the property that
