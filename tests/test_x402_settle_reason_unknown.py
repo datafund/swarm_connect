@@ -1,16 +1,22 @@
-"""A settle refusal whose reason means "the transaction may have been sent" (#660).
+"""Settle refusals: definite only on an allowlist, otherwise unknown (#660).
 
-In @x402/evm 2.5.0 the exact EIP-3009 settle path answers `success: false`
+A `success: false` settle answer is a definite refusal only when it carries no
+valid transaction hash and its reason is a code @x402/evm 2.5.0 or 2.30.0
+returns before broadcasting anything (settlement.DEFINITE_SETTLE_REFUSALS);
+everything else is an unknown outcome. The trade-off: a rare definite refusal
+with unexpected wording is answered as unknown, and keeps its Idempotency-Key
+for 24 h. What made the rule necessary: in production, x402.org's v1
+facilitator put a multi-line viem error from eth_sendRawTransaction in
+errorReason, and in @x402/evm 2.5.0 the exact EIP-3009 settle path answers `success: false`
 with plain `transaction_failed` (v1 and v2) and an empty transaction from one
 catch around both writeContract and waitForTransactionReceipt (its Permit2
 path: `transaction_failed: <message>`). In 2.30.0, which matches what the
 staging facilitator answered, a receipt wait that throws after the broadcast
 answers `settlement_pending` with the transaction, and a send or simulation
 failure answers `invalid_exact_evm_transaction_failed` (also used for a
-reverted receipt; kept in the family anyway). `unexpected_settle_error` is in
-neither version and is kept defensively. Either way the transfer can still be
-mined until validBefore has passed. Such an answer is an unknown
-outcome, not a refusal: at both settle sites (settle_payment before the work,
+reverted receipt; unknown either way). `unexpected_settle_error` is in
+neither version. Either way the transfer can still be mined until validBefore
+has passed. Such an answer is an unknown outcome, not a refusal: at both settle sites (settle_payment before the work,
 the middleware fallback after it), in both x402 versions, it must take the
 path a facilitator exception takes. Definite refusals stay byte for byte as
 they were (tests/golden/x402_settle_refusals.json, captured on the code before

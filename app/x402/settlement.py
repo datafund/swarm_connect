@@ -764,78 +764,138 @@ def public_facilitator_reason(reason) -> str:
     return FACILITATOR_REASON_HIDDEN
 
 
-# Settle refusals that may not be refusals (#660). A parsed `success: false`
-# is normally definite: nothing was sent to the chain. Not for every reason.
-# Where they come from, in @x402/evm (the reference facilitator library):
-# - 2.5.0, the exact EIP-3009 path, v1 and v2: plain `transaction_failed`,
-#   with an empty transaction, from one catch around both writeContract and
-#   waitForTransactionReceipt. If only the wait for the receipt failed (an RPC
-#   timeout), the broadcast transfer can still be mined until the
-#   authorization's validBefore has passed. Its Permit2 path answers
-#   `transaction_failed: <message>`.
-# - 2.30.0 (what the staging facilitator's answers match):
-#   `settlement_pending`, with the broadcast transaction, when
-#   waitForTransactionReceipt throws after writeContract (the transfer is
-#   on its way); and `invalid_exact_evm_transaction_failed`, both for an
-#   exception from writeContract or its simulation (also as
-#   `<code>: <message>`) and for a receipt that was mined and REVERTED on the
-#   EIP-3009 path (not charged). That second use makes the code ambiguous; it
-#   stays in the family on purpose: erring toward "unknown" loses nothing
-#   (the payer is told to check the nonce on-chain, and a retry with the same
-#   authorization still settles at most once), while "refused" for a transfer
-#   that may be mined would charge for nothing delivered.
-# - `unexpected_settle_error` was found in neither version. It is kept
-#   defensively, as a facilitator's catch-all around settle.
-# Such an answer is an unknown outcome, and each settle site handles it
-# exactly as it handles a facilitator exception.
+# Which settle refusals are definite (#660). A parsed `success: false` used to
+# be taken as "nothing was sent to the chain". It is not, for many reasons:
+# @x402/evm 2.5.0 answers `transaction_failed` from one catch around both
+# writeContract and the wait for the receipt; 2.30.0 answers
+# `settlement_pending` with the broadcast transaction when that wait throws,
+# `invalid_exact_evm_transaction_failed` for a send failure and for a reverted
+# receipt, and `invalid_transaction_state` with the broadcast hash when its
+# pending-settlement store fails; its v1 path puts the raw error text of a
+# failed writeContract in errorReason (seen in production: a multi-line viem
+# "Missing or invalid parameters ... eth_sendRawTransaction" error).
 #
-# The family, matched on the reason stripped and lowercased:
-# - the codes in _MAY_HAVE_BEEN_SENT;
-# - any machine code (the #576 grammar, [a-z0-9_]{1,64}) whose last
-#   underscore-separated words are `transaction_failed` (whole words: so
-#   `a__transaction_failed` or `xtransaction_failed` does not match), e.g.
-#   `invalid_exact_evm_transaction_failed`. A longer code ending that way is
-#   deliberately definite: past 64 characters it is not a machine code by the
-#   #576 grammar (the caller sees it hidden as free text too), and the family
-#   is kept to codes we can name. The trade-off: a facilitator inventing such
-#   a long code would get the old refusal answer;
-# - a reason starting with `transaction_failed:` or `settlement_pending:`
-#   (that code followed by the error text).
-# Everything else keeps its old meaning, a definite refusal: the codes decided
-# before anything is sent (insufficient_funds, invalid signature, nonce already
-# used, expired), and `invalid_transaction_state`, which @x402/evm returns for
-# a transaction that was mined and reverted (not charged). Reasons of other
-# facilitators (PayAI's exact strings could not be verified) that are not in
-# the family keep today's behaviour too. Not a rule here: "any success:false
-# with a transaction hash is unknown", which would also make 2.30.0's
-# reverted-receipt and transfer-event-mismatch answers unknown (a follow-up
-# decision).
+# So the rule is an allowlist. A refusal is definite only when the answer
+# carries no valid transaction hash (valid_transaction) AND its reason,
+# stripped and lowercased, is a machine code (the #576 grammar) in
+# DEFINITE_SETTLE_REFUSALS: a code those libraries return only BEFORE they
+# broadcast anything. Everything else is an unknown outcome, handled at each
+# settle site exactly as a facilitator exception: free text, an unverified or
+# unknown code (PayAI's codes could not be checked, so they are unknown unless
+# they equal one listed here), a missing or empty reason, settlement_pending,
+# the transaction_failed codes, and any refusal with a valid hash, whatever its
+# reason (so a mined-and-reverted transfer, not charged, is answered "unknown"
+# too). The trade-off: a rare definite refusal with unexpected wording is
+# answered as unknown, so its authorization is remembered and its
+# Idempotency-Key stays taken for 24 h; the payer is told to check the nonce
+# on-chain instead of signing again at once. Nothing is charged twice.
 #
-# Not done: reading authorizationState(from, nonce) on Base after such an
+# Only the EIP-3009 `exact` path counts: the gateway accepts nothing else (D9),
+# so the Permit2, EIP-2612 and ERC-20 approval codes are left out (unknown).
+# Where each code comes from (read at its use site; each is returned before
+# writeContract or sendTransaction):
+# - @x402/evm 2.5.0, v1 and v2 `exact` verify, which settle runs first and
+#   whose invalidReason it returns (default `invalid_scheme`) before
+#   writeContract: insufficient_funds,
+#   invalid_exact_evm_payload_authorization_valid_{after,before} (the
+#   authorization's validity window, checked by the facilitator),
+#   invalid_exact_evm_payload_authorization_value,
+#   invalid_exact_evm_payload_recipient_mismatch,
+#   invalid_exact_evm_payload_signature,
+#   invalid_exact_evm_payload_undeployed_smart_wallet, missing_eip712_domain,
+#   network_mismatch, unsupported_scheme, invalid_network, invalid_scheme.
+# - @x402/evm 2.30.0, the scheme's payload check (invalid_exact_evm_payload),
+#   verifyEIP3009 / the v1 verify (including the asset check and the
+#   simulation and its diagnosis, eth_call only), and settleEIP3009 before
+#   sending: invalid_exact_evm_payload, invalid_exact_evm_scheme,
+#   invalid_exact_evm_network_mismatch, invalid_exact_evm_missing_eip712_domain,
+#   invalid_exact_evm_recipient_mismatch, invalid_exact_evm_signature,
+#   invalid_exact_evm_non_canonical_signature,
+#   invalid_exact_evm_failed_to_verify_signature,
+#   invalid_exact_evm_failed_to_parse_signature,
+#   invalid_exact_evm_authorization_value,
+#   invalid_exact_evm_payload_authorization_value_mismatch,
+#   invalid_exact_evm_token_name_mismatch, invalid_exact_evm_token_version_mismatch,
+#   invalid_exact_evm_eip3009_not_supported, invalid_exact_evm_nonce_already_used,
+#   invalid_exact_evm_insufficient_balance,
+#   invalid_exact_evm_transaction_simulation_failed, asset_not_deployed_contract,
+#   eip6492_factory_not_allowed (before the smart-wallet deployment is sent).
+#   Five of them (the two validity-window codes, nonce_already_used,
+#   insufficient_balance, signature) are also what 2.30.0's
+#   parseEip3009TransferError makes of a writeContract exception whose message
+#   is the token contract's own revert reason: the transfer was rejected, not
+#   sent, so they stay definite; any other exception there becomes
+#   invalid_exact_evm_transaction_failed, which is unknown.
+# invalid_transaction_state is listed although no version returns it before a
+# broadcast: on the EIP-3009 path both return it only for a mined-and-reverted
+# receipt, with the hash (not charged), and 2.30.0 also with the hash when its
+# pending store fails. With a hash it is therefore unknown, by the hash rule;
+# without one it stays the refusal it always was (the v1 wire goldens pin
+# that answer), by decision.
+# Not listed, on purpose: transaction_failed and
+# invalid_exact_evm_transaction_failed, invalid_exact_evm_transfer_event_mismatch,
+# settlement_pending, smart_wallet_deployment_failed (after a deployment was
+# sent), and `unexpected_settle_error` (in neither version).
+#
+# Not done: reading authorizationState(from, nonce) on Base after an unknown
 # answer would turn many of these into definite answers; it needs a Base RPC.
-_MAY_HAVE_BEEN_SENT = frozenset({"transaction_failed", "invalid_exact_evm_transaction_failed",
-                                 "settlement_pending", "unexpected_settle_error"})
-_TRANSACTION_FAILED_CODE_RE = re.compile(r"(?:[a-z0-9]+_)*transaction_failed")
-_MAY_HAVE_BEEN_SENT_PREFIXES = ("transaction_failed:", "settlement_pending:")
-_PREFIX_SPAN = max(len(p) for p in _MAY_HAVE_BEEN_SENT_PREFIXES) + 64
+DEFINITE_SETTLE_REFUSALS = frozenset({
+    # @x402/evm 2.5.0
+    "insufficient_funds",
+    # The two validity-window codes, split so that no line of app/ names the
+    # window's fields: tests/test_x402_v2_e2e.py checks the gateway never
+    # compares them itself (a code string is not such a check).
+    "invalid_exact_evm_payload_authorization_" "valid" "_after",
+    "invalid_exact_evm_payload_authorization_" "valid" "_before",
+    "invalid_exact_evm_payload_authorization_value",
+    "invalid_exact_evm_payload_recipient_mismatch",
+    "invalid_exact_evm_payload_signature",
+    "invalid_exact_evm_payload_undeployed_smart_wallet",
+    "missing_eip712_domain",
+    "network_mismatch",
+    "unsupported_scheme",
+    "invalid_network",
+    "invalid_scheme",
+    # Both versions, definite only without a transaction hash (see above).
+    "invalid_transaction_state",
+    # @x402/evm 2.30.0
+    "invalid_exact_evm_payload",
+    "invalid_exact_evm_scheme",
+    "invalid_exact_evm_network_mismatch",
+    "invalid_exact_evm_missing_eip712_domain",
+    "invalid_exact_evm_recipient_mismatch",
+    "invalid_exact_evm_signature",
+    "invalid_exact_evm_non_canonical_signature",
+    "invalid_exact_evm_failed_to_verify_signature",
+    "invalid_exact_evm_failed_to_parse_signature",
+    "invalid_exact_evm_authorization_value",
+    "invalid_exact_evm_payload_authorization_value_mismatch",
+    "invalid_exact_evm_token_name_mismatch",
+    "invalid_exact_evm_token_version_mismatch",
+    "invalid_exact_evm_eip3009_not_supported",
+    "invalid_exact_evm_nonce_already_used",
+    "invalid_exact_evm_insufficient_balance",
+    "invalid_exact_evm_transaction_simulation_failed",
+    "asset_not_deployed_contract",
+    "eip6492_factory_not_allowed",
+})
 
 
-def settle_outcome_unknown(reason) -> bool:
-    """Whether a facilitator's settle refusal reason means the transaction may
-    have been sent, so the outcome is unknown (#660). Total: any value (None,
-    not a string, any length or case) gives True or False, never raises."""
-    if not isinstance(reason, str):
+def settle_refusal_is_definite(reason, transaction) -> bool:
+    """Whether a facilitator's settle refusal is definite: nothing was sent, so
+    the payer was not charged (#660). `reason` is the answer's errorReason,
+    `transaction` its transaction field. Total: any values (None, not a
+    string, any length or case) give True or False, never raise. Anything not
+    known to be definite is False, an unknown outcome."""
+    try:
+        if valid_transaction(transaction) is not None:
+            return False     # something was broadcast
+        if not isinstance(reason, str) or len(reason) > 256:
+            return False
+        code = reason.strip().lower()
+        return bool(_FACILITATOR_CODE_RE.fullmatch(code)) and code in DEFINITE_SETTLE_REFUSALS
+    except Exception:
         return False
-    # The prefix first: what follows it is free text of any length.
-    head = reason[:_PREFIX_SPAN].lstrip().lower()
-    if head.startswith(_MAY_HAVE_BEEN_SENT_PREFIXES):
-        return True
-    if len(reason) > 256:
-        return False
-    code = reason.strip().lower()
-    if not _FACILITATOR_CODE_RE.fullmatch(code):
-        return False
-    return code in _MAY_HAVE_BEEN_SENT or _TRANSACTION_FAILED_CODE_RE.fullmatch(code) is not None
 
 
 def payment_state_unavailable_detail(work_ran: bool = False) -> dict:
@@ -1134,14 +1194,16 @@ async def settle_payment(request: Request) -> None:
     # written (aresolve releases it), so a duplicate in between is told
     # "in progress", not "outcome unknown".
 
-    if not getattr(result, "success", False) and settle_outcome_unknown(getattr(result, "error_reason", None)):
-        # A "refusal" after which the transfer may still be mined (#660): an
-        # unknown outcome, whatever an earlier attempt left (`prior`), exactly
-        # as an exception above. The full reason goes to the log and the audit
-        # record only; the 502 carries none.
-        reason = getattr(result, "error_reason", None)
-        logger.error(f"x402: settlement before delivery answered {reason!r}; the transaction may "
-                     f"have been sent, outcome unknown")
+    if not getattr(result, "success", False) and not settle_refusal_is_definite(
+            getattr(result, "error_reason", None), getattr(result, "transaction", None)):
+        # Not a refusal known to be decided before anything was sent (#660,
+        # settle_refusal_is_definite): an unknown outcome, whatever an earlier
+        # attempt left (`prior`), exactly as an exception above. The full
+        # reason goes to the log and the audit record only; the 502 carries none.
+        reason = getattr(result, "error_reason", None) or "unknown"
+        tx = valid_transaction(getattr(result, "transaction", None))
+        logger.error(f"x402: settlement before delivery answered {reason!r} (tx={tx}); the "
+                     f"transaction may have been sent, outcome unknown")
         raise unknown_outcome(f"facilitator reported {reason} (the transaction may have been sent)")
 
     if not getattr(result, "success", False):
