@@ -236,8 +236,14 @@ async def check_facilitator_v2_support(client: Optional[FacilitatorClient] = Non
     if not 200 <= status < 300:
         # Not an answer to trust, whatever its body says (CDP answers 401 in
         # plain text without valid credentials).
+        if 300 <= status < 400:
+            hint = " (redirects are not followed: set X402_FACILITATOR_URL to the final URL)"
+        elif status in (401, 403):
+            hint = " (an authentication error: check the facilitator credentials)"
+        else:
+            hint = ""
         raise _v2_refusal(f"the facilitator's /supported on {host} answered HTTP {status}, not a list "
-                          f"of payment kinds (a 401 or 403 is an authentication error)")
+                          f"of payment kinds{hint}")
     # The body as JSON text, decoded here and nowhere else: httpx2's
     # Response.json() lets json.loads guess UTF-16 or UTF-32, and then the
     # byte-level depth count below would read another text than the parser.

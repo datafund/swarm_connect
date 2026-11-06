@@ -19,6 +19,10 @@ import time
 # Configure basic logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+# httpx2's request lines without the server's reason phrase or query (#608):
+# the container log reaches the public deploy log.
+from app.core import http_log  # noqa: E402
+http_log.install()
 
 # Captured at import so /health can report process age without reading /metrics.
 _STARTED_MONOTONIC = time.monotonic()
