@@ -105,7 +105,7 @@ def assert_payai_jwt(token, key=KEY, key_id=KEY_ID, now=None):
     raw_header = base64.urlsafe_b64decode(head + "=" * (-len(head) % 4))
     # The package's layout: JSON.stringify, compact, keys in this order.
     assert raw_header == json.dumps({"alg": "EdDSA", "typ": "JWT", "kid": key_id},
-                                    separators=(",", ":")).encode()
+                                    separators=(",", ":"), ensure_ascii=False).encode("utf-8")
     payload = _b64url_json(body)
     assert list(payload) == ["sub", "iss", "iat", "exp", "jti"]
     assert payload["sub"] == key_id and payload["iss"] == "payai-merchant"
@@ -140,6 +140,9 @@ def test_a_token_signed_with_another_key_does_not_verify():
     lambda s: "payai_sk_" + s,                                    # the prefix stripped
     lambda s: " payai_sk_" + s + " ",
     lambda s: s.rstrip("=").replace("+", "-").replace("/", "_"),  # url-safe, no padding
+    lambda s: "\ufeff" + s + "\ufeff",                          # JS trim() strips U+FEFF
+    lambda s: "\u00a0" + s + "\u00a0\u3000\u2028",              # ...and NBSP, Zs, LS
+    lambda s: s[:20] + " \n\t" + s[20:],                         # atob drops ASCII whitespace
 ])
 def test_secret_normalization_matches_the_package(form):
     key = facilitator.load_payai_private_key(form(SECRET))
@@ -479,3 +482,94 @@ def test_deploy_renders_the_payai_secrets_like_the_cdp_ones_in_both_jobs():
         assert "X402_FACILITATOR_CDP_API_KEY_SECRET=${{ secrets.X402_FACILITATOR_CDP_API_KEY_SECRET || '' }}" in lines
         for name in ("X402_FACILITATOR_PAYAI_API_KEY_ID", "X402_FACILITATOR_PAYAI_API_KEY_SECRET"):
             assert f"{name}=${{{{ secrets.{name} || '' }}}}" in lines
+
+
+# --- review round 1 ----------------------------------------------------------
+
+def _pkcs8_v2(key, public=None) -> bytes:
+    """RFC 5958 OneAsymmetricKey (PKCS#8 v2) for an Ed25519 key, built by hand:
+    version 1, the Ed25519 OID, the seed in an OCTET STRING, the public key [1]."""
+    seed = key.private_bytes(serialization.Encoding.Raw, serialization.PrivateFormat.Raw,
+                             serialization.NoEncryption())
+    pub = (public or key.public_key()).public_bytes(serialization.Encoding.Raw,
+                                                    serialization.PublicFormat.Raw)
+    body = (bytes.fromhex("020101" "300506032b6570" "04220420") + seed
+            + bytes.fromhex("812100") + pub)
+    return bytes([0x30, len(body)]) + body
+
+
+def test_a_pkcs8_v2_secret_loads_and_signs_like_v1():
+    v2 = base64.b64encode(_pkcs8_v2(KEY)).decode()
+    key = facilitator.load_payai_private_key(v2)
+    assert key.private_bytes(serialization.Encoding.Raw, serialization.PrivateFormat.Raw,
+                             serialization.NoEncryption()) == SEED
+    clock = Clock()
+    a = facilitator.PayAIAuth(KEY_ID, key, clock=clock)
+    b = facilitator.PayAIAuth(KEY_ID, facilitator.load_payai_private_key(SECRET), clock=clock)
+    # Ed25519 is deterministic: the same message gives the same signature.
+    msg = b"payai"
+    assert key.sign(msg) == facilitator.load_payai_private_key(SECRET).sign(msg)
+    assert_payai_jwt(a.token(), now=clock.t)
+    assert_payai_jwt(b.token(), now=clock.t)
+
+
+def test_a_pkcs8_v2_secret_with_another_public_key_is_refused():
+    other, _ = new_key()
+    bad = base64.b64encode(_pkcs8_v2(KEY, public=other.public_key())).decode()
+    with pytest.raises(ValueError, match="malformed") as exc:
+        facilitator.load_payai_private_key(bad)
+    assert_no_key_material(str(exc.value) + repr(exc.value))
+    assert exc.value.__cause__ is None
+    assert exc.value.__context__ is None or exc.value.__suppress_context__
+
+
+def _v2_variants():
+    der = _pkcs8_v2(KEY)
+    return {
+        "truncated": der[:-5],
+        "trailing bytes": der + b"\x00",
+        "version 2": der[:4] + b"\x02" + der[5:],
+        "another OID": der.replace(bytes.fromhex("2b6570"), bytes.fromhex("2b6571")),
+        "31-byte seed": bytes([0x30, der[1] - 1]) + der[2:12] + b"\x04\x21\x04\x1f" + der[16:47] + der[48:],
+        "garbage": b"\x30\x51" + b"\xff" * 0x51,
+        "outer length too long": b"\x30\x84\xff\xff\xff\xff" + der[2:],
+    }
+
+
+@pytest.mark.parametrize("name", list(_v2_variants()))
+def test_a_malformed_pkcs8_v2_secret_is_refused_without_echo(name, payai):
+    import traceback
+    bad = base64.b64encode(_v2_variants()[name]).decode()
+    with pytest.raises(ValueError, match="malformed") as exc:
+        facilitator.load_payai_private_key(bad)
+    text = "".join(traceback.format_exception(exc.type, exc.value, exc.tb))
+    assert bad not in text and bad[:16] not in text
+    assert_no_key_material(text)
+    assert exc.value.__cause__ is None
+    assert exc.value.__context__ is None or exc.value.__suppress_context__
+    payai.setattr(settings, "X402_FACILITATOR_PAYAI_API_KEY_SECRET", bad)
+    msg = _refusal("X402_FACILITATOR_PAYAI_API_KEY_SECRET is malformed")
+    assert bad[:16] not in msg
+
+
+@pytest.mark.parametrize("bad", [
+    SECRET + "=",                 # excess padding: atob refuses it
+    SECRET.rstrip("=") + "===",
+    "=" + SECRET,
+    SECRET[:10] + "=" + SECRET[10:],
+], ids=["one extra", "three", "leading", "inside"])
+def test_padding_is_as_strict_as_atob(bad):
+    with pytest.raises(ValueError, match="malformed"):
+        facilitator.load_payai_private_key(bad)
+
+
+def test_a_non_ascii_key_id_is_sent_as_utf8_like_json_stringify():
+    kid = "cl\u00e9-\u5bc6\u94a5-\U0001f511"
+    clock = Clock()
+    auth = facilitator.PayAIAuth(kid, facilitator.load_payai_private_key(SECRET), clock=clock)
+    token = auth.token()
+    head = token.split(".")[0]
+    assert "\\u" not in base64.urlsafe_b64decode(head + "=" * (-len(head) % 4)).decode("utf-8")
+    payload = assert_payai_jwt(token, key_id=kid, now=clock.t)
+    assert payload["sub"] == kid
+    assert jwt.get_unverified_header(token)["kid"] == kid
