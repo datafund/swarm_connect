@@ -53,9 +53,17 @@ def parse_x402_protocol_versions(value) -> tuple:
 
 class Settings(BaseSettings):
     PROJECT_NAME: str = "Provenance Gateway"
-    # Where the approved service terms are published; shown on / as terms_url
-    # (#383). Empty (null) until the terms are approved: TERMS.md is a draft.
+    # Where the alpha notice (ALPHA_NOTICE.md) is published; shown on / as
+    # terms_url (#383) and linked from /docs and from the messages to a caller
+    # who may have paid for nothing. By decision (#685) the alpha notice stands
+    # in for full terms. Empty: null on /, and not linked.
     TERMS_URL: str = ""
+    # Contact for feedback and problem reports to the developers and the
+    # organisation (#686), e.g. an email address. Shown on / as support_contact
+    # and named in the messages to a caller who may have paid for nothing. Not
+    # a refund channel. Empty: null on /, and the messages say "the gateway
+    # operator".
+    SUPPORT_CONTACT: str = ""
     API_V1_STR: str = "/api/v1"
     SWARM_BEE_API_URL: AnyHttpUrl  # validates that it's a URL
 

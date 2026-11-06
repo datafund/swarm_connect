@@ -349,6 +349,9 @@ app.include_router(pricing.router, prefix=f"{settings.API_V1_STR}", tags=["prici
 # Shown in OpenAPI (#602): the x402 block, present only when payments are enabled.
 _HEALTH_X402_EXAMPLE = {
     "status": "ok",
+    # Both null when not configured (#686).
+    "terms_url": "https://example.org/alpha-notice",
+    "support_contact": "support@example.org",
     "x402": {
         "enabled": True,
         "versions": [1],
@@ -445,6 +448,8 @@ def build_health_response(snapshot) -> dict:
         # What a paid request buys, what happens on failure, and that data
         # lives only as long as its stamp (#383).
         "terms_url": settings.TERMS_URL or None,
+        # Feedback and problem reports (#686); not a refund channel.
+        "support_contact": settings.SUPPORT_CONTACT or None,
         # Build and process age. Both were previously only readable from /metrics,
         # which is not public any more (#188) — and they are the two fields an
         # external checker needs to tell whether the gateway was redeployed or

@@ -1011,6 +1011,21 @@ def test_version_mismatch_when_the_original_version_is_no_longer_accepted(gw, mo
     assert fac.paths().count("settle") == 1
 
 
+@pytest.mark.parametrize("contact", ["", "info@datafund.io"])
+def test_version_mismatch_points_to_the_support_contact(gw, monkeypatch, contact):
+    """#686: names SUPPORT_CONTACT when set, "the operator" otherwise; no placeholder."""
+    monkeypatch.setattr(settings, "SUPPORT_CONTACT", contact)
+    client, fac = gw("1,2")
+    offer = _offer(client)
+    key = {"Idempotency-Key": "k-contact"}
+    assert client.post("/api/v1/stamps/", headers={**pay(1, offer), **key}).status_code == 200
+    monkeypatch.setattr(settings, "X402_PROTOCOL_VERSIONS", "2")
+    r = client.post("/api/v1/stamps/", headers={**pay(2, offer, nonce=nonce_hex("0e")), **key})
+    message = r.json()["detail"]["message"]
+    assert message.endswith(f"report it to {contact}." if contact else "contact the operator.")
+    assert "refund" not in message and "to ." not in message
+
+
 def test_version_mismatch_still_points_to_the_original_header_while_it_is_accepted(gw):
     client, fac = gw("1,2")
     offer = _offer(client)

@@ -28,6 +28,7 @@ from app.x402.facilitator_client import FacilitatorClient
 from app.x402.encoding import safe_base64_decode, safe_base64_encode
 
 from app.core.config import settings
+from app.core.support import report_advice
 from app.x402.ratelimit import get_rate_limit_headers
 from app.x402.networks import to_caip2, to_v1
 from app.services.metrics import x402_settlements_total
@@ -250,12 +251,12 @@ def _settlement_unknown_response(request: Request) -> JSONResponse:
     Fields at the top level (as first documented) and under `detail`, like
     every other payment-settlement error (#553).
     """
-    from app.x402.settlement import OUTCOME_UNKNOWN_ADVICE, OUTCOME_UNKNOWN_HEADERS, request_nonce
+    from app.x402.settlement import OUTCOME_UNKNOWN_HEADERS, outcome_unknown_advice, request_nonce
     body = {
         "code": "PAYMENT_SETTLEMENT_UNKNOWN",
         "message": ("The request was processed, but the payment facilitator did not answer, so "
                     "it is unknown whether the payment was collected. The result is withheld. "
-                    + OUTCOME_UNKNOWN_ADVICE),
+                    + outcome_unknown_advice()),
         "nonce": request_nonce(request),
         "x402_status": "settlement_unknown",
     }
@@ -564,7 +565,7 @@ class X402Middleware(BaseHTTPMiddleware):
         of its own, and then checks the result: SettleResponse reports failure
         with success=False rather than an exception (#355).
         """
-        from app.x402.settlement import (AFTER_WORK, OUTCOME_UNKNOWN_ADVICE, OUTCOME_UNKNOWN_HEADERS,
+        from app.x402.settlement import (AFTER_WORK, OUTCOME_UNKNOWN_HEADERS,
                                          outcome_unknown, outcome_unknown_refusal, replay_guard,
                                          request_nonce)
         from app.x402.audit import log_payment_failed, log_payment_settled
@@ -798,7 +799,7 @@ class X402Middleware(BaseHTTPMiddleware):
             content={
                 "code": "DELIVERY_FAILED_AFTER_PAYMENT",
                 "message": ("The payment was collected but the request failed before completing. "
-                            "Contact the operator with this transaction for a refund."),
+                            + report_advice("transaction")),
                 "transaction": tx_hash,
                 "x402_status": "settled_not_delivered",
             },

@@ -22,6 +22,7 @@ from app.x402.idempotency import IdempotencyStore, auth_hash, entry_id
 from app.x402.middleware import X402Middleware
 from app.x402.ratelimit import reset_rate_limiter
 from app.x402.settlement import replay_guard, settle_payment
+from tests.test_alpha_notice import SETTING_CASES as ALPHA_CASES, SETTING_IDS as ALPHA_IDS
 
 ALICE = "0x" + "a1" * 20
 MALLORY = "0x" + "b2" * 20
@@ -377,6 +378,28 @@ def test_stored_results_survive_restart_and_expire(tmp_path, monkeypatch):
 
 def test_payer_match_is_case_insensitive():
     assert entry_id(ALICE.upper(), "post", "/p/", "k") == entry_id(ALICE, "POST", "/p", "k")
+
+
+
+@pytest.mark.parametrize("contact,terms", ALPHA_CASES, ids=ALPHA_IDS)
+def test_paid_not_delivered_messages_name_the_contact_not_a_refund(fac, monkeypatch, contact, terms):
+    """#686: the crash after payment (middleware) and the keyed retry after it."""
+    from tests.test_alpha_notice import check_message, configure
+    configure(monkeypatch, contact, terms)
+    app, bought = _app(fac)
+    c = TestClient(app, raise_server_exceptions=False)
+    first = _post(c, body={"depth": 17, "fail": "raise"})
+    assert first.status_code == 500
+    body = first.json()
+    assert set(body) == {"code", "message", "transaction", "x402_status"}
+    assert body["code"] == "DELIVERY_FAILED_AFTER_PAYMENT"
+    check_message(body["message"], contact, terms)
+    retry = _post(c, body={"depth": 17, "fail": "raise"})
+    assert retry.status_code == 409
+    detail = retry.json()["detail"]
+    assert detail["code"] == "IDEMPOTENCY_KEY_SETTLED_PENDING"
+    assert detail["x402_status"] == "settled_not_delivered"
+    check_message(detail["message"], contact, terms)
 
 
 def test_unknown_settlement_outcome_keeps_the_key(fac):

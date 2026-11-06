@@ -82,6 +82,7 @@ from starlette.responses import Response
 from app.core.atomic_io import atomic_write_json
 from app.core.io_lane import IOLane
 from app.core.config import settings
+from app.core.support import notice_sentence, report_advice, report_nonce_clause, support_contact
 from app.x402.networks import to_v1
 
 logger = logging.getLogger(__name__)
@@ -745,11 +746,11 @@ def _settlement_unknown_409(entry: dict) -> HTTPException:
                     "settlement but no answer came back, so it may or may not have been "
                     "collected. This request was not charged, and this key stays taken. "
                     "Do not pay again from this response. Check on-chain whether the "
-                    "original authorization (nonce below) was used. If it was, contact the "
-                    "operator with the nonce. If it was not, the facilitator may still submit "
+                    f"original authorization (nonce below) was used. If it was, {report_nonce_clause()}. "
+                    "If it was not, the facilitator may still submit "
                     "it, so wait until its validBefore has passed, or cancel it on-chain with "
                     "EIP-3009 cancelAuthorization, then retry with a new payment and a new "
-                    "Idempotency-Key."),
+                    "Idempotency-Key." + notice_sentence()),
         "nonce": entry.get("nonce"),
         "x402_status": "settlement_unknown",
     })
@@ -835,8 +836,9 @@ async def begin_idempotent_request(request: Request, payer: str,
                            if version_enabled(original) else
                            f"This gateway no longer accepts x402 v{original} payments, so the "
                            f"stored result cannot be fetched with this key. Do not pay again "
-                           f"for it: look the result up through the resource itself, or contact "
-                           f"the operator.")),
+                           f"for it: look the result up through the resource itself, or "
+                           + (f"report it to {support_contact()}."
+                              if support_contact() else "contact the operator."))),
             "original_x402_version": original,
             "original_x402_version_accepted": version_enabled(original),
         })
@@ -870,8 +872,7 @@ async def begin_idempotent_request(request: Request, payer: str,
             "code": "IDEMPOTENCY_KEY_SETTLED_PENDING",
             "message": ("The first request with this Idempotency-Key was paid, but its result is "
                         "not available (it failed or was interrupted after payment). This payment "
-                        "was not charged. Contact the operator with this transaction for the "
-                        "result or a refund."),
+                        "was not charged. " + report_advice("transaction")),
             "transaction": tx,
             "x402_status": "settled_not_delivered",
         })
