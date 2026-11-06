@@ -52,7 +52,7 @@ class TestCheckBaseEthBalance:
     @patch("app.x402.base_balance._get_eth_balance_from_rpc", new_callable=AsyncMock)
     @patch("app.x402.base_balance.settings")
     @pytest.mark.asyncio
-    async def test_balance_above_threshold(self, mock_settings, mock_get_balance):
+    async def test_balance_is_read_and_reported(self, mock_settings, mock_get_balance):
         """A balance is read and reported; ok=True."""
         mock_settings.X402_PAY_TO_ADDRESS = "0x1234567890123456789012345678901234567890"
         mock_get_balance.return_value = int(0.01 * WEI_PER_ETH)  # 0.01 ETH
@@ -70,7 +70,7 @@ class TestCheckBaseEthBalance:
     @patch("app.x402.base_balance._get_eth_balance_from_rpc", new_callable=AsyncMock)
     @patch("app.x402.base_balance.settings")
     @pytest.mark.asyncio
-    async def test_balance_below_warning_threshold(self, mock_settings, mock_get_balance):
+    async def test_low_balance_is_ok_without_warning(self, mock_settings, mock_get_balance):
         """A low balance is information only (#663): ok=True and no warning."""
         mock_settings.X402_PAY_TO_ADDRESS = "0x1234567890123456789012345678901234567890"
         mock_get_balance.return_value = int(0.003 * WEI_PER_ETH)  # 0.003 ETH
@@ -85,7 +85,7 @@ class TestCheckBaseEthBalance:
     @patch("app.x402.base_balance._get_eth_balance_from_rpc", new_callable=AsyncMock)
     @patch("app.x402.base_balance.settings")
     @pytest.mark.asyncio
-    async def test_balance_below_critical_threshold(self, mock_settings, mock_get_balance):
+    async def test_near_empty_balance_is_not_critical(self, mock_settings, mock_get_balance):
         """A near-empty balance is not critical (#663): the wallet needs no ETH."""
         mock_settings.X402_PAY_TO_ADDRESS = "0x1234567890123456789012345678901234567890"
         mock_get_balance.return_value = int(0.0005 * WEI_PER_ETH)  # 0.0005 ETH
@@ -100,10 +100,10 @@ class TestCheckBaseEthBalance:
     @patch("app.x402.base_balance._get_eth_balance_from_rpc", new_callable=AsyncMock)
     @patch("app.x402.base_balance.settings")
     @pytest.mark.asyncio
-    async def test_balance_at_warning_threshold(self, mock_settings, mock_get_balance):
-        """Balance exactly at warning threshold returns ok=True."""
+    async def test_former_warning_threshold_value_has_no_effect(self, mock_settings, mock_get_balance):
+        """The former warning threshold value has no effect (#663)."""
         mock_settings.X402_PAY_TO_ADDRESS = "0x1234567890123456789012345678901234567890"
-        mock_get_balance.return_value = int(0.005 * WEI_PER_ETH)  # Exactly at threshold
+        mock_get_balance.return_value = int(0.005 * WEI_PER_ETH)  # The former warning threshold
 
         result = await check_base_eth_balance()
 
@@ -113,7 +113,7 @@ class TestCheckBaseEthBalance:
     @patch("app.x402.base_balance._get_eth_balance_from_rpc", new_callable=AsyncMock)
     @patch("app.x402.base_balance.settings")
     @pytest.mark.asyncio
-    async def test_balance_at_critical_threshold(self, mock_settings, mock_get_balance):
+    async def test_former_critical_threshold_value_has_no_effect(self, mock_settings, mock_get_balance):
         """The former critical threshold value has no effect (#663)."""
         mock_settings.X402_PAY_TO_ADDRESS = "0x1234567890123456789012345678901234567890"
         mock_get_balance.return_value = int(0.001 * WEI_PER_ETH)  # Exactly at critical
