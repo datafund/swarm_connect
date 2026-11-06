@@ -119,36 +119,88 @@ def _unknown_body(r):
 
 
 # --------------------------------------------------------------------------
-# The classifier
+# The classifier: an allowlist of definite refusals
 # --------------------------------------------------------------------------
 
+# The codes the @x402/evm 2.5.0 and 2.30.0 EIP-3009 facilitators return
+# before anything is broadcast (settlement.py lists where each comes from).
+# Kept here as an independent copy: a code added to or dropped from the
+# gateway's set fails test_definite_set_is_exactly_this.
+DEFINITE_CODES = sorted([
+    # 2.5.0 (v1 and v2 verify, returned by settle before writeContract)
+    "insufficient_funds", "invalid_exact_evm_payload_authorization_valid_after",
+    "invalid_exact_evm_payload_authorization_valid_before",
+    "invalid_exact_evm_payload_authorization_value", "invalid_exact_evm_payload_recipient_mismatch",
+    "invalid_exact_evm_payload_signature", "invalid_exact_evm_payload_undeployed_smart_wallet",
+    "missing_eip712_domain", "network_mismatch", "unsupported_scheme", "invalid_network",
+    "invalid_scheme",
+    # 2.30.0
+    "invalid_exact_evm_payload", "invalid_exact_evm_scheme", "invalid_exact_evm_network_mismatch",
+    "invalid_exact_evm_missing_eip712_domain", "invalid_exact_evm_recipient_mismatch",
+    "invalid_exact_evm_signature", "invalid_exact_evm_non_canonical_signature",
+    "invalid_exact_evm_failed_to_verify_signature", "invalid_exact_evm_failed_to_parse_signature",
+    "invalid_exact_evm_authorization_value", "invalid_exact_evm_payload_authorization_value_mismatch",
+    "invalid_exact_evm_token_name_mismatch", "invalid_exact_evm_token_version_mismatch",
+    "invalid_exact_evm_eip3009_not_supported", "invalid_exact_evm_nonce_already_used",
+    "invalid_exact_evm_insufficient_balance", "invalid_exact_evm_transaction_simulation_failed",
+    "asset_not_deployed_contract", "eip6492_factory_not_allowed",
+])
+TX_HASH = "0x" + "cd" * 32
+
+RPC_ERROR = ("Missing or invalid parameters.\nDouble check you have provided the correct parameters.\n\n"
+             "Request Arguments:\n  chain: Base Sepolia (id: 84532)\n\nContract Call:\n"
+             "  function: transferWithAuthorization(address from, address to, uint256 value)\n\n"
+             "Details: eth_sendRawTransaction failed\nVersion: viem@2.0.0")
+
+
+def _definite(reason, transaction=""):
+    return st.settle_refusal_is_definite(reason, transaction)
+
+
+def test_definite_set_is_exactly_this():
+    assert sorted(st.DEFINITE_SETTLE_REFUSALS) == DEFINITE_CODES
+
+
+@pytest.mark.parametrize("code", DEFINITE_CODES)
+@pytest.mark.parametrize("transaction", ["", None, "0x", "0x" + "cd" * 31, "not a hash", 0, b"x",
+                                         {"h": TX_HASH}, "0x" + "cd" * 32 + "\n", " " + TX_HASH])
+def test_a_definite_code_without_a_valid_hash_is_definite(code, transaction):
+    assert _definite(code, transaction) is True
+    assert _definite("  " + code.upper() + "\n", transaction) is True
+
+
+@pytest.mark.parametrize("code", DEFINITE_CODES + ["invalid_transaction_state"])
+def test_any_answer_with_a_valid_hash_is_unknown(code):
+    assert _definite(code, TX_HASH) is False
+    assert _definite(code, "0x" + "CD" * 32) is False
+
+
 @pytest.mark.parametrize("reason", UNKNOWN_REASONS + [
+    "settlement_pending", "SETTLEMENT_PENDING ", "settlement_pending: request timed out",
     "TRANSACTION_FAILED", "  invalid_exact_evm_transaction_failed\n", "Unexpected_Settle_Error",
-    "invalid_exact_svm_transaction_failed",
-    "transaction_failed:" + "x" * 100000,
-    "Transaction_Failed: multi\nline\ntext",
+    "invalid_exact_svm_transaction_failed", "invalid_exact_evm_transfer_event_mismatch",
+    "transaction_failed:" + "x" * 100000, "Transaction_Failed: multi\nline\ntext",
+    # Never returned before a broadcast by either library version.
+    "invalid_transaction_state", "smart_wallet_deployment_failed", "erc20_approval_tx_failed",
+    # Codes the libraries do not have, or near misses of listed ones.
+    "invalid_signature", "expired", "unknown", "settle_failed", "nonce_used", "pending",
+    "insufficient_funds_x", "xinsufficient_funds", "insufficient funds", "insufficient_funds:",
+    "insufficient_funds: more", "invalid_exact_evm_nonce_already_used;",
+    # Free text, missing or odd.
+    RPC_ERROR, "execution reverted\nwith a second line", "", "   ", "\n",
+    "x" * 100000, "insufficient_funds" * 10000, "a" * 65,
 ])
-def test_classifier_family(reason):
-    assert st.settle_outcome_unknown(reason) is True
+def test_everything_else_is_unknown(reason):
+    assert _definite(reason) is False
+    assert _definite(reason, TX_HASH) is False
 
 
-@pytest.mark.parametrize("reason", [
-    "insufficient_funds", "invalid_exact_evm_nonce_already_used", "invalid_transaction_state",
-    "invalid_signature", "invalid_exact_evm_non_canonical_signature", "expired", "unknown",
-    "", "   ", "xtransaction_failed", "transaction_failed_later", "transaction_failedx",
-    "_transaction_failed", "a__transaction_failed", "transaction failed",
-    "the transaction_failed because of a reason", "rpc error: transaction_failed",
-    "transaction_failed;", "a" * 60 + "_transaction_failed",
-    "x" * 100000, "transaction_failed" * 10000,
-])
-def test_classifier_definite(reason):
-    assert st.settle_outcome_unknown(reason) is False
-
-
-@pytest.mark.parametrize("reason", [None, 0, 1, 3.5, b"transaction_failed", bytearray(b"x"),
-                                    ["transaction_failed"], {"transaction_failed": 1}, object(), True])
-def test_classifier_is_total(reason):
-    assert st.settle_outcome_unknown(reason) is False
+@pytest.mark.parametrize("reason", [None, 0, 1, 3.5, True, b"insufficient_funds",
+                                    bytearray(b"insufficient_funds"), ["insufficient_funds"],
+                                    {"insufficient_funds": 1}, object()])
+@pytest.mark.parametrize("transaction", ["", None, TX_HASH, 7, object()])
+def test_the_classifier_is_total(reason, transaction):
+    assert _definite(reason, transaction) is False
 
 
 # --------------------------------------------------------------------------
@@ -276,18 +328,6 @@ def test_after_work_retry_is_stopped_before_the_work_runs_again(gw, version):
 # settlement_pending (@x402/evm 2.30.0): broadcast, receipt not awaited
 # --------------------------------------------------------------------------
 
-@pytest.mark.parametrize("reason", ["settlement_pending", "SETTLEMENT_PENDING ",
-                                    "settlement_pending: request timed out"])
-def test_classifier_settlement_pending(reason):
-    assert st.settle_outcome_unknown(reason) is True
-
-
-@pytest.mark.parametrize("reason", ["settlement_pendingx", "xsettlement_pending", "pending",
-                                    "a_settlement_pending", "settlement_pending_later"])
-def test_classifier_settlement_pending_near_misses(reason):
-    assert st.settle_outcome_unknown(reason) is False
-
-
 def _pending_answer(version, with_tx):
     """What @x402/evm 2.30.0 answers when waitForTransactionReceipt throws
     after writeContract broadcast (settlementPendingResponse)."""
@@ -332,6 +372,87 @@ def test_settlement_pending_is_an_unknown_outcome(gw, site, version, status, wit
     assert again.status_code == 409, again.text
     assert again.json()["detail"]["code"] == "IDEMPOTENCY_KEY_SETTLEMENT_UNKNOWN"
     assert [c["path"] for c in fac.calls].count("settle") == settles
+
+
+# --------------------------------------------------------------------------
+# The allowlist at both sites: anything not a listed pre-broadcast code is unknown
+# --------------------------------------------------------------------------
+
+UNKNOWN_ANSWERS = {
+    # name: (errorReason or "__none__", transaction, the reason the audit names)
+    "rpc_error_text": (RPC_ERROR, "", RPC_ERROR),
+    "unverified_code": ("settle_failed", "", "settle_failed"),
+    "missing_reason": ("__none__", "", "unknown"),
+    "empty_reason": ("", "", "unknown"),
+    "invalid_transaction_state_with_hash": ("invalid_transaction_state", TX_HASH,
+                                            "invalid_transaction_state"),
+    "invalid_transaction_state_without_hash": ("invalid_transaction_state", "",
+                                               "invalid_transaction_state"),
+    "definite_code_with_hash": ("insufficient_funds", TX_HASH, "insufficient_funds"),
+}
+
+
+@pytest.mark.parametrize("site", sorted(SITES))
+@pytest.mark.parametrize("version,status", [(1, 200), (2, 200), (2, 400)])
+@pytest.mark.parametrize("case", sorted(UNKNOWN_ANSWERS))
+def test_an_answer_outside_the_allowlist_is_an_unknown_outcome(gw, site, version, status, case):
+    reason, transaction, audited = UNKNOWN_ANSWERS[case]
+    client, fac = gw("1,2")
+    offer = _offer(client)
+    route = SITES[site]
+    fac.settle_status, fac.settle = 500, {"oops": True}
+    reference = _send(client, route, pay(version, offer, nonce=nonce_hex("0e")))
+    assert reference.status_code == 502, reference.text
+
+    answer = _answer(version, reason)
+    answer["transaction"] = transaction
+    fac.settle_status, fac.settle = status, answer
+    key = {"Idempotency-Key": f"k-allow-{site}-{version}-{status}-{case}"}
+    before, audit = _counts(version), _audit_lines()
+    r = _send(client, route, {**pay(version, offer, nonce=nonce_hex("0c")), **key})
+    assert r.status_code == 502, r.text
+    assert r.headers["X-Payment-Mode"] == "failed"
+    assert r.headers["X-Payment-Status"] == "settlement_unknown"
+    assert receipt_header(version) not in r.headers and other_receipt_header(version) not in r.headers
+    assert "eth_sendRawTransaction" not in r.text and "cd" * 32 not in r.text
+    assert _unknown_body(r) == _unknown_body(reference)
+    assert sorted(k for k in r.headers if k != "content-length") == \
+        sorted(k for k in reference.headers if k != "content-length")
+    assert _moved(before, _counts(version)) == {"error": 1}
+    _assert_unknown_audited(_new_audit(audit), audited, nonce_hex("0c"), version)
+    expected_kind = st.BEFORE_WORK if site == "before_work" else st.AFTER_WORK
+    assert st.outcome_unknown.kind(_key(nonce_hex("0c"))) == expected_kind
+    fac.settle_status, fac.settle = 200, None
+    settles = [c["path"] for c in fac.calls].count("settle")
+    again = _send(client, route, {**pay(version, offer, nonce=nonce_hex("0d")), **key})
+    assert again.status_code == 409, again.text
+    assert again.json()["detail"]["code"] == "IDEMPOTENCY_KEY_SETTLEMENT_UNKNOWN"
+    assert [c["path"] for c in fac.calls].count("settle") == settles
+
+
+@pytest.mark.parametrize("site", sorted(SITES))
+@pytest.mark.parametrize("version", VERSIONS)
+@pytest.mark.parametrize("code", DEFINITE_CODES)
+def test_every_listed_code_without_a_hash_is_a_refusal(gw, site, version, code):
+    client, fac = gw("1,2")
+    offer = _offer(client)
+    route = SITES[site]
+    fac.settle = _answer(version, code)
+    key = {"Idempotency-Key": f"k-definite-{site}-{version}-{code}"}
+    before, audit = _counts(version), _audit_lines()
+    r = _send(client, route, {**pay(version, offer, nonce=nonce_hex("0f")), **key})
+    assert r.status_code == 402, r.text
+    assert r.json()["code"] == "PAYMENT_SETTLEMENT_FAILED"
+    assert code in r.json()["message"]
+    assert "X-Payment-Status" not in r.headers
+    assert _moved(before, _counts(version)) == {"refused": 1}
+    events = _new_audit(audit)
+    assert [e["data"]["error_reason"] for e in events if e["event_type"] == "payment_settled"] == [code]
+    assert [e for e in events if e["event_type"] == "payment_failed"] == []
+    assert st.outcome_unknown.kind(_key(nonce_hex("0f"))) is None
+    # The key was freed: a new payment under it is a new, paid attempt.
+    fac.settle = None
+    assert _send(client, route, {**pay(version, offer, nonce=nonce_hex("10")), **key}).status_code == 200
 
 
 # --------------------------------------------------------------------------
@@ -402,14 +523,15 @@ def test_idempotency_key_stays_taken_after_an_unknown_reason(gw, site, version):
 # Definite refusals: byte for byte as before #660
 # --------------------------------------------------------------------------
 
+# Reasons on the allowlist (definite without a transaction hash). Free text,
+# unverified codes, a missing reason and invalid_transaction_state left this
+# golden for the unknown-outcome tests above when the allowlist was adopted.
 DEFINITE = {
     "insufficient_funds": "insufficient_funds",
     "nonce_already_used": "invalid_exact_evm_nonce_already_used",
-    "invalid_transaction_state": "invalid_transaction_state",
-    "invalid_signature": "invalid_signature",
-    "free_text": "execution reverted\nwith a second line",
-    "unverified_code": "settle_failed",
-    "no_reason": "__none__",
+    "valid_before_expired": "invalid_exact_evm_payload_authorization_valid_before",
+    "payload_signature": "invalid_exact_evm_payload_signature",
+    "simulation_failed": "invalid_exact_evm_transaction_simulation_failed",
 }
 
 
@@ -456,7 +578,7 @@ def _capture(gw):
                     out["definite"][f"v{version}/{site}/{name}/{status}"] = rec
             # A definite refusal of an authorization whose earlier outcome is
             # unknown (first a facilitator exception before the work).
-            for name in ("nonce_already_used", "invalid_transaction_state"):
+            for name in ("nonce_already_used", "insufficient_funds"):
                 client, fac = gw("1,2")
                 offer = _offer(client)
                 first = nonce()

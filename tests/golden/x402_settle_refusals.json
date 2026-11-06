@@ -1,46 +1,5 @@
 {
  "definite": {
-  "v1/after_work/free_text/200": {
-   "audit": [
-    {
-     "client_ip": "testclient",
-     "data": {
-      "error_reason": "execution reverted\nwith a second line",
-      "network": "base-sepolia",
-      "nonce": "0x1010101010101010101010101010101010101010101010101010101010101010",
-      "success": false,
-      "transaction_hash": null,
-      "x402_version": 1
-     },
-     "event_type": "payment_settled",
-     "wallet_address": "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
-    }
-   ],
-   "body": "{\"detail\":{\"code\":\"PAYMENT_SETTLEMENT_FAILED\",\"message\":\"The payment could not be settled (facilitator error; details in the gateway log).\",\"x402_status\":\"settlement_failed\"},\"code\":\"PAYMENT_SETTLEMENT_FAILED\",\"message\":\"The payment could not be settled (facilitator error; details in the gateway log).\",\"x402_status\":\"settlement_failed\"}",
-   "headers": [
-    [
-     "content-length",
-     "338"
-    ],
-    [
-     "content-type",
-     "application/json"
-    ],
-    [
-     "x-payment-mode",
-     "failed"
-    ]
-   ],
-   "idempotency_retry_status": 200,
-   "metric": {
-    "refused": 1.0
-   },
-   "ran": [
-    "paid"
-   ],
-   "registry": null,
-   "status": 402
-  },
   "v1/after_work/insufficient_funds/200": {
    "audit": [
     {
@@ -48,7 +7,7 @@
      "data": {
       "error_reason": "insufficient_funds",
       "network": "base-sepolia",
-      "nonce": "0x1212121212121212121212121212121212121212121212121212121212121212",
+      "nonce": "0x1010101010101010101010101010101010101010101010101010101010101010",
       "success": false,
       "transaction_hash": null,
       "x402_version": 1
@@ -82,129 +41,6 @@
    "registry": null,
    "status": 402
   },
-  "v1/after_work/invalid_signature/200": {
-   "audit": [
-    {
-     "client_ip": "testclient",
-     "data": {
-      "error_reason": "invalid_signature",
-      "network": "base-sepolia",
-      "nonce": "0x1414141414141414141414141414141414141414141414141414141414141414",
-      "success": false,
-      "transaction_hash": null,
-      "x402_version": 1
-     },
-     "event_type": "payment_settled",
-     "wallet_address": "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
-    }
-   ],
-   "body": "{\"detail\":{\"code\":\"PAYMENT_SETTLEMENT_FAILED\",\"message\":\"The payment could not be settled (invalid_signature).\",\"x402_status\":\"settlement_failed\"},\"code\":\"PAYMENT_SETTLEMENT_FAILED\",\"message\":\"The payment could not be settled (invalid_signature).\",\"x402_status\":\"settlement_failed\"}",
-   "headers": [
-    [
-     "content-length",
-     "282"
-    ],
-    [
-     "content-type",
-     "application/json"
-    ],
-    [
-     "x-payment-mode",
-     "failed"
-    ]
-   ],
-   "idempotency_retry_status": 200,
-   "metric": {
-    "refused": 1.0
-   },
-   "ran": [
-    "paid"
-   ],
-   "registry": null,
-   "status": 402
-  },
-  "v1/after_work/invalid_transaction_state/200": {
-   "audit": [
-    {
-     "client_ip": "testclient",
-     "data": {
-      "error_reason": "invalid_transaction_state",
-      "network": "base-sepolia",
-      "nonce": "0x1616161616161616161616161616161616161616161616161616161616161616",
-      "success": false,
-      "transaction_hash": null,
-      "x402_version": 1
-     },
-     "event_type": "payment_settled",
-     "wallet_address": "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
-    }
-   ],
-   "body": "{\"detail\":{\"code\":\"PAYMENT_SETTLEMENT_FAILED\",\"message\":\"The payment could not be settled (invalid_transaction_state).\",\"x402_status\":\"settlement_failed\"},\"code\":\"PAYMENT_SETTLEMENT_FAILED\",\"message\":\"The payment could not be settled (invalid_transaction_state).\",\"x402_status\":\"settlement_failed\"}",
-   "headers": [
-    [
-     "content-length",
-     "298"
-    ],
-    [
-     "content-type",
-     "application/json"
-    ],
-    [
-     "x-payment-mode",
-     "failed"
-    ]
-   ],
-   "idempotency_retry_status": 200,
-   "metric": {
-    "refused": 1.0
-   },
-   "ran": [
-    "paid"
-   ],
-   "registry": null,
-   "status": 402
-  },
-  "v1/after_work/no_reason/200": {
-   "audit": [
-    {
-     "client_ip": "testclient",
-     "data": {
-      "error_reason": "unknown",
-      "network": "base-sepolia",
-      "nonce": "0x1818181818181818181818181818181818181818181818181818181818181818",
-      "success": false,
-      "transaction_hash": null,
-      "x402_version": 1
-     },
-     "event_type": "payment_settled",
-     "wallet_address": "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
-    }
-   ],
-   "body": "{\"detail\":{\"code\":\"PAYMENT_SETTLEMENT_FAILED\",\"message\":\"The payment could not be settled (unknown).\",\"x402_status\":\"settlement_failed\"},\"code\":\"PAYMENT_SETTLEMENT_FAILED\",\"message\":\"The payment could not be settled (unknown).\",\"x402_status\":\"settlement_failed\"}",
-   "headers": [
-    [
-     "content-length",
-     "262"
-    ],
-    [
-     "content-type",
-     "application/json"
-    ],
-    [
-     "x-payment-mode",
-     "failed"
-    ]
-   ],
-   "idempotency_retry_status": 200,
-   "metric": {
-    "refused": 1.0
-   },
-   "ran": [
-    "paid"
-   ],
-   "registry": null,
-   "status": 402
-  },
   "v1/after_work/nonce_already_used/200": {
    "audit": [
     {
@@ -212,7 +48,7 @@
      "data": {
       "error_reason": "invalid_exact_evm_nonce_already_used",
       "network": "base-sepolia",
-      "nonce": "0x1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a",
+      "nonce": "0x1212121212121212121212121212121212121212121212121212121212121212",
       "success": false,
       "transaction_hash": null,
       "x402_version": 1
@@ -246,14 +82,14 @@
    "registry": null,
    "status": 402
   },
-  "v1/after_work/unverified_code/200": {
+  "v1/after_work/payload_signature/200": {
    "audit": [
     {
      "client_ip": "testclient",
      "data": {
-      "error_reason": "settle_failed",
+      "error_reason": "invalid_exact_evm_payload_signature",
       "network": "base-sepolia",
-      "nonce": "0x1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c",
+      "nonce": "0x1414141414141414141414141414141414141414141414141414141414141414",
       "success": false,
       "transaction_hash": null,
       "x402_version": 1
@@ -262,11 +98,11 @@
      "wallet_address": "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
     }
    ],
-   "body": "{\"detail\":{\"code\":\"PAYMENT_SETTLEMENT_FAILED\",\"message\":\"The payment could not be settled (settle_failed).\",\"x402_status\":\"settlement_failed\"},\"code\":\"PAYMENT_SETTLEMENT_FAILED\",\"message\":\"The payment could not be settled (settle_failed).\",\"x402_status\":\"settlement_failed\"}",
+   "body": "{\"detail\":{\"code\":\"PAYMENT_SETTLEMENT_FAILED\",\"message\":\"The payment could not be settled (invalid_exact_evm_payload_signature).\",\"x402_status\":\"settlement_failed\"},\"code\":\"PAYMENT_SETTLEMENT_FAILED\",\"message\":\"The payment could not be settled (invalid_exact_evm_payload_signature).\",\"x402_status\":\"settlement_failed\"}",
    "headers": [
     [
      "content-length",
-     "274"
+     "318"
     ],
     [
      "content-type",
@@ -287,14 +123,14 @@
    "registry": null,
    "status": 402
   },
-  "v1/before_work/free_text/200": {
+  "v1/after_work/simulation_failed/200": {
    "audit": [
     {
      "client_ip": "testclient",
      "data": {
-      "error_reason": "execution reverted\nwith a second line",
+      "error_reason": "invalid_exact_evm_transaction_simulation_failed",
       "network": "base-sepolia",
-      "nonce": "0x2020202020202020202020202020202020202020202020202020202020202020",
+      "nonce": "0x1616161616161616161616161616161616161616161616161616161616161616",
       "success": false,
       "transaction_hash": null,
       "x402_version": 1
@@ -303,26 +139,69 @@
      "wallet_address": "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
     }
    ],
-   "body": "{\"code\":\"PAYMENT_SETTLEMENT_FAILED\",\"message\":\"The payment could not be settled (facilitator error; details in the gateway log). Nothing was delivered.\",\"x402_status\":\"settlement_failed\",\"reason\":\"facilitator error; details in the gateway log\",\"x402Version\":1,\"error\":\"The payment could not be settled (facilitator error; details in the gateway log). Nothing was delivered.\",\"accepts\":[{\"scheme\":\"exact\",\"network\":\"base-sepolia\",\"maxAmountRequired\":\"20000\",\"resource\":\"http://testserver/api/v1/stamps/\",\"description\":\"Test operation\",\"mimeType\":\"application/json\",\"outputSchema\":null,\"payTo\":\"0x2222222222222222222222222222222222222222\",\"maxTimeoutSeconds\":300,\"asset\":\"0x036CbD53842c5426634e7929541eC2318f3dCF7e\",\"extra\":{\"name\":\"USDC\",\"version\":\"2\"}}],\"detail\":{\"code\":\"PAYMENT_SETTLEMENT_FAILED\",\"message\":\"The payment could not be settled (facilitator error; details in the gateway log). Nothing was delivered.\",\"x402_status\":\"settlement_failed\",\"reason\":\"facilitator error; details in the gateway log\",\"x402Version\":1,\"error\":\"The payment could not be settled (facilitator error; details in the gateway log). Nothing was delivered.\",\"accepts\":[{\"scheme\":\"exact\",\"network\":\"base-sepolia\",\"maxAmountRequired\":\"20000\",\"resource\":\"http://testserver/api/v1/stamps/\",\"description\":\"Test operation\",\"mimeType\":\"application/json\",\"outputSchema\":null,\"payTo\":\"0x2222222222222222222222222222222222222222\",\"maxTimeoutSeconds\":300,\"asset\":\"0x036CbD53842c5426634e7929541eC2318f3dCF7e\",\"extra\":{\"name\":\"USDC\",\"version\":\"2\"}}]}}",
+   "body": "{\"detail\":{\"code\":\"PAYMENT_SETTLEMENT_FAILED\",\"message\":\"The payment could not be settled (invalid_exact_evm_transaction_simulation_failed).\",\"x402_status\":\"settlement_failed\"},\"code\":\"PAYMENT_SETTLEMENT_FAILED\",\"message\":\"The payment could not be settled (invalid_exact_evm_transaction_simulation_failed).\",\"x402_status\":\"settlement_failed\"}",
    "headers": [
     [
      "content-length",
-     "1518"
+     "342"
     ],
     [
      "content-type",
      "application/json"
     ],
     [
-     "payment-required",
-     "eyJ4NDAyVmVyc2lvbiI6MiwiZXJyb3IiOiJUaGUgcGF5bWVudCBjb3VsZCBub3QgYmUgc2V0dGxlZCAoZmFjaWxpdGF0b3IgZXJyb3I7IGRldGFpbHMgaW4gdGhlIGdhdGV3YXkgbG9nKS4gTm90aGluZyB3YXMgZGVsaXZlcmVkLiIsInJlc291cmNlIjp7InVybCI6Imh0dHA6Ly90ZXN0c2VydmVyL2FwaS92MS9zdGFtcHMvIiwiZGVzY3JpcHRpb24iOiJUZXN0IG9wZXJhdGlvbiIsIm1pbWVUeXBlIjoiYXBwbGljYXRpb24vanNvbiJ9LCJhY2NlcHRzIjpbeyJzY2hlbWUiOiJleGFjdCIsIm5ldHdvcmsiOiJlaXAxNTU6ODQ1MzIiLCJhc3NldCI6IjB4MDM2Q2JENTM4NDJjNTQyNjYzNGU3OTI5NTQxZUMyMzE4ZjNkQ0Y3ZSIsImFtb3VudCI6IjIwMDAwIiwicGF5VG8iOiIweDIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIiLCJtYXhUaW1lb3V0U2Vjb25kcyI6MzAwLCJleHRyYSI6eyJuYW1lIjoiVVNEQyIsInZlcnNpb24iOiIyIn19XX0="
+     "x-payment-mode",
+     "failed"
     ]
    ],
    "idempotency_retry_status": 200,
    "metric": {
     "refused": 1.0
    },
-   "ran": [],
+   "ran": [
+    "paid"
+   ],
+   "registry": null,
+   "status": 402
+  },
+  "v1/after_work/valid_before_expired/200": {
+   "audit": [
+    {
+     "client_ip": "testclient",
+     "data": {
+      "error_reason": "invalid_exact_evm_payload_authorization_valid_before",
+      "network": "base-sepolia",
+      "nonce": "0x1818181818181818181818181818181818181818181818181818181818181818",
+      "success": false,
+      "transaction_hash": null,
+      "x402_version": 1
+     },
+     "event_type": "payment_settled",
+     "wallet_address": "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+    }
+   ],
+   "body": "{\"detail\":{\"code\":\"PAYMENT_SETTLEMENT_FAILED\",\"message\":\"The payment could not be settled (invalid_exact_evm_payload_authorization_valid_before).\",\"x402_status\":\"settlement_failed\"},\"code\":\"PAYMENT_SETTLEMENT_FAILED\",\"message\":\"The payment could not be settled (invalid_exact_evm_payload_authorization_valid_before).\",\"x402_status\":\"settlement_failed\"}",
+   "headers": [
+    [
+     "content-length",
+     "352"
+    ],
+    [
+     "content-type",
+     "application/json"
+    ],
+    [
+     "x-payment-mode",
+     "failed"
+    ]
+   ],
+   "idempotency_retry_status": 200,
+   "metric": {
+    "refused": 1.0
+   },
+   "ran": [
+    "paid"
+   ],
    "registry": null,
    "status": 402
   },
@@ -333,7 +212,7 @@
      "data": {
       "error_reason": "insufficient_funds",
       "network": "base-sepolia",
-      "nonce": "0x2222222222222222222222222222222222222222222222222222222222222222",
+      "nonce": "0x1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c",
       "success": false,
       "transaction_hash": null,
       "x402_version": 1
@@ -365,123 +244,6 @@
    "registry": null,
    "status": 402
   },
-  "v1/before_work/invalid_signature/200": {
-   "audit": [
-    {
-     "client_ip": "testclient",
-     "data": {
-      "error_reason": "invalid_signature",
-      "network": "base-sepolia",
-      "nonce": "0x2424242424242424242424242424242424242424242424242424242424242424",
-      "success": false,
-      "transaction_hash": null,
-      "x402_version": 1
-     },
-     "event_type": "payment_settled",
-     "wallet_address": "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
-    }
-   ],
-   "body": "{\"code\":\"PAYMENT_SETTLEMENT_FAILED\",\"message\":\"The payment could not be settled (invalid_signature). Nothing was delivered.\",\"x402_status\":\"settlement_failed\",\"reason\":\"invalid_signature\",\"x402Version\":1,\"error\":\"The payment could not be settled (invalid_signature). Nothing was delivered.\",\"accepts\":[{\"scheme\":\"exact\",\"network\":\"base-sepolia\",\"maxAmountRequired\":\"20000\",\"resource\":\"http://testserver/api/v1/stamps/\",\"description\":\"Test operation\",\"mimeType\":\"application/json\",\"outputSchema\":null,\"payTo\":\"0x2222222222222222222222222222222222222222\",\"maxTimeoutSeconds\":300,\"asset\":\"0x036CbD53842c5426634e7929541eC2318f3dCF7e\",\"extra\":{\"name\":\"USDC\",\"version\":\"2\"}}],\"detail\":{\"code\":\"PAYMENT_SETTLEMENT_FAILED\",\"message\":\"The payment could not be settled (invalid_signature). Nothing was delivered.\",\"x402_status\":\"settlement_failed\",\"reason\":\"invalid_signature\",\"x402Version\":1,\"error\":\"The payment could not be settled (invalid_signature). Nothing was delivered.\",\"accepts\":[{\"scheme\":\"exact\",\"network\":\"base-sepolia\",\"maxAmountRequired\":\"20000\",\"resource\":\"http://testserver/api/v1/stamps/\",\"description\":\"Test operation\",\"mimeType\":\"application/json\",\"outputSchema\":null,\"payTo\":\"0x2222222222222222222222222222222222222222\",\"maxTimeoutSeconds\":300,\"asset\":\"0x036CbD53842c5426634e7929541eC2318f3dCF7e\",\"extra\":{\"name\":\"USDC\",\"version\":\"2\"}}]}}",
-   "headers": [
-    [
-     "content-length",
-     "1350"
-    ],
-    [
-     "content-type",
-     "application/json"
-    ],
-    [
-     "payment-required",
-     "eyJ4NDAyVmVyc2lvbiI6MiwiZXJyb3IiOiJUaGUgcGF5bWVudCBjb3VsZCBub3QgYmUgc2V0dGxlZCAoaW52YWxpZF9zaWduYXR1cmUpLiBOb3RoaW5nIHdhcyBkZWxpdmVyZWQuIiwicmVzb3VyY2UiOnsidXJsIjoiaHR0cDovL3Rlc3RzZXJ2ZXIvYXBpL3YxL3N0YW1wcy8iLCJkZXNjcmlwdGlvbiI6IlRlc3Qgb3BlcmF0aW9uIiwibWltZVR5cGUiOiJhcHBsaWNhdGlvbi9qc29uIn0sImFjY2VwdHMiOlt7InNjaGVtZSI6ImV4YWN0IiwibmV0d29yayI6ImVpcDE1NTo4NDUzMiIsImFzc2V0IjoiMHgwMzZDYkQ1Mzg0MmM1NDI2NjM0ZTc5Mjk1NDFlQzIzMThmM2RDRjdlIiwiYW1vdW50IjoiMjAwMDAiLCJwYXlUbyI6IjB4MjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMiIsIm1heFRpbWVvdXRTZWNvbmRzIjozMDAsImV4dHJhIjp7Im5hbWUiOiJVU0RDIiwidmVyc2lvbiI6IjIifX1dfQ=="
-    ]
-   ],
-   "idempotency_retry_status": 200,
-   "metric": {
-    "refused": 1.0
-   },
-   "ran": [],
-   "registry": null,
-   "status": 402
-  },
-  "v1/before_work/invalid_transaction_state/200": {
-   "audit": [
-    {
-     "client_ip": "testclient",
-     "data": {
-      "error_reason": "invalid_transaction_state",
-      "network": "base-sepolia",
-      "nonce": "0x2626262626262626262626262626262626262626262626262626262626262626",
-      "success": false,
-      "transaction_hash": null,
-      "x402_version": 1
-     },
-     "event_type": "payment_settled",
-     "wallet_address": "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
-    }
-   ],
-   "body": "{\"code\":\"PAYMENT_SETTLEMENT_FAILED\",\"message\":\"The payment could not be settled (invalid_transaction_state). Nothing was delivered.\",\"x402_status\":\"settlement_failed\",\"reason\":\"invalid_transaction_state\",\"x402Version\":1,\"error\":\"The payment could not be settled (invalid_transaction_state). Nothing was delivered.\",\"accepts\":[{\"scheme\":\"exact\",\"network\":\"base-sepolia\",\"maxAmountRequired\":\"20000\",\"resource\":\"http://testserver/api/v1/stamps/\",\"description\":\"Test operation\",\"mimeType\":\"application/json\",\"outputSchema\":null,\"payTo\":\"0x2222222222222222222222222222222222222222\",\"maxTimeoutSeconds\":300,\"asset\":\"0x036CbD53842c5426634e7929541eC2318f3dCF7e\",\"extra\":{\"name\":\"USDC\",\"version\":\"2\"}}],\"detail\":{\"code\":\"PAYMENT_SETTLEMENT_FAILED\",\"message\":\"The payment could not be settled (invalid_transaction_state). Nothing was delivered.\",\"x402_status\":\"settlement_failed\",\"reason\":\"invalid_transaction_state\",\"x402Version\":1,\"error\":\"The payment could not be settled (invalid_transaction_state). Nothing was delivered.\",\"accepts\":[{\"scheme\":\"exact\",\"network\":\"base-sepolia\",\"maxAmountRequired\":\"20000\",\"resource\":\"http://testserver/api/v1/stamps/\",\"description\":\"Test operation\",\"mimeType\":\"application/json\",\"outputSchema\":null,\"payTo\":\"0x2222222222222222222222222222222222222222\",\"maxTimeoutSeconds\":300,\"asset\":\"0x036CbD53842c5426634e7929541eC2318f3dCF7e\",\"extra\":{\"name\":\"USDC\",\"version\":\"2\"}}]}}",
-   "headers": [
-    [
-     "content-length",
-     "1398"
-    ],
-    [
-     "content-type",
-     "application/json"
-    ],
-    [
-     "payment-required",
-     "eyJ4NDAyVmVyc2lvbiI6MiwiZXJyb3IiOiJUaGUgcGF5bWVudCBjb3VsZCBub3QgYmUgc2V0dGxlZCAoaW52YWxpZF90cmFuc2FjdGlvbl9zdGF0ZSkuIE5vdGhpbmcgd2FzIGRlbGl2ZXJlZC4iLCJyZXNvdXJjZSI6eyJ1cmwiOiJodHRwOi8vdGVzdHNlcnZlci9hcGkvdjEvc3RhbXBzLyIsImRlc2NyaXB0aW9uIjoiVGVzdCBvcGVyYXRpb24iLCJtaW1lVHlwZSI6ImFwcGxpY2F0aW9uL2pzb24ifSwiYWNjZXB0cyI6W3sic2NoZW1lIjoiZXhhY3QiLCJuZXR3b3JrIjoiZWlwMTU1Ojg0NTMyIiwiYXNzZXQiOiIweDAzNkNiRDUzODQyYzU0MjY2MzRlNzkyOTU0MWVDMjMxOGYzZENGN2UiLCJhbW91bnQiOiIyMDAwMCIsInBheVRvIjoiMHgyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyIiwibWF4VGltZW91dFNlY29uZHMiOjMwMCwiZXh0cmEiOnsibmFtZSI6IlVTREMiLCJ2ZXJzaW9uIjoiMiJ9fV19"
-    ]
-   ],
-   "idempotency_retry_status": 200,
-   "metric": {
-    "refused": 1.0
-   },
-   "ran": [],
-   "registry": null,
-   "status": 402
-  },
-  "v1/before_work/no_reason/200": {
-   "audit": [
-    {
-     "client_ip": "testclient",
-     "data": {
-      "error_reason": "unknown",
-      "network": "base-sepolia",
-      "nonce": "0x2828282828282828282828282828282828282828282828282828282828282828",
-      "success": false,
-      "transaction_hash": null,
-      "x402_version": 1
-     },
-     "event_type": "payment_settled",
-     "wallet_address": "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
-    }
-   ],
-   "body": "{\"code\":\"PAYMENT_SETTLEMENT_FAILED\",\"message\":\"The payment could not be settled (unknown). Nothing was delivered.\",\"x402_status\":\"settlement_failed\",\"reason\":\"unknown\",\"x402Version\":1,\"error\":\"The payment could not be settled (unknown). Nothing was delivered.\",\"accepts\":[{\"scheme\":\"exact\",\"network\":\"base-sepolia\",\"maxAmountRequired\":\"20000\",\"resource\":\"http://testserver/api/v1/stamps/\",\"description\":\"Test operation\",\"mimeType\":\"application/json\",\"outputSchema\":null,\"payTo\":\"0x2222222222222222222222222222222222222222\",\"maxTimeoutSeconds\":300,\"asset\":\"0x036CbD53842c5426634e7929541eC2318f3dCF7e\",\"extra\":{\"name\":\"USDC\",\"version\":\"2\"}}],\"detail\":{\"code\":\"PAYMENT_SETTLEMENT_FAILED\",\"message\":\"The payment could not be settled (unknown). Nothing was delivered.\",\"x402_status\":\"settlement_failed\",\"reason\":\"unknown\",\"x402Version\":1,\"error\":\"The payment could not be settled (unknown). Nothing was delivered.\",\"accepts\":[{\"scheme\":\"exact\",\"network\":\"base-sepolia\",\"maxAmountRequired\":\"20000\",\"resource\":\"http://testserver/api/v1/stamps/\",\"description\":\"Test operation\",\"mimeType\":\"application/json\",\"outputSchema\":null,\"payTo\":\"0x2222222222222222222222222222222222222222\",\"maxTimeoutSeconds\":300,\"asset\":\"0x036CbD53842c5426634e7929541eC2318f3dCF7e\",\"extra\":{\"name\":\"USDC\",\"version\":\"2\"}}]}}",
-   "headers": [
-    [
-     "content-length",
-     "1290"
-    ],
-    [
-     "content-type",
-     "application/json"
-    ],
-    [
-     "payment-required",
-     "eyJ4NDAyVmVyc2lvbiI6MiwiZXJyb3IiOiJUaGUgcGF5bWVudCBjb3VsZCBub3QgYmUgc2V0dGxlZCAodW5rbm93bikuIE5vdGhpbmcgd2FzIGRlbGl2ZXJlZC4iLCJyZXNvdXJjZSI6eyJ1cmwiOiJodHRwOi8vdGVzdHNlcnZlci9hcGkvdjEvc3RhbXBzLyIsImRlc2NyaXB0aW9uIjoiVGVzdCBvcGVyYXRpb24iLCJtaW1lVHlwZSI6ImFwcGxpY2F0aW9uL2pzb24ifSwiYWNjZXB0cyI6W3sic2NoZW1lIjoiZXhhY3QiLCJuZXR3b3JrIjoiZWlwMTU1Ojg0NTMyIiwiYXNzZXQiOiIweDAzNkNiRDUzODQyYzU0MjY2MzRlNzkyOTU0MWVDMjMxOGYzZENGN2UiLCJhbW91bnQiOiIyMDAwMCIsInBheVRvIjoiMHgyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyIiwibWF4VGltZW91dFNlY29uZHMiOjMwMCwiZXh0cmEiOnsibmFtZSI6IlVTREMiLCJ2ZXJzaW9uIjoiMiJ9fV19"
-    ]
-   ],
-   "idempotency_retry_status": 200,
-   "metric": {
-    "refused": 1.0
-   },
-   "ran": [],
-   "registry": null,
-   "status": 402
-  },
   "v1/before_work/nonce_already_used/200": {
    "audit": [
     {
@@ -489,7 +251,7 @@
      "data": {
       "error_reason": "invalid_exact_evm_nonce_already_used",
       "network": "base-sepolia",
-      "nonce": "0x2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a",
+      "nonce": "0x1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e",
       "success": false,
       "transaction_hash": null,
       "x402_version": 1
@@ -521,14 +283,14 @@
    "registry": null,
    "status": 402
   },
-  "v1/before_work/unverified_code/200": {
+  "v1/before_work/payload_signature/200": {
    "audit": [
     {
      "client_ip": "testclient",
      "data": {
-      "error_reason": "settle_failed",
+      "error_reason": "invalid_exact_evm_payload_signature",
       "network": "base-sepolia",
-      "nonce": "0x2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c",
+      "nonce": "0x2020202020202020202020202020202020202020202020202020202020202020",
       "success": false,
       "transaction_hash": null,
       "x402_version": 1
@@ -537,11 +299,11 @@
      "wallet_address": "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
     }
    ],
-   "body": "{\"code\":\"PAYMENT_SETTLEMENT_FAILED\",\"message\":\"The payment could not be settled (settle_failed). Nothing was delivered.\",\"x402_status\":\"settlement_failed\",\"reason\":\"settle_failed\",\"x402Version\":1,\"error\":\"The payment could not be settled (settle_failed). Nothing was delivered.\",\"accepts\":[{\"scheme\":\"exact\",\"network\":\"base-sepolia\",\"maxAmountRequired\":\"20000\",\"resource\":\"http://testserver/api/v1/stamps/\",\"description\":\"Test operation\",\"mimeType\":\"application/json\",\"outputSchema\":null,\"payTo\":\"0x2222222222222222222222222222222222222222\",\"maxTimeoutSeconds\":300,\"asset\":\"0x036CbD53842c5426634e7929541eC2318f3dCF7e\",\"extra\":{\"name\":\"USDC\",\"version\":\"2\"}}],\"detail\":{\"code\":\"PAYMENT_SETTLEMENT_FAILED\",\"message\":\"The payment could not be settled (settle_failed). Nothing was delivered.\",\"x402_status\":\"settlement_failed\",\"reason\":\"settle_failed\",\"x402Version\":1,\"error\":\"The payment could not be settled (settle_failed). Nothing was delivered.\",\"accepts\":[{\"scheme\":\"exact\",\"network\":\"base-sepolia\",\"maxAmountRequired\":\"20000\",\"resource\":\"http://testserver/api/v1/stamps/\",\"description\":\"Test operation\",\"mimeType\":\"application/json\",\"outputSchema\":null,\"payTo\":\"0x2222222222222222222222222222222222222222\",\"maxTimeoutSeconds\":300,\"asset\":\"0x036CbD53842c5426634e7929541eC2318f3dCF7e\",\"extra\":{\"name\":\"USDC\",\"version\":\"2\"}}]}}",
+   "body": "{\"code\":\"PAYMENT_SETTLEMENT_FAILED\",\"message\":\"The payment could not be settled (invalid_exact_evm_payload_signature). Nothing was delivered.\",\"x402_status\":\"settlement_failed\",\"reason\":\"invalid_exact_evm_payload_signature\",\"x402Version\":1,\"error\":\"The payment could not be settled (invalid_exact_evm_payload_signature). Nothing was delivered.\",\"accepts\":[{\"scheme\":\"exact\",\"network\":\"base-sepolia\",\"maxAmountRequired\":\"20000\",\"resource\":\"http://testserver/api/v1/stamps/\",\"description\":\"Test operation\",\"mimeType\":\"application/json\",\"outputSchema\":null,\"payTo\":\"0x2222222222222222222222222222222222222222\",\"maxTimeoutSeconds\":300,\"asset\":\"0x036CbD53842c5426634e7929541eC2318f3dCF7e\",\"extra\":{\"name\":\"USDC\",\"version\":\"2\"}}],\"detail\":{\"code\":\"PAYMENT_SETTLEMENT_FAILED\",\"message\":\"The payment could not be settled (invalid_exact_evm_payload_signature). Nothing was delivered.\",\"x402_status\":\"settlement_failed\",\"reason\":\"invalid_exact_evm_payload_signature\",\"x402Version\":1,\"error\":\"The payment could not be settled (invalid_exact_evm_payload_signature). Nothing was delivered.\",\"accepts\":[{\"scheme\":\"exact\",\"network\":\"base-sepolia\",\"maxAmountRequired\":\"20000\",\"resource\":\"http://testserver/api/v1/stamps/\",\"description\":\"Test operation\",\"mimeType\":\"application/json\",\"outputSchema\":null,\"payTo\":\"0x2222222222222222222222222222222222222222\",\"maxTimeoutSeconds\":300,\"asset\":\"0x036CbD53842c5426634e7929541eC2318f3dCF7e\",\"extra\":{\"name\":\"USDC\",\"version\":\"2\"}}]}}",
    "headers": [
     [
      "content-length",
-     "1326"
+     "1458"
     ],
     [
      "content-type",
@@ -549,7 +311,7 @@
     ],
     [
      "payment-required",
-     "eyJ4NDAyVmVyc2lvbiI6MiwiZXJyb3IiOiJUaGUgcGF5bWVudCBjb3VsZCBub3QgYmUgc2V0dGxlZCAoc2V0dGxlX2ZhaWxlZCkuIE5vdGhpbmcgd2FzIGRlbGl2ZXJlZC4iLCJyZXNvdXJjZSI6eyJ1cmwiOiJodHRwOi8vdGVzdHNlcnZlci9hcGkvdjEvc3RhbXBzLyIsImRlc2NyaXB0aW9uIjoiVGVzdCBvcGVyYXRpb24iLCJtaW1lVHlwZSI6ImFwcGxpY2F0aW9uL2pzb24ifSwiYWNjZXB0cyI6W3sic2NoZW1lIjoiZXhhY3QiLCJuZXR3b3JrIjoiZWlwMTU1Ojg0NTMyIiwiYXNzZXQiOiIweDAzNkNiRDUzODQyYzU0MjY2MzRlNzkyOTU0MWVDMjMxOGYzZENGN2UiLCJhbW91bnQiOiIyMDAwMCIsInBheVRvIjoiMHgyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyIiwibWF4VGltZW91dFNlY29uZHMiOjMwMCwiZXh0cmEiOnsibmFtZSI6IlVTREMiLCJ2ZXJzaW9uIjoiMiJ9fV19"
+     "eyJ4NDAyVmVyc2lvbiI6MiwiZXJyb3IiOiJUaGUgcGF5bWVudCBjb3VsZCBub3QgYmUgc2V0dGxlZCAoaW52YWxpZF9leGFjdF9ldm1fcGF5bG9hZF9zaWduYXR1cmUpLiBOb3RoaW5nIHdhcyBkZWxpdmVyZWQuIiwicmVzb3VyY2UiOnsidXJsIjoiaHR0cDovL3Rlc3RzZXJ2ZXIvYXBpL3YxL3N0YW1wcy8iLCJkZXNjcmlwdGlvbiI6IlRlc3Qgb3BlcmF0aW9uIiwibWltZVR5cGUiOiJhcHBsaWNhdGlvbi9qc29uIn0sImFjY2VwdHMiOlt7InNjaGVtZSI6ImV4YWN0IiwibmV0d29yayI6ImVpcDE1NTo4NDUzMiIsImFzc2V0IjoiMHgwMzZDYkQ1Mzg0MmM1NDI2NjM0ZTc5Mjk1NDFlQzIzMThmM2RDRjdlIiwiYW1vdW50IjoiMjAwMDAiLCJwYXlUbyI6IjB4MjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMiIsIm1heFRpbWVvdXRTZWNvbmRzIjozMDAsImV4dHJhIjp7Im5hbWUiOiJVU0RDIiwidmVyc2lvbiI6IjIifX1dfQ=="
     ]
    ],
    "idempotency_retry_status": 200,
@@ -560,85 +322,81 @@
    "registry": null,
    "status": 402
   },
-  "v2/after_work/free_text/200": {
+  "v1/before_work/simulation_failed/200": {
    "audit": [
     {
      "client_ip": "testclient",
      "data": {
-      "error_reason": "execution reverted\nwith a second line",
+      "error_reason": "invalid_exact_evm_transaction_simulation_failed",
       "network": "base-sepolia",
-      "nonce": "0x3030303030303030303030303030303030303030303030303030303030303030",
+      "nonce": "0x2222222222222222222222222222222222222222222222222222222222222222",
       "success": false,
       "transaction_hash": null,
-      "x402_version": 2
+      "x402_version": 1
      },
      "event_type": "payment_settled",
      "wallet_address": "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
     }
    ],
-   "body": "{\"detail\":{\"code\":\"PAYMENT_SETTLEMENT_FAILED\",\"message\":\"The payment could not be settled (facilitator error; details in the gateway log).\",\"x402_status\":\"settlement_failed\"},\"code\":\"PAYMENT_SETTLEMENT_FAILED\",\"message\":\"The payment could not be settled (facilitator error; details in the gateway log).\",\"x402_status\":\"settlement_failed\"}",
+   "body": "{\"code\":\"PAYMENT_SETTLEMENT_FAILED\",\"message\":\"The payment could not be settled (invalid_exact_evm_transaction_simulation_failed). Nothing was delivered.\",\"x402_status\":\"settlement_failed\",\"reason\":\"invalid_exact_evm_transaction_simulation_failed\",\"x402Version\":1,\"error\":\"The payment could not be settled (invalid_exact_evm_transaction_simulation_failed). Nothing was delivered.\",\"accepts\":[{\"scheme\":\"exact\",\"network\":\"base-sepolia\",\"maxAmountRequired\":\"20000\",\"resource\":\"http://testserver/api/v1/stamps/\",\"description\":\"Test operation\",\"mimeType\":\"application/json\",\"outputSchema\":null,\"payTo\":\"0x2222222222222222222222222222222222222222\",\"maxTimeoutSeconds\":300,\"asset\":\"0x036CbD53842c5426634e7929541eC2318f3dCF7e\",\"extra\":{\"name\":\"USDC\",\"version\":\"2\"}}],\"detail\":{\"code\":\"PAYMENT_SETTLEMENT_FAILED\",\"message\":\"The payment could not be settled (invalid_exact_evm_transaction_simulation_failed). Nothing was delivered.\",\"x402_status\":\"settlement_failed\",\"reason\":\"invalid_exact_evm_transaction_simulation_failed\",\"x402Version\":1,\"error\":\"The payment could not be settled (invalid_exact_evm_transaction_simulation_failed). Nothing was delivered.\",\"accepts\":[{\"scheme\":\"exact\",\"network\":\"base-sepolia\",\"maxAmountRequired\":\"20000\",\"resource\":\"http://testserver/api/v1/stamps/\",\"description\":\"Test operation\",\"mimeType\":\"application/json\",\"outputSchema\":null,\"payTo\":\"0x2222222222222222222222222222222222222222\",\"maxTimeoutSeconds\":300,\"asset\":\"0x036CbD53842c5426634e7929541eC2318f3dCF7e\",\"extra\":{\"name\":\"USDC\",\"version\":\"2\"}}]}}",
    "headers": [
     [
      "content-length",
-     "338"
+     "1530"
     ],
     [
      "content-type",
      "application/json"
     ],
     [
-     "x-payment-mode",
-     "failed"
+     "payment-required",
+     "eyJ4NDAyVmVyc2lvbiI6MiwiZXJyb3IiOiJUaGUgcGF5bWVudCBjb3VsZCBub3QgYmUgc2V0dGxlZCAoaW52YWxpZF9leGFjdF9ldm1fdHJhbnNhY3Rpb25fc2ltdWxhdGlvbl9mYWlsZWQpLiBOb3RoaW5nIHdhcyBkZWxpdmVyZWQuIiwicmVzb3VyY2UiOnsidXJsIjoiaHR0cDovL3Rlc3RzZXJ2ZXIvYXBpL3YxL3N0YW1wcy8iLCJkZXNjcmlwdGlvbiI6IlRlc3Qgb3BlcmF0aW9uIiwibWltZVR5cGUiOiJhcHBsaWNhdGlvbi9qc29uIn0sImFjY2VwdHMiOlt7InNjaGVtZSI6ImV4YWN0IiwibmV0d29yayI6ImVpcDE1NTo4NDUzMiIsImFzc2V0IjoiMHgwMzZDYkQ1Mzg0MmM1NDI2NjM0ZTc5Mjk1NDFlQzIzMThmM2RDRjdlIiwiYW1vdW50IjoiMjAwMDAiLCJwYXlUbyI6IjB4MjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMiIsIm1heFRpbWVvdXRTZWNvbmRzIjozMDAsImV4dHJhIjp7Im5hbWUiOiJVU0RDIiwidmVyc2lvbiI6IjIifX1dfQ=="
     ]
    ],
    "idempotency_retry_status": 200,
    "metric": {
     "refused": 1.0
    },
-   "ran": [
-    "paid"
-   ],
+   "ran": [],
    "registry": null,
    "status": 402
   },
-  "v2/after_work/free_text/400": {
+  "v1/before_work/valid_before_expired/200": {
    "audit": [
     {
      "client_ip": "testclient",
      "data": {
-      "error_reason": "execution reverted\nwith a second line",
+      "error_reason": "invalid_exact_evm_payload_authorization_valid_before",
       "network": "base-sepolia",
-      "nonce": "0x3232323232323232323232323232323232323232323232323232323232323232",
+      "nonce": "0x2424242424242424242424242424242424242424242424242424242424242424",
       "success": false,
       "transaction_hash": null,
-      "x402_version": 2
+      "x402_version": 1
      },
      "event_type": "payment_settled",
      "wallet_address": "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
     }
    ],
-   "body": "{\"detail\":{\"code\":\"PAYMENT_SETTLEMENT_FAILED\",\"message\":\"The payment could not be settled (facilitator error; details in the gateway log).\",\"x402_status\":\"settlement_failed\"},\"code\":\"PAYMENT_SETTLEMENT_FAILED\",\"message\":\"The payment could not be settled (facilitator error; details in the gateway log).\",\"x402_status\":\"settlement_failed\"}",
+   "body": "{\"code\":\"PAYMENT_SETTLEMENT_FAILED\",\"message\":\"The payment could not be settled (invalid_exact_evm_payload_authorization_valid_before). Nothing was delivered.\",\"x402_status\":\"settlement_failed\",\"reason\":\"invalid_exact_evm_payload_authorization_valid_before\",\"x402Version\":1,\"error\":\"The payment could not be settled (invalid_exact_evm_payload_authorization_valid_before). Nothing was delivered.\",\"accepts\":[{\"scheme\":\"exact\",\"network\":\"base-sepolia\",\"maxAmountRequired\":\"20000\",\"resource\":\"http://testserver/api/v1/stamps/\",\"description\":\"Test operation\",\"mimeType\":\"application/json\",\"outputSchema\":null,\"payTo\":\"0x2222222222222222222222222222222222222222\",\"maxTimeoutSeconds\":300,\"asset\":\"0x036CbD53842c5426634e7929541eC2318f3dCF7e\",\"extra\":{\"name\":\"USDC\",\"version\":\"2\"}}],\"detail\":{\"code\":\"PAYMENT_SETTLEMENT_FAILED\",\"message\":\"The payment could not be settled (invalid_exact_evm_payload_authorization_valid_before). Nothing was delivered.\",\"x402_status\":\"settlement_failed\",\"reason\":\"invalid_exact_evm_payload_authorization_valid_before\",\"x402Version\":1,\"error\":\"The payment could not be settled (invalid_exact_evm_payload_authorization_valid_before). Nothing was delivered.\",\"accepts\":[{\"scheme\":\"exact\",\"network\":\"base-sepolia\",\"maxAmountRequired\":\"20000\",\"resource\":\"http://testserver/api/v1/stamps/\",\"description\":\"Test operation\",\"mimeType\":\"application/json\",\"outputSchema\":null,\"payTo\":\"0x2222222222222222222222222222222222222222\",\"maxTimeoutSeconds\":300,\"asset\":\"0x036CbD53842c5426634e7929541eC2318f3dCF7e\",\"extra\":{\"name\":\"USDC\",\"version\":\"2\"}}]}}",
    "headers": [
     [
      "content-length",
-     "338"
+     "1560"
     ],
     [
      "content-type",
      "application/json"
     ],
     [
-     "x-payment-mode",
-     "failed"
+     "payment-required",
+     "eyJ4NDAyVmVyc2lvbiI6MiwiZXJyb3IiOiJUaGUgcGF5bWVudCBjb3VsZCBub3QgYmUgc2V0dGxlZCAoaW52YWxpZF9leGFjdF9ldm1fcGF5bG9hZF9hdXRob3JpemF0aW9uX3ZhbGlkX2JlZm9yZSkuIE5vdGhpbmcgd2FzIGRlbGl2ZXJlZC4iLCJyZXNvdXJjZSI6eyJ1cmwiOiJodHRwOi8vdGVzdHNlcnZlci9hcGkvdjEvc3RhbXBzLyIsImRlc2NyaXB0aW9uIjoiVGVzdCBvcGVyYXRpb24iLCJtaW1lVHlwZSI6ImFwcGxpY2F0aW9uL2pzb24ifSwiYWNjZXB0cyI6W3sic2NoZW1lIjoiZXhhY3QiLCJuZXR3b3JrIjoiZWlwMTU1Ojg0NTMyIiwiYXNzZXQiOiIweDAzNkNiRDUzODQyYzU0MjY2MzRlNzkyOTU0MWVDMjMxOGYzZENGN2UiLCJhbW91bnQiOiIyMDAwMCIsInBheVRvIjoiMHgyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyIiwibWF4VGltZW91dFNlY29uZHMiOjMwMCwiZXh0cmEiOnsibmFtZSI6IlVTREMiLCJ2ZXJzaW9uIjoiMiJ9fV19"
     ]
    ],
    "idempotency_retry_status": 200,
    "metric": {
     "refused": 1.0
    },
-   "ran": [
-    "paid"
-   ],
+   "ran": [],
    "registry": null,
    "status": 402
   },
@@ -649,7 +407,7 @@
      "data": {
       "error_reason": "insufficient_funds",
       "network": "base-sepolia",
-      "nonce": "0x3434343434343434343434343434343434343434343434343434343434343434",
+      "nonce": "0x2828282828282828282828282828282828282828282828282828282828282828",
       "success": false,
       "transaction_hash": null,
       "x402_version": 2
@@ -690,7 +448,7 @@
      "data": {
       "error_reason": "insufficient_funds",
       "network": "base-sepolia",
-      "nonce": "0x3636363636363636363636363636363636363636363636363636363636363636",
+      "nonce": "0x2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a",
       "success": false,
       "transaction_hash": null,
       "x402_version": 2
@@ -724,252 +482,6 @@
    "registry": null,
    "status": 402
   },
-  "v2/after_work/invalid_signature/200": {
-   "audit": [
-    {
-     "client_ip": "testclient",
-     "data": {
-      "error_reason": "invalid_signature",
-      "network": "base-sepolia",
-      "nonce": "0x3838383838383838383838383838383838383838383838383838383838383838",
-      "success": false,
-      "transaction_hash": null,
-      "x402_version": 2
-     },
-     "event_type": "payment_settled",
-     "wallet_address": "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
-    }
-   ],
-   "body": "{\"detail\":{\"code\":\"PAYMENT_SETTLEMENT_FAILED\",\"message\":\"The payment could not be settled (invalid_signature).\",\"x402_status\":\"settlement_failed\"},\"code\":\"PAYMENT_SETTLEMENT_FAILED\",\"message\":\"The payment could not be settled (invalid_signature).\",\"x402_status\":\"settlement_failed\"}",
-   "headers": [
-    [
-     "content-length",
-     "282"
-    ],
-    [
-     "content-type",
-     "application/json"
-    ],
-    [
-     "x-payment-mode",
-     "failed"
-    ]
-   ],
-   "idempotency_retry_status": 200,
-   "metric": {
-    "refused": 1.0
-   },
-   "ran": [
-    "paid"
-   ],
-   "registry": null,
-   "status": 402
-  },
-  "v2/after_work/invalid_signature/400": {
-   "audit": [
-    {
-     "client_ip": "testclient",
-     "data": {
-      "error_reason": "invalid_signature",
-      "network": "base-sepolia",
-      "nonce": "0x3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a",
-      "success": false,
-      "transaction_hash": null,
-      "x402_version": 2
-     },
-     "event_type": "payment_settled",
-     "wallet_address": "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
-    }
-   ],
-   "body": "{\"detail\":{\"code\":\"PAYMENT_SETTLEMENT_FAILED\",\"message\":\"The payment could not be settled (invalid_signature).\",\"x402_status\":\"settlement_failed\"},\"code\":\"PAYMENT_SETTLEMENT_FAILED\",\"message\":\"The payment could not be settled (invalid_signature).\",\"x402_status\":\"settlement_failed\"}",
-   "headers": [
-    [
-     "content-length",
-     "282"
-    ],
-    [
-     "content-type",
-     "application/json"
-    ],
-    [
-     "x-payment-mode",
-     "failed"
-    ]
-   ],
-   "idempotency_retry_status": 200,
-   "metric": {
-    "refused": 1.0
-   },
-   "ran": [
-    "paid"
-   ],
-   "registry": null,
-   "status": 402
-  },
-  "v2/after_work/invalid_transaction_state/200": {
-   "audit": [
-    {
-     "client_ip": "testclient",
-     "data": {
-      "error_reason": "invalid_transaction_state",
-      "network": "base-sepolia",
-      "nonce": "0x3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c",
-      "success": false,
-      "transaction_hash": null,
-      "x402_version": 2
-     },
-     "event_type": "payment_settled",
-     "wallet_address": "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
-    }
-   ],
-   "body": "{\"detail\":{\"code\":\"PAYMENT_SETTLEMENT_FAILED\",\"message\":\"The payment could not be settled (invalid_transaction_state).\",\"x402_status\":\"settlement_failed\"},\"code\":\"PAYMENT_SETTLEMENT_FAILED\",\"message\":\"The payment could not be settled (invalid_transaction_state).\",\"x402_status\":\"settlement_failed\"}",
-   "headers": [
-    [
-     "content-length",
-     "298"
-    ],
-    [
-     "content-type",
-     "application/json"
-    ],
-    [
-     "x-payment-mode",
-     "failed"
-    ]
-   ],
-   "idempotency_retry_status": 200,
-   "metric": {
-    "refused": 1.0
-   },
-   "ran": [
-    "paid"
-   ],
-   "registry": null,
-   "status": 402
-  },
-  "v2/after_work/invalid_transaction_state/400": {
-   "audit": [
-    {
-     "client_ip": "testclient",
-     "data": {
-      "error_reason": "invalid_transaction_state",
-      "network": "base-sepolia",
-      "nonce": "0x3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e",
-      "success": false,
-      "transaction_hash": null,
-      "x402_version": 2
-     },
-     "event_type": "payment_settled",
-     "wallet_address": "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
-    }
-   ],
-   "body": "{\"detail\":{\"code\":\"PAYMENT_SETTLEMENT_FAILED\",\"message\":\"The payment could not be settled (invalid_transaction_state).\",\"x402_status\":\"settlement_failed\"},\"code\":\"PAYMENT_SETTLEMENT_FAILED\",\"message\":\"The payment could not be settled (invalid_transaction_state).\",\"x402_status\":\"settlement_failed\"}",
-   "headers": [
-    [
-     "content-length",
-     "298"
-    ],
-    [
-     "content-type",
-     "application/json"
-    ],
-    [
-     "x-payment-mode",
-     "failed"
-    ]
-   ],
-   "idempotency_retry_status": 200,
-   "metric": {
-    "refused": 1.0
-   },
-   "ran": [
-    "paid"
-   ],
-   "registry": null,
-   "status": 402
-  },
-  "v2/after_work/no_reason/200": {
-   "audit": [
-    {
-     "client_ip": "testclient",
-     "data": {
-      "error_reason": "unknown",
-      "network": "base-sepolia",
-      "nonce": "0x4040404040404040404040404040404040404040404040404040404040404040",
-      "success": false,
-      "transaction_hash": null,
-      "x402_version": 2
-     },
-     "event_type": "payment_settled",
-     "wallet_address": "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
-    }
-   ],
-   "body": "{\"detail\":{\"code\":\"PAYMENT_SETTLEMENT_FAILED\",\"message\":\"The payment could not be settled (unknown).\",\"x402_status\":\"settlement_failed\"},\"code\":\"PAYMENT_SETTLEMENT_FAILED\",\"message\":\"The payment could not be settled (unknown).\",\"x402_status\":\"settlement_failed\"}",
-   "headers": [
-    [
-     "content-length",
-     "262"
-    ],
-    [
-     "content-type",
-     "application/json"
-    ],
-    [
-     "x-payment-mode",
-     "failed"
-    ]
-   ],
-   "idempotency_retry_status": 200,
-   "metric": {
-    "refused": 1.0
-   },
-   "ran": [
-    "paid"
-   ],
-   "registry": null,
-   "status": 402
-  },
-  "v2/after_work/no_reason/400": {
-   "audit": [
-    {
-     "client_ip": "testclient",
-     "data": {
-      "error_reason": "unknown",
-      "network": "base-sepolia",
-      "nonce": "0x4242424242424242424242424242424242424242424242424242424242424242",
-      "success": false,
-      "transaction_hash": null,
-      "x402_version": 2
-     },
-     "event_type": "payment_settled",
-     "wallet_address": "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
-    }
-   ],
-   "body": "{\"detail\":{\"code\":\"PAYMENT_SETTLEMENT_FAILED\",\"message\":\"The payment could not be settled (unknown).\",\"x402_status\":\"settlement_failed\"},\"code\":\"PAYMENT_SETTLEMENT_FAILED\",\"message\":\"The payment could not be settled (unknown).\",\"x402_status\":\"settlement_failed\"}",
-   "headers": [
-    [
-     "content-length",
-     "262"
-    ],
-    [
-     "content-type",
-     "application/json"
-    ],
-    [
-     "x-payment-mode",
-     "failed"
-    ]
-   ],
-   "idempotency_retry_status": 200,
-   "metric": {
-    "refused": 1.0
-   },
-   "ran": [
-    "paid"
-   ],
-   "registry": null,
-   "status": 402
-  },
   "v2/after_work/nonce_already_used/200": {
    "audit": [
     {
@@ -977,7 +489,7 @@
      "data": {
       "error_reason": "invalid_exact_evm_nonce_already_used",
       "network": "base-sepolia",
-      "nonce": "0x4444444444444444444444444444444444444444444444444444444444444444",
+      "nonce": "0x2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c",
       "success": false,
       "transaction_hash": null,
       "x402_version": 2
@@ -1018,7 +530,7 @@
      "data": {
       "error_reason": "invalid_exact_evm_nonce_already_used",
       "network": "base-sepolia",
-      "nonce": "0x4646464646464646464646464646464646464646464646464646464646464646",
+      "nonce": "0x2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e",
       "success": false,
       "transaction_hash": null,
       "x402_version": 2
@@ -1052,14 +564,14 @@
    "registry": null,
    "status": 402
   },
-  "v2/after_work/unverified_code/200": {
+  "v2/after_work/payload_signature/200": {
    "audit": [
     {
      "client_ip": "testclient",
      "data": {
-      "error_reason": "settle_failed",
+      "error_reason": "invalid_exact_evm_payload_signature",
       "network": "base-sepolia",
-      "nonce": "0x4848484848484848484848484848484848484848484848484848484848484848",
+      "nonce": "0x3030303030303030303030303030303030303030303030303030303030303030",
       "success": false,
       "transaction_hash": null,
       "x402_version": 2
@@ -1068,11 +580,11 @@
      "wallet_address": "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
     }
    ],
-   "body": "{\"detail\":{\"code\":\"PAYMENT_SETTLEMENT_FAILED\",\"message\":\"The payment could not be settled (settle_failed).\",\"x402_status\":\"settlement_failed\"},\"code\":\"PAYMENT_SETTLEMENT_FAILED\",\"message\":\"The payment could not be settled (settle_failed).\",\"x402_status\":\"settlement_failed\"}",
+   "body": "{\"detail\":{\"code\":\"PAYMENT_SETTLEMENT_FAILED\",\"message\":\"The payment could not be settled (invalid_exact_evm_payload_signature).\",\"x402_status\":\"settlement_failed\"},\"code\":\"PAYMENT_SETTLEMENT_FAILED\",\"message\":\"The payment could not be settled (invalid_exact_evm_payload_signature).\",\"x402_status\":\"settlement_failed\"}",
    "headers": [
     [
      "content-length",
-     "274"
+     "318"
     ],
     [
      "content-type",
@@ -1093,14 +605,14 @@
    "registry": null,
    "status": 402
   },
-  "v2/after_work/unverified_code/400": {
+  "v2/after_work/payload_signature/400": {
    "audit": [
     {
      "client_ip": "testclient",
      "data": {
-      "error_reason": "settle_failed",
+      "error_reason": "invalid_exact_evm_payload_signature",
       "network": "base-sepolia",
-      "nonce": "0x4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a",
+      "nonce": "0x3232323232323232323232323232323232323232323232323232323232323232",
       "success": false,
       "transaction_hash": null,
       "x402_version": 2
@@ -1109,11 +621,11 @@
      "wallet_address": "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
     }
    ],
-   "body": "{\"detail\":{\"code\":\"PAYMENT_SETTLEMENT_FAILED\",\"message\":\"The payment could not be settled (settle_failed).\",\"x402_status\":\"settlement_failed\"},\"code\":\"PAYMENT_SETTLEMENT_FAILED\",\"message\":\"The payment could not be settled (settle_failed).\",\"x402_status\":\"settlement_failed\"}",
+   "body": "{\"detail\":{\"code\":\"PAYMENT_SETTLEMENT_FAILED\",\"message\":\"The payment could not be settled (invalid_exact_evm_payload_signature).\",\"x402_status\":\"settlement_failed\"},\"code\":\"PAYMENT_SETTLEMENT_FAILED\",\"message\":\"The payment could not be settled (invalid_exact_evm_payload_signature).\",\"x402_status\":\"settlement_failed\"}",
    "headers": [
     [
      "content-length",
-     "274"
+     "318"
     ],
     [
      "content-type",
@@ -1134,14 +646,14 @@
    "registry": null,
    "status": 402
   },
-  "v2/before_work/free_text/200": {
+  "v2/after_work/simulation_failed/200": {
    "audit": [
     {
      "client_ip": "testclient",
      "data": {
-      "error_reason": "execution reverted\nwith a second line",
+      "error_reason": "invalid_exact_evm_transaction_simulation_failed",
       "network": "base-sepolia",
-      "nonce": "0x4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e",
+      "nonce": "0x3434343434343434343434343434343434343434343434343434343434343434",
       "success": false,
       "transaction_hash": null,
       "x402_version": 2
@@ -1150,37 +662,39 @@
      "wallet_address": "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
     }
    ],
-   "body": "{\"code\":\"PAYMENT_SETTLEMENT_FAILED\",\"message\":\"The payment could not be settled (facilitator error; details in the gateway log). Nothing was delivered.\",\"x402_status\":\"settlement_failed\",\"reason\":\"facilitator error; details in the gateway log\",\"x402Version\":1,\"error\":\"The payment could not be settled (facilitator error; details in the gateway log). Nothing was delivered.\",\"accepts\":[{\"scheme\":\"exact\",\"network\":\"base-sepolia\",\"maxAmountRequired\":\"20000\",\"resource\":\"http://testserver/api/v1/stamps/\",\"description\":\"Test operation\",\"mimeType\":\"application/json\",\"outputSchema\":null,\"payTo\":\"0x2222222222222222222222222222222222222222\",\"maxTimeoutSeconds\":300,\"asset\":\"0x036CbD53842c5426634e7929541eC2318f3dCF7e\",\"extra\":{\"name\":\"USDC\",\"version\":\"2\"}}],\"detail\":{\"code\":\"PAYMENT_SETTLEMENT_FAILED\",\"message\":\"The payment could not be settled (facilitator error; details in the gateway log). Nothing was delivered.\",\"x402_status\":\"settlement_failed\",\"reason\":\"facilitator error; details in the gateway log\",\"x402Version\":1,\"error\":\"The payment could not be settled (facilitator error; details in the gateway log). Nothing was delivered.\",\"accepts\":[{\"scheme\":\"exact\",\"network\":\"base-sepolia\",\"maxAmountRequired\":\"20000\",\"resource\":\"http://testserver/api/v1/stamps/\",\"description\":\"Test operation\",\"mimeType\":\"application/json\",\"outputSchema\":null,\"payTo\":\"0x2222222222222222222222222222222222222222\",\"maxTimeoutSeconds\":300,\"asset\":\"0x036CbD53842c5426634e7929541eC2318f3dCF7e\",\"extra\":{\"name\":\"USDC\",\"version\":\"2\"}}]}}",
+   "body": "{\"detail\":{\"code\":\"PAYMENT_SETTLEMENT_FAILED\",\"message\":\"The payment could not be settled (invalid_exact_evm_transaction_simulation_failed).\",\"x402_status\":\"settlement_failed\"},\"code\":\"PAYMENT_SETTLEMENT_FAILED\",\"message\":\"The payment could not be settled (invalid_exact_evm_transaction_simulation_failed).\",\"x402_status\":\"settlement_failed\"}",
    "headers": [
     [
      "content-length",
-     "1518"
+     "342"
     ],
     [
      "content-type",
      "application/json"
     ],
     [
-     "payment-required",
-     "eyJ4NDAyVmVyc2lvbiI6MiwiZXJyb3IiOiJUaGUgcGF5bWVudCBjb3VsZCBub3QgYmUgc2V0dGxlZCAoZmFjaWxpdGF0b3IgZXJyb3I7IGRldGFpbHMgaW4gdGhlIGdhdGV3YXkgbG9nKS4gTm90aGluZyB3YXMgZGVsaXZlcmVkLiIsInJlc291cmNlIjp7InVybCI6Imh0dHA6Ly90ZXN0c2VydmVyL2FwaS92MS9zdGFtcHMvIiwiZGVzY3JpcHRpb24iOiJUZXN0IG9wZXJhdGlvbiIsIm1pbWVUeXBlIjoiYXBwbGljYXRpb24vanNvbiJ9LCJhY2NlcHRzIjpbeyJzY2hlbWUiOiJleGFjdCIsIm5ldHdvcmsiOiJlaXAxNTU6ODQ1MzIiLCJhc3NldCI6IjB4MDM2Q2JENTM4NDJjNTQyNjYzNGU3OTI5NTQxZUMyMzE4ZjNkQ0Y3ZSIsImFtb3VudCI6IjIwMDAwIiwicGF5VG8iOiIweDIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIiLCJtYXhUaW1lb3V0U2Vjb25kcyI6MzAwLCJleHRyYSI6eyJuYW1lIjoiVVNEQyIsInZlcnNpb24iOiIyIn19XX0="
+     "x-payment-mode",
+     "failed"
     ]
    ],
    "idempotency_retry_status": 200,
    "metric": {
     "refused": 1.0
    },
-   "ran": [],
+   "ran": [
+    "paid"
+   ],
    "registry": null,
    "status": 402
   },
-  "v2/before_work/free_text/400": {
+  "v2/after_work/simulation_failed/400": {
    "audit": [
     {
      "client_ip": "testclient",
      "data": {
-      "error_reason": "execution reverted\nwith a second line",
+      "error_reason": "invalid_exact_evm_transaction_simulation_failed",
       "network": "base-sepolia",
-      "nonce": "0x5050505050505050505050505050505050505050505050505050505050505050",
+      "nonce": "0x3636363636363636363636363636363636363636363636363636363636363636",
       "success": false,
       "transaction_hash": null,
       "x402_version": 2
@@ -1189,26 +703,110 @@
      "wallet_address": "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
     }
    ],
-   "body": "{\"code\":\"PAYMENT_SETTLEMENT_FAILED\",\"message\":\"The payment could not be settled (facilitator error; details in the gateway log). Nothing was delivered.\",\"x402_status\":\"settlement_failed\",\"reason\":\"facilitator error; details in the gateway log\",\"x402Version\":1,\"error\":\"The payment could not be settled (facilitator error; details in the gateway log). Nothing was delivered.\",\"accepts\":[{\"scheme\":\"exact\",\"network\":\"base-sepolia\",\"maxAmountRequired\":\"20000\",\"resource\":\"http://testserver/api/v1/stamps/\",\"description\":\"Test operation\",\"mimeType\":\"application/json\",\"outputSchema\":null,\"payTo\":\"0x2222222222222222222222222222222222222222\",\"maxTimeoutSeconds\":300,\"asset\":\"0x036CbD53842c5426634e7929541eC2318f3dCF7e\",\"extra\":{\"name\":\"USDC\",\"version\":\"2\"}}],\"detail\":{\"code\":\"PAYMENT_SETTLEMENT_FAILED\",\"message\":\"The payment could not be settled (facilitator error; details in the gateway log). Nothing was delivered.\",\"x402_status\":\"settlement_failed\",\"reason\":\"facilitator error; details in the gateway log\",\"x402Version\":1,\"error\":\"The payment could not be settled (facilitator error; details in the gateway log). Nothing was delivered.\",\"accepts\":[{\"scheme\":\"exact\",\"network\":\"base-sepolia\",\"maxAmountRequired\":\"20000\",\"resource\":\"http://testserver/api/v1/stamps/\",\"description\":\"Test operation\",\"mimeType\":\"application/json\",\"outputSchema\":null,\"payTo\":\"0x2222222222222222222222222222222222222222\",\"maxTimeoutSeconds\":300,\"asset\":\"0x036CbD53842c5426634e7929541eC2318f3dCF7e\",\"extra\":{\"name\":\"USDC\",\"version\":\"2\"}}]}}",
+   "body": "{\"detail\":{\"code\":\"PAYMENT_SETTLEMENT_FAILED\",\"message\":\"The payment could not be settled (invalid_exact_evm_transaction_simulation_failed).\",\"x402_status\":\"settlement_failed\"},\"code\":\"PAYMENT_SETTLEMENT_FAILED\",\"message\":\"The payment could not be settled (invalid_exact_evm_transaction_simulation_failed).\",\"x402_status\":\"settlement_failed\"}",
    "headers": [
     [
      "content-length",
-     "1518"
+     "342"
     ],
     [
      "content-type",
      "application/json"
     ],
     [
-     "payment-required",
-     "eyJ4NDAyVmVyc2lvbiI6MiwiZXJyb3IiOiJUaGUgcGF5bWVudCBjb3VsZCBub3QgYmUgc2V0dGxlZCAoZmFjaWxpdGF0b3IgZXJyb3I7IGRldGFpbHMgaW4gdGhlIGdhdGV3YXkgbG9nKS4gTm90aGluZyB3YXMgZGVsaXZlcmVkLiIsInJlc291cmNlIjp7InVybCI6Imh0dHA6Ly90ZXN0c2VydmVyL2FwaS92MS9zdGFtcHMvIiwiZGVzY3JpcHRpb24iOiJUZXN0IG9wZXJhdGlvbiIsIm1pbWVUeXBlIjoiYXBwbGljYXRpb24vanNvbiJ9LCJhY2NlcHRzIjpbeyJzY2hlbWUiOiJleGFjdCIsIm5ldHdvcmsiOiJlaXAxNTU6ODQ1MzIiLCJhc3NldCI6IjB4MDM2Q2JENTM4NDJjNTQyNjYzNGU3OTI5NTQxZUMyMzE4ZjNkQ0Y3ZSIsImFtb3VudCI6IjIwMDAwIiwicGF5VG8iOiIweDIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIiLCJtYXhUaW1lb3V0U2Vjb25kcyI6MzAwLCJleHRyYSI6eyJuYW1lIjoiVVNEQyIsInZlcnNpb24iOiIyIn19XX0="
+     "x-payment-mode",
+     "failed"
     ]
    ],
    "idempotency_retry_status": 200,
    "metric": {
     "refused": 1.0
    },
-   "ran": [],
+   "ran": [
+    "paid"
+   ],
+   "registry": null,
+   "status": 402
+  },
+  "v2/after_work/valid_before_expired/200": {
+   "audit": [
+    {
+     "client_ip": "testclient",
+     "data": {
+      "error_reason": "invalid_exact_evm_payload_authorization_valid_before",
+      "network": "base-sepolia",
+      "nonce": "0x3838383838383838383838383838383838383838383838383838383838383838",
+      "success": false,
+      "transaction_hash": null,
+      "x402_version": 2
+     },
+     "event_type": "payment_settled",
+     "wallet_address": "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+    }
+   ],
+   "body": "{\"detail\":{\"code\":\"PAYMENT_SETTLEMENT_FAILED\",\"message\":\"The payment could not be settled (invalid_exact_evm_payload_authorization_valid_before).\",\"x402_status\":\"settlement_failed\"},\"code\":\"PAYMENT_SETTLEMENT_FAILED\",\"message\":\"The payment could not be settled (invalid_exact_evm_payload_authorization_valid_before).\",\"x402_status\":\"settlement_failed\"}",
+   "headers": [
+    [
+     "content-length",
+     "352"
+    ],
+    [
+     "content-type",
+     "application/json"
+    ],
+    [
+     "x-payment-mode",
+     "failed"
+    ]
+   ],
+   "idempotency_retry_status": 200,
+   "metric": {
+    "refused": 1.0
+   },
+   "ran": [
+    "paid"
+   ],
+   "registry": null,
+   "status": 402
+  },
+  "v2/after_work/valid_before_expired/400": {
+   "audit": [
+    {
+     "client_ip": "testclient",
+     "data": {
+      "error_reason": "invalid_exact_evm_payload_authorization_valid_before",
+      "network": "base-sepolia",
+      "nonce": "0x3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a",
+      "success": false,
+      "transaction_hash": null,
+      "x402_version": 2
+     },
+     "event_type": "payment_settled",
+     "wallet_address": "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+    }
+   ],
+   "body": "{\"detail\":{\"code\":\"PAYMENT_SETTLEMENT_FAILED\",\"message\":\"The payment could not be settled (invalid_exact_evm_payload_authorization_valid_before).\",\"x402_status\":\"settlement_failed\"},\"code\":\"PAYMENT_SETTLEMENT_FAILED\",\"message\":\"The payment could not be settled (invalid_exact_evm_payload_authorization_valid_before).\",\"x402_status\":\"settlement_failed\"}",
+   "headers": [
+    [
+     "content-length",
+     "352"
+    ],
+    [
+     "content-type",
+     "application/json"
+    ],
+    [
+     "x-payment-mode",
+     "failed"
+    ]
+   ],
+   "idempotency_retry_status": 200,
+   "metric": {
+    "refused": 1.0
+   },
+   "ran": [
+    "paid"
+   ],
    "registry": null,
    "status": 402
   },
@@ -1219,7 +817,7 @@
      "data": {
       "error_reason": "insufficient_funds",
       "network": "base-sepolia",
-      "nonce": "0x5252525252525252525252525252525252525252525252525252525252525252",
+      "nonce": "0x3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e",
       "success": false,
       "transaction_hash": null,
       "x402_version": 2
@@ -1258,7 +856,7 @@
      "data": {
       "error_reason": "insufficient_funds",
       "network": "base-sepolia",
-      "nonce": "0x5454545454545454545454545454545454545454545454545454545454545454",
+      "nonce": "0x4040404040404040404040404040404040404040404040404040404040404040",
       "success": false,
       "transaction_hash": null,
       "x402_version": 2
@@ -1290,240 +888,6 @@
    "registry": null,
    "status": 402
   },
-  "v2/before_work/invalid_signature/200": {
-   "audit": [
-    {
-     "client_ip": "testclient",
-     "data": {
-      "error_reason": "invalid_signature",
-      "network": "base-sepolia",
-      "nonce": "0x5656565656565656565656565656565656565656565656565656565656565656",
-      "success": false,
-      "transaction_hash": null,
-      "x402_version": 2
-     },
-     "event_type": "payment_settled",
-     "wallet_address": "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
-    }
-   ],
-   "body": "{\"code\":\"PAYMENT_SETTLEMENT_FAILED\",\"message\":\"The payment could not be settled (invalid_signature). Nothing was delivered.\",\"x402_status\":\"settlement_failed\",\"reason\":\"invalid_signature\",\"x402Version\":1,\"error\":\"The payment could not be settled (invalid_signature). Nothing was delivered.\",\"accepts\":[{\"scheme\":\"exact\",\"network\":\"base-sepolia\",\"maxAmountRequired\":\"20000\",\"resource\":\"http://testserver/api/v1/stamps/\",\"description\":\"Test operation\",\"mimeType\":\"application/json\",\"outputSchema\":null,\"payTo\":\"0x2222222222222222222222222222222222222222\",\"maxTimeoutSeconds\":300,\"asset\":\"0x036CbD53842c5426634e7929541eC2318f3dCF7e\",\"extra\":{\"name\":\"USDC\",\"version\":\"2\"}}],\"detail\":{\"code\":\"PAYMENT_SETTLEMENT_FAILED\",\"message\":\"The payment could not be settled (invalid_signature). Nothing was delivered.\",\"x402_status\":\"settlement_failed\",\"reason\":\"invalid_signature\",\"x402Version\":1,\"error\":\"The payment could not be settled (invalid_signature). Nothing was delivered.\",\"accepts\":[{\"scheme\":\"exact\",\"network\":\"base-sepolia\",\"maxAmountRequired\":\"20000\",\"resource\":\"http://testserver/api/v1/stamps/\",\"description\":\"Test operation\",\"mimeType\":\"application/json\",\"outputSchema\":null,\"payTo\":\"0x2222222222222222222222222222222222222222\",\"maxTimeoutSeconds\":300,\"asset\":\"0x036CbD53842c5426634e7929541eC2318f3dCF7e\",\"extra\":{\"name\":\"USDC\",\"version\":\"2\"}}]}}",
-   "headers": [
-    [
-     "content-length",
-     "1350"
-    ],
-    [
-     "content-type",
-     "application/json"
-    ],
-    [
-     "payment-required",
-     "eyJ4NDAyVmVyc2lvbiI6MiwiZXJyb3IiOiJUaGUgcGF5bWVudCBjb3VsZCBub3QgYmUgc2V0dGxlZCAoaW52YWxpZF9zaWduYXR1cmUpLiBOb3RoaW5nIHdhcyBkZWxpdmVyZWQuIiwicmVzb3VyY2UiOnsidXJsIjoiaHR0cDovL3Rlc3RzZXJ2ZXIvYXBpL3YxL3N0YW1wcy8iLCJkZXNjcmlwdGlvbiI6IlRlc3Qgb3BlcmF0aW9uIiwibWltZVR5cGUiOiJhcHBsaWNhdGlvbi9qc29uIn0sImFjY2VwdHMiOlt7InNjaGVtZSI6ImV4YWN0IiwibmV0d29yayI6ImVpcDE1NTo4NDUzMiIsImFzc2V0IjoiMHgwMzZDYkQ1Mzg0MmM1NDI2NjM0ZTc5Mjk1NDFlQzIzMThmM2RDRjdlIiwiYW1vdW50IjoiMjAwMDAiLCJwYXlUbyI6IjB4MjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMiIsIm1heFRpbWVvdXRTZWNvbmRzIjozMDAsImV4dHJhIjp7Im5hbWUiOiJVU0RDIiwidmVyc2lvbiI6IjIifX1dfQ=="
-    ]
-   ],
-   "idempotency_retry_status": 200,
-   "metric": {
-    "refused": 1.0
-   },
-   "ran": [],
-   "registry": null,
-   "status": 402
-  },
-  "v2/before_work/invalid_signature/400": {
-   "audit": [
-    {
-     "client_ip": "testclient",
-     "data": {
-      "error_reason": "invalid_signature",
-      "network": "base-sepolia",
-      "nonce": "0x5858585858585858585858585858585858585858585858585858585858585858",
-      "success": false,
-      "transaction_hash": null,
-      "x402_version": 2
-     },
-     "event_type": "payment_settled",
-     "wallet_address": "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
-    }
-   ],
-   "body": "{\"code\":\"PAYMENT_SETTLEMENT_FAILED\",\"message\":\"The payment could not be settled (invalid_signature). Nothing was delivered.\",\"x402_status\":\"settlement_failed\",\"reason\":\"invalid_signature\",\"x402Version\":1,\"error\":\"The payment could not be settled (invalid_signature). Nothing was delivered.\",\"accepts\":[{\"scheme\":\"exact\",\"network\":\"base-sepolia\",\"maxAmountRequired\":\"20000\",\"resource\":\"http://testserver/api/v1/stamps/\",\"description\":\"Test operation\",\"mimeType\":\"application/json\",\"outputSchema\":null,\"payTo\":\"0x2222222222222222222222222222222222222222\",\"maxTimeoutSeconds\":300,\"asset\":\"0x036CbD53842c5426634e7929541eC2318f3dCF7e\",\"extra\":{\"name\":\"USDC\",\"version\":\"2\"}}],\"detail\":{\"code\":\"PAYMENT_SETTLEMENT_FAILED\",\"message\":\"The payment could not be settled (invalid_signature). Nothing was delivered.\",\"x402_status\":\"settlement_failed\",\"reason\":\"invalid_signature\",\"x402Version\":1,\"error\":\"The payment could not be settled (invalid_signature). Nothing was delivered.\",\"accepts\":[{\"scheme\":\"exact\",\"network\":\"base-sepolia\",\"maxAmountRequired\":\"20000\",\"resource\":\"http://testserver/api/v1/stamps/\",\"description\":\"Test operation\",\"mimeType\":\"application/json\",\"outputSchema\":null,\"payTo\":\"0x2222222222222222222222222222222222222222\",\"maxTimeoutSeconds\":300,\"asset\":\"0x036CbD53842c5426634e7929541eC2318f3dCF7e\",\"extra\":{\"name\":\"USDC\",\"version\":\"2\"}}]}}",
-   "headers": [
-    [
-     "content-length",
-     "1350"
-    ],
-    [
-     "content-type",
-     "application/json"
-    ],
-    [
-     "payment-required",
-     "eyJ4NDAyVmVyc2lvbiI6MiwiZXJyb3IiOiJUaGUgcGF5bWVudCBjb3VsZCBub3QgYmUgc2V0dGxlZCAoaW52YWxpZF9zaWduYXR1cmUpLiBOb3RoaW5nIHdhcyBkZWxpdmVyZWQuIiwicmVzb3VyY2UiOnsidXJsIjoiaHR0cDovL3Rlc3RzZXJ2ZXIvYXBpL3YxL3N0YW1wcy8iLCJkZXNjcmlwdGlvbiI6IlRlc3Qgb3BlcmF0aW9uIiwibWltZVR5cGUiOiJhcHBsaWNhdGlvbi9qc29uIn0sImFjY2VwdHMiOlt7InNjaGVtZSI6ImV4YWN0IiwibmV0d29yayI6ImVpcDE1NTo4NDUzMiIsImFzc2V0IjoiMHgwMzZDYkQ1Mzg0MmM1NDI2NjM0ZTc5Mjk1NDFlQzIzMThmM2RDRjdlIiwiYW1vdW50IjoiMjAwMDAiLCJwYXlUbyI6IjB4MjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMiIsIm1heFRpbWVvdXRTZWNvbmRzIjozMDAsImV4dHJhIjp7Im5hbWUiOiJVU0RDIiwidmVyc2lvbiI6IjIifX1dfQ=="
-    ]
-   ],
-   "idempotency_retry_status": 200,
-   "metric": {
-    "refused": 1.0
-   },
-   "ran": [],
-   "registry": null,
-   "status": 402
-  },
-  "v2/before_work/invalid_transaction_state/200": {
-   "audit": [
-    {
-     "client_ip": "testclient",
-     "data": {
-      "error_reason": "invalid_transaction_state",
-      "network": "base-sepolia",
-      "nonce": "0x5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a",
-      "success": false,
-      "transaction_hash": null,
-      "x402_version": 2
-     },
-     "event_type": "payment_settled",
-     "wallet_address": "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
-    }
-   ],
-   "body": "{\"code\":\"PAYMENT_SETTLEMENT_FAILED\",\"message\":\"The payment could not be settled (invalid_transaction_state). Nothing was delivered.\",\"x402_status\":\"settlement_failed\",\"reason\":\"invalid_transaction_state\",\"x402Version\":1,\"error\":\"The payment could not be settled (invalid_transaction_state). Nothing was delivered.\",\"accepts\":[{\"scheme\":\"exact\",\"network\":\"base-sepolia\",\"maxAmountRequired\":\"20000\",\"resource\":\"http://testserver/api/v1/stamps/\",\"description\":\"Test operation\",\"mimeType\":\"application/json\",\"outputSchema\":null,\"payTo\":\"0x2222222222222222222222222222222222222222\",\"maxTimeoutSeconds\":300,\"asset\":\"0x036CbD53842c5426634e7929541eC2318f3dCF7e\",\"extra\":{\"name\":\"USDC\",\"version\":\"2\"}}],\"detail\":{\"code\":\"PAYMENT_SETTLEMENT_FAILED\",\"message\":\"The payment could not be settled (invalid_transaction_state). Nothing was delivered.\",\"x402_status\":\"settlement_failed\",\"reason\":\"invalid_transaction_state\",\"x402Version\":1,\"error\":\"The payment could not be settled (invalid_transaction_state). Nothing was delivered.\",\"accepts\":[{\"scheme\":\"exact\",\"network\":\"base-sepolia\",\"maxAmountRequired\":\"20000\",\"resource\":\"http://testserver/api/v1/stamps/\",\"description\":\"Test operation\",\"mimeType\":\"application/json\",\"outputSchema\":null,\"payTo\":\"0x2222222222222222222222222222222222222222\",\"maxTimeoutSeconds\":300,\"asset\":\"0x036CbD53842c5426634e7929541eC2318f3dCF7e\",\"extra\":{\"name\":\"USDC\",\"version\":\"2\"}}]}}",
-   "headers": [
-    [
-     "content-length",
-     "1398"
-    ],
-    [
-     "content-type",
-     "application/json"
-    ],
-    [
-     "payment-required",
-     "eyJ4NDAyVmVyc2lvbiI6MiwiZXJyb3IiOiJUaGUgcGF5bWVudCBjb3VsZCBub3QgYmUgc2V0dGxlZCAoaW52YWxpZF90cmFuc2FjdGlvbl9zdGF0ZSkuIE5vdGhpbmcgd2FzIGRlbGl2ZXJlZC4iLCJyZXNvdXJjZSI6eyJ1cmwiOiJodHRwOi8vdGVzdHNlcnZlci9hcGkvdjEvc3RhbXBzLyIsImRlc2NyaXB0aW9uIjoiVGVzdCBvcGVyYXRpb24iLCJtaW1lVHlwZSI6ImFwcGxpY2F0aW9uL2pzb24ifSwiYWNjZXB0cyI6W3sic2NoZW1lIjoiZXhhY3QiLCJuZXR3b3JrIjoiZWlwMTU1Ojg0NTMyIiwiYXNzZXQiOiIweDAzNkNiRDUzODQyYzU0MjY2MzRlNzkyOTU0MWVDMjMxOGYzZENGN2UiLCJhbW91bnQiOiIyMDAwMCIsInBheVRvIjoiMHgyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyIiwibWF4VGltZW91dFNlY29uZHMiOjMwMCwiZXh0cmEiOnsibmFtZSI6IlVTREMiLCJ2ZXJzaW9uIjoiMiJ9fV19"
-    ]
-   ],
-   "idempotency_retry_status": 200,
-   "metric": {
-    "refused": 1.0
-   },
-   "ran": [],
-   "registry": null,
-   "status": 402
-  },
-  "v2/before_work/invalid_transaction_state/400": {
-   "audit": [
-    {
-     "client_ip": "testclient",
-     "data": {
-      "error_reason": "invalid_transaction_state",
-      "network": "base-sepolia",
-      "nonce": "0x5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c",
-      "success": false,
-      "transaction_hash": null,
-      "x402_version": 2
-     },
-     "event_type": "payment_settled",
-     "wallet_address": "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
-    }
-   ],
-   "body": "{\"code\":\"PAYMENT_SETTLEMENT_FAILED\",\"message\":\"The payment could not be settled (invalid_transaction_state). Nothing was delivered.\",\"x402_status\":\"settlement_failed\",\"reason\":\"invalid_transaction_state\",\"x402Version\":1,\"error\":\"The payment could not be settled (invalid_transaction_state). Nothing was delivered.\",\"accepts\":[{\"scheme\":\"exact\",\"network\":\"base-sepolia\",\"maxAmountRequired\":\"20000\",\"resource\":\"http://testserver/api/v1/stamps/\",\"description\":\"Test operation\",\"mimeType\":\"application/json\",\"outputSchema\":null,\"payTo\":\"0x2222222222222222222222222222222222222222\",\"maxTimeoutSeconds\":300,\"asset\":\"0x036CbD53842c5426634e7929541eC2318f3dCF7e\",\"extra\":{\"name\":\"USDC\",\"version\":\"2\"}}],\"detail\":{\"code\":\"PAYMENT_SETTLEMENT_FAILED\",\"message\":\"The payment could not be settled (invalid_transaction_state). Nothing was delivered.\",\"x402_status\":\"settlement_failed\",\"reason\":\"invalid_transaction_state\",\"x402Version\":1,\"error\":\"The payment could not be settled (invalid_transaction_state). Nothing was delivered.\",\"accepts\":[{\"scheme\":\"exact\",\"network\":\"base-sepolia\",\"maxAmountRequired\":\"20000\",\"resource\":\"http://testserver/api/v1/stamps/\",\"description\":\"Test operation\",\"mimeType\":\"application/json\",\"outputSchema\":null,\"payTo\":\"0x2222222222222222222222222222222222222222\",\"maxTimeoutSeconds\":300,\"asset\":\"0x036CbD53842c5426634e7929541eC2318f3dCF7e\",\"extra\":{\"name\":\"USDC\",\"version\":\"2\"}}]}}",
-   "headers": [
-    [
-     "content-length",
-     "1398"
-    ],
-    [
-     "content-type",
-     "application/json"
-    ],
-    [
-     "payment-required",
-     "eyJ4NDAyVmVyc2lvbiI6MiwiZXJyb3IiOiJUaGUgcGF5bWVudCBjb3VsZCBub3QgYmUgc2V0dGxlZCAoaW52YWxpZF90cmFuc2FjdGlvbl9zdGF0ZSkuIE5vdGhpbmcgd2FzIGRlbGl2ZXJlZC4iLCJyZXNvdXJjZSI6eyJ1cmwiOiJodHRwOi8vdGVzdHNlcnZlci9hcGkvdjEvc3RhbXBzLyIsImRlc2NyaXB0aW9uIjoiVGVzdCBvcGVyYXRpb24iLCJtaW1lVHlwZSI6ImFwcGxpY2F0aW9uL2pzb24ifSwiYWNjZXB0cyI6W3sic2NoZW1lIjoiZXhhY3QiLCJuZXR3b3JrIjoiZWlwMTU1Ojg0NTMyIiwiYXNzZXQiOiIweDAzNkNiRDUzODQyYzU0MjY2MzRlNzkyOTU0MWVDMjMxOGYzZENGN2UiLCJhbW91bnQiOiIyMDAwMCIsInBheVRvIjoiMHgyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyIiwibWF4VGltZW91dFNlY29uZHMiOjMwMCwiZXh0cmEiOnsibmFtZSI6IlVTREMiLCJ2ZXJzaW9uIjoiMiJ9fV19"
-    ]
-   ],
-   "idempotency_retry_status": 200,
-   "metric": {
-    "refused": 1.0
-   },
-   "ran": [],
-   "registry": null,
-   "status": 402
-  },
-  "v2/before_work/no_reason/200": {
-   "audit": [
-    {
-     "client_ip": "testclient",
-     "data": {
-      "error_reason": "unknown",
-      "network": "base-sepolia",
-      "nonce": "0x5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e",
-      "success": false,
-      "transaction_hash": null,
-      "x402_version": 2
-     },
-     "event_type": "payment_settled",
-     "wallet_address": "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
-    }
-   ],
-   "body": "{\"code\":\"PAYMENT_SETTLEMENT_FAILED\",\"message\":\"The payment could not be settled (unknown). Nothing was delivered.\",\"x402_status\":\"settlement_failed\",\"reason\":\"unknown\",\"x402Version\":1,\"error\":\"The payment could not be settled (unknown). Nothing was delivered.\",\"accepts\":[{\"scheme\":\"exact\",\"network\":\"base-sepolia\",\"maxAmountRequired\":\"20000\",\"resource\":\"http://testserver/api/v1/stamps/\",\"description\":\"Test operation\",\"mimeType\":\"application/json\",\"outputSchema\":null,\"payTo\":\"0x2222222222222222222222222222222222222222\",\"maxTimeoutSeconds\":300,\"asset\":\"0x036CbD53842c5426634e7929541eC2318f3dCF7e\",\"extra\":{\"name\":\"USDC\",\"version\":\"2\"}}],\"detail\":{\"code\":\"PAYMENT_SETTLEMENT_FAILED\",\"message\":\"The payment could not be settled (unknown). Nothing was delivered.\",\"x402_status\":\"settlement_failed\",\"reason\":\"unknown\",\"x402Version\":1,\"error\":\"The payment could not be settled (unknown). Nothing was delivered.\",\"accepts\":[{\"scheme\":\"exact\",\"network\":\"base-sepolia\",\"maxAmountRequired\":\"20000\",\"resource\":\"http://testserver/api/v1/stamps/\",\"description\":\"Test operation\",\"mimeType\":\"application/json\",\"outputSchema\":null,\"payTo\":\"0x2222222222222222222222222222222222222222\",\"maxTimeoutSeconds\":300,\"asset\":\"0x036CbD53842c5426634e7929541eC2318f3dCF7e\",\"extra\":{\"name\":\"USDC\",\"version\":\"2\"}}]}}",
-   "headers": [
-    [
-     "content-length",
-     "1290"
-    ],
-    [
-     "content-type",
-     "application/json"
-    ],
-    [
-     "payment-required",
-     "eyJ4NDAyVmVyc2lvbiI6MiwiZXJyb3IiOiJUaGUgcGF5bWVudCBjb3VsZCBub3QgYmUgc2V0dGxlZCAodW5rbm93bikuIE5vdGhpbmcgd2FzIGRlbGl2ZXJlZC4iLCJyZXNvdXJjZSI6eyJ1cmwiOiJodHRwOi8vdGVzdHNlcnZlci9hcGkvdjEvc3RhbXBzLyIsImRlc2NyaXB0aW9uIjoiVGVzdCBvcGVyYXRpb24iLCJtaW1lVHlwZSI6ImFwcGxpY2F0aW9uL2pzb24ifSwiYWNjZXB0cyI6W3sic2NoZW1lIjoiZXhhY3QiLCJuZXR3b3JrIjoiZWlwMTU1Ojg0NTMyIiwiYXNzZXQiOiIweDAzNkNiRDUzODQyYzU0MjY2MzRlNzkyOTU0MWVDMjMxOGYzZENGN2UiLCJhbW91bnQiOiIyMDAwMCIsInBheVRvIjoiMHgyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyIiwibWF4VGltZW91dFNlY29uZHMiOjMwMCwiZXh0cmEiOnsibmFtZSI6IlVTREMiLCJ2ZXJzaW9uIjoiMiJ9fV19"
-    ]
-   ],
-   "idempotency_retry_status": 200,
-   "metric": {
-    "refused": 1.0
-   },
-   "ran": [],
-   "registry": null,
-   "status": 402
-  },
-  "v2/before_work/no_reason/400": {
-   "audit": [
-    {
-     "client_ip": "testclient",
-     "data": {
-      "error_reason": "unknown",
-      "network": "base-sepolia",
-      "nonce": "0x6060606060606060606060606060606060606060606060606060606060606060",
-      "success": false,
-      "transaction_hash": null,
-      "x402_version": 2
-     },
-     "event_type": "payment_settled",
-     "wallet_address": "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
-    }
-   ],
-   "body": "{\"code\":\"PAYMENT_SETTLEMENT_FAILED\",\"message\":\"The payment could not be settled (unknown). Nothing was delivered.\",\"x402_status\":\"settlement_failed\",\"reason\":\"unknown\",\"x402Version\":1,\"error\":\"The payment could not be settled (unknown). Nothing was delivered.\",\"accepts\":[{\"scheme\":\"exact\",\"network\":\"base-sepolia\",\"maxAmountRequired\":\"20000\",\"resource\":\"http://testserver/api/v1/stamps/\",\"description\":\"Test operation\",\"mimeType\":\"application/json\",\"outputSchema\":null,\"payTo\":\"0x2222222222222222222222222222222222222222\",\"maxTimeoutSeconds\":300,\"asset\":\"0x036CbD53842c5426634e7929541eC2318f3dCF7e\",\"extra\":{\"name\":\"USDC\",\"version\":\"2\"}}],\"detail\":{\"code\":\"PAYMENT_SETTLEMENT_FAILED\",\"message\":\"The payment could not be settled (unknown). Nothing was delivered.\",\"x402_status\":\"settlement_failed\",\"reason\":\"unknown\",\"x402Version\":1,\"error\":\"The payment could not be settled (unknown). Nothing was delivered.\",\"accepts\":[{\"scheme\":\"exact\",\"network\":\"base-sepolia\",\"maxAmountRequired\":\"20000\",\"resource\":\"http://testserver/api/v1/stamps/\",\"description\":\"Test operation\",\"mimeType\":\"application/json\",\"outputSchema\":null,\"payTo\":\"0x2222222222222222222222222222222222222222\",\"maxTimeoutSeconds\":300,\"asset\":\"0x036CbD53842c5426634e7929541eC2318f3dCF7e\",\"extra\":{\"name\":\"USDC\",\"version\":\"2\"}}]}}",
-   "headers": [
-    [
-     "content-length",
-     "1290"
-    ],
-    [
-     "content-type",
-     "application/json"
-    ],
-    [
-     "payment-required",
-     "eyJ4NDAyVmVyc2lvbiI6MiwiZXJyb3IiOiJUaGUgcGF5bWVudCBjb3VsZCBub3QgYmUgc2V0dGxlZCAodW5rbm93bikuIE5vdGhpbmcgd2FzIGRlbGl2ZXJlZC4iLCJyZXNvdXJjZSI6eyJ1cmwiOiJodHRwOi8vdGVzdHNlcnZlci9hcGkvdjEvc3RhbXBzLyIsImRlc2NyaXB0aW9uIjoiVGVzdCBvcGVyYXRpb24iLCJtaW1lVHlwZSI6ImFwcGxpY2F0aW9uL2pzb24ifSwiYWNjZXB0cyI6W3sic2NoZW1lIjoiZXhhY3QiLCJuZXR3b3JrIjoiZWlwMTU1Ojg0NTMyIiwiYXNzZXQiOiIweDAzNkNiRDUzODQyYzU0MjY2MzRlNzkyOTU0MWVDMjMxOGYzZENGN2UiLCJhbW91bnQiOiIyMDAwMCIsInBheVRvIjoiMHgyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyIiwibWF4VGltZW91dFNlY29uZHMiOjMwMCwiZXh0cmEiOnsibmFtZSI6IlVTREMiLCJ2ZXJzaW9uIjoiMiJ9fV19"
-    ]
-   ],
-   "idempotency_retry_status": 200,
-   "metric": {
-    "refused": 1.0
-   },
-   "ran": [],
-   "registry": null,
-   "status": 402
-  },
   "v2/before_work/nonce_already_used/200": {
    "audit": [
     {
@@ -1531,7 +895,7 @@
      "data": {
       "error_reason": "invalid_exact_evm_nonce_already_used",
       "network": "base-sepolia",
-      "nonce": "0x6262626262626262626262626262626262626262626262626262626262626262",
+      "nonce": "0x4242424242424242424242424242424242424242424242424242424242424242",
       "success": false,
       "transaction_hash": null,
       "x402_version": 2
@@ -1570,7 +934,7 @@
      "data": {
       "error_reason": "invalid_exact_evm_nonce_already_used",
       "network": "base-sepolia",
-      "nonce": "0x6464646464646464646464646464646464646464646464646464646464646464",
+      "nonce": "0x4444444444444444444444444444444444444444444444444444444444444444",
       "success": false,
       "transaction_hash": null,
       "x402_version": 2
@@ -1602,14 +966,14 @@
    "registry": null,
    "status": 402
   },
-  "v2/before_work/unverified_code/200": {
+  "v2/before_work/payload_signature/200": {
    "audit": [
     {
      "client_ip": "testclient",
      "data": {
-      "error_reason": "settle_failed",
+      "error_reason": "invalid_exact_evm_payload_signature",
       "network": "base-sepolia",
-      "nonce": "0x6666666666666666666666666666666666666666666666666666666666666666",
+      "nonce": "0x4646464646464646464646464646464646464646464646464646464646464646",
       "success": false,
       "transaction_hash": null,
       "x402_version": 2
@@ -1618,11 +982,11 @@
      "wallet_address": "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
     }
    ],
-   "body": "{\"code\":\"PAYMENT_SETTLEMENT_FAILED\",\"message\":\"The payment could not be settled (settle_failed). Nothing was delivered.\",\"x402_status\":\"settlement_failed\",\"reason\":\"settle_failed\",\"x402Version\":1,\"error\":\"The payment could not be settled (settle_failed). Nothing was delivered.\",\"accepts\":[{\"scheme\":\"exact\",\"network\":\"base-sepolia\",\"maxAmountRequired\":\"20000\",\"resource\":\"http://testserver/api/v1/stamps/\",\"description\":\"Test operation\",\"mimeType\":\"application/json\",\"outputSchema\":null,\"payTo\":\"0x2222222222222222222222222222222222222222\",\"maxTimeoutSeconds\":300,\"asset\":\"0x036CbD53842c5426634e7929541eC2318f3dCF7e\",\"extra\":{\"name\":\"USDC\",\"version\":\"2\"}}],\"detail\":{\"code\":\"PAYMENT_SETTLEMENT_FAILED\",\"message\":\"The payment could not be settled (settle_failed). Nothing was delivered.\",\"x402_status\":\"settlement_failed\",\"reason\":\"settle_failed\",\"x402Version\":1,\"error\":\"The payment could not be settled (settle_failed). Nothing was delivered.\",\"accepts\":[{\"scheme\":\"exact\",\"network\":\"base-sepolia\",\"maxAmountRequired\":\"20000\",\"resource\":\"http://testserver/api/v1/stamps/\",\"description\":\"Test operation\",\"mimeType\":\"application/json\",\"outputSchema\":null,\"payTo\":\"0x2222222222222222222222222222222222222222\",\"maxTimeoutSeconds\":300,\"asset\":\"0x036CbD53842c5426634e7929541eC2318f3dCF7e\",\"extra\":{\"name\":\"USDC\",\"version\":\"2\"}}]}}",
+   "body": "{\"code\":\"PAYMENT_SETTLEMENT_FAILED\",\"message\":\"The payment could not be settled (invalid_exact_evm_payload_signature). Nothing was delivered.\",\"x402_status\":\"settlement_failed\",\"reason\":\"invalid_exact_evm_payload_signature\",\"x402Version\":1,\"error\":\"The payment could not be settled (invalid_exact_evm_payload_signature). Nothing was delivered.\",\"accepts\":[{\"scheme\":\"exact\",\"network\":\"base-sepolia\",\"maxAmountRequired\":\"20000\",\"resource\":\"http://testserver/api/v1/stamps/\",\"description\":\"Test operation\",\"mimeType\":\"application/json\",\"outputSchema\":null,\"payTo\":\"0x2222222222222222222222222222222222222222\",\"maxTimeoutSeconds\":300,\"asset\":\"0x036CbD53842c5426634e7929541eC2318f3dCF7e\",\"extra\":{\"name\":\"USDC\",\"version\":\"2\"}}],\"detail\":{\"code\":\"PAYMENT_SETTLEMENT_FAILED\",\"message\":\"The payment could not be settled (invalid_exact_evm_payload_signature). Nothing was delivered.\",\"x402_status\":\"settlement_failed\",\"reason\":\"invalid_exact_evm_payload_signature\",\"x402Version\":1,\"error\":\"The payment could not be settled (invalid_exact_evm_payload_signature). Nothing was delivered.\",\"accepts\":[{\"scheme\":\"exact\",\"network\":\"base-sepolia\",\"maxAmountRequired\":\"20000\",\"resource\":\"http://testserver/api/v1/stamps/\",\"description\":\"Test operation\",\"mimeType\":\"application/json\",\"outputSchema\":null,\"payTo\":\"0x2222222222222222222222222222222222222222\",\"maxTimeoutSeconds\":300,\"asset\":\"0x036CbD53842c5426634e7929541eC2318f3dCF7e\",\"extra\":{\"name\":\"USDC\",\"version\":\"2\"}}]}}",
    "headers": [
     [
      "content-length",
-     "1326"
+     "1458"
     ],
     [
      "content-type",
@@ -1630,7 +994,7 @@
     ],
     [
      "payment-required",
-     "eyJ4NDAyVmVyc2lvbiI6MiwiZXJyb3IiOiJUaGUgcGF5bWVudCBjb3VsZCBub3QgYmUgc2V0dGxlZCAoc2V0dGxlX2ZhaWxlZCkuIE5vdGhpbmcgd2FzIGRlbGl2ZXJlZC4iLCJyZXNvdXJjZSI6eyJ1cmwiOiJodHRwOi8vdGVzdHNlcnZlci9hcGkvdjEvc3RhbXBzLyIsImRlc2NyaXB0aW9uIjoiVGVzdCBvcGVyYXRpb24iLCJtaW1lVHlwZSI6ImFwcGxpY2F0aW9uL2pzb24ifSwiYWNjZXB0cyI6W3sic2NoZW1lIjoiZXhhY3QiLCJuZXR3b3JrIjoiZWlwMTU1Ojg0NTMyIiwiYXNzZXQiOiIweDAzNkNiRDUzODQyYzU0MjY2MzRlNzkyOTU0MWVDMjMxOGYzZENGN2UiLCJhbW91bnQiOiIyMDAwMCIsInBheVRvIjoiMHgyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyIiwibWF4VGltZW91dFNlY29uZHMiOjMwMCwiZXh0cmEiOnsibmFtZSI6IlVTREMiLCJ2ZXJzaW9uIjoiMiJ9fV19"
+     "eyJ4NDAyVmVyc2lvbiI6MiwiZXJyb3IiOiJUaGUgcGF5bWVudCBjb3VsZCBub3QgYmUgc2V0dGxlZCAoaW52YWxpZF9leGFjdF9ldm1fcGF5bG9hZF9zaWduYXR1cmUpLiBOb3RoaW5nIHdhcyBkZWxpdmVyZWQuIiwicmVzb3VyY2UiOnsidXJsIjoiaHR0cDovL3Rlc3RzZXJ2ZXIvYXBpL3YxL3N0YW1wcy8iLCJkZXNjcmlwdGlvbiI6IlRlc3Qgb3BlcmF0aW9uIiwibWltZVR5cGUiOiJhcHBsaWNhdGlvbi9qc29uIn0sImFjY2VwdHMiOlt7InNjaGVtZSI6ImV4YWN0IiwibmV0d29yayI6ImVpcDE1NTo4NDUzMiIsImFzc2V0IjoiMHgwMzZDYkQ1Mzg0MmM1NDI2NjM0ZTc5Mjk1NDFlQzIzMThmM2RDRjdlIiwiYW1vdW50IjoiMjAwMDAiLCJwYXlUbyI6IjB4MjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMiIsIm1heFRpbWVvdXRTZWNvbmRzIjozMDAsImV4dHJhIjp7Im5hbWUiOiJVU0RDIiwidmVyc2lvbiI6IjIifX1dfQ=="
     ]
    ],
    "idempotency_retry_status": 200,
@@ -1641,14 +1005,14 @@
    "registry": null,
    "status": 402
   },
-  "v2/before_work/unverified_code/400": {
+  "v2/before_work/payload_signature/400": {
    "audit": [
     {
      "client_ip": "testclient",
      "data": {
-      "error_reason": "settle_failed",
+      "error_reason": "invalid_exact_evm_payload_signature",
       "network": "base-sepolia",
-      "nonce": "0x6868686868686868686868686868686868686868686868686868686868686868",
+      "nonce": "0x4848484848484848484848484848484848484848484848484848484848484848",
       "success": false,
       "transaction_hash": null,
       "x402_version": 2
@@ -1657,11 +1021,11 @@
      "wallet_address": "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
     }
    ],
-   "body": "{\"code\":\"PAYMENT_SETTLEMENT_FAILED\",\"message\":\"The payment could not be settled (settle_failed). Nothing was delivered.\",\"x402_status\":\"settlement_failed\",\"reason\":\"settle_failed\",\"x402Version\":1,\"error\":\"The payment could not be settled (settle_failed). Nothing was delivered.\",\"accepts\":[{\"scheme\":\"exact\",\"network\":\"base-sepolia\",\"maxAmountRequired\":\"20000\",\"resource\":\"http://testserver/api/v1/stamps/\",\"description\":\"Test operation\",\"mimeType\":\"application/json\",\"outputSchema\":null,\"payTo\":\"0x2222222222222222222222222222222222222222\",\"maxTimeoutSeconds\":300,\"asset\":\"0x036CbD53842c5426634e7929541eC2318f3dCF7e\",\"extra\":{\"name\":\"USDC\",\"version\":\"2\"}}],\"detail\":{\"code\":\"PAYMENT_SETTLEMENT_FAILED\",\"message\":\"The payment could not be settled (settle_failed). Nothing was delivered.\",\"x402_status\":\"settlement_failed\",\"reason\":\"settle_failed\",\"x402Version\":1,\"error\":\"The payment could not be settled (settle_failed). Nothing was delivered.\",\"accepts\":[{\"scheme\":\"exact\",\"network\":\"base-sepolia\",\"maxAmountRequired\":\"20000\",\"resource\":\"http://testserver/api/v1/stamps/\",\"description\":\"Test operation\",\"mimeType\":\"application/json\",\"outputSchema\":null,\"payTo\":\"0x2222222222222222222222222222222222222222\",\"maxTimeoutSeconds\":300,\"asset\":\"0x036CbD53842c5426634e7929541eC2318f3dCF7e\",\"extra\":{\"name\":\"USDC\",\"version\":\"2\"}}]}}",
+   "body": "{\"code\":\"PAYMENT_SETTLEMENT_FAILED\",\"message\":\"The payment could not be settled (invalid_exact_evm_payload_signature). Nothing was delivered.\",\"x402_status\":\"settlement_failed\",\"reason\":\"invalid_exact_evm_payload_signature\",\"x402Version\":1,\"error\":\"The payment could not be settled (invalid_exact_evm_payload_signature). Nothing was delivered.\",\"accepts\":[{\"scheme\":\"exact\",\"network\":\"base-sepolia\",\"maxAmountRequired\":\"20000\",\"resource\":\"http://testserver/api/v1/stamps/\",\"description\":\"Test operation\",\"mimeType\":\"application/json\",\"outputSchema\":null,\"payTo\":\"0x2222222222222222222222222222222222222222\",\"maxTimeoutSeconds\":300,\"asset\":\"0x036CbD53842c5426634e7929541eC2318f3dCF7e\",\"extra\":{\"name\":\"USDC\",\"version\":\"2\"}}],\"detail\":{\"code\":\"PAYMENT_SETTLEMENT_FAILED\",\"message\":\"The payment could not be settled (invalid_exact_evm_payload_signature). Nothing was delivered.\",\"x402_status\":\"settlement_failed\",\"reason\":\"invalid_exact_evm_payload_signature\",\"x402Version\":1,\"error\":\"The payment could not be settled (invalid_exact_evm_payload_signature). Nothing was delivered.\",\"accepts\":[{\"scheme\":\"exact\",\"network\":\"base-sepolia\",\"maxAmountRequired\":\"20000\",\"resource\":\"http://testserver/api/v1/stamps/\",\"description\":\"Test operation\",\"mimeType\":\"application/json\",\"outputSchema\":null,\"payTo\":\"0x2222222222222222222222222222222222222222\",\"maxTimeoutSeconds\":300,\"asset\":\"0x036CbD53842c5426634e7929541eC2318f3dCF7e\",\"extra\":{\"name\":\"USDC\",\"version\":\"2\"}}]}}",
    "headers": [
     [
      "content-length",
-     "1326"
+     "1458"
     ],
     [
      "content-type",
@@ -1669,7 +1033,163 @@
     ],
     [
      "payment-required",
-     "eyJ4NDAyVmVyc2lvbiI6MiwiZXJyb3IiOiJUaGUgcGF5bWVudCBjb3VsZCBub3QgYmUgc2V0dGxlZCAoc2V0dGxlX2ZhaWxlZCkuIE5vdGhpbmcgd2FzIGRlbGl2ZXJlZC4iLCJyZXNvdXJjZSI6eyJ1cmwiOiJodHRwOi8vdGVzdHNlcnZlci9hcGkvdjEvc3RhbXBzLyIsImRlc2NyaXB0aW9uIjoiVGVzdCBvcGVyYXRpb24iLCJtaW1lVHlwZSI6ImFwcGxpY2F0aW9uL2pzb24ifSwiYWNjZXB0cyI6W3sic2NoZW1lIjoiZXhhY3QiLCJuZXR3b3JrIjoiZWlwMTU1Ojg0NTMyIiwiYXNzZXQiOiIweDAzNkNiRDUzODQyYzU0MjY2MzRlNzkyOTU0MWVDMjMxOGYzZENGN2UiLCJhbW91bnQiOiIyMDAwMCIsInBheVRvIjoiMHgyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyIiwibWF4VGltZW91dFNlY29uZHMiOjMwMCwiZXh0cmEiOnsibmFtZSI6IlVTREMiLCJ2ZXJzaW9uIjoiMiJ9fV19"
+     "eyJ4NDAyVmVyc2lvbiI6MiwiZXJyb3IiOiJUaGUgcGF5bWVudCBjb3VsZCBub3QgYmUgc2V0dGxlZCAoaW52YWxpZF9leGFjdF9ldm1fcGF5bG9hZF9zaWduYXR1cmUpLiBOb3RoaW5nIHdhcyBkZWxpdmVyZWQuIiwicmVzb3VyY2UiOnsidXJsIjoiaHR0cDovL3Rlc3RzZXJ2ZXIvYXBpL3YxL3N0YW1wcy8iLCJkZXNjcmlwdGlvbiI6IlRlc3Qgb3BlcmF0aW9uIiwibWltZVR5cGUiOiJhcHBsaWNhdGlvbi9qc29uIn0sImFjY2VwdHMiOlt7InNjaGVtZSI6ImV4YWN0IiwibmV0d29yayI6ImVpcDE1NTo4NDUzMiIsImFzc2V0IjoiMHgwMzZDYkQ1Mzg0MmM1NDI2NjM0ZTc5Mjk1NDFlQzIzMThmM2RDRjdlIiwiYW1vdW50IjoiMjAwMDAiLCJwYXlUbyI6IjB4MjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMiIsIm1heFRpbWVvdXRTZWNvbmRzIjozMDAsImV4dHJhIjp7Im5hbWUiOiJVU0RDIiwidmVyc2lvbiI6IjIifX1dfQ=="
+    ]
+   ],
+   "idempotency_retry_status": 200,
+   "metric": {
+    "refused": 1.0
+   },
+   "ran": [],
+   "registry": null,
+   "status": 402
+  },
+  "v2/before_work/simulation_failed/200": {
+   "audit": [
+    {
+     "client_ip": "testclient",
+     "data": {
+      "error_reason": "invalid_exact_evm_transaction_simulation_failed",
+      "network": "base-sepolia",
+      "nonce": "0x4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a",
+      "success": false,
+      "transaction_hash": null,
+      "x402_version": 2
+     },
+     "event_type": "payment_settled",
+     "wallet_address": "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+    }
+   ],
+   "body": "{\"code\":\"PAYMENT_SETTLEMENT_FAILED\",\"message\":\"The payment could not be settled (invalid_exact_evm_transaction_simulation_failed). Nothing was delivered.\",\"x402_status\":\"settlement_failed\",\"reason\":\"invalid_exact_evm_transaction_simulation_failed\",\"x402Version\":1,\"error\":\"The payment could not be settled (invalid_exact_evm_transaction_simulation_failed). Nothing was delivered.\",\"accepts\":[{\"scheme\":\"exact\",\"network\":\"base-sepolia\",\"maxAmountRequired\":\"20000\",\"resource\":\"http://testserver/api/v1/stamps/\",\"description\":\"Test operation\",\"mimeType\":\"application/json\",\"outputSchema\":null,\"payTo\":\"0x2222222222222222222222222222222222222222\",\"maxTimeoutSeconds\":300,\"asset\":\"0x036CbD53842c5426634e7929541eC2318f3dCF7e\",\"extra\":{\"name\":\"USDC\",\"version\":\"2\"}}],\"detail\":{\"code\":\"PAYMENT_SETTLEMENT_FAILED\",\"message\":\"The payment could not be settled (invalid_exact_evm_transaction_simulation_failed). Nothing was delivered.\",\"x402_status\":\"settlement_failed\",\"reason\":\"invalid_exact_evm_transaction_simulation_failed\",\"x402Version\":1,\"error\":\"The payment could not be settled (invalid_exact_evm_transaction_simulation_failed). Nothing was delivered.\",\"accepts\":[{\"scheme\":\"exact\",\"network\":\"base-sepolia\",\"maxAmountRequired\":\"20000\",\"resource\":\"http://testserver/api/v1/stamps/\",\"description\":\"Test operation\",\"mimeType\":\"application/json\",\"outputSchema\":null,\"payTo\":\"0x2222222222222222222222222222222222222222\",\"maxTimeoutSeconds\":300,\"asset\":\"0x036CbD53842c5426634e7929541eC2318f3dCF7e\",\"extra\":{\"name\":\"USDC\",\"version\":\"2\"}}]}}",
+   "headers": [
+    [
+     "content-length",
+     "1530"
+    ],
+    [
+     "content-type",
+     "application/json"
+    ],
+    [
+     "payment-required",
+     "eyJ4NDAyVmVyc2lvbiI6MiwiZXJyb3IiOiJUaGUgcGF5bWVudCBjb3VsZCBub3QgYmUgc2V0dGxlZCAoaW52YWxpZF9leGFjdF9ldm1fdHJhbnNhY3Rpb25fc2ltdWxhdGlvbl9mYWlsZWQpLiBOb3RoaW5nIHdhcyBkZWxpdmVyZWQuIiwicmVzb3VyY2UiOnsidXJsIjoiaHR0cDovL3Rlc3RzZXJ2ZXIvYXBpL3YxL3N0YW1wcy8iLCJkZXNjcmlwdGlvbiI6IlRlc3Qgb3BlcmF0aW9uIiwibWltZVR5cGUiOiJhcHBsaWNhdGlvbi9qc29uIn0sImFjY2VwdHMiOlt7InNjaGVtZSI6ImV4YWN0IiwibmV0d29yayI6ImVpcDE1NTo4NDUzMiIsImFzc2V0IjoiMHgwMzZDYkQ1Mzg0MmM1NDI2NjM0ZTc5Mjk1NDFlQzIzMThmM2RDRjdlIiwiYW1vdW50IjoiMjAwMDAiLCJwYXlUbyI6IjB4MjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMiIsIm1heFRpbWVvdXRTZWNvbmRzIjozMDAsImV4dHJhIjp7Im5hbWUiOiJVU0RDIiwidmVyc2lvbiI6IjIifX1dfQ=="
+    ]
+   ],
+   "idempotency_retry_status": 200,
+   "metric": {
+    "refused": 1.0
+   },
+   "ran": [],
+   "registry": null,
+   "status": 402
+  },
+  "v2/before_work/simulation_failed/400": {
+   "audit": [
+    {
+     "client_ip": "testclient",
+     "data": {
+      "error_reason": "invalid_exact_evm_transaction_simulation_failed",
+      "network": "base-sepolia",
+      "nonce": "0x4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c",
+      "success": false,
+      "transaction_hash": null,
+      "x402_version": 2
+     },
+     "event_type": "payment_settled",
+     "wallet_address": "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+    }
+   ],
+   "body": "{\"code\":\"PAYMENT_SETTLEMENT_FAILED\",\"message\":\"The payment could not be settled (invalid_exact_evm_transaction_simulation_failed). Nothing was delivered.\",\"x402_status\":\"settlement_failed\",\"reason\":\"invalid_exact_evm_transaction_simulation_failed\",\"x402Version\":1,\"error\":\"The payment could not be settled (invalid_exact_evm_transaction_simulation_failed). Nothing was delivered.\",\"accepts\":[{\"scheme\":\"exact\",\"network\":\"base-sepolia\",\"maxAmountRequired\":\"20000\",\"resource\":\"http://testserver/api/v1/stamps/\",\"description\":\"Test operation\",\"mimeType\":\"application/json\",\"outputSchema\":null,\"payTo\":\"0x2222222222222222222222222222222222222222\",\"maxTimeoutSeconds\":300,\"asset\":\"0x036CbD53842c5426634e7929541eC2318f3dCF7e\",\"extra\":{\"name\":\"USDC\",\"version\":\"2\"}}],\"detail\":{\"code\":\"PAYMENT_SETTLEMENT_FAILED\",\"message\":\"The payment could not be settled (invalid_exact_evm_transaction_simulation_failed). Nothing was delivered.\",\"x402_status\":\"settlement_failed\",\"reason\":\"invalid_exact_evm_transaction_simulation_failed\",\"x402Version\":1,\"error\":\"The payment could not be settled (invalid_exact_evm_transaction_simulation_failed). Nothing was delivered.\",\"accepts\":[{\"scheme\":\"exact\",\"network\":\"base-sepolia\",\"maxAmountRequired\":\"20000\",\"resource\":\"http://testserver/api/v1/stamps/\",\"description\":\"Test operation\",\"mimeType\":\"application/json\",\"outputSchema\":null,\"payTo\":\"0x2222222222222222222222222222222222222222\",\"maxTimeoutSeconds\":300,\"asset\":\"0x036CbD53842c5426634e7929541eC2318f3dCF7e\",\"extra\":{\"name\":\"USDC\",\"version\":\"2\"}}]}}",
+   "headers": [
+    [
+     "content-length",
+     "1530"
+    ],
+    [
+     "content-type",
+     "application/json"
+    ],
+    [
+     "payment-required",
+     "eyJ4NDAyVmVyc2lvbiI6MiwiZXJyb3IiOiJUaGUgcGF5bWVudCBjb3VsZCBub3QgYmUgc2V0dGxlZCAoaW52YWxpZF9leGFjdF9ldm1fdHJhbnNhY3Rpb25fc2ltdWxhdGlvbl9mYWlsZWQpLiBOb3RoaW5nIHdhcyBkZWxpdmVyZWQuIiwicmVzb3VyY2UiOnsidXJsIjoiaHR0cDovL3Rlc3RzZXJ2ZXIvYXBpL3YxL3N0YW1wcy8iLCJkZXNjcmlwdGlvbiI6IlRlc3Qgb3BlcmF0aW9uIiwibWltZVR5cGUiOiJhcHBsaWNhdGlvbi9qc29uIn0sImFjY2VwdHMiOlt7InNjaGVtZSI6ImV4YWN0IiwibmV0d29yayI6ImVpcDE1NTo4NDUzMiIsImFzc2V0IjoiMHgwMzZDYkQ1Mzg0MmM1NDI2NjM0ZTc5Mjk1NDFlQzIzMThmM2RDRjdlIiwiYW1vdW50IjoiMjAwMDAiLCJwYXlUbyI6IjB4MjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMiIsIm1heFRpbWVvdXRTZWNvbmRzIjozMDAsImV4dHJhIjp7Im5hbWUiOiJVU0RDIiwidmVyc2lvbiI6IjIifX1dfQ=="
+    ]
+   ],
+   "idempotency_retry_status": 200,
+   "metric": {
+    "refused": 1.0
+   },
+   "ran": [],
+   "registry": null,
+   "status": 402
+  },
+  "v2/before_work/valid_before_expired/200": {
+   "audit": [
+    {
+     "client_ip": "testclient",
+     "data": {
+      "error_reason": "invalid_exact_evm_payload_authorization_valid_before",
+      "network": "base-sepolia",
+      "nonce": "0x4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e",
+      "success": false,
+      "transaction_hash": null,
+      "x402_version": 2
+     },
+     "event_type": "payment_settled",
+     "wallet_address": "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+    }
+   ],
+   "body": "{\"code\":\"PAYMENT_SETTLEMENT_FAILED\",\"message\":\"The payment could not be settled (invalid_exact_evm_payload_authorization_valid_before). Nothing was delivered.\",\"x402_status\":\"settlement_failed\",\"reason\":\"invalid_exact_evm_payload_authorization_valid_before\",\"x402Version\":1,\"error\":\"The payment could not be settled (invalid_exact_evm_payload_authorization_valid_before). Nothing was delivered.\",\"accepts\":[{\"scheme\":\"exact\",\"network\":\"base-sepolia\",\"maxAmountRequired\":\"20000\",\"resource\":\"http://testserver/api/v1/stamps/\",\"description\":\"Test operation\",\"mimeType\":\"application/json\",\"outputSchema\":null,\"payTo\":\"0x2222222222222222222222222222222222222222\",\"maxTimeoutSeconds\":300,\"asset\":\"0x036CbD53842c5426634e7929541eC2318f3dCF7e\",\"extra\":{\"name\":\"USDC\",\"version\":\"2\"}}],\"detail\":{\"code\":\"PAYMENT_SETTLEMENT_FAILED\",\"message\":\"The payment could not be settled (invalid_exact_evm_payload_authorization_valid_before). Nothing was delivered.\",\"x402_status\":\"settlement_failed\",\"reason\":\"invalid_exact_evm_payload_authorization_valid_before\",\"x402Version\":1,\"error\":\"The payment could not be settled (invalid_exact_evm_payload_authorization_valid_before). Nothing was delivered.\",\"accepts\":[{\"scheme\":\"exact\",\"network\":\"base-sepolia\",\"maxAmountRequired\":\"20000\",\"resource\":\"http://testserver/api/v1/stamps/\",\"description\":\"Test operation\",\"mimeType\":\"application/json\",\"outputSchema\":null,\"payTo\":\"0x2222222222222222222222222222222222222222\",\"maxTimeoutSeconds\":300,\"asset\":\"0x036CbD53842c5426634e7929541eC2318f3dCF7e\",\"extra\":{\"name\":\"USDC\",\"version\":\"2\"}}]}}",
+   "headers": [
+    [
+     "content-length",
+     "1560"
+    ],
+    [
+     "content-type",
+     "application/json"
+    ],
+    [
+     "payment-required",
+     "eyJ4NDAyVmVyc2lvbiI6MiwiZXJyb3IiOiJUaGUgcGF5bWVudCBjb3VsZCBub3QgYmUgc2V0dGxlZCAoaW52YWxpZF9leGFjdF9ldm1fcGF5bG9hZF9hdXRob3JpemF0aW9uX3ZhbGlkX2JlZm9yZSkuIE5vdGhpbmcgd2FzIGRlbGl2ZXJlZC4iLCJyZXNvdXJjZSI6eyJ1cmwiOiJodHRwOi8vdGVzdHNlcnZlci9hcGkvdjEvc3RhbXBzLyIsImRlc2NyaXB0aW9uIjoiVGVzdCBvcGVyYXRpb24iLCJtaW1lVHlwZSI6ImFwcGxpY2F0aW9uL2pzb24ifSwiYWNjZXB0cyI6W3sic2NoZW1lIjoiZXhhY3QiLCJuZXR3b3JrIjoiZWlwMTU1Ojg0NTMyIiwiYXNzZXQiOiIweDAzNkNiRDUzODQyYzU0MjY2MzRlNzkyOTU0MWVDMjMxOGYzZENGN2UiLCJhbW91bnQiOiIyMDAwMCIsInBheVRvIjoiMHgyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyIiwibWF4VGltZW91dFNlY29uZHMiOjMwMCwiZXh0cmEiOnsibmFtZSI6IlVTREMiLCJ2ZXJzaW9uIjoiMiJ9fV19"
+    ]
+   ],
+   "idempotency_retry_status": 200,
+   "metric": {
+    "refused": 1.0
+   },
+   "ran": [],
+   "registry": null,
+   "status": 402
+  },
+  "v2/before_work/valid_before_expired/400": {
+   "audit": [
+    {
+     "client_ip": "testclient",
+     "data": {
+      "error_reason": "invalid_exact_evm_payload_authorization_valid_before",
+      "network": "base-sepolia",
+      "nonce": "0x5050505050505050505050505050505050505050505050505050505050505050",
+      "success": false,
+      "transaction_hash": null,
+      "x402_version": 2
+     },
+     "event_type": "payment_settled",
+     "wallet_address": "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+    }
+   ],
+   "body": "{\"code\":\"PAYMENT_SETTLEMENT_FAILED\",\"message\":\"The payment could not be settled (invalid_exact_evm_payload_authorization_valid_before). Nothing was delivered.\",\"x402_status\":\"settlement_failed\",\"reason\":\"invalid_exact_evm_payload_authorization_valid_before\",\"x402Version\":1,\"error\":\"The payment could not be settled (invalid_exact_evm_payload_authorization_valid_before). Nothing was delivered.\",\"accepts\":[{\"scheme\":\"exact\",\"network\":\"base-sepolia\",\"maxAmountRequired\":\"20000\",\"resource\":\"http://testserver/api/v1/stamps/\",\"description\":\"Test operation\",\"mimeType\":\"application/json\",\"outputSchema\":null,\"payTo\":\"0x2222222222222222222222222222222222222222\",\"maxTimeoutSeconds\":300,\"asset\":\"0x036CbD53842c5426634e7929541eC2318f3dCF7e\",\"extra\":{\"name\":\"USDC\",\"version\":\"2\"}}],\"detail\":{\"code\":\"PAYMENT_SETTLEMENT_FAILED\",\"message\":\"The payment could not be settled (invalid_exact_evm_payload_authorization_valid_before). Nothing was delivered.\",\"x402_status\":\"settlement_failed\",\"reason\":\"invalid_exact_evm_payload_authorization_valid_before\",\"x402Version\":1,\"error\":\"The payment could not be settled (invalid_exact_evm_payload_authorization_valid_before). Nothing was delivered.\",\"accepts\":[{\"scheme\":\"exact\",\"network\":\"base-sepolia\",\"maxAmountRequired\":\"20000\",\"resource\":\"http://testserver/api/v1/stamps/\",\"description\":\"Test operation\",\"mimeType\":\"application/json\",\"outputSchema\":null,\"payTo\":\"0x2222222222222222222222222222222222222222\",\"maxTimeoutSeconds\":300,\"asset\":\"0x036CbD53842c5426634e7929541eC2318f3dCF7e\",\"extra\":{\"name\":\"USDC\",\"version\":\"2\"}}]}}",
+   "headers": [
+    [
+     "content-length",
+     "1560"
+    ],
+    [
+     "content-type",
+     "application/json"
+    ],
+    [
+     "payment-required",
+     "eyJ4NDAyVmVyc2lvbiI6MiwiZXJyb3IiOiJUaGUgcGF5bWVudCBjb3VsZCBub3QgYmUgc2V0dGxlZCAoaW52YWxpZF9leGFjdF9ldm1fcGF5bG9hZF9hdXRob3JpemF0aW9uX3ZhbGlkX2JlZm9yZSkuIE5vdGhpbmcgd2FzIGRlbGl2ZXJlZC4iLCJyZXNvdXJjZSI6eyJ1cmwiOiJodHRwOi8vdGVzdHNlcnZlci9hcGkvdjEvc3RhbXBzLyIsImRlc2NyaXB0aW9uIjoiVGVzdCBvcGVyYXRpb24iLCJtaW1lVHlwZSI6ImFwcGxpY2F0aW9uL2pzb24ifSwiYWNjZXB0cyI6W3sic2NoZW1lIjoiZXhhY3QiLCJuZXR3b3JrIjoiZWlwMTU1Ojg0NTMyIiwiYXNzZXQiOiIweDAzNkNiRDUzODQyYzU0MjY2MzRlNzkyOTU0MWVDMjMxOGYzZENGN2UiLCJhbW91bnQiOiIyMDAwMCIsInBheVRvIjoiMHgyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyIiwibWF4VGltZW91dFNlY29uZHMiOjMwMCwiZXh0cmEiOnsibmFtZSI6IlVTREMiLCJ2ZXJzaW9uIjoiMiJ9fV19"
     ]
    ],
    "idempotency_retry_status": 200,
@@ -1682,14 +1202,14 @@
   }
  },
  "refused_after_unknown": {
-  "v1/after_work/invalid_transaction_state": {
+  "v1/after_work/insufficient_funds": {
    "audit": [
     {
      "client_ip": "testclient",
      "data": {
-      "error_reason": "invalid_transaction_state",
+      "error_reason": "insufficient_funds",
       "network": "base-sepolia",
-      "nonce": "0x1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f",
+      "nonce": "0x1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b",
       "success": false,
       "transaction_hash": null,
       "x402_version": 1
@@ -1700,8 +1220,8 @@
     {
      "client_ip": "testclient",
      "data": {
-      "nonce": "0x1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f",
-      "reason": "409 PAYMENT_AUTHORIZATION_OUTCOME_UNKNOWN at settle (invalid_transaction_state)",
+      "nonce": "0x1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b",
+      "reason": "409 PAYMENT_AUTHORIZATION_OUTCOME_UNKNOWN at settle (insufficient_funds)",
       "stage": "outcome_unknown_retry",
       "x402_version": 1
      },
@@ -1709,11 +1229,11 @@
      "wallet_address": "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
     }
    ],
-   "body": "{\"detail\":{\"code\":\"PAYMENT_AUTHORIZATION_OUTCOME_UNKNOWN\",\"message\":\"An earlier request with this payment authorization ended without a settlement answer, so that transfer may already have been collected. This request's work ran, but its result is withheld and it was not charged. Do not pay again from this response. Check on-chain whether this authorization's nonce was used. If it was, contact the operator with the nonce. If it was not, the facilitator may still submit it, so before signing a new payment wait until its validBefore has passed, or cancel it on-chain with EIP-3009 cancelAuthorization.\",\"nonce\":\"0x1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f\",\"x402_status\":\"settlement_unknown\",\"reason\":\"invalid_transaction_state\"},\"code\":\"PAYMENT_AUTHORIZATION_OUTCOME_UNKNOWN\",\"message\":\"An earlier request with this payment authorization ended without a settlement answer, so that transfer may already have been collected. This request's work ran, but its result is withheld and it was not charged. Do not pay again from this response. Check on-chain whether this authorization's nonce was used. If it was, contact the operator with the nonce. If it was not, the facilitator may still submit it, so before signing a new payment wait until its validBefore has passed, or cancel it on-chain with EIP-3009 cancelAuthorization.\"}",
+   "body": "{\"detail\":{\"code\":\"PAYMENT_AUTHORIZATION_OUTCOME_UNKNOWN\",\"message\":\"An earlier request with this payment authorization ended without a settlement answer, so that transfer may already have been collected. This request's work ran, but its result is withheld and it was not charged. Do not pay again from this response. Check on-chain whether this authorization's nonce was used. If it was, contact the operator with the nonce. If it was not, the facilitator may still submit it, so before signing a new payment wait until its validBefore has passed, or cancel it on-chain with EIP-3009 cancelAuthorization.\",\"nonce\":\"0x1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b\",\"x402_status\":\"settlement_unknown\",\"reason\":\"insufficient_funds\"},\"code\":\"PAYMENT_AUTHORIZATION_OUTCOME_UNKNOWN\",\"message\":\"An earlier request with this payment authorization ended without a settlement answer, so that transfer may already have been collected. This request's work ran, but its result is withheld and it was not charged. Do not pay again from this response. Check on-chain whether this authorization's nonce was used. If it was, contact the operator with the nonce. If it was not, the facilitator may still submit it, so before signing a new payment wait until its validBefore has passed, or cancel it on-chain with EIP-3009 cancelAuthorization.\"}",
    "headers": [
     [
      "content-length",
-     "1353"
+     "1346"
     ],
     [
      "content-type",
@@ -1744,7 +1264,7 @@
      "data": {
       "error_reason": "invalid_exact_evm_nonce_already_used",
       "network": "base-sepolia",
-      "nonce": "0x1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e",
+      "nonce": "0x1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a",
       "success": false,
       "transaction_hash": null,
       "x402_version": 1
@@ -1755,7 +1275,7 @@
     {
      "client_ip": "testclient",
      "data": {
-      "nonce": "0x1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e",
+      "nonce": "0x1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a",
       "reason": "409 PAYMENT_AUTHORIZATION_OUTCOME_UNKNOWN at settle (invalid_exact_evm_nonce_already_used)",
       "stage": "outcome_unknown_retry",
       "x402_version": 1
@@ -1764,7 +1284,7 @@
      "wallet_address": "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
     }
    ],
-   "body": "{\"detail\":{\"code\":\"PAYMENT_AUTHORIZATION_OUTCOME_UNKNOWN\",\"message\":\"An earlier request with this payment authorization ended without a settlement answer, so that transfer may already have been collected. This request's work ran, but its result is withheld and it was not charged. Do not pay again from this response. Check on-chain whether this authorization's nonce was used. If it was, contact the operator with the nonce. If it was not, the facilitator may still submit it, so before signing a new payment wait until its validBefore has passed, or cancel it on-chain with EIP-3009 cancelAuthorization.\",\"nonce\":\"0x1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e\",\"x402_status\":\"settlement_unknown\",\"reason\":\"invalid_exact_evm_nonce_already_used\"},\"code\":\"PAYMENT_AUTHORIZATION_OUTCOME_UNKNOWN\",\"message\":\"An earlier request with this payment authorization ended without a settlement answer, so that transfer may already have been collected. This request's work ran, but its result is withheld and it was not charged. Do not pay again from this response. Check on-chain whether this authorization's nonce was used. If it was, contact the operator with the nonce. If it was not, the facilitator may still submit it, so before signing a new payment wait until its validBefore has passed, or cancel it on-chain with EIP-3009 cancelAuthorization.\"}",
+   "body": "{\"detail\":{\"code\":\"PAYMENT_AUTHORIZATION_OUTCOME_UNKNOWN\",\"message\":\"An earlier request with this payment authorization ended without a settlement answer, so that transfer may already have been collected. This request's work ran, but its result is withheld and it was not charged. Do not pay again from this response. Check on-chain whether this authorization's nonce was used. If it was, contact the operator with the nonce. If it was not, the facilitator may still submit it, so before signing a new payment wait until its validBefore has passed, or cancel it on-chain with EIP-3009 cancelAuthorization.\",\"nonce\":\"0x1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a\",\"x402_status\":\"settlement_unknown\",\"reason\":\"invalid_exact_evm_nonce_already_used\"},\"code\":\"PAYMENT_AUTHORIZATION_OUTCOME_UNKNOWN\",\"message\":\"An earlier request with this payment authorization ended without a settlement answer, so that transfer may already have been collected. This request's work ran, but its result is withheld and it was not charged. Do not pay again from this response. Check on-chain whether this authorization's nonce was used. If it was, contact the operator with the nonce. If it was not, the facilitator may still submit it, so before signing a new payment wait until its validBefore has passed, or cancel it on-chain with EIP-3009 cancelAuthorization.\"}",
    "headers": [
     [
      "content-length",
@@ -1792,14 +1312,14 @@
    "registry": "after_work",
    "status": 409
   },
-  "v1/before_work/invalid_transaction_state": {
+  "v1/before_work/insufficient_funds": {
    "audit": [
     {
      "client_ip": "testclient",
      "data": {
-      "error_reason": "invalid_transaction_state",
+      "error_reason": "insufficient_funds",
       "network": "base-sepolia",
-      "nonce": "0x2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f",
+      "nonce": "0x2727272727272727272727272727272727272727272727272727272727272727",
       "success": false,
       "transaction_hash": null,
       "x402_version": 1
@@ -1810,8 +1330,8 @@
     {
      "client_ip": "testclient",
      "data": {
-      "nonce": "0x2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f",
-      "reason": "409 PAYMENT_AUTHORIZATION_OUTCOME_UNKNOWN at settle (invalid_transaction_state)",
+      "nonce": "0x2727272727272727272727272727272727272727272727272727272727272727",
+      "reason": "409 PAYMENT_AUTHORIZATION_OUTCOME_UNKNOWN at settle (insufficient_funds)",
       "stage": "outcome_unknown_retry",
       "x402_version": 1
      },
@@ -1819,11 +1339,11 @@
      "wallet_address": "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
     }
    ],
-   "body": "{\"detail\":{\"code\":\"PAYMENT_AUTHORIZATION_OUTCOME_UNKNOWN\",\"message\":\"An earlier request with this payment authorization ended without a settlement answer, so that transfer may already have been collected. This request did nothing and was not charged. Do not pay again from this response. Check on-chain whether this authorization's nonce was used. If it was, contact the operator with the nonce. If it was not, the facilitator may still submit it, so before signing a new payment wait until its validBefore has passed, or cancel it on-chain with EIP-3009 cancelAuthorization.\",\"nonce\":\"0x2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f\",\"x402_status\":\"settlement_unknown\",\"reason\":\"invalid_transaction_state\"},\"code\":\"PAYMENT_AUTHORIZATION_OUTCOME_UNKNOWN\",\"message\":\"An earlier request with this payment authorization ended without a settlement answer, so that transfer may already have been collected. This request did nothing and was not charged. Do not pay again from this response. Check on-chain whether this authorization's nonce was used. If it was, contact the operator with the nonce. If it was not, the facilitator may still submit it, so before signing a new payment wait until its validBefore has passed, or cancel it on-chain with EIP-3009 cancelAuthorization.\"}",
+   "body": "{\"detail\":{\"code\":\"PAYMENT_AUTHORIZATION_OUTCOME_UNKNOWN\",\"message\":\"An earlier request with this payment authorization ended without a settlement answer, so that transfer may already have been collected. This request did nothing and was not charged. Do not pay again from this response. Check on-chain whether this authorization's nonce was used. If it was, contact the operator with the nonce. If it was not, the facilitator may still submit it, so before signing a new payment wait until its validBefore has passed, or cancel it on-chain with EIP-3009 cancelAuthorization.\",\"nonce\":\"0x2727272727272727272727272727272727272727272727272727272727272727\",\"x402_status\":\"settlement_unknown\",\"reason\":\"insufficient_funds\"},\"code\":\"PAYMENT_AUTHORIZATION_OUTCOME_UNKNOWN\",\"message\":\"An earlier request with this payment authorization ended without a settlement answer, so that transfer may already have been collected. This request did nothing and was not charged. Do not pay again from this response. Check on-chain whether this authorization's nonce was used. If it was, contact the operator with the nonce. If it was not, the facilitator may still submit it, so before signing a new payment wait until its validBefore has passed, or cancel it on-chain with EIP-3009 cancelAuthorization.\"}",
    "headers": [
     [
      "content-length",
-     "1293"
+     "1286"
     ],
     [
      "content-type",
@@ -1852,7 +1372,7 @@
      "data": {
       "error_reason": "invalid_exact_evm_nonce_already_used",
       "network": "base-sepolia",
-      "nonce": "0x2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e",
+      "nonce": "0x2626262626262626262626262626262626262626262626262626262626262626",
       "success": false,
       "transaction_hash": null,
       "x402_version": 1
@@ -1863,7 +1383,7 @@
     {
      "client_ip": "testclient",
      "data": {
-      "nonce": "0x2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e",
+      "nonce": "0x2626262626262626262626262626262626262626262626262626262626262626",
       "reason": "409 PAYMENT_AUTHORIZATION_OUTCOME_UNKNOWN at settle (invalid_exact_evm_nonce_already_used)",
       "stage": "outcome_unknown_retry",
       "x402_version": 1
@@ -1872,7 +1392,7 @@
      "wallet_address": "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
     }
    ],
-   "body": "{\"detail\":{\"code\":\"PAYMENT_AUTHORIZATION_OUTCOME_UNKNOWN\",\"message\":\"An earlier request with this payment authorization ended without a settlement answer, so that transfer may already have been collected. This request did nothing and was not charged. Do not pay again from this response. Check on-chain whether this authorization's nonce was used. If it was, contact the operator with the nonce. If it was not, the facilitator may still submit it, so before signing a new payment wait until its validBefore has passed, or cancel it on-chain with EIP-3009 cancelAuthorization.\",\"nonce\":\"0x2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e\",\"x402_status\":\"settlement_unknown\",\"reason\":\"invalid_exact_evm_nonce_already_used\"},\"code\":\"PAYMENT_AUTHORIZATION_OUTCOME_UNKNOWN\",\"message\":\"An earlier request with this payment authorization ended without a settlement answer, so that transfer may already have been collected. This request did nothing and was not charged. Do not pay again from this response. Check on-chain whether this authorization's nonce was used. If it was, contact the operator with the nonce. If it was not, the facilitator may still submit it, so before signing a new payment wait until its validBefore has passed, or cancel it on-chain with EIP-3009 cancelAuthorization.\"}",
+   "body": "{\"detail\":{\"code\":\"PAYMENT_AUTHORIZATION_OUTCOME_UNKNOWN\",\"message\":\"An earlier request with this payment authorization ended without a settlement answer, so that transfer may already have been collected. This request did nothing and was not charged. Do not pay again from this response. Check on-chain whether this authorization's nonce was used. If it was, contact the operator with the nonce. If it was not, the facilitator may still submit it, so before signing a new payment wait until its validBefore has passed, or cancel it on-chain with EIP-3009 cancelAuthorization.\",\"nonce\":\"0x2626262626262626262626262626262626262626262626262626262626262626\",\"x402_status\":\"settlement_unknown\",\"reason\":\"invalid_exact_evm_nonce_already_used\"},\"code\":\"PAYMENT_AUTHORIZATION_OUTCOME_UNKNOWN\",\"message\":\"An earlier request with this payment authorization ended without a settlement answer, so that transfer may already have been collected. This request did nothing and was not charged. Do not pay again from this response. Check on-chain whether this authorization's nonce was used. If it was, contact the operator with the nonce. If it was not, the facilitator may still submit it, so before signing a new payment wait until its validBefore has passed, or cancel it on-chain with EIP-3009 cancelAuthorization.\"}",
    "headers": [
     [
      "content-length",
@@ -1898,14 +1418,14 @@
    "registry": "before_work",
    "status": 409
   },
-  "v2/after_work/invalid_transaction_state": {
+  "v2/after_work/insufficient_funds": {
    "audit": [
     {
      "client_ip": "testclient",
      "data": {
-      "error_reason": "invalid_transaction_state",
+      "error_reason": "insufficient_funds",
       "network": "base-sepolia",
-      "nonce": "0x4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d",
+      "nonce": "0x3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d",
       "success": false,
       "transaction_hash": null,
       "x402_version": 2
@@ -1916,8 +1436,8 @@
     {
      "client_ip": "testclient",
      "data": {
-      "nonce": "0x4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d",
-      "reason": "409 PAYMENT_AUTHORIZATION_OUTCOME_UNKNOWN at settle (invalid_transaction_state)",
+      "nonce": "0x3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d",
+      "reason": "409 PAYMENT_AUTHORIZATION_OUTCOME_UNKNOWN at settle (insufficient_funds)",
       "stage": "outcome_unknown_retry",
       "x402_version": 2
      },
@@ -1925,11 +1445,11 @@
      "wallet_address": "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
     }
    ],
-   "body": "{\"detail\":{\"code\":\"PAYMENT_AUTHORIZATION_OUTCOME_UNKNOWN\",\"message\":\"An earlier request with this payment authorization ended without a settlement answer, so that transfer may already have been collected. This request's work ran, but its result is withheld and it was not charged. Do not pay again from this response. Check on-chain whether this authorization's nonce was used. If it was, contact the operator with the nonce. If it was not, the facilitator may still submit it, so before signing a new payment wait until its validBefore has passed, or cancel it on-chain with EIP-3009 cancelAuthorization.\",\"nonce\":\"0x4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d\",\"x402_status\":\"settlement_unknown\",\"reason\":\"invalid_transaction_state\"},\"code\":\"PAYMENT_AUTHORIZATION_OUTCOME_UNKNOWN\",\"message\":\"An earlier request with this payment authorization ended without a settlement answer, so that transfer may already have been collected. This request's work ran, but its result is withheld and it was not charged. Do not pay again from this response. Check on-chain whether this authorization's nonce was used. If it was, contact the operator with the nonce. If it was not, the facilitator may still submit it, so before signing a new payment wait until its validBefore has passed, or cancel it on-chain with EIP-3009 cancelAuthorization.\"}",
+   "body": "{\"detail\":{\"code\":\"PAYMENT_AUTHORIZATION_OUTCOME_UNKNOWN\",\"message\":\"An earlier request with this payment authorization ended without a settlement answer, so that transfer may already have been collected. This request's work ran, but its result is withheld and it was not charged. Do not pay again from this response. Check on-chain whether this authorization's nonce was used. If it was, contact the operator with the nonce. If it was not, the facilitator may still submit it, so before signing a new payment wait until its validBefore has passed, or cancel it on-chain with EIP-3009 cancelAuthorization.\",\"nonce\":\"0x3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d\",\"x402_status\":\"settlement_unknown\",\"reason\":\"insufficient_funds\"},\"code\":\"PAYMENT_AUTHORIZATION_OUTCOME_UNKNOWN\",\"message\":\"An earlier request with this payment authorization ended without a settlement answer, so that transfer may already have been collected. This request's work ran, but its result is withheld and it was not charged. Do not pay again from this response. Check on-chain whether this authorization's nonce was used. If it was, contact the operator with the nonce. If it was not, the facilitator may still submit it, so before signing a new payment wait until its validBefore has passed, or cancel it on-chain with EIP-3009 cancelAuthorization.\"}",
    "headers": [
     [
      "content-length",
-     "1353"
+     "1346"
     ],
     [
      "content-type",
@@ -1960,7 +1480,7 @@
      "data": {
       "error_reason": "invalid_exact_evm_nonce_already_used",
       "network": "base-sepolia",
-      "nonce": "0x4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c",
+      "nonce": "0x3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c",
       "success": false,
       "transaction_hash": null,
       "x402_version": 2
@@ -1971,7 +1491,7 @@
     {
      "client_ip": "testclient",
      "data": {
-      "nonce": "0x4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c",
+      "nonce": "0x3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c",
       "reason": "409 PAYMENT_AUTHORIZATION_OUTCOME_UNKNOWN at settle (invalid_exact_evm_nonce_already_used)",
       "stage": "outcome_unknown_retry",
       "x402_version": 2
@@ -1980,7 +1500,7 @@
      "wallet_address": "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
     }
    ],
-   "body": "{\"detail\":{\"code\":\"PAYMENT_AUTHORIZATION_OUTCOME_UNKNOWN\",\"message\":\"An earlier request with this payment authorization ended without a settlement answer, so that transfer may already have been collected. This request's work ran, but its result is withheld and it was not charged. Do not pay again from this response. Check on-chain whether this authorization's nonce was used. If it was, contact the operator with the nonce. If it was not, the facilitator may still submit it, so before signing a new payment wait until its validBefore has passed, or cancel it on-chain with EIP-3009 cancelAuthorization.\",\"nonce\":\"0x4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c\",\"x402_status\":\"settlement_unknown\",\"reason\":\"invalid_exact_evm_nonce_already_used\"},\"code\":\"PAYMENT_AUTHORIZATION_OUTCOME_UNKNOWN\",\"message\":\"An earlier request with this payment authorization ended without a settlement answer, so that transfer may already have been collected. This request's work ran, but its result is withheld and it was not charged. Do not pay again from this response. Check on-chain whether this authorization's nonce was used. If it was, contact the operator with the nonce. If it was not, the facilitator may still submit it, so before signing a new payment wait until its validBefore has passed, or cancel it on-chain with EIP-3009 cancelAuthorization.\"}",
+   "body": "{\"detail\":{\"code\":\"PAYMENT_AUTHORIZATION_OUTCOME_UNKNOWN\",\"message\":\"An earlier request with this payment authorization ended without a settlement answer, so that transfer may already have been collected. This request's work ran, but its result is withheld and it was not charged. Do not pay again from this response. Check on-chain whether this authorization's nonce was used. If it was, contact the operator with the nonce. If it was not, the facilitator may still submit it, so before signing a new payment wait until its validBefore has passed, or cancel it on-chain with EIP-3009 cancelAuthorization.\",\"nonce\":\"0x3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c\",\"x402_status\":\"settlement_unknown\",\"reason\":\"invalid_exact_evm_nonce_already_used\"},\"code\":\"PAYMENT_AUTHORIZATION_OUTCOME_UNKNOWN\",\"message\":\"An earlier request with this payment authorization ended without a settlement answer, so that transfer may already have been collected. This request's work ran, but its result is withheld and it was not charged. Do not pay again from this response. Check on-chain whether this authorization's nonce was used. If it was, contact the operator with the nonce. If it was not, the facilitator may still submit it, so before signing a new payment wait until its validBefore has passed, or cancel it on-chain with EIP-3009 cancelAuthorization.\"}",
    "headers": [
     [
      "content-length",
@@ -2008,14 +1528,14 @@
    "registry": "after_work",
    "status": 409
   },
-  "v2/before_work/invalid_transaction_state": {
+  "v2/before_work/insufficient_funds": {
    "audit": [
     {
      "client_ip": "testclient",
      "data": {
-      "error_reason": "invalid_transaction_state",
+      "error_reason": "insufficient_funds",
       "network": "base-sepolia",
-      "nonce": "0x6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b",
+      "nonce": "0x5353535353535353535353535353535353535353535353535353535353535353",
       "success": false,
       "transaction_hash": null,
       "x402_version": 2
@@ -2026,8 +1546,8 @@
     {
      "client_ip": "testclient",
      "data": {
-      "nonce": "0x6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b",
-      "reason": "409 PAYMENT_AUTHORIZATION_OUTCOME_UNKNOWN at settle (invalid_transaction_state)",
+      "nonce": "0x5353535353535353535353535353535353535353535353535353535353535353",
+      "reason": "409 PAYMENT_AUTHORIZATION_OUTCOME_UNKNOWN at settle (insufficient_funds)",
       "stage": "outcome_unknown_retry",
       "x402_version": 2
      },
@@ -2035,11 +1555,11 @@
      "wallet_address": "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
     }
    ],
-   "body": "{\"detail\":{\"code\":\"PAYMENT_AUTHORIZATION_OUTCOME_UNKNOWN\",\"message\":\"An earlier request with this payment authorization ended without a settlement answer, so that transfer may already have been collected. This request did nothing and was not charged. Do not pay again from this response. Check on-chain whether this authorization's nonce was used. If it was, contact the operator with the nonce. If it was not, the facilitator may still submit it, so before signing a new payment wait until its validBefore has passed, or cancel it on-chain with EIP-3009 cancelAuthorization.\",\"nonce\":\"0x6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b\",\"x402_status\":\"settlement_unknown\",\"reason\":\"invalid_transaction_state\"},\"code\":\"PAYMENT_AUTHORIZATION_OUTCOME_UNKNOWN\",\"message\":\"An earlier request with this payment authorization ended without a settlement answer, so that transfer may already have been collected. This request did nothing and was not charged. Do not pay again from this response. Check on-chain whether this authorization's nonce was used. If it was, contact the operator with the nonce. If it was not, the facilitator may still submit it, so before signing a new payment wait until its validBefore has passed, or cancel it on-chain with EIP-3009 cancelAuthorization.\"}",
+   "body": "{\"detail\":{\"code\":\"PAYMENT_AUTHORIZATION_OUTCOME_UNKNOWN\",\"message\":\"An earlier request with this payment authorization ended without a settlement answer, so that transfer may already have been collected. This request did nothing and was not charged. Do not pay again from this response. Check on-chain whether this authorization's nonce was used. If it was, contact the operator with the nonce. If it was not, the facilitator may still submit it, so before signing a new payment wait until its validBefore has passed, or cancel it on-chain with EIP-3009 cancelAuthorization.\",\"nonce\":\"0x5353535353535353535353535353535353535353535353535353535353535353\",\"x402_status\":\"settlement_unknown\",\"reason\":\"insufficient_funds\"},\"code\":\"PAYMENT_AUTHORIZATION_OUTCOME_UNKNOWN\",\"message\":\"An earlier request with this payment authorization ended without a settlement answer, so that transfer may already have been collected. This request did nothing and was not charged. Do not pay again from this response. Check on-chain whether this authorization's nonce was used. If it was, contact the operator with the nonce. If it was not, the facilitator may still submit it, so before signing a new payment wait until its validBefore has passed, or cancel it on-chain with EIP-3009 cancelAuthorization.\"}",
    "headers": [
     [
      "content-length",
-     "1293"
+     "1286"
     ],
     [
      "content-type",
@@ -2068,7 +1588,7 @@
      "data": {
       "error_reason": "invalid_exact_evm_nonce_already_used",
       "network": "base-sepolia",
-      "nonce": "0x6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a",
+      "nonce": "0x5252525252525252525252525252525252525252525252525252525252525252",
       "success": false,
       "transaction_hash": null,
       "x402_version": 2
@@ -2079,7 +1599,7 @@
     {
      "client_ip": "testclient",
      "data": {
-      "nonce": "0x6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a",
+      "nonce": "0x5252525252525252525252525252525252525252525252525252525252525252",
       "reason": "409 PAYMENT_AUTHORIZATION_OUTCOME_UNKNOWN at settle (invalid_exact_evm_nonce_already_used)",
       "stage": "outcome_unknown_retry",
       "x402_version": 2
@@ -2088,7 +1608,7 @@
      "wallet_address": "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
     }
    ],
-   "body": "{\"detail\":{\"code\":\"PAYMENT_AUTHORIZATION_OUTCOME_UNKNOWN\",\"message\":\"An earlier request with this payment authorization ended without a settlement answer, so that transfer may already have been collected. This request did nothing and was not charged. Do not pay again from this response. Check on-chain whether this authorization's nonce was used. If it was, contact the operator with the nonce. If it was not, the facilitator may still submit it, so before signing a new payment wait until its validBefore has passed, or cancel it on-chain with EIP-3009 cancelAuthorization.\",\"nonce\":\"0x6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a\",\"x402_status\":\"settlement_unknown\",\"reason\":\"invalid_exact_evm_nonce_already_used\"},\"code\":\"PAYMENT_AUTHORIZATION_OUTCOME_UNKNOWN\",\"message\":\"An earlier request with this payment authorization ended without a settlement answer, so that transfer may already have been collected. This request did nothing and was not charged. Do not pay again from this response. Check on-chain whether this authorization's nonce was used. If it was, contact the operator with the nonce. If it was not, the facilitator may still submit it, so before signing a new payment wait until its validBefore has passed, or cancel it on-chain with EIP-3009 cancelAuthorization.\"}",
+   "body": "{\"detail\":{\"code\":\"PAYMENT_AUTHORIZATION_OUTCOME_UNKNOWN\",\"message\":\"An earlier request with this payment authorization ended without a settlement answer, so that transfer may already have been collected. This request did nothing and was not charged. Do not pay again from this response. Check on-chain whether this authorization's nonce was used. If it was, contact the operator with the nonce. If it was not, the facilitator may still submit it, so before signing a new payment wait until its validBefore has passed, or cancel it on-chain with EIP-3009 cancelAuthorization.\",\"nonce\":\"0x5252525252525252525252525252525252525252525252525252525252525252\",\"x402_status\":\"settlement_unknown\",\"reason\":\"invalid_exact_evm_nonce_already_used\"},\"code\":\"PAYMENT_AUTHORIZATION_OUTCOME_UNKNOWN\",\"message\":\"An earlier request with this payment authorization ended without a settlement answer, so that transfer may already have been collected. This request did nothing and was not charged. Do not pay again from this response. Check on-chain whether this authorization's nonce was used. If it was, contact the operator with the nonce. If it was not, the facilitator may still submit it, so before signing a new payment wait until its validBefore has passed, or cancel it on-chain with EIP-3009 cancelAuthorization.\"}",
    "headers": [
     [
      "content-length",
