@@ -146,7 +146,7 @@ Refunds are manual USDC transfers from the pay-to wallet to the payer address in
 
 `scripts/backup_state.sh` archives `/opt/swarm_connect_data` and `/opt/swarm_connect_dev_data`. They hold the ownership registry, prepaid bandwidth credit, pool state, allowance and spend counters, stored Idempotency-Key results, and the audit log. If `x402_idempotency.json` is unreadable, the gateway keeps it, saves a `.corrupt-<ts>` copy, logs an ERROR and refuses keyed paid requests (`503 IDEMPOTENCY_UNAVAILABLE`); restore it from backup, or move it away to start empty (retries of the last 24 h are then charged again). `x402_settlement_unknown.json` (payment authorizations whose settlement got no answer, 24 h) is handled the same way, except that while it is unreadable **every** paid request is refused (`503 PAYMENT_STATE_UNAVAILABLE`, uncharged): restore it from backup, or move it away to start empty (a retry of an authorization from the last 24 h may then get a payable 402, or rerun work that already ran). Either way, **restart the gateway** afterwards: the file is read only at startup, and until then the 503 persists.
 
-**The archives contain bearer credit tokens.** Treat every copy, including the off-host one, as secret, and set retention on the remote side as well: the script only prunes locally.
+**The archives contain bearer credit tokens.** Treat every copy, including the off-host one, as secret, and set retention on the remote side as well: the script only prunes locally. An S3 copy (below) is encrypted before it leaves the host; an rsync/scp copy is not.
 
 Install it **outside** the deployed checkout (every deploy re-clones `/opt/swarm_connect`), nightly, with an off-host copy:
 
@@ -228,6 +228,95 @@ To recover:
 
 Rotated files stay on the volume, and are therefore in the backups.
 
+### Off-host copy to an S3-compatible bucket (#493)
+
+`backup_state.sh` can also copy each archive to an S3-compatible object store, in addition to `BACKUP_REMOTE` or instead of it. It works with any provider that speaks the S3 API: AWS, or another provider through a custom endpoint. Nothing changes until it is configured. With no `BACKUP_S3_*` setting and no settings file, the script does exactly what it did before. Each archive is uploaded **encrypted**:
+- The script runs `age -r <recipient>` on the archive in a temporary directory that only ever holds ciphertext. The host holds only the public recipient, so it cannot decrypt its own uploads.
+- It uploads `<archive>.tar.gz.age` and `<archive>.tar.gz.age.sha256` next to each other. The checksum covers the **ciphertext**, in `sha256sum -c` format, so a downloaded copy can be checked without the decryption key. `age -d` checks the plaintext itself: age authenticates what it decrypts and refuses a modified file.
+- It then lists the prefix and compares the size of both objects with the local files. **There is no re-download check:** the host's key deliberately has no read right, so a host cannot fetch back the archives. Test a real restore by hand from time to time, as below.
+
+Failure semantics are the same as for `BACKUP_REMOTE`. Any configuration error, encryption failure, failed upload or size mismatch logs `FAILED: off-host copy of <archive> to …`, keeps the local archive, makes the run exit 1, and leaves `.last_success` untouched. A configuration error does not stop the local archives: they are still written, and each logs `FAILED: off-host copy of <archive> to S3: <reason>`.
+
+**Tool: rclone, pinned to v1.75.2.** The script refuses any other version (`rclone vX is installed, expected exactly v1.75.2`). The reasons for rclone are in the script header: one upstream `.deb`, any S3 provider, credentials passed in its environment (never on a command line, so nothing shows in `ps`), and support for a put+list-only key. Ubuntu 24.04's own `rclone` package is an older release, so do not use it.
+
+Setup, as root on each gateway host:
+
+```sh
+apt-get install -y age
+cd /tmp && curl -fsSLO https://downloads.rclone.org/v1.75.2/rclone-v1.75.2-linux-amd64.deb
+echo "efbfe852181f7191eb3c9043ed1ab49c9b2d0ba045c61c926a5da111c939ec5c  rclone-v1.75.2-linux-amd64.deb" | sha256sum -c -
+dpkg -i rclone-v1.75.2-linux-amd64.deb && rclone version | head -1      # rclone v1.75.2
+# the script itself: same path and mode as before (re-run after every change to it)
+install -m 0755 /opt/swarm_connect/scripts/backup_state.sh /usr/local/sbin/swarm_connect_backup
+# settings and credentials: one root-only file outside the checkout, parsed (never sourced) by the script
+install -d -m 0700 /etc/swarm_connect
+install -m 0600 /dev/null /etc/swarm_connect/backup_s3.env
+cat > /etc/swarm_connect/backup_s3.env <<'ENV'
+BACKUP_S3_URI=s3://<bucket>/<host-prefix>
+BACKUP_S3_ENDPOINT=<https://endpoint-of-the-provider, or leave the line out for AWS>
+BACKUP_S3_REGION=<region>
+BACKUP_S3_AGE_RECIPIENT=<gateway-state-age-recipient>
+BACKUP_S3_ACCESS_KEY_ID=<access key id>
+BACKUP_S3_SECRET_ACCESS_KEY=<secret access key>
+ENV
+/usr/local/sbin/swarm_connect_backup     # first run by hand; each archive must log "copied off-host to s3://..."
+```
+
+The cron line in `/etc/cron.d/swarm_connect_backup` stays as it is. It must not carry any `BACKUP_S3_*` credential: the script refuses `BACKUP_S3_ACCESS_KEY_ID` and `BACKUP_S3_SECRET_ACCESS_KEY` from the environment and accepts them only from the file. The file:
+- has the same format and checks as `/etc/swarm_connect/bee_keys.env` (below): `KEY=VALUE` lines for the six settings above only, `#` comments, literal values, optionally quoted (quotes are needed for several recipients);
+- is refused if it is a symlink, is not owned by root, or can be written by group or others, or its directory can;
+- has values that override the environment. `BACKUP_S3_ENV_FILE` names another file, by absolute path; the empty value means no file.
+
+`BACKUP_S3_URI`, `BACKUP_S3_ENDPOINT`, `BACKUP_S3_REGION` and `BACKUP_S3_AGE_RECIPIENT` may also be set in the environment, but keep them in the file so that cron and a manual run match. These are host settings for the cron job, not gateway settings, so they are not in `.env.example`.
+
+The script before #493 ran under `/bin/sh`. It is now a bash script (`#!/usr/bin/env bash`). The cron line keeps working unchanged: it runs `/usr/local/sbin/swarm_connect_backup` by its path, so the shebang picks the interpreter, and `install -m 0755` sets the executable bit. Hosts keep running the old copy until the `install` line above is run again.
+
+**The bucket**, set up once by an account that is not on any gateway host:
+1. Create a dedicated bucket with **Object Lock** enabled; this also turns versioning on. Set a default retention, for example GOVERNANCE (or COMPLIANCE) mode for 30 days. Where a provider has no Object Lock, turn on versioning at least. Use one prefix per host (`<bucket>/<host-prefix>/`).
+2. Create an access key per host, limited to that host's prefix with **put and list only**. In AWS IAM terms:
+
+   ```json
+   {"Version": "2012-10-17", "Statement": [
+     {"Effect": "Allow", "Action": ["s3:PutObject"], "Resource": ["arn:aws:s3:::<bucket>/<host-prefix>/*"]},
+     {"Effect": "Allow", "Action": ["s3:ListBucket"], "Resource": ["arn:aws:s3:::<bucket>"],
+      "Condition": {"StringLike": {"s3:prefix": ["<host-prefix>/", "<host-prefix>/*"]}}}]}
+   ```
+
+   No `s3:GetObject`, `s3:DeleteObject`, retention, lifecycle or bucket-policy rights. A compromised host can then add objects but cannot read, delete or shorten the retention of any. An upload under an existing name only adds a new version, and the old one stays locked. The script works with exactly these rights; it never checks or creates the bucket and never reads an object back.
+3. Add a **lifecycle rule** on the prefix: expire current objects after 30 days, delete noncurrent versions after 1 day, and remove expired delete markers. Object Lock keeps each version until its retention ends; the lifecycle removes it after that. The script uploads daily and does not make separate monthly copies. If monthly history is needed, keep it with a provider-side rule or a separate job that copies the first archive of each month to another prefix with a longer lifecycle. Example (AWS syntax; other providers have an equivalent):
+
+   ```json
+   {"Rules": [{"ID": "gateway-state-30d", "Status": "Enabled", "Filter": {"Prefix": "<host-prefix>/"},
+     "Expiration": {"Days": 30}, "NoncurrentVersionExpiration": {"NoncurrentDays": 1}}]}
+   ```
+
+4. Keep a separate **read** key for restores, off every gateway host, with the age identity's holders.
+
+The opt-in test `RUN_S3_BACKUP_TEST=1 pytest tests/test_backup_s3_minio.py` runs this setup against MinIO in Docker. It uses a bucket with object lock, a put+list-only key, real age and the pinned rclone, and checks success, wrong credentials, an unreachable endpoint and a full restore.
+
+**Key custody.** The gateway-state age key is its own key. Never use the Bee keystore key for it (§6), and never put its identity (`AGE-SECRET-KEY-…`) on a gateway host; the script refuses it as a recipient. Generate it with `age-keygen` on an offline machine, give the public `age1…` recipient to the hosts, and keep the identity as for the Bee key: two copies with named holders. The bucket's admin account, the restore read key and the age identity are held by people, not by any gateway host.
+
+**Rotating the age key:** set the new recipient in `/etc/swarm_connect/backup_s3.env` on every host. The next run encrypts to it. Keep the old identity until every archive encrypted to it has expired from the bucket (the lifecycle period plus the lock period).
+
+**Bumping rclone:** the version is pinned in `RCLONE_PIN` in the script. Install the new release on a test host, run the MinIO test with the new `rclone/rclone` image tag and digest, then change `RCLONE_PIN`, this install step (version and sha256 from the release's `SHA256SUMS`) and the test pin together. Afterwards reinstall the script and the new rclone on every host together: until both are updated, every S3 copy fails with the version message.
+
+**Restore from the bucket**, on an admin workstation that holds the read key and the age identity (never on a gateway host):
+
+```sh
+# the read key in rclone's environment, not on the command line
+export RCLONE_CONFIG_RESTORE_TYPE=s3 RCLONE_CONFIG_RESTORE_PROVIDER=Other RCLONE_CONFIG_RESTORE_ENDPOINT=<endpoint> RCLONE_CONFIG_RESTORE_REGION=<region>
+read -r RCLONE_CONFIG_RESTORE_ACCESS_KEY_ID; read -rs RCLONE_CONFIG_RESTORE_SECRET_ACCESS_KEY
+export RCLONE_CONFIG_RESTORE_ACCESS_KEY_ID RCLONE_CONFIG_RESTORE_SECRET_ACCESS_KEY
+rclone lsf restore:<bucket>/<host-prefix>/ | sort | tail -4                           # newest archives
+rclone copy restore:<bucket>/<host-prefix>/ ./restore --include 'swarm_connect_data-<stamp>.tar.gz.age*'
+cd restore && sha256sum -c swarm_connect_data-<stamp>.tar.gz.age.sha256              # must print OK
+age -d -i <identity file> -o swarm_connect_data-<stamp>.tar.gz swarm_connect_data-<stamp>.tar.gz.age
+tar -tzf swarm_connect_data-<stamp>.tar.gz | head                                      # sanity check
+scp swarm_connect_data-<stamp>.tar.gz root@<gateway-host>:/var/backups/swarm_connect/
+```
+
+Then continue with the restore steps above (`tar -xzf … -C /opt`). The decrypted archive contains bearer credit tokens: delete it from the workstation afterwards.
+
 ### Bee node identity (keystores)
 
 Each Bee node's identity is in `/home/bee/.bee/keys/` inside its volume: `swarm.key` (the Ethereum key, which is the node's wallet: xBZZ, xDAI, chequebook and stamp ownership), `libp2p_v2.key` and `pss.key`. The keys are encrypted with the keystore password (`BEE_PASSWORD`, `BEE_DEV_PASSWORD`). If a node is rebuilt with a new identity, it cannot spend the old wallet's funds.
@@ -239,7 +328,7 @@ This is a **separate backup class** from gateway state, with a separate script, 
 - The host holds only the **public** age recipient. The script refuses an `AGE-SECRET-KEY-…` value.
 - The script also refuses to run when its destination equals or nests with the gateway-state destination (`BACKUP_REMOTE`) or its local directory overlaps `BACKUP_DIR`.
 
-It is separate from `backup_state.sh`, not a flag on it. The wallet class needs its own recipient, destination, markers and cadence, and a separate file can be installed and permissioned on its own without touching the nightly state job. The S3 target in #493 can be added to both scripts later.
+It is separate from `backup_state.sh`, not a flag on it. The wallet class needs its own recipient, destination, markers and cadence, and a separate file can be installed and permissioned on its own without touching the nightly state job. The S3 target (#493, above) is in `backup_state.sh` only; this script still copies with rsync or scp.
 
 **Setup**, as root on each gateway host:
 
@@ -464,6 +553,7 @@ If the series are missing, Alloy did not load the config: `docker logs` of the A
 | Facilitator credentials | GitHub secrets → `/opt/swarm_connect*.env` | Create new credentials, update the secrets, redeploy, then revoke the old ones |
 | `NOTARY_PRIVATE_KEY` | GitHub secret → env file | `scripts/generate_notary_key.py`, update the secret, redeploy. Publish the new notary address |
 | `GNOSIS_PRIVATE_KEY` (for-owner) | GitHub secret → env file | New key, move funds, update the secret, redeploy |
+| Gateway-state backup age key | Identity offline, off every gateway host; only the public recipient is in `/etc/swarm_connect/backup_s3.env` (§4) | Set the new recipient on every host; keep the old identity until its archives have expired from the bucket |
 | Bee wallet (node identity) | Keystore in `keys/` of the `bee-data` / `bee-dev-data` volume, encrypted with `BEE_PASSWORD` / `BEE_DEV_PASSWORD` from `/opt/swarm_connect_host.env`. Backed up by `scripts/backup_bee_keys.sh` (§4) | See *Bee node identity: custody* below |
 
 Keep hot wallets (the Bee node, the Gnosis signer) funded for days, not months, and let the balance alerts prompt top-ups.
