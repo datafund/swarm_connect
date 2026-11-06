@@ -308,7 +308,7 @@ app/x402/
 ├── facilitator_client.py # httpx facilitator client: verify, settle (v1 and v2, #607), supported (#604)
 ├── facilitator.py   # Builds the shared client (CDP / bearer auth), validate_x402_config, the v2 /supported startup check (#608)
 ├── networks.py      # v1 names <-> CAIP-2 ids (#599)
-├── base_balance.py  # Base ETH balance of the pay-to address (gates protected requests)
+├── base_balance.py  # Base ETH balance of the pay-to address, information only (needs no ETH, gates nothing, #663)
 ├── pricing.py       # Price calculation (BZZ → USD)
 ├── access.py        # IP whitelist/blacklist (not wired into requests yet, #379)
 ├── audit.py         # Audit log (JSON lines)
