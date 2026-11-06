@@ -363,7 +363,7 @@ def test_settle_refused_gets_402_settlement_failed(gw, version, status):
     client, fac = gw("1,2")
     offer = _offer(client)
     fac.settle_status = status
-    fac.settle = {"success": False, "errorReason": "invalid_signature", "transaction": "",
+    fac.settle = {"success": False, "errorReason": "invalid_exact_evm_signature", "transaction": "",
                   "network": "base-sepolia" if version == 1 else "eip155:84532"}
     before = x402_settlements_total.labels(result="refused", version=str(version))._value.get()
     r = client.post("/api/v1/stamps/", headers=pay(version, offer))

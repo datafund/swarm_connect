@@ -311,7 +311,7 @@ def test_fallback_unknown_never_reruns_the_work_after_the_replay_window(env):
     """#553 review 2: the reservation lapses after an hour, the registry entry does not.
     A remembered after-the-work authorization is stopped before any work runs."""
     from app.x402.settlement import replay_guard
-    fac = _facilitator(RuntimeError("facilitator down"), refused("nonce_used"))
+    fac = _facilitator(RuntimeError("facilitator down"), refused("invalid_exact_evm_nonce_already_used"))
     header = create_valid_payment_header()
     assert _run(fac, path="/api/v1/data/manifest", header=header).status_code == 502
     replay_guard.reset()   # the replay window has passed
@@ -333,12 +333,12 @@ def test_unavailable_same_authorization_retry_is_still_allowed(env):
 def test_middleware_refusal_of_a_remembered_authorization_is_a_409(env):
     """A before-the-work unknown outcome, then the same authorization on a route that
     settles after its work, refused by the facilitator: the middleware's own 409."""
-    fac = _facilitator(RuntimeError("facilitator down"), refused("nonce_used"))
+    fac = _facilitator(RuntimeError("facilitator down"), refused("invalid_exact_evm_nonce_already_used"))
     header = create_valid_payment_header()
     assert _run(fac, header=header).status_code == 502
     r = _run(fac, path="/api/v1/data/manifest", header=header)
     detail = _assert_outcome_unknown(r)
-    assert detail["reason"] == "nonce_used"
+    assert detail["reason"] == "invalid_exact_evm_nonce_already_used"
     _assert_unknown_headers(r)
     assert "ok" not in r.text
 
