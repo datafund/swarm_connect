@@ -210,6 +210,20 @@ def test_hook_sends_the_jwt_on_verify_settle_supported_and_list(payai):
     assert all(h == {"Authorization": auth} for h in headers.values())
 
 
+class _Raw(httpx2.AsyncByteStream):
+    def __init__(self, data: bytes):
+        self.data = data
+
+    async def __aiter__(self):
+        yield self.data
+
+
+def _supported_answer():
+    # A fresh raw stream each time: supported_response() reads it with aiter_raw.
+    body = json.dumps({"kinds": [V2_EXACT]}).encode()
+    return httpx2.Response(200, headers={"Content-Type": "application/json"}, stream=_Raw(body))
+
+
 def _payment_and_requirements():
     from app.x402.models_v1 import PaymentPayload, PaymentRequirements
     from tests.test_x402_facilitator_differential import PAYLOAD, REQUIREMENTS
@@ -220,7 +234,7 @@ def _recording_client(config, seen, answer=None):
     def handler(request):
         seen.append((request.method, request.url.path, request.headers.get("Authorization")))
         if request.url.path.endswith("/supported"):
-            return httpx2.Response(200, json={"kinds": [V2_EXACT]})
+            return _supported_answer()
         return httpx2.Response(200, json=answer or {"isValid": False, "invalidReason": "x", "payer": None})
     return FacilitatorClient(config, transport=httpx2.MockTransport(handler))
 
@@ -340,7 +354,9 @@ def test_the_loader_error_carries_no_key_material(name):
     text = "".join(traceback.format_exception(exc.type, exc.value, exc.tb)) + repr(exc.value)
     assert "malformed" in str(exc.value)
     assert bad not in text and bad[:16] not in text
-    assert exc.value.__cause__ is None and exc.value.__suppress_context__
+    # No chained exception that could carry the input, shown or not.
+    assert exc.value.__cause__ is None
+    assert exc.value.__context__ is None or exc.value.__suppress_context__
 
 
 def test_plain_http_with_payai_is_refused(payai):
@@ -405,7 +421,7 @@ def _captured(config):
         seen.append((request.method, str(request.url), sorted(request.headers.multi_items()),
                      request.content))
         if request.url.path.endswith("/supported"):
-            return httpx2.Response(200, json={"kinds": [V2_EXACT]})
+            return _supported_answer()
         return httpx2.Response(200, json={"isValid": False, "invalidReason": "x", "payer": None})
 
     client = FacilitatorClient(config, transport=httpx2.MockTransport(handler))

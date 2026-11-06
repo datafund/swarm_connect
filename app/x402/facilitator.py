@@ -18,16 +18,31 @@ Two ways to authenticate, both optional:
   (/platform/v2/x402/verify, /settle), so with CDP credentials the gateway
   always calls that route: X402_FACILITATOR_URL must be empty or exactly
   CDP_FACILITATOR_URL, and startup refuses anything else (#527).
+- X402_FACILITATOR_PAYAI_API_KEY_ID / _SECRET: a PayAI API key (#662). The
+  secret is a base64 PKCS#8 Ed25519 private key; PayAIAuth signs a JWT with
+  it that lives 120 s, caches it until 30 s before it expires, and sends it as
+  Authorization: Bearer <jwt> on /verify, /settle and /supported, as
+  @payai/facilitator does. It is not a static token: never put the secret in
+  X402_FACILITATOR_BEARER_TOKEN. The configured X402_FACILITATOR_URL is used
+  as is (https required). Without these settings PayAI serves the gateway on
+  its shared free lane.
 - X402_FACILITATOR_BEARER_TOKEN: a static bearer token, for facilitators that
   accept one.
+
+At most one of the three may be set.
 
 validate_x402_config() runs at startup and refuses a configuration that would
 otherwise fail on the first payment, or take payment in the wrong asset (#370).
 """
+import base64
 import json
 import logging
+import math
 import re
-from typing import Optional
+import threading
+import time
+import uuid
+from typing import Callable, Optional
 
 from app.x402.facilitator_client import FacilitatorClient, FacilitatorConfig
 
@@ -59,6 +74,107 @@ def _strip_one_slash(url: str) -> str:
     return url[:-1] if url.endswith("/") else url
 
 
+# --- PayAI API key (#662) -----------------------------------------------------
+# Matches @payai/facilitator 2.4.6 (dist/cjs/index.js): normalizeApiKeySecret,
+# generatePayAIApiKeyJwt, getOrGenerateJwt (REFRESH_BUFFER_SECONDS) and
+# createPayAIAuthHeaders.
+PAYAI_ISSUER = "payai-merchant"
+PAYAI_TOKEN_LIFETIME_SECONDS = 120
+PAYAI_REFRESH_MARGIN_SECONDS = 30
+_PAYAI_SECRET_PREFIX = "payai_sk_"
+_ASCII_WHITESPACE = re.compile(r"[\t\n\f\r ]")
+
+
+def load_payai_private_key(secret: str):
+    """The Ed25519 private key in a PayAI API key secret.
+
+    Normalised as normalizeApiKeySecret does (surrounding whitespace trimmed,
+    a leading payai_sk_ removed), then decoded as base64ToUint8Array and atob
+    do (the url-safe alphabet accepted, whitespace and missing padding
+    forgiven), then loaded as PKCS#8 DER. Any failure raises ValueError saying
+    only that the setting is malformed: no part of the value, and no chained
+    exception, since the message reaches the public deploy log (#485).
+    """
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+    from cryptography.hazmat.primitives.serialization import load_der_private_key
+    problem = None
+    try:
+        text = (secret or "").strip()
+        if text.startswith(_PAYAI_SECRET_PREFIX):
+            text = text[len(_PAYAI_SECRET_PREFIX):]
+        text = _ASCII_WHITESPACE.sub("", text.replace("-", "+").replace("_", "/"))
+        text = text.rstrip("=")
+        if not text or len(text) % 4 == 1:
+            problem = "not base64"
+        else:
+            der = base64.b64decode(text + "=" * (-len(text) % 4), validate=True)
+            key = load_der_private_key(der, password=None)
+            if isinstance(key, Ed25519PrivateKey):
+                return key
+            problem = "not an Ed25519 key"
+    except Exception:
+        problem = problem or "not a base64 PKCS#8 Ed25519 private key"
+    raise ValueError(f"X402_FACILITATOR_PAYAI_API_KEY_SECRET is malformed ({problem}); it must be "
+                     f"the PayAI API key secret, a base64 PKCS#8 Ed25519 private key")
+
+
+def _b64url(data: bytes) -> str:
+    return base64.urlsafe_b64encode(data).rstrip(b"=").decode("ascii")
+
+
+def _compact_json(value: dict) -> bytes:
+    # JSON.stringify's output: no spaces, keys in insertion order.
+    return json.dumps(value, separators=(",", ":")).encode("utf-8")
+
+
+class PayAIAuth:
+    """PayAI API key JWTs, cached until PAYAI_REFRESH_MARGIN_SECONDS before expiry.
+
+    One clock (seconds, floored as Math.floor(Date.now() / 1000)) sets iat,
+    exp and the cache, as getOrGenerateJwt does. The check and the signing
+    run under a lock with no await in between, so concurrent requests on the
+    event loop (or on threads) share one token. Holds the loaded key, never
+    the secret text; repr shows neither.
+    """
+
+    def __init__(self, key_id: str, private_key, clock: Callable[[], float] = time.time):
+        self._key_id = key_id
+        self._key = private_key
+        self._clock = clock
+        self._lock = threading.Lock()
+        self._token: Optional[str] = None
+        self._expires_at = 0
+
+    def __repr__(self) -> str:
+        return "PayAIAuth(<redacted>)"
+
+    __str__ = __repr__
+
+    def _sign(self, now: int) -> str:
+        header = {"alg": "EdDSA", "typ": "JWT", "kid": self._key_id}
+        payload = {"sub": self._key_id, "iss": PAYAI_ISSUER, "iat": now,
+                   "exp": now + PAYAI_TOKEN_LIFETIME_SECONDS, "jti": str(uuid.uuid4())}
+        message = f"{_b64url(_compact_json(header))}.{_b64url(_compact_json(payload))}"
+        return f"{message}.{_b64url(self._key.sign(message.encode('ascii')))}"
+
+    def token(self) -> str:
+        with self._lock:
+            now = math.floor(self._clock())
+            if self._token is None or self._expires_at <= now + PAYAI_REFRESH_MARGIN_SECONDS:
+                self._token = self._sign(now)
+                self._expires_at = now + PAYAI_TOKEN_LIFETIME_SECONDS
+            return self._token
+
+    async def create_headers(self) -> dict:
+        auth = {"Authorization": f"Bearer {self.token()}"}
+        # "list" like the bearer hook; "supported" for the startup check (#608).
+        return {"verify": auth, "settle": auth, "supported": auth, "list": auth}
+
+
+def _uses_payai() -> bool:
+    return bool(settings.X402_FACILITATOR_PAYAI_API_KEY_ID or settings.X402_FACILITATOR_PAYAI_API_KEY_SECRET)
+
+
 def _config() -> FacilitatorConfig:
     url = settings.X402_FACILITATOR_URL
     if settings.X402_FACILITATOR_CDP_API_KEY_ID:
@@ -83,6 +199,13 @@ def _config() -> FacilitatorConfig:
         return {"url": cdp["url"], "create_headers": create_headers}
 
     config: FacilitatorConfig = {"url": url}
+    if _uses_payai():
+        # The configured URL as is: a PayAI token is not bound to a path.
+        # validate_x402_config() has checked both values and https.
+        auth = PayAIAuth(settings.X402_FACILITATOR_PAYAI_API_KEY_ID,
+                         load_payai_private_key(settings.X402_FACILITATOR_PAYAI_API_KEY_SECRET))
+        config["create_headers"] = auth.create_headers
+        return config
     token = settings.X402_FACILITATOR_BEARER_TOKEN
     if token:
         async def create_headers():
@@ -133,9 +256,23 @@ def validate_x402_config() -> None:
     url = settings.X402_FACILITATOR_URL or ""
     uses_cdp = bool(settings.X402_FACILITATOR_CDP_API_KEY_ID)
     uses_bearer = bool(settings.X402_FACILITATOR_BEARER_TOKEN)
+    uses_payai = _uses_payai()
     mainnet = bool(network) and not is_testnet_network(network)
-    if uses_cdp and uses_bearer:
+    if uses_payai and (uses_cdp or uses_bearer):
+        problems.append("set only one of CDP credentials, PayAI credentials (X402_FACILITATOR_PAYAI_API_KEY_ID "
+                        "/ _SECRET) and X402_FACILITATOR_BEARER_TOKEN")
+    elif uses_cdp and uses_bearer:
         problems.append("set either CDP credentials or X402_FACILITATOR_BEARER_TOKEN, not both")
+    if uses_payai:
+        if not settings.X402_FACILITATOR_PAYAI_API_KEY_SECRET:
+            problems.append("X402_FACILITATOR_PAYAI_API_KEY_SECRET is required with X402_FACILITATOR_PAYAI_API_KEY_ID")
+        elif not settings.X402_FACILITATOR_PAYAI_API_KEY_ID:
+            problems.append("X402_FACILITATOR_PAYAI_API_KEY_ID is required with X402_FACILITATOR_PAYAI_API_KEY_SECRET")
+        else:
+            try:
+                load_payai_private_key(settings.X402_FACILITATOR_PAYAI_API_KEY_SECRET)
+            except ValueError as e:
+                problems.append(str(e))     # names the setting, never its value
     if uses_cdp:
         if url and _host(url) != CDP_HOST:
             problems.append(f"CDP credentials are set but X402_FACILITATOR_URL points at {_host(url)!r}; "
@@ -159,13 +296,14 @@ def validate_x402_config() -> None:
                 f"X402_NETWORK={network!r} is a mainnet, but X402_FACILITATOR_URL points at the public "
                 f"test-network facilitator ({url}); configure a mainnet facilitator"
             )
-        if (mainnet or uses_bearer) and url.startswith("http://"):
+        if (mainnet or uses_bearer or uses_payai) and url.startswith("http://"):
             problems.append("X402_FACILITATOR_URL must use https on a mainnet or with credentials")
     if problems:
         raise RuntimeError("Refusing to start with x402 enabled: " + "; ".join(problems))
     used = get_facilitator_client().config["url"] if uses_cdp else url
     logger.info(f"x402 configuration OK: network={network}, facilitator={used}"
-                + (" (CDP auth)" if uses_cdp else " (bearer auth)" if settings.X402_FACILITATOR_BEARER_TOKEN else ""))
+                + (" (CDP auth)" if uses_cdp else " (PayAI API key auth)" if uses_payai
+                   else " (bearer auth)" if settings.X402_FACILITATOR_BEARER_TOKEN else ""))
 
 
 def _v2_refusal(reason: str) -> RuntimeError:
@@ -226,7 +364,7 @@ async def check_facilitator_v2_support(client: Optional[FacilitatorClient] = Non
                           f"({type(e).__name__}), so it is unknown whether it settles x402 v2 exact "
                           f"on {network}") from None
     except Exception as e:
-        # Anything else before an answer: the CDP header hook raising, an
+        # Anything else before an answer: the CDP or PayAI header hook raising, an
         # httpx2 error outside HTTPError (InvalidURL), a bad header value. A
         # refusal, not a traceback, and never the error text (it may hold a
         # credential or the URL).
