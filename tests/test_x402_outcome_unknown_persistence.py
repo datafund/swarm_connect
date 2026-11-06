@@ -46,7 +46,7 @@ def _restart(monkeypatch, path):
 
 
 def test_p2_unavailable_restart_then_refused_same_authorization_is_not_a_402(env, state, monkeypatch):
-    fac = _facilitator(RuntimeError("facilitator down"), refused("nonce_used"))
+    fac = _facilitator(RuntimeError("facilitator down"), refused("invalid_exact_evm_nonce_already_used"))
     header = create_valid_payment_header()
     assert _run(fac, header=header).status_code == 502
     _restart(monkeypatch, state)
@@ -203,7 +203,7 @@ def test_every_outcome_unknown_409_is_audited_with_the_nonce(env):
     assert "nonce_used" in rec["data"]["reason"]
     # refused at settle
     st.outcome_unknown.reset(); st.replay_guard.reset()
-    fac = _facilitator(RuntimeError("down"), refused("nonce_used"))
+    fac = _facilitator(RuntimeError("down"), refused("invalid_exact_evm_nonce_already_used"))
     assert _run(fac, header=header).status_code == 502
     assert _run(fac, header=header).status_code == 409
     rec = _outcome_unknown_records()[0]
@@ -260,7 +260,7 @@ def test_cancelled_settlement_before_work_is_remembered(env, state, monkeypatch)
     """settle_payment interrupted (CancelledError: a shutdown or disconnect while waiting
     for the facilitator): the outcome is unknown, not "You were not charged"."""
     import asyncio
-    fac = _facilitator(asyncio.CancelledError(), refused("nonce_used"), refused("nonce_used"))
+    fac = _facilitator(asyncio.CancelledError(), refused("invalid_exact_evm_nonce_already_used"), refused("invalid_exact_evm_nonce_already_used"))
     header = create_valid_payment_header()
     first = _run(fac, header=header)
     assert first.status_code != 402 and "You were not charged" not in first.text
@@ -296,7 +296,7 @@ def test_cancelled_settlement_after_work_is_remembered(env, state, monkeypatch):
 def test_refused_retry_on_a_fallback_route_upgrades_to_after_work(env, state):
     """A before-work authorization retried on a route that settles after its work: the
     work ran, so from then on it must not run again."""
-    fac = _facilitator(RuntimeError("down"), refused("nonce_used"), refused("nonce_used"))
+    fac = _facilitator(RuntimeError("down"), refused("invalid_exact_evm_nonce_already_used"), refused("invalid_exact_evm_nonce_already_used"))
     header = create_valid_payment_header()
     assert _run(fac, header=header).status_code == 502
     _assert_outcome_unknown(_run(fac, path="/api/v1/data/manifest", header=header))
@@ -337,7 +337,7 @@ def test_refusal_of_a_remembered_authorization_has_its_own_metric(env):
         return x402_settlements_total.labels(result=result, version="1")._value.get()
 
     refused_before, after_before = count("refused"), count("refused_after_unknown")
-    fac = _facilitator(RuntimeError("down"), refused("nonce_used"))
+    fac = _facilitator(RuntimeError("down"), refused("invalid_exact_evm_nonce_already_used"))
     header = create_valid_payment_header()
     assert _run(fac, header=header).status_code == 502
     assert _run(fac, header=header).status_code == 409
@@ -361,7 +361,7 @@ def test_a_registry_that_cannot_write_its_file_at_startup_fails_closed(env, tmp_
     reg = st.OutcomeUnknownRegistry(state_file=path)
     assert reg.unavailable
     monkeypatch.setattr(st, "outcome_unknown", reg)
-    fac = _facilitator(refused("nonce_used"))
+    fac = _facilitator(refused("invalid_exact_evm_nonce_already_used"))
     r = _run(fac)
     assert r.status_code == 503 and r.json()["detail"]["code"] == "PAYMENT_STATE_UNAVAILABLE"
     assert fac.settle.await_count == 0
@@ -375,7 +375,7 @@ def test_restart_with_an_unwritable_file_does_not_lose_a_memory_only_entry(env, 
     first.add(KEY, st.BEFORE_WORK)
     monkeypatch.setattr(st, "outcome_unknown", st.OutcomeUnknownRegistry(state_file=path))
     st.replay_guard.reset()
-    r = _run(_facilitator(refused("nonce_used")))
+    r = _run(_facilitator(refused("invalid_exact_evm_nonce_already_used")))
     assert r.status_code == 503
     assert "accepts" not in r.text
 
@@ -387,7 +387,7 @@ def test_write_ahead_entry_exists_while_the_facilitator_is_asked(env, state, mon
 
     async def settle(**kw):
         snapshot["file"] = open(state).read()     # what a crash right now would leave
-        return refused("nonce_used")
+        return refused("invalid_exact_evm_nonce_already_used")
 
     fac = _facilitator()
     fac.settle = AsyncMock(side_effect=settle)
@@ -398,7 +398,7 @@ def test_write_ahead_entry_exists_while_the_facilitator_is_asked(env, state, mon
     with open(state, "w") as f:                   # the crash: the file as it was mid-settle
         f.write(snapshot["file"])
     _restart(monkeypatch, state)
-    _assert_outcome_unknown(_run(_facilitator(refused("nonce_used")), header=header))
+    _assert_outcome_unknown(_run(_facilitator(refused("invalid_exact_evm_nonce_already_used")), header=header))
 
 
 def test_write_ahead_on_the_fallback_is_after_work(env, state, monkeypatch):
@@ -512,16 +512,16 @@ def test_task_is_being_cancelled_tells_this_task_from_an_inner_cancel():
 
 
 def test_outcome_unknown_message_says_whether_the_work_ran(env, state):
-    fac = _facilitator(RuntimeError("down"), refused("nonce_used"))
+    fac = _facilitator(RuntimeError("down"), refused("invalid_exact_evm_nonce_already_used"))
     header = create_valid_payment_header()
     assert _run(fac, header=header).status_code == 502
     after = _run(fac, path="/api/v1/data/manifest", header=header)
     message = after.json()["detail"]["message"]
     assert "did nothing" not in message and "withheld" in message
     st.replay_guard.reset()
-    before = _run(_facilitator(refused("x")), header=create_valid_payment_header(payer="0x" + "be" * 20))
+    before = _run(_facilitator(refused("insufficient_funds")), header=create_valid_payment_header(payer="0x" + "be" * 20))
     assert before.status_code == 402   # unrelated authorization: ordinary refusal
-    fac = _facilitator(RuntimeError("down"), refused("nonce_used"))
+    fac = _facilitator(RuntimeError("down"), refused("invalid_exact_evm_nonce_already_used"))
     h2 = create_valid_payment_header(payer="0x" + "cf" * 20)
     assert _run(fac, header=h2).status_code == 502
     assert "did nothing" in _run(fac, header=h2).json()["detail"]["message"]
@@ -531,7 +531,7 @@ def test_middleware_built_bodies_have_detail_and_top_level_code(env, state):
     fac = _facilitator(RuntimeError("down"))
     r = _run(fac, path="/api/v1/data/manifest")
     assert r.json()["detail"]["code"] == r.json()["code"] == "PAYMENT_SETTLEMENT_UNKNOWN"
-    fac = _facilitator(RuntimeError("down"), refused("nonce_used"))
+    fac = _facilitator(RuntimeError("down"), refused("invalid_exact_evm_nonce_already_used"))
     h = create_valid_payment_header(payer="0x" + "dd" * 20)
     assert _run(fac, header=h).status_code == 502
     r = _run(fac, path="/api/v1/data/manifest", header=h)

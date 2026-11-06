@@ -477,7 +477,7 @@ def test_keyed_unavailable_then_same_authorization_under_a_new_key(fac):
     c = TestClient(app)
     nonce = "0x" + "7c" * 32
     fac.settle.side_effect = [httpx.ReadTimeout("facilitator slow"),
-                              SettleResponse(success=False, errorReason="nonce_used")]
+                              SettleResponse(success=False, errorReason="invalid_exact_evm_nonce_already_used")]
     first = c.post("/api/v1/stamps/", json={"depth": 17},
                    headers={"X-PAYMENT": pay(nonce=nonce), "Idempotency-Key": "k-a"})
     assert first.status_code == 502

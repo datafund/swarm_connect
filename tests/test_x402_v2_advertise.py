@@ -361,11 +361,11 @@ def test_v2_only_offer_mismatch_keeps_code_and_fields(gw, monkeypatch):
 def test_v2_only_settlement_failed_keeps_its_fields(gw, monkeypatch):
     client, fac, offer = _v2_only(gw, monkeypatch)
     fac.settle_status = 400
-    fac.settle = {"success": False, "errorReason": "invalid_signature", "transaction": "",
+    fac.settle = {"success": False, "errorReason": "invalid_exact_evm_signature", "transaction": "",
                   "network": "eip155:84532"}
     r = client.post("/api/v1/stamps/", headers=pay(2, offer, nonce=nonce_hex("07")))
     body = _d10(r, offer, code="PAYMENT_SETTLEMENT_FAILED", x402_status="settlement_failed",
-                reason="invalid_signature")
+                reason="invalid_exact_evm_signature")
     assert body["error"] == body["message"]
 
 

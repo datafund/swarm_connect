@@ -24,7 +24,10 @@ Replaces x402 1.0.0's FacilitatorClient, and behaves the same for v1:
   TypeError (JSON that is not an object), or the error of a timeout or a
   failed connection (now httpx2's classes, not httpx's). Every caller catches
   these as Exception: app/x402/settlement.py and the middleware count a raise
-  as an unknown outcome, and a parsed success:false as a definite refusal.
+  as an unknown outcome, and a parsed success:false as a definite refusal
+  only when settlement.settle_refusal_is_definite says so (#660: no
+  transaction hash, and a listed pre-broadcast code); any other
+  success:false is an unknown outcome too.
 
 x402 v2 (#607): verify and settle take a PaymentPayloadV2 with
 PaymentRequirementsV2 (mixing the versions raises TypeError). The body is
@@ -38,7 +41,9 @@ facilitator-side switches it never priced. Answers are classified by status
   (the dependency answers 502): a 5xx, a non-2xx isValid:true, a body that
   does not parse. A 5xx saying isValid:true is never taken as verified.
 - settle: a 2xx body that parses is the answer. A 4xx body that parses with
-  success:false is a definite refusal. Everything else raises, so the
+  success:false is a refusal, which the settlement code takes as definite
+  only when settlement.settle_refusal_is_definite says so (#660); any
+  other is an unknown outcome too. Everything else raises, so the
   settlement code counts it as an unknown outcome: a 5xx (a facilitator or
   proxy in trouble may still have submitted the transfer), a non-2xx
   success:true, or a body that does not parse.
