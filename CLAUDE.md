@@ -306,7 +306,7 @@ app/x402/
 ├── v2_payment.py    # Read a v2 PAYMENT-SIGNATURE: decode, refuse non-exact/Permit2, match `accepted` to the gateway's own offer (#607)
 ├── advertise_v2.py  # PAYMENT-REQUIRED on every 402 with an offer, and the v2 body copy with "2" alone (#608)
 ├── facilitator_client.py # httpx facilitator client: verify, settle (v1 and v2, #607), supported (#604)
-├── facilitator.py   # Builds the shared client (CDP / bearer auth), validate_x402_config, the v2 /supported startup check (#608)
+├── facilitator.py   # Builds the shared client (CDP / PayAI API key / bearer auth), validate_x402_config, the v2 /supported startup check (#608)
 ├── networks.py      # v1 names <-> CAIP-2 ids (#599)
 ├── base_balance.py  # Base ETH balance of the pay-to address, information only (needs no ETH, gates nothing, #663)
 ├── pricing.py       # Price calculation (BZZ → USD)
@@ -314,6 +314,8 @@ app/x402/
 ├── audit.py         # Audit log (JSON lines)
 └── ratelimit.py     # Per-IP rate limiting (free tier)
 ```
+
+**PayAI API key (#662).** With `X402_FACILITATOR_PAYAI_API_KEY_ID` and `_SECRET` set, `facilitator._config()` uses the configured `X402_FACILITATOR_URL` and a `PayAIAuth` hook that matches `@payai/facilitator` 2.4.6 (`normalizeApiKeySecret`, `generatePayAIApiKeyJwt`, `getOrGenerateJwt`, `createPayAIAuthHeaders`): the secret is trimmed, a leading `payai_sk_` dropped, decoded as base64 (url-safe alphabet and missing padding accepted) and loaded as a PKCS#8 Ed25519 key (`load_payai_private_key`); the JWT has header `{"alg":"EdDSA","typ":"JWT","kid":<id>}` and payload `{"sub":<id>,"iss":"payai-merchant","iat","exp":iat+120,"jti":<uuid4>}`, compact JSON in that key order, signed with Ed25519; it is reused while `exp > now + 30` (one clock, floored seconds, for iat, exp and the cache; a `threading.Lock` around check-and-sign, no await inside) and sent as `Authorization: Bearer <jwt>` on `verify`, `settle`, `supported` and `list`, so the v2 startup check and `check_config` send it too. `validate_x402_config()` refuses PayAI with CDP or a bearer token, one PayAI value without the other, a secret that does not load (`X402_FACILITATOR_PAYAI_API_KEY_SECRET is malformed (...)`, never the value, no chained exception) and `http://`. The secret field has `repr=False`; `PayAIAuth` keeps only the key object and its repr is redacted. Without the PayAI settings, `_config()`, the requests and every message are as before. Tests: `tests/test_x402_payai_auth.py` (generated keys only, MockTransport, injected clock).
 
 ### x402 Tests
 
@@ -327,6 +329,10 @@ X402_FACILITATOR_URL=...     # Payment facilitator (with CDP credentials: empty 
 X402_PAY_TO_ADDRESS=0x...    # USDC receiving wallet (Base)
 X402_NETWORK=base-sepolia    # Network: base or base-sepolia, or the CAIP-2 id eip155:8453 or eip155:84532 (#599)
 X402_PROTOCOL_VERSIONS=1     # x402 versions accepted: 1 (default), 1,2 or 2; anything else stops startup (#607)
+# Facilitator auth, at most one route (GitHub secrets; startup refuses more than one):
+X402_FACILITATOR_CDP_API_KEY_ID= / X402_FACILITATOR_CDP_API_KEY_SECRET=      # Coinbase CDP (cdp-sdk)
+X402_FACILITATOR_PAYAI_API_KEY_ID= / X402_FACILITATOR_PAYAI_API_KEY_SECRET=  # PayAI API key (#662); unset = shared free lane
+X402_FACILITATOR_BEARER_TOKEN=                                               # static bearer token
 
 # Free tier settings (for users without x402 capability)
 X402_FREE_TIER_ENABLED=true  # Allow non-paying users (default: on)
