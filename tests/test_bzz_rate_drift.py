@@ -72,9 +72,28 @@ def test_drift_alert_rule_is_defined():
     rule = next(r for r in rules if r["title"] == "BZZ pricing rate off market")
     # "> 0" filters out the market gauge when there is no (working) feed, so the
     # rule has no data instead of dividing by zero and firing on +Inf.
-    assert rule["data"][0]["model"]["expr"] == "gateway_bzz_usd_rate_configured / (gateway_bzz_usd_rate_market > 0)"
+    assert rule["data"][0]["model"]["expr"] == "(gateway_bzz_usd_rate_market > 0) / gateway_bzz_usd_rate_configured"
     assert rule["noDataState"] == "OK"
-    assert rule["data"][2]["model"]["conditions"][0]["evaluator"] == {"params": [0.5, 2], "type": "outside_range"}
+    # The market price as a share of the configured rate, alerted outside 20%..90%.
+    assert rule["data"][2]["model"]["conditions"][0]["evaluator"] == {
+        "params": [metrics.MARKET_SHARE_LOW, metrics.MARKET_SHARE_HIGH], "type": "outside_range"}
+    assert (metrics.MARKET_SHARE_LOW, metrics.MARKET_SHARE_HIGH) == (0.2, 0.9)
+
+
+@pytest.mark.parametrize("market,warns", [
+    (0.095, True),    # 95% of the configured 0.1: margin nearly gone
+    (0.091, True),
+    (0.089, False),
+    (0.05, False),    # 50%: the cutover setting on 2026-11-06
+    (0.021, False),
+    (0.019, True),    # 19%: charging more than 5x the market
+])
+def test_drift_warning_bounds(monkeypatch, caplog, market, warns):
+    monkeypatch.setattr(settings, "X402_BZZ_USD_RATE", 0.1)
+    monkeypatch.setattr(settings, "X402_BZZ_PRICE_FEED_URL", "https://feed.example/price")
+    with _feed({"usd": market}), caplog.at_level("WARNING"):
+        asyncio.run(metrics._update_bzz_rates())
+    assert any("review X402_BZZ_USD_RATE" in r.message for r in caplog.records) is warns
 
 
 

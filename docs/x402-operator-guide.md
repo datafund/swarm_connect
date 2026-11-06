@@ -238,7 +238,7 @@ the price of a new 24-hour stamp sized to it.
 
 ### Keeping the BZZ/USD rate honest (#364)
 
-Every price is computed from `X402_BZZ_USD_RATE`. It is **not** updated automatically. Set it explicitly per environment (GitHub variable `X402_BZZ_USD_RATE`, also `X402_MARKUP_PERCENT` and `X402_MIN_PRICE_USD`) and review it regularly. To be warned when it drifts, set `X402_BZZ_PRICE_FEED_URL`, for example `https://api.coingecko.com/api/v3/simple/price?ids=swarm-bzz&vs_currencies=usd`. The gateway then exports `gateway_bzz_usd_rate_configured` and `gateway_bzz_usd_rate_market`, logs a warning, and the Grafana alert "BZZ pricing rate off market" fires when the configured rate is more than 2× away from the market (above: overcharging; below 0.5×: sales can lose money).
+Every price is computed from `X402_BZZ_USD_RATE`. It is **not** updated automatically. Set it explicitly per environment (GitHub variable `X402_BZZ_USD_RATE`, also `X402_MARKUP_PERCENT` and `X402_MIN_PRICE_USD`) and review it regularly. To be warned when it drifts, set `X402_BZZ_PRICE_FEED_URL`, for example `https://api.coingecko.com/api/v3/simple/price?ids=swarm-bzz&vs_currencies=usd`. The gateway then exports `gateway_bzz_usd_rate_configured` and `gateway_bzz_usd_rate_market`, logs a warning, and the Grafana alert "BZZ pricing rate off market" fires when, for an hour, the market price is above 90% of the configured rate (the margin is nearly gone, and sales may soon lose money) or below 20% of it (the gateway charges more than 5× the market). The public CoinGecko API needs no key; the gateway reads it once per `X402_BZZ_PRICE_FEED_INTERVAL_SECONDS` (900 s by default).
 
 ## Access Control
 
