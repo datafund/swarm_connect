@@ -140,7 +140,8 @@ DEFINITE_CODES = sorted([
     "invalid_exact_evm_payload_signature", "invalid_exact_evm_payload_undeployed_smart_wallet",
     "missing_eip712_domain", "network_mismatch", "unsupported_scheme", "invalid_network",
     "invalid_scheme",
-    # both versions, only after a broadcast: definite without a hash by decision
+    # not a pre-send code: only 2.5.0 returns it, after a reverted receipt, with
+    # the hash; definite without a hash by the maintainer's decision
     "invalid_transaction_state",
     # 2.30.0
     "invalid_exact_evm_payload", "invalid_exact_evm_scheme", "invalid_exact_evm_network_mismatch",

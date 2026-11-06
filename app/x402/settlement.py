@@ -769,9 +769,9 @@ def public_facilitator_reason(reason) -> str:
 # @x402/evm 2.5.0 answers `transaction_failed` from one catch around both
 # writeContract and the wait for the receipt; 2.30.0 answers
 # `settlement_pending` with the broadcast transaction when that wait throws,
-# `invalid_exact_evm_transaction_failed` for a send failure and for a reverted
-# receipt, and `invalid_transaction_state` with the broadcast hash when its
-# pending-settlement store fails; its v1 path puts the raw error text of a
+# `invalid_exact_evm_transaction_failed` for a send failure, for a reverted
+# receipt and (with the broadcast hash) when its pending-settlement store
+# fails; its v1 path puts the raw error text of a
 # failed writeContract in errorReason (seen in production: a multi-line viem
 # "Missing or invalid parameters ... eth_sendRawTransaction" error).
 #
@@ -826,12 +826,16 @@ def public_facilitator_reason(reason) -> str:
 #   is the token contract's own revert reason: the transfer was rejected, not
 #   sent, so they stay definite; any other exception there becomes
 #   invalid_exact_evm_transaction_failed, which is unknown.
-# invalid_transaction_state is listed although no version returns it before a
-# broadcast: on the EIP-3009 path both return it only for a mined-and-reverted
-# receipt, with the hash (not charged), and 2.30.0 also with the hash when its
-# pending store fails. With a hash it is therefore unknown, by the hash rule;
-# without one it stays the refusal it always was (the v1 wire goldens pin
-# that answer), by decision.
+# invalid_transaction_state is listed by the maintainer's explicit decision,
+# not because it is a pre-send code: it is not one. On the EIP-3009 `exact`
+# path only 2.5.0 returns it (v1 and v2), after a mined-and-reverted receipt,
+# with the transaction hash; 2.30.0 never does there (a reverted receipt and a
+# pending-store failure both come back as invalid_exact_evm_transaction_failed
+# with the hash). It is harmless in money terms: a reverted
+# transferWithAuthorization rolls back and leaves the nonce unspent, so nothing
+# was charged; and with a hash the answer is unknown anyway, by the hash rule.
+# Without a hash it stays the refusal it always was (the v1 wire goldens pin
+# that answer).
 # Not listed, on purpose: transaction_failed and
 # invalid_exact_evm_transaction_failed, invalid_exact_evm_transfer_event_mismatch,
 # settlement_pending, smart_wallet_deployment_failed (after a deployment was
@@ -856,7 +860,9 @@ DEFINITE_SETTLE_REFUSALS = frozenset({
     "unsupported_scheme",
     "invalid_network",
     "invalid_scheme",
-    # Both versions, definite only without a transaction hash (see above).
+    # Not a pre-send code: kept definite (only without a hash) by the
+    # maintainer's decision; only 2.5.0 returns it, after a reverted receipt,
+    # with the hash (see above).
     "invalid_transaction_state",
     # @x402/evm 2.30.0
     "invalid_exact_evm_payload",
