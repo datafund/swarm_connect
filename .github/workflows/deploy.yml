@@ -92,6 +92,8 @@ jobs:
           X402_BZZ_PRICE_FEED_INTERVAL_SECONDS=${{ vars.X402_BZZ_PRICE_FEED_INTERVAL_SECONDS || '900' }}
           X402_FACILITATOR_CDP_API_KEY_ID=${{ secrets.X402_FACILITATOR_CDP_API_KEY_ID || '' }}
           X402_FACILITATOR_CDP_API_KEY_SECRET=${{ secrets.X402_FACILITATOR_CDP_API_KEY_SECRET || '' }}
+          X402_FACILITATOR_PAYAI_API_KEY_ID=${{ secrets.X402_FACILITATOR_PAYAI_API_KEY_ID || '' }}
+          X402_FACILITATOR_PAYAI_API_KEY_SECRET=${{ secrets.X402_FACILITATOR_PAYAI_API_KEY_SECRET || '' }}
           X402_FACILITATOR_BEARER_TOKEN=${{ secrets.X402_FACILITATOR_BEARER_TOKEN || '' }}
           X402_PROTOCOL_VERSIONS=${{ vars.X402_PROTOCOL_VERSIONS || '1' }}
           X402_FREE_TIER_ENABLED=${{ vars.X402_FREE_TIER_ENABLED || 'true' }}
@@ -174,6 +176,8 @@ jobs:
           X402_FACILITATOR_URL=${{ vars.X402_FACILITATOR_URL }}
           X402_FACILITATOR_CDP_API_KEY_ID=${{ secrets.X402_FACILITATOR_CDP_API_KEY_ID || '' }}
           X402_FACILITATOR_CDP_API_KEY_SECRET=${{ secrets.X402_FACILITATOR_CDP_API_KEY_SECRET || '' }}
+          X402_FACILITATOR_PAYAI_API_KEY_ID=${{ secrets.X402_FACILITATOR_PAYAI_API_KEY_ID || '' }}
+          X402_FACILITATOR_PAYAI_API_KEY_SECRET=${{ secrets.X402_FACILITATOR_PAYAI_API_KEY_SECRET || '' }}
           X402_FACILITATOR_BEARER_TOKEN=${{ secrets.X402_FACILITATOR_BEARER_TOKEN || '' }}
           # Defaults to 1 (x402 v1 only) in both environments, unlike the network and
           # facilitator above: 1 is the behaviour before x402 v2 existed. 1,2 turns on
