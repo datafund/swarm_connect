@@ -431,6 +431,17 @@ The two payment state files are rewritten as paid requests go through. While a w
 
 **What the probe does not see.** It runs in Alloy on the gateway host and calls the public hostnames through DNS, TLS and the reverse proxy. If the whole host or its network goes away, the probe goes with it; **Gateway Down** and **No Data** cover that partly. `monitoring/alerting/README.md` describes Grafana Synthetic Monitoring as the option for a check from outside.
 
+### Log delivery alerts (#672)
+
+The gateway's logs go to Grafana Cloud Loki through Alloy, on a pipeline separate from the metrics. When it breaks, every other alert stays quiet. In #661 the token lacked `logs:write` and the logs of an unknown period were lost.
+
+| Alert | Meaning | First action |
+|---|---|---|
+| **Gateway logs dropped** (warning) | Alloy gave up on gateway log entries in the last 15 minutes (`loki_write_dropped_entries_total`, by `host` and `reason`). Those lines are lost | On the host, `docker logs` of the Alloy container, searched for `final error sending batch`. A 401 with `invalid scope requested`: add `logs:write` to the access policy of `GRAFANA_CLOUD_API_TOKEN` in Grafana Cloud (Access Policies, policy `alloy-metrics-push`); the existing token picks it up within 15 minutes, no redeploy needed. Another 401: wrong `GRAFANA_CLOUD_LOKI_USERNAME` (the Loki tenant id, not the Prometheus one) or a revoked token. 429, `rate_limited` or `stream_limited`: Grafana Cloud limits. `queue_is_full`: Loki slow or unreachable from the host |
+| **Gateway logs missing in Loki** (warning) | Loki received no `{job="swarm_connect/gateway"}` line for an environment for 15 minutes, for 15 more minutes. Docker's healthcheck alone writes about 18 lines per 10 minutes, so this never happens while the gateway runs and logs arrive | Is the gateway container running (**Gateway Down**)? Does **Gateway logs dropped** fire too (then follow it)? Otherwise `docker ps` and `docker logs` of the Alloy container on the host, for a config error or a Docker discovery error. Lines Alloy never read are still in the container's own log until the container is replaced, so read them with `docker logs` before the next deploy |
+
+**After the deploy that adds this**, check in Grafana Explore that `loki_write_dropped_entries_total{job="swarm_connect/alloy"}` has series (one per `reason`). Until they arrive, **Gateway logs dropped** cannot fire. Alloy runs the config of the branch deployed last, so while this change is only on `dev`, a main deploy removes the counters again (see "Which deploy adds the probe" below). **Gateway logs missing in Loki** reads Loki and does not depend on the deploy.
+
 #### After the first deploy that adds the probe
 
 **Which deploy adds the probe.** Every deploy clones *its own branch* into the host checkout (`git clone -b $GITHUB_REF_NAME`) and recreates Alloy from that checkout's `monitoring/alloy/config.alloy`. Both environments share one Alloy, so it runs the config of whichever branch deployed last. While this change is only on `dev`, a dev deploy adds the probe for both environments and **any main deploy removes it again** until the next dev deploy. The probe rules have `noDataState: OK`, so they go quiet; **Public health probe missing** fires after about 45 minutes, so the loss is not silent. Expect it to fire after each main deploy until the change reaches `main`. Then redeploy dev, or merge to main, rather than pausing it.

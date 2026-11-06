@@ -281,3 +281,35 @@ It is configured in Grafana, not in this repository, so it is not reviewed or
 deployed from here. Its series carry their own `job` and `probe` labels. A rule
 on them should select by `job`, like the rules above, so the two sources do not
 mix.
+
+## Gateway logs that never reach Loki (#672)
+
+The log pipeline and the metrics pipeline in `config.alloy` are independent, so
+a broken log pipeline leaves every metric, and every rule above, looking normal.
+In #661 the Alloy token lacked the `logs:write` scope: Loki answered every push
+with 401 `invalid scope requested`, Alloy dropped each batch after its retries,
+and the logs of an unknown period were lost before anyone noticed. Two rules
+cover the two ways logs go missing:
+
+| rule | data source | fires on | for | severity |
+|---|---|---|---|---|
+| Gateway logs dropped | Prometheus | `increase(loki_write_dropped_entries_total{job="swarm_connect/alloy"}[15m])` > 0, by `host` and `reason` | 5m | warning |
+| Gateway logs missing in Loki | Loki | `absent_over_time` of `{job="swarm_connect/gateway"}` over 15m, for `environment="main"` and `"development"` | 15m | warning |
+
+**Gateway logs dropped** names the cause: Alloy exports its own `loki.write`
+counters (`prometheus.exporter.self`, only `loki_write_dropped_entries_total`
+and `loki_write_sent_entries_total` kept). Measured on the host during #661:
+6,097 entries dropped with `reason="ingester_error"`, next to 594 pushes
+answered 401. It fires on any drop, and clears 15 minutes after drops stop.
+
+**Gateway logs missing in Loki** reads Loki itself, so it also catches what the
+first rule cannot see: Alloy not running, Alloy not finding the containers, or
+Alloy's own metrics not arriving. Docker's healthcheck alone writes about 18
+lines per 10 minutes per environment (measured 2026-11-06), so a 15-minute gap
+is never normal while the gateway runs. It fires about 30 minutes after the last
+line: 15 minutes of lookback, then 15 minutes of `for`.
+
+Both are `noDataState: OK`, like the rest: each expresses the loss as a series,
+so no data means nothing is lost. Both were evaluated against the live stack
+with Grafana's rule evaluation API before they were committed; the Loki rule
+returned a firing series when pointed at an environment with no logs.
