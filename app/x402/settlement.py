@@ -764,6 +764,57 @@ def public_facilitator_reason(reason) -> str:
     return FACILITATOR_REASON_HIDDEN
 
 
+# Settle refusals that may not be refusals (#660). A parsed `success: false`
+# is normally definite: nothing was sent to the chain. Not for every reason.
+# In @x402/evm (checked at 2.5.0) the exact EIP-3009 settle path answers
+# `transaction_failed` (`invalid_exact_evm_transaction_failed` in v2) with an
+# empty transaction from one catch that covers both writeContract and
+# waitForTransactionReceipt: if the transaction was broadcast and only the wait
+# for its receipt failed (an RPC timeout), the transfer can still be mined
+# until the authorization's validBefore has passed. `unexpected_settle_error`
+# is that library's catch-all around settle. Such an answer is an unknown outcome, and
+# each settle site handles it exactly as it handles a facilitator exception.
+#
+# The family, matched on the reason stripped and lowercased:
+# - the codes in _MAY_HAVE_BEEN_SENT;
+# - any machine code (the #576 grammar, [a-z0-9_]{1,64}) whose last
+#   underscore-separated words are `transaction_failed`, e.g.
+#   `invalid_exact_evm_transaction_failed`;
+# - a reason starting with `transaction_failed:` (that code followed by the
+#   error text).
+# Everything else keeps its old meaning, a definite refusal: the codes decided
+# before anything is sent (insufficient_funds, invalid signature, nonce already
+# used, expired), and `invalid_transaction_state`, which @x402/evm returns for
+# a transaction that was mined and reverted (not charged). Reasons of other
+# facilitators (PayAI's exact strings could not be verified) that are not in
+# the family keep today's behaviour too.
+#
+# Not done: reading authorizationState(from, nonce) on Base after such an
+# answer would turn many of these into definite answers; it needs a Base RPC.
+_MAY_HAVE_BEEN_SENT = frozenset({"transaction_failed", "invalid_exact_evm_transaction_failed",
+                                 "unexpected_settle_error"})
+_TRANSACTION_FAILED_CODE_RE = re.compile(r"(?:[a-z0-9]+_)*transaction_failed")
+_TRANSACTION_FAILED_PREFIX = "transaction_failed:"
+
+
+def settle_outcome_unknown(reason) -> bool:
+    """Whether a facilitator's settle refusal reason means the transaction may
+    have been sent, so the outcome is unknown (#660). Total: any value (None,
+    not a string, any length or case) gives True or False, never raises."""
+    if not isinstance(reason, str):
+        return False
+    # The prefix first: what follows it is free text of any length.
+    head = reason[:len(_TRANSACTION_FAILED_PREFIX) + 64].lstrip().lower()
+    if head.startswith(_TRANSACTION_FAILED_PREFIX):
+        return True
+    if len(reason) > 256:
+        return False
+    code = reason.strip().lower()
+    if not _FACILITATOR_CODE_RE.fullmatch(code):
+        return False
+    return code in _MAY_HAVE_BEEN_SENT or _TRANSACTION_FAILED_CODE_RE.fullmatch(code) is not None
+
+
 def payment_state_unavailable_detail(work_ran: bool = False) -> dict:
     if work_ran:
         message = ("This request's work ran, but its payment cannot be settled right now, so the "
@@ -1024,24 +1075,32 @@ async def settle_payment(request: Request) -> None:
         raise HTTPException(status_code=503, headers={"Retry-After": "60"},
                             detail=payment_state_unavailable_detail())
     outcome_unknown.mark_asked(auth_key, gen)
-    try:
-        result = checked_settlement(await _facilitator().settle(
-            payment=payment, payment_requirements=facilitator_requirements(request)))
-    except Exception as e:
+
+    def unknown_outcome(reason: str) -> HTTPException:
         # The outcome is unknown: the facilitator may or may not have submitted
         # the transfer. Deliver nothing. The middleware then releases the
         # reservation, which is safe: a retry with the same authorization is
         # delivered only if its own settlement succeeds, and a transfer that did
-        # go through spent the nonce, so it cannot.
+        # go through spent the nonce, so it cannot. One path for a facilitator
+        # exception and for a refusal whose transaction may have been sent
+        # (#660), so the two cannot drift. Neither clears the Idempotency-Key's
+        # "settling" record (no settlement_refused): a retry with the key is
+        # told the outcome is unknown, not charged again.
         outcome_unknown.release(auth_key)    # an unknown outcome now, no longer in flight
-        logger.error(f"x402: settlement error before delivery: {type(e).__name__}: {e}", exc_info=True)
-        log_payment_failed(client_ip=client_ip, reason=f"{type(e).__name__}: {e}",
+        log_payment_failed(client_ip=client_ip, reason=reason,
                            stage="settle", wallet_address=payer, nonce=request_nonce(request),
                            x402_version=paid_version(request))
         x402_settlements_total.labels(result="error", version=paid_version_label(request)).inc()
         # The write-ahead entry (BEFORE_WORK, on disk) is the record: no write here.
-        raise HTTPException(status_code=502, detail=settlement_unavailable_detail(request),
-                            headers=dict(OUTCOME_UNKNOWN_HEADERS))
+        return HTTPException(status_code=502, detail=settlement_unavailable_detail(request),
+                             headers=dict(OUTCOME_UNKNOWN_HEADERS))
+
+    try:
+        result = checked_settlement(await _facilitator().settle(
+            payment=payment, payment_requirements=facilitator_requirements(request)))
+    except Exception as e:
+        logger.error(f"x402: settlement error before delivery: {type(e).__name__}: {e}", exc_info=True)
+        raise unknown_outcome(f"{type(e).__name__}: {e}")
     except BaseException as e:
         # Interrupted while waiting (CancelledError: a shutdown or a client
         # disconnect). Just as unknown: recorded, then re-raised (#553).
@@ -1051,6 +1110,16 @@ async def settle_payment(request: Request) -> None:
     # A definite answer: the request stays in flight until its resolution is
     # written (aresolve releases it), so a duplicate in between is told
     # "in progress", not "outcome unknown".
+
+    if not getattr(result, "success", False) and settle_outcome_unknown(getattr(result, "error_reason", None)):
+        # A "refusal" after which the transfer may still be mined (#660): an
+        # unknown outcome, whatever an earlier attempt left (`prior`), exactly
+        # as an exception above. The full reason goes to the log and the audit
+        # record only; the 502 carries none.
+        reason = getattr(result, "error_reason", None)
+        logger.error(f"x402: settlement before delivery answered {reason!r}; the transaction may "
+                     f"have been sent, outcome unknown")
+        raise unknown_outcome(f"facilitator reported {reason} (the transaction may have been sent)")
 
     if not getattr(result, "success", False):
         settlement_refused(request)

@@ -24,7 +24,9 @@ Replaces x402 1.0.0's FacilitatorClient, and behaves the same for v1:
   TypeError (JSON that is not an object), or the error of a timeout or a
   failed connection (now httpx2's classes, not httpx's). Every caller catches
   these as Exception: app/x402/settlement.py and the middleware count a raise
-  as an unknown outcome, and a parsed success:false as a definite refusal.
+  as an unknown outcome, and a parsed success:false as a definite refusal,
+  except a reason meaning the transaction may have been sent
+  (settlement.settle_outcome_unknown, #660), which is unknown too.
 
 x402 v2 (#607): verify and settle take a PaymentPayloadV2 with
 PaymentRequirementsV2 (mixing the versions raises TypeError). The body is

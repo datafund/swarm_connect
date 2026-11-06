@@ -623,12 +623,21 @@ class X402Middleware(BaseHTTPMiddleware):
                                     headers={"Retry-After": "60"})
             outcome_unknown.mark_asked(auth_key, gen)
             try:
-                from app.x402.settlement import checked_settlement, facilitator_requirements
+                from app.x402.settlement import (checked_settlement, facilitator_requirements,
+                                                 settle_outcome_unknown)
                 settlement = checked_settlement(await self.facilitator_client.settle(
                     payment=payment_payload,
                     payment_requirements=facilitator_requirements(request),
                 ))
                 failure = None if settlement.success else (settlement.error_reason or "unknown")
+                if failure is not None and settle_outcome_unknown(settlement.error_reason):
+                    # A "refusal" after which the transfer may still be mined
+                    # (#660, settlement.settle_outcome_unknown, the classifier
+                    # settle_payment uses too): the unknown-outcome path below,
+                    # exactly as for an exception.
+                    outcome_unknown.release(auth_key)    # an unknown outcome now
+                    failure = f"facilitator reported {failure} (the transaction may have been sent)"
+                    unknown_outcome = True
             except Exception as e:
                 outcome_unknown.release(auth_key)    # an unknown outcome now
                 logger.error(f"x402: Payment settlement failed: {type(e).__name__}: {e}", exc_info=True)
