@@ -42,11 +42,49 @@ def test_no_markdown_calls_the_software_beta():
         assert not re.search(r"\bbeta\b", path.read_text(), re.I), path
 
 
-@pytest.mark.parametrize("doc", ["README.md", "ALPHA_NOTICE.md", "docs/x402-client-integration.md",
-                                 "docs/error-codes.md", "docs/x402-operator-guide.md"])
-def test_docs_promise_no_refund(doc):
-    text = (REPO / doc).read_text().lower()
-    assert "for a refund" not in text and "or a refund" not in text, doc
+# Docs where "refund" is not a promise to a paying caller, and why.
+NOT_FOR_PAYING_CALLERS = {
+    # Operator-only: section 3 "Refunds and reconciliation" is what an operator
+    # may choose to do, by hand, from the audit log.
+    "docs/mainnet-runbook.md": "operator action",
+    "docs/x402-operator-guide.md": "operator action (\"the usual refund path\")",
+    "docs/deployment-guide.md": "operator action (a purchase recorded for a refund)",
+    # Developer notes on internal code paths ("refund path", a free-tier or
+    # bandwidth-credit counter given back), not a promise of money back.
+    "CLAUDE.md": "internal code paths",
+    # Prepaid bandwidth bytes debited and given back when Bee refuses a chunk:
+    # gateway-internal credit, not a payment refund.
+    "docs/chunk-forwarding-guide.md": "bandwidth credit, not money",
+}
+# Wording that says the opposite of a promise.
+NOT_A_PROMISE = (
+    "refunds should not be expected",
+    "not a refund contact",
+    "not a refund channel",
+)
+
+
+def test_no_public_doc_promises_a_refund():
+    """#685: outside the docs listed above, "refund" only says not to expect one."""
+    offending = []
+    for path in _tracked_markdown():
+        rel = str(path.relative_to(REPO))
+        if rel in NOT_FOR_PAYING_CALLERS:
+            continue
+        for number, line in enumerate(path.read_text().splitlines(), 1):
+            text = line.lower()
+            for phrase in NOT_A_PROMISE:
+                text = text.replace(phrase, "")
+            if "refund" in text:
+                offending.append(f"{rel}:{number}: {line.strip()[:120]}")
+    assert not offending, "\n".join(offending)
+
+
+def test_refund_allowlist_is_not_stale():
+    tracked = {str(p.relative_to(REPO)) for p in _tracked_markdown()}
+    for rel in NOT_FOR_PAYING_CALLERS:
+        assert rel in tracked, rel
+        assert "refund" in (REPO / rel).read_text().lower(), f"{rel} no longer needs the exemption"
 
 
 @pytest.mark.parametrize("doc", ["README.md", "docs/x402-client-integration.md"])

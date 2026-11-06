@@ -176,7 +176,7 @@ The response then says that you paid and got nothing:
 {
   "detail": {
     "code": "DELIVERY_FAILED_AFTER_PAYMENT",
-    "message": "The payment was collected but the stamp could not be handed over. Contact the operator with this transaction for a refund.",
+    "message": "The payment was collected but the stamp could not be handed over. Report this, with the transaction, to the gateway operator.",
     "transaction": "0x...",
     "x402_status": "settled_not_delivered"
   }
@@ -184,8 +184,13 @@ The response then says that you paid and got nothing:
 ```
 `detail.transaction` is the payment transfer. The payment middleware also sets
 the `X-Payment-Transaction` and `X-Payment-Status: settled_not_delivered`
-headers. Do not retry blindly, and do not pay again. Contact the operator with
-the transaction for a refund. See
+headers. Do not retry blindly, and do not pay again. Report it, with the
+transaction, to the gateway's support contact. The message above is the one
+with no contact configured. When the operator sets `SUPPORT_CONTACT` (shown as
+`support_contact` on `GET /`), the message names it instead of "the gateway
+operator". When `TERMS_URL` is set, the message adds "The gateway is alpha
+software; see the notice at <url>." The gateway is alpha software: refunds
+should not be expected (see the [alpha notice](../ALPHA_NOTICE.md)). See
 [error-codes.md](error-codes.md) for this code.
 
 **Response (daily allowance used up): HTTP 429**
