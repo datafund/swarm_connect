@@ -4,6 +4,20 @@ A FastAPI service for Swarm network access with x402 payments, notary signing, a
 > ⚠️ **ALPHA SOFTWARE - PROOF OF CONCEPT**
 > This software is in **Alpha stage** and should be considered a **Proof of Concept**. Use for testing and experimentation only. Not recommended for production use.
 
+> ⚠️ **REAL MONEY ON THE HOSTED GATEWAY**
+> The hosted gateway at `provenance-gateway.datafund.io` charges real USDC on Base mainnet. The software is alpha: there are no guarantees and refunds should not be expected. Spend small amounts, set a per-payment cap in your client, and test on staging or the free tier first. See the [alpha notice](ALPHA_NOTICE.md). Feedback and problem reports: info@datafund.io (a feedback contact, not a refund contact).
+
+### Hosted gateways
+
+| | Production | Staging |
+|---|---|---|
+| URL | `provenance-gateway.datafund.io` | `provenance-gateway.dev.datafund.io` |
+| Network | `base` / `eip155:8453` | `base-sepolia` / `eip155:84532` |
+| Token | USDC `0x8335…2913`, real money | test USDC `0x036C…CF7e` |
+| x402 | v1 and v2 | v1 and v2 |
+| Free tier | `X-Payment-Mode: free`, 3 requests/min | same |
+| Notes | | stores on the real Swarm network; for integration testing only |
+
 > ⚠️ **DATA PERSISTENCE WARNING**
 > Storage on Swarm is **rented storage** with limited time periods. The default configuration uses very short rental periods (approximately **1 day**). **Do not expect uploaded data to persist longer than the rental period.** Data will become unavailable when the postage stamp expires.
 >
@@ -54,7 +68,7 @@ swarm_connect/
 ``` 
 
 
-> **Data retention.** Swarm keeps data only while the stamp it was uploaded with is valid. Stamp purchase, extension, pool acquire and upload responses include `expires_at`: an **estimate** (UTC, at today's storage price) of when the stamp runs out. Extend the stamp (`PATCH /api/v1/stamps/{id}/extend`) well before then, or the data can disappear. Pool stamps come with at least about a day left; purchased stamps last the requested duration. Service terms: [TERMS.md](TERMS.md) (draft; linked as `terms_url` from `GET /` once `TERMS_URL` is set).
+> **Data retention.** Swarm keeps data only while the stamp it was uploaded with is valid. Stamp purchase, extension, pool acquire and upload responses include `expires_at`: an **estimate** (UTC, at today's storage price) of when the stamp runs out. Extend the stamp (`PATCH /api/v1/stamps/{id}/extend`) well before then, or the data can disappear. Pool stamps come with at least about a day left; purchased stamps last the requested duration. See the [alpha notice](ALPHA_NOTICE.md) (linked as `terms_url` from `GET /` once `TERMS_URL` is set).
 
 ## Running
 

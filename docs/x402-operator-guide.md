@@ -6,7 +6,7 @@ This guide explains how to set up and operate the x402 payment integration for t
 
 x402 enables pay-per-request access to the gateway without requiring user accounts. Users pay in USDC on Base chain, and the gateway uses those funds to purchase stamps and upload data to Swarm.
 
-**Current Status**: Testnet only (Base Sepolia)
+**Current Status** (hosted gateways): production (`provenance-gateway.datafund.io`) takes real USDC on Base mainnet (`base`), through the PayAI facilitator, x402 v1 and v2; staging (`provenance-gateway.dev.datafund.io`) runs on Base Sepolia with test USDC, also PayAI and v1+v2. The software is alpha; paying users are pointed to the [alpha notice](../ALPHA_NOTICE.md) (`TERMS_URL`) and a feedback contact (`SUPPORT_CONTACT`), both shown on `GET /`. Operating on mainnet: see the [mainnet runbook](mainnet-runbook.md).
 
 ## Architecture
 
