@@ -82,38 +82,125 @@ PAYAI_ISSUER = "payai-merchant"
 PAYAI_TOKEN_LIFETIME_SECONDS = 120
 PAYAI_REFRESH_MARGIN_SECONDS = 30
 _PAYAI_SECRET_PREFIX = "payai_sk_"
+# What String.prototype.trim() strips: WhiteSpace and LineTerminator
+# (ECMA-262), that is tab, VT, FF, space, NBSP, U+FEFF, the Zs category, LF,
+# CR, LS and PS. Python's str.strip() differs (no U+FEFF; adds U+001C-1F, U+0085).
+_JS_TRIM = ("\t\n\v\f\r \u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007"
+            "\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000\ufeff")
+# What atob's forgiving-base64 decode removes first: ASCII whitespace.
 _ASCII_WHITESPACE = re.compile(r"[\t\n\f\r ]")
+_BASE64_ALPHABET = re.compile(r"[A-Za-z0-9+/]*")
+
+# RFC 8410 / RFC 5958 OneAsymmetricKey (PKCS#8 v2) for Ed25519, the parts
+# that are fixed: version 1, the algorithm 1.3.101.112 without parameters,
+# and the 32-byte seed wrapped in an OCTET STRING inside the privateKey
+# OCTET STRING.
+_V2_VERSION = bytes.fromhex("020101")
+_ED25519_ALGORITHM = bytes.fromhex("300506032b6570")
+_V2_SEED_PREFIX = bytes.fromhex("04220420")
+
+
+class _BadKey(Exception):
+    """A secret that is not a usable key. Its text is a fixed reason only."""
+
+
+def _atob(text: str) -> bytes:
+    """atob's forgiving-base64 decode (WHATWG): ASCII whitespace removed, one
+    or two trailing '=' removed when the length is a multiple of 4, then only
+    the base64 alphabet, and never a length of 4n+1."""
+    data = _ASCII_WHITESPACE.sub("", text)
+    if len(data) % 4 == 0:
+        data = data[:-2] if data.endswith("==") else data[:-1] if data.endswith("=") else data
+    if len(data) % 4 == 1 or not _BASE64_ALPHABET.fullmatch(data):
+        raise _BadKey("not base64")
+    return base64.b64decode(data + "=" * (-len(data) % 4), validate=True)
+
+
+def _der_length(der: bytes, i: int):
+    """The DER length at der[i] (minimal form, at most two length bytes) and
+    the index after it."""
+    if i >= len(der):
+        raise _BadKey("truncated")
+    first = der[i]
+    if first < 0x80:
+        return first, i + 1
+    count = first & 0x7F
+    if count not in (1, 2) or i + 1 + count > len(der):
+        raise _BadKey("bad length")
+    n = int.from_bytes(der[i + 1:i + 1 + count], "big")
+    if n < 0x80 or (count == 2 and n < 0x100):
+        raise _BadKey("bad length")
+    return n, i + 1 + count
+
+
+def _ed25519_from_pkcs8_v2(der: bytes):
+    """An Ed25519 key from a PKCS#8 v2 (OneAsymmetricKey) DER, which
+    cryptography's load_der_private_key does not read but WebCrypto and
+    OpenSSL do. Strict: the fields above, then optional attributes [0], then
+    an optional public key [1], which must be the seed's own; nothing else."""
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+    from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
+    if not der or der[0] != 0x30:
+        raise _BadKey("not PKCS#8")
+    n, i = _der_length(der, 1)
+    if i + n != len(der):
+        raise _BadKey("bad length")
+    fixed = _V2_VERSION + _ED25519_ALGORITHM + _V2_SEED_PREFIX
+    if der[i:i + len(fixed)] != fixed or len(der) < i + len(fixed) + 32:
+        raise _BadKey("not a PKCS#8 v2 Ed25519 key")
+    i += len(fixed)
+    key = Ed25519PrivateKey.from_private_bytes(der[i:i + 32])
+    i += 32
+    if i < len(der) and der[i] == 0xA0:              # attributes, not used
+        n, i = _der_length(der, i + 1)
+        i += n
+    if i < len(der) and der[i] == 0x81:              # publicKey BIT STRING
+        n, j = _der_length(der, i + 1)
+        if n != 33 or j + n > len(der) or der[j] != 0:
+            raise _BadKey("bad public key")
+        own = key.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
+        if der[j + 1:j + 33] != own:
+            raise _BadKey("its public key does not match its private key")
+        i = j + n
+    if i != len(der):
+        raise _BadKey("unexpected data after the key")
+    return key
 
 
 def load_payai_private_key(secret: str):
     """The Ed25519 private key in a PayAI API key secret.
 
-    Normalised as normalizeApiKeySecret does (surrounding whitespace trimmed,
-    a leading payai_sk_ removed), then decoded as base64ToUint8Array and atob
-    do (the url-safe alphabet accepted, whitespace and missing padding
-    forgiven), then loaded as PKCS#8 DER. Any failure raises ValueError saying
-    only that the setting is malformed: no part of the value, and no chained
-    exception, since the message reaches the public deploy log (#485).
+    Normalised as @payai/facilitator 2.4.6 does: normalizeApiKeySecret (trim()
+    with JavaScript's whitespace set, then a leading payai_sk_ removed), then
+    base64ToUint8Array (- and _ mapped to + and /, then atob's
+    forgiving-base64 rules, see _atob). The DER is loaded by cryptography as
+    PKCS#8; a PKCS#8 v2 Ed25519 DER (with the public key), which cryptography
+    50 refuses, is read by _ed25519_from_pkcs8_v2. Where this may still
+    differ from the package, which imports the DER with WebCrypto: DER that
+    WebCrypto accepts and neither reader here does (unusual encodings), or the
+    reverse. Any failure raises ValueError saying only that the setting is
+    malformed: no part of the value, and no chained exception, since the
+    message reaches the public deploy log (#485).
     """
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
     from cryptography.hazmat.primitives.serialization import load_der_private_key
-    problem = None
+    problem = "not a base64 PKCS#8 Ed25519 private key"
     try:
-        text = (secret or "").strip()
+        text = (secret or "").strip(_JS_TRIM)
         if text.startswith(_PAYAI_SECRET_PREFIX):
             text = text[len(_PAYAI_SECRET_PREFIX):]
-        text = _ASCII_WHITESPACE.sub("", text.replace("-", "+").replace("_", "/"))
-        text = text.rstrip("=")
-        if not text or len(text) % 4 == 1:
-            problem = "not base64"
-        else:
-            der = base64.b64decode(text + "=" * (-len(text) % 4), validate=True)
+        der = _atob(text.replace("-", "+").replace("_", "/"))
+        try:
             key = load_der_private_key(der, password=None)
-            if isinstance(key, Ed25519PrivateKey):
-                return key
-            problem = "not an Ed25519 key"
+        except ValueError:
+            key = _ed25519_from_pkcs8_v2(der)
+        if isinstance(key, Ed25519PrivateKey):
+            return key
+        problem = "not an Ed25519 key"
+    except _BadKey as e:
+        problem = str(e)
     except Exception:
-        problem = problem or "not a base64 PKCS#8 Ed25519 private key"
+        pass
     raise ValueError(f"X402_FACILITATOR_PAYAI_API_KEY_SECRET is malformed ({problem}); it must be "
                      f"the PayAI API key secret, a base64 PKCS#8 Ed25519 private key")
 
@@ -123,8 +210,9 @@ def _b64url(data: bytes) -> str:
 
 
 def _compact_json(value: dict) -> bytes:
-    # JSON.stringify's output: no spaces, keys in insertion order.
-    return json.dumps(value, separators=(",", ":")).encode("utf-8")
+    # JSON.stringify's output: no spaces, keys in insertion order, non-ASCII
+    # characters as themselves (UTF-8 on the wire), not as \u escapes.
+    return json.dumps(value, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
 
 
 class PayAIAuth:
