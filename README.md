@@ -476,7 +476,7 @@ Gateway ──/metrics──> Grafana Alloy ──remote write──> Grafana Cl
 - HTTP request rate, latency percentiles (p50/p95/p99), and error rate
 - Upload/download counts and bytes transferred
 - Stamp purchases and pool acquisitions
-- Wallet balances (BZZ, xDAI, chequebook, Base ETH) with alert thresholds
+- Wallet balances (BZZ, xDAI, chequebook) with alert thresholds, and the x402 pay-to wallet's Base ETH (information only, no alert: it needs no ETH)
 - Stamp pool availability by size and minimum TTL
 - x402 payment mode breakdown (paid/free/rejected)
 - Bee node API error rate by endpoint

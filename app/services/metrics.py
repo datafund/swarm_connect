@@ -41,7 +41,7 @@ chequebook_available_balance = Gauge(
     "gateway_chequebook_available_balance", "Chequebook available BZZ balance"
 )
 base_eth_balance = Gauge(
-    "gateway_base_eth_balance", "Base chain ETH balance for x402 gas", ["wallet"]
+    "gateway_base_eth_balance", "Base chain ETH balance of the x402 pay-to wallet (information only)", ["wallet"]
 )
 stamp_pool_available = Gauge(
     "gateway_stamp_pool_available", "Available stamps in pool by size", ["size"]

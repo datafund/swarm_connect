@@ -178,7 +178,8 @@ def test_balance_check_rule_covers_failed_and_stale_reads():
 
 def test_balance_alerts_point_at_the_check():
     rules = _rules()
-    for title in ("Critical BZZ Balance", "Low BZZ Balance", "Low xDAI Balance", "Low Base ETH"):
+    # "Low Base ETH" was removed (#663): the pay-to wallet needs no ETH.
+    for title in ("Critical BZZ Balance", "Low BZZ Balance", "Low xDAI Balance"):
         assert "gateway_balance_check_ok" in rules[title]["annotations"]["description"], title
 
 

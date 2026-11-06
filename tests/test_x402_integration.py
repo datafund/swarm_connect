@@ -733,9 +733,10 @@ class TestHealthEndpointWithX402:
         with patch("app.services.swarm_api.get_node_status_summary",
                    new=AsyncMock(return_value={"healthy": True, "network_availability": "Available", "warnings": []})):
             response = await read_root()
-        # A (near-)empty pay-to wallet is correct for a cold mainnet address (#371).
+        # A (near-)empty pay-to wallet is correct for a cold mainnet address (#371),
+        # and /health no longer calls it critical (#663).
         assert response["status"] == "ok"
-        assert response["x402"]["base_wallet"]["is_critical"] is True
+        assert response["x402"]["base_wallet"]["is_critical"] is False
         assert response["x402"]["errors"] == []
 
     @patch("app.x402.preflight.check_preflight_balances", new_callable=AsyncMock)
