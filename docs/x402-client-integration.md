@@ -622,7 +622,7 @@ Use the staging gateway, `https://provenance-gateway.dev.datafund.io`, for integ
 The production gateway, `https://provenance-gateway.datafund.io`, charges real USDC on Base mainnet:
 - Network `base` (`eip155:8453`), USDC `0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913`, EIP-712 domain name `"USD Coin"`, version `"2"` (build the domain from the 402's `extra`, as above)
 - The wallet needs USDC and no ETH: the facilitator pays the gas
-- **Always set a per-payment cap**: `max_value` (x402 Python SDK), `--max-usd` (the samples), `maxAmount` (the provenance SDK)
+- **Always set a per-payment cap**: `max_value` (x402 Python SDK), `--max-usd` (Python sample) / the `MAX_USD` constant (Node sample), `maxAmount` (the provenance SDK)
 - Optionally pin `payTo` to the gateway's address (`--pay-to` / `PAY_TO` in the samples), so a changed 402 cannot redirect your payment
 - The software is alpha: refunds should not be expected. See the [alpha notice](../ALPHA_NOTICE.md)
 
