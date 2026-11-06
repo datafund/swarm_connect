@@ -103,6 +103,20 @@ def test_root_has_no_contact_until_configured(monkeypatch):
     assert body["terms_url"] is None
 
 
+def test_root_treats_whitespace_only_settings_as_unset(monkeypatch):
+    configure(monkeypatch, "  ", " \t")
+    body = _root()
+    assert body["support_contact"] is None
+    assert body["terms_url"] is None
+
+
+def test_root_strips_the_settings(monkeypatch):
+    configure(monkeypatch, f" {CONTACT} ", f"{NOTICE}\n")
+    body = _root()
+    assert body["support_contact"] == CONTACT
+    assert body["terms_url"] == NOTICE
+
+
 def test_root_shows_the_contact_and_the_notice(monkeypatch):
     configure(monkeypatch, CONTACT, NOTICE)
     body = _root()

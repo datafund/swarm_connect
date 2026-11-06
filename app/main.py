@@ -408,6 +408,9 @@ async def read_root():
     **Response fields**:
     - `status`: "ok" | "degraded" | "critical"
     - `message`: Gateway name
+    - `terms_url`: where the alpha notice is published (`TERMS_URL`), or null
+    - `support_contact`: feedback and problem-report contact (`SUPPORT_CONTACT`),
+      not a refund channel, or null
     - `version`: gateway build
     - `uptime_seconds`: seconds since this process started — a drop means it was
       restarted or redeployed
@@ -482,9 +485,9 @@ def build_health_response(snapshot) -> dict:
         "message": f"Welcome to {settings.PROJECT_NAME}",
         # What a paid request buys, what happens on failure, and that data
         # lives only as long as its stamp (#383).
-        "terms_url": settings.TERMS_URL or None,
+        "terms_url": (settings.TERMS_URL or "").strip() or None,
         # Feedback and problem reports (#686); not a refund channel.
-        "support_contact": settings.SUPPORT_CONTACT or None,
+        "support_contact": (settings.SUPPORT_CONTACT or "").strip() or None,
         # Build and process age. Both were previously only readable from /metrics,
         # which is not public any more (#188) — and they are the two fields an
         # external checker needs to tell whether the gateway was redeployed or

@@ -298,6 +298,7 @@ async def test_paid_non_delivery_is_logged_as_an_error(tmp_path, monkeypatch, ca
     assert detail["code"] == "DELIVERY_FAILED_AFTER_PAYMENT"
     assert detail["transaction"] == "0xtx"
     assert detail["x402_status"] == "settled_not_delivered"
+    assert "operator" in detail["message"]  # default settings: no SUPPORT_CONTACT
     assert "refund" not in detail["message"]  # #686: no refund promise
     assert "another request" not in detail["message"]
     err = [m for m in caplog.messages if "PAID NON-DELIVERY" in m]
