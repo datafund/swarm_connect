@@ -213,10 +213,17 @@ def create_402_response(
     if free_tier_info and free_tier_info.get("available"):
         response_body["freeTier"] = free_tier_info
 
+    headers = {"Content-Type": "application/json"}
+    # With x402 v2 enabled, the PAYMENT-REQUIRED header too, and with "2"
+    # alone the body as its JSON copy (#608).
+    from app.x402.advertise_v2 import PAYMENT_REQUIRED_HEADER, advertise
+    response_body, advertised = advertise(response_body)
+    if advertised is not None:
+        headers[PAYMENT_REQUIRED_HEADER] = advertised
     return JSONResponse(
         status_code=402,
         content=response_body,
-        headers={"Content-Type": "application/json"}
+        headers=headers
     )
 
 
@@ -301,6 +308,11 @@ async def _spec_shaped_402(response: Response) -> Response:
     The same body is kept under "detail" as well, so clients written against
     the old shape keep working; that copy is deprecated. The error envelope's
     top-level `code` and `message` (#381) stay as well.
+
+    With x402 v2 enabled, a body with offers also gets the PAYMENT-REQUIRED
+    header, built from those offers, and with "2" alone the body is the JSON
+    copy of that v2 Payment Required (app/x402/advertise_v2.py, #608, D10).
+    Every x402 402 with an offer leaves through here.
     """
     raw = b""
     async for chunk in response.body_iterator:
@@ -310,7 +322,10 @@ async def _spec_shaped_402(response: Response) -> Response:
         detail = parsed.get("detail")
     except Exception:
         parsed, detail = {}, None
+    advertised = None
     if isinstance(detail, dict) and "x402Version" in detail and "accepts" in detail:
+        from app.x402.advertise_v2 import advertise
+        detail, advertised = advertise(detail)
         envelope = {k: parsed[k] for k in ("code", "message") if k in parsed}
         out = JSONResponse(status_code=402, content={**detail, **envelope, "detail": detail})
     else:
@@ -320,6 +335,8 @@ async def _spec_shaped_402(response: Response) -> Response:
     out.raw_headers = [
         (k, v) for k, v in response.raw_headers if k.lower() not in (b"content-length", b"content-type")
     ] + [(k, v) for k, v in out.raw_headers if k.lower() in (b"content-length", b"content-type")]
+    if advertised is not None:
+        out.raw_headers.append((b"payment-required", advertised.encode("ascii")))
     return out
 
 

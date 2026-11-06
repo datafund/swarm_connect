@@ -19,6 +19,10 @@ import time
 # Configure basic logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+# httpx2's request lines without the server's reason phrase or query (#608):
+# the container log reaches the public deploy log.
+from app.core import http_log  # noqa: E402
+http_log.install()
 
 # Captured at import so /health can report process age without reading /metrics.
 _STARTED_MONOTONIC = time.monotonic()
@@ -31,8 +35,11 @@ async def lifespan(app: FastAPI):
     # Refuse to start with an x402 configuration that cannot take payment
     # safely: an unknown network, a missing pay-to address, or a mainnet
     # paired with the public test-network facilitator (#370).
-    from app.x402.facilitator import validate_x402_config
+    from app.x402.facilitator import check_facilitator_v2_support, validate_x402_config
     validate_x402_config()
+    # With x402 v2 enabled, the facilitator must list v2 exact on the network
+    # in /supported, or the gateway does not start (#608, D3 in #596).
+    await check_facilitator_v2_support()
 
     # Initialize shared HTTP client (must be first — other services depend on it)
     from app.services.http_client import init_client, close_client

@@ -29,8 +29,8 @@ from app.x402.settlement import replay_guard
 from tests import test_x402_v1_golden as golden
 from tests import test_x402_v2_payment_header as v2h
 from tests.x402_v2_builders import (
-    PAYER, authorization, encode, header_for, nonce_hex, other_receipt_header, pay,
-    receipt_header, v1_payload, v2_accepted, v2_payload,
+    PAYER, advertised, authorization, encode, expected_payment_required, header_for, nonce_hex,
+    other_receipt_header, pay, receipt_header, v1_payload, v2_accepted, v2_payload,
 )
 
 URL = "https://facilitator.example"
@@ -126,10 +126,15 @@ def _settled(version):
 
 
 def _v1_body_402(r):
+    """The v1 body of a 402, and with v2 enabled (#608) its PAYMENT-REQUIRED
+    header advertising the same offer."""
     body = r.json()
     assert body["x402Version"] == 1 and len(body["accepts"]) == 1
     assert body["accepts"][0]["network"] == "base-sepolia"
-    assert "PAYMENT-REQUIRED" not in r.headers      # #608
+    if 2 in settings.x402_protocol_versions():
+        assert advertised(r) == expected_payment_required(body)
+    else:
+        assert "PAYMENT-REQUIRED" not in r.headers
     return body
 
 
@@ -293,12 +298,18 @@ def test_default_setting_still_refuses_v2(gw):
     assert fac.calls == []
 
 
-def test_v2_only_refuses_x_payment(gw):
-    client, fac = gw("2")
-    offer = _offer(client)
+def test_v2_only_refuses_x_payment(gw, monkeypatch):
+    client, fac = gw("1,2")
+    offer = _offer(client)              # the v1 offer, for the X-PAYMENT below
+    monkeypatch.setattr(settings, "X402_PROTOCOL_VERSIONS", "2")
     before = x402_payments_total.labels(mode="version_unsupported", version="1")._value.get()
     r = client.post("/api/v1/stamps/", headers=pay(1, offer))
-    body = _refused_402(r, "X402_VERSION_UNSUPPORTED")
+    assert r.status_code == 402, r.text
+    # With "2" alone the body is the JSON copy of the v2 PaymentRequired (D10, #608).
+    body = r.json()
+    assert body["code"] == "X402_VERSION_UNSUPPORTED" and body["detail"]["code"] == "X402_VERSION_UNSUPPORTED"
+    assert body["x402Version"] == 2 and body["accepts"] == [v2_accepted(offer)]
+    assert advertised(r) == {k: body[k] for k in ("x402Version", "error", "resource", "accepts")}
     assert "PAYMENT-SIGNATURE" in body["message"]
     assert x402_payments_total.labels(mode="version_unsupported", version="1")._value.get() == before + 1
     assert fac.calls == []

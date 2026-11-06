@@ -1084,10 +1084,11 @@ async def settle_payment(request: Request) -> None:
             "reason": shown,
         }
         # Also a well-formed x402 Payment Required body, so a client can sign a
-        # fresh payment from it like from any other 402 (#372). It stays the v1
-        # shape for a v2 payment too, as every 402 does until PAYMENT-REQUIRED
-        # is sent (#608); what follows the request's version is the
-        # facilitator call above (facilitator_requirements, #607).
+        # fresh payment from it like from any other 402 (#372). It is raised in
+        # the v1 shape for a v2 payment too, as every 402 is; the middleware
+        # adds PAYMENT-REQUIRED with v2 enabled (advertise_v2.py, #608). What
+        # follows the request's version is the facilitator call above
+        # (facilitator_requirements, #607).
         if hasattr(requirements, "model_dump"):
             detail.update({
                 "x402Version": 1,

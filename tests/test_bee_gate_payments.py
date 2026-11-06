@@ -250,6 +250,13 @@ def _plain_app():
         await swallow_a_refusal()
         raise HTTPException(status_code=409, detail={"code": "SOMETHING", "x402_status": "settlement_unknown"})
 
+    @app.get("/payment-required-402")
+    async def payment_required():
+        # The x402 v2 offer header (#608), on a body that alone would not
+        # be recognised as a payment answer.
+        await swallow_a_refusal()
+        raise HTTPException(status_code=402, detail="x", headers={"PAYMENT-REQUIRED": "e30="})
+
     @app.get("/plain-422")
     async def plain():
         await swallow_a_refusal()
@@ -275,12 +282,18 @@ def plain():
     ("/settled-not-delivered-502", 502),   # (b) X-Payment-Transaction
     ("/payment-code-500", 500),            # (b) a payment/delivery code in the body
     ("/x402-fields-409", 409),             # (b) x402 fields in the body
+    ("/payment-required-402", 402),        # (b) PAYMENT-REQUIRED (#608)
 ])
 def test_payment_answers_are_never_rewritten(plain, path, status):
     r = plain.get(path)
     assert r.status_code == status
     assert "retry-after" not in r.headers
     assert_not_rewritten(r)
+
+
+def test_a_402_keeps_its_payment_required_header(plain):
+    r = plain.get("/payment-required-402")
+    assert r.status_code == 402 and r.headers["payment-required"] == "e30="
 
 
 def test_a_request_carrying_a_payment_is_never_rewritten(plain):

@@ -91,3 +91,28 @@ def receipt_header(version: int) -> str:
 
 def other_receipt_header(version: int) -> str:
     return receipt_header(2 if version == 1 else 1)
+
+
+def expected_payment_required(body_v1: dict) -> dict:
+    """The v2 PaymentRequired a 402 with this v1 body advertises (#608): the
+    body's error, the resource of accepts[0], and every v1 offer in v2 form."""
+    first = body_v1["accepts"][0]
+    out = {"x402Version": 2}
+    if body_v1.get("error") is not None:
+        out["error"] = body_v1["error"]
+    out["resource"] = {"url": first["resource"], "description": first["description"],
+                       "mimeType": first["mimeType"]}
+    out["accepts"] = [v2_accepted(o) for o in body_v1["accepts"]]
+    return out
+
+
+def advertised(response) -> dict:
+    """The decoded PAYMENT-REQUIRED of a response (codec_v2, then the plain
+    base64 JSON reading @x402/core does), checked to agree."""
+    from app.x402 import codec_v2
+    value = response.headers["PAYMENT-REQUIRED"]
+    typed = codec_v2.decode_payment_required(value).model_dump(mode="json", by_alias=True,
+                                                               exclude_none=True)
+    plain = json.loads(base64.b64decode(value, validate=True).decode("utf-8"))
+    assert typed == plain
+    return plain

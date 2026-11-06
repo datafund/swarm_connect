@@ -21,7 +21,7 @@ For each HTTP request:
      facilitator settle call) or completed;
    - the response carries a payment header (X-Payment-Status,
      X-PAYMENT-RESPONSE or PAYMENT-RESPONSE, X-Payment-Transaction, X-Payment-Mode
-     paid/failed);
+     paid/failed, or PAYMENT-REQUIRED, the x402 v2 offer, #608);
    - its body has a payment (including PAYMENTS_UNAVAILABLE), idempotency,
      delivery or purchase code, or x402 fields.
    A response below 400 passes through unchanged, as does every response of a
@@ -159,9 +159,10 @@ class BeeGateMiddleware:
 
 
 # Response headers the x402 code sets on answers about a payment.
-# PAYMENT-RESPONSE is the x402 v2 receipt (#607).
+# PAYMENT-RESPONSE is the x402 v2 receipt (#607), PAYMENT-REQUIRED the x402 v2
+# offer on a 402 (#608): replacing that 402 would take the offer away.
 _PAYMENT_HEADERS = (b"x-payment-status", b"x-payment-response", b"x-payment-transaction",
-                    b"payment-response")
+                    b"payment-response", b"payment-required")
 # Codes of answers about a payment or its delivery (docs/error-codes.md).
 # PAYMENTS_ (#589): PAYMENTS_UNAVAILABLE already says this request was not
 # charged, and its reason and Retry-After are the client's answer.

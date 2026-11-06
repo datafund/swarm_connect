@@ -45,8 +45,9 @@ facilitator-side switches it never priced. Answers are classified by status
 
 tests/test_x402_facilitator_differential.py runs verify and settle through
 this client and through x402 1.0.0 against a stub server and compares the
-requests and results. supported() has no 1.0.0 counterpart; nothing in app/
-calls it yet (#608).
+requests and results. supported() and supported_response() have no 1.0.0
+counterpart; the startup check for x402 v2 calls supported_response()
+(facilitator.check_facilitator_v2_support, #608) and requires a 2xx.
 """
 import inspect
 from typing import Any, Callable, Optional
@@ -156,11 +157,57 @@ class FacilitatorClient:
         data = await self._post("settle", payment, payment_requirements)
         return SettleResponse(**data)
 
+    async def supported_response(self) -> httpx2.Response:
+        """GET {url}/supported for the v2 startup check, unparsed (#608).
+
+        Same headers ("supported" entry) and per-read timeout as verify and
+        settle, plus Accept-Encoding: identity, and no redirects followed. A
+        non-2xx answer (a 3xx included) is returned with its status and an
+        empty body, never read. A 2xx answer is never inflated: one that
+        still carries a Content-Encoding other than identity raises
+        SupportedAnswerEncoded, so a small compressed answer cannot make
+        startup allocate a large one. The raw body is read up to
+        MAX_SUPPORTED_BYTES; a longer one raises SupportedAnswerTooLarge.
+        The returned Response holds the raw bytes and the status; the caller
+        (facilitator.check_facilitator_v2_support) decodes them itself, and
+        puts an overall deadline around this call."""
+        headers = await self._headers("supported")
+        headers["Accept-Encoding"] = "identity"
+        async with self._client() as client:
+            # Redirects are not followed (#608): httpx2 reads and decodes every
+            # 3xx body in full while following, before the encoding check and
+            # the byte cap below could see it, and a redirect could hand the
+            # check to another origin. A 3xx is returned as is; the caller
+            # refuses it like any other non-2xx answer.
+            async with client.stream("GET", f"{self.config['url']}/supported", headers=headers,
+                                     follow_redirects=False) as response:
+                # The raw byte pairs: decoded as latin-1 and re-encoded, an
+                # obs-text header (0x80-0xFF) would raise UnicodeEncodeError.
+                kept = [(k, v) for k, v in response.headers.raw
+                        if k.lower() not in (b"content-encoding", b"content-length", b"transfer-encoding")]
+                if not 200 <= response.status_code < 300:
+                    # Refused whatever it says (a 3xx included): its body is
+                    # never read, so it cannot cost memory or time.
+                    return httpx2.Response(response.status_code, headers=kept, content=b"",
+                                           request=response.request)
+                encodings = [e.strip().lower() for v in response.headers.get_list("content-encoding")
+                             for e in v.split(",") if e.strip()]
+                if any(e != "identity" for e in encodings):
+                    raise SupportedAnswerEncoded(response.status_code)
+                body = bytearray()
+                async for chunk in response.aiter_raw():
+                    body += chunk
+                    if len(body) > MAX_SUPPORTED_BYTES:
+                        raise SupportedAnswerTooLarge(response.status_code)
+                return httpx2.Response(response.status_code, headers=kept, content=bytes(body),
+                                      request=response.request)
+
     async def supported(self) -> SupportedResponse:
         """GET {url}/supported: the payment kinds the facilitator settles.
 
-        Same headers, timeout and parsing rule as verify and settle. Not called
-        by the gateway yet (#608)."""
+        Same headers, timeout and parsing rule as v1 verify and settle: the
+        body is parsed whatever the HTTP status. The startup check does not
+        use this; it reads supported_response() and requires a 2xx."""
         headers = await self._headers("supported")
         async with self._client() as client:
             response = await client.get(f"{self.config['url']}/supported", headers=headers,
@@ -178,6 +225,27 @@ def v2_request_body(payment: PaymentPayloadV2, payment_requirements: PaymentRequ
         "paymentRequirements": payment_requirements.model_dump(mode="json", by_alias=True,
                                                                exclude_none=True),
     }
+
+
+# The largest GET /supported answer read (#608). Real answers are a few KB.
+MAX_SUPPORTED_BYTES = 1024 * 1024
+
+
+class SupportedAnswerTooLarge(Exception):
+    """A /supported answer over MAX_SUPPORTED_BYTES. Never carries the body."""
+
+    def __init__(self, status: int):
+        super().__init__(f"facilitator /supported answer over {MAX_SUPPORTED_BYTES} bytes (HTTP {status})")
+        self.status = status
+
+
+class SupportedAnswerEncoded(Exception):
+    """A /supported answer with a Content-Encoding other than identity,
+    refused without being inflated. Never carries the body."""
+
+    def __init__(self, status: int):
+        super().__init__(f"facilitator /supported answer is content-encoded (HTTP {status})")
+        self.status = status
 
 
 class FacilitatorAnswerUnusable(Exception):
