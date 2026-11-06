@@ -68,6 +68,11 @@ class Settings(BaseSettings):
     X402_FACILITATOR_CDP_API_KEY_ID: Optional[str] = None
     X402_FACILITATOR_CDP_API_KEY_SECRET: Optional[str] = None
     X402_FACILITATOR_BEARER_TOKEN: Optional[str] = None
+    # PayAI facilitator API key (#662): the key ID and its secret, a base64
+    # PKCS#8 Ed25519 private key that signs a short-lived JWT per request.
+    # Unset: PayAI's shared free lane. The secret is kept out of repr.
+    X402_FACILITATOR_PAYAI_API_KEY_ID: Optional[str] = None
+    X402_FACILITATOR_PAYAI_API_KEY_SECRET: Optional[str] = Field(None, repr=False)
     X402_NETWORK: str = "base-sepolia"  # Network identifier (v1 style)
     # The x402 protocol versions a payment is accepted in (#607, D3 in #596):
     # "1" (default), "1,2" (dual mode) or "2". Anything else stops startup.
