@@ -1,0 +1,968 @@
+{
+ "v1/after_work/free_text/200": {
+  "body": "{\"detail\":{\"code\":\"PAYMENT_SETTLEMENT_FAILED\",\"message\":\"The payment could not be settled (facilitator error; details in the gateway log).\",\"x402_status\":\"settlement_failed\"},\"code\":\"PAYMENT_SETTLEMENT_FAILED\",\"message\":\"The payment could not be settled (facilitator error; details in the gateway log).\",\"x402_status\":\"settlement_failed\"}",
+  "headers": [
+   [
+    "content-length",
+    "338"
+   ],
+   [
+    "content-type",
+    "application/json"
+   ],
+   [
+    "x-payment-mode",
+    "failed"
+   ]
+  ],
+  "metric": {
+   "refused": 1.0
+  },
+  "ran": [
+   "paid"
+  ],
+  "status": 402
+ },
+ "v1/after_work/insufficient_funds/200": {
+  "body": "{\"detail\":{\"code\":\"PAYMENT_SETTLEMENT_FAILED\",\"message\":\"The payment could not be settled (insufficient_funds).\",\"x402_status\":\"settlement_failed\"},\"code\":\"PAYMENT_SETTLEMENT_FAILED\",\"message\":\"The payment could not be settled (insufficient_funds).\",\"x402_status\":\"settlement_failed\"}",
+  "headers": [
+   [
+    "content-length",
+    "284"
+   ],
+   [
+    "content-type",
+    "application/json"
+   ],
+   [
+    "x-payment-mode",
+    "failed"
+   ]
+  ],
+  "metric": {
+   "refused": 1.0
+  },
+  "ran": [
+   "paid"
+  ],
+  "status": 402
+ },
+ "v1/after_work/invalid_signature/200": {
+  "body": "{\"detail\":{\"code\":\"PAYMENT_SETTLEMENT_FAILED\",\"message\":\"The payment could not be settled (invalid_signature).\",\"x402_status\":\"settlement_failed\"},\"code\":\"PAYMENT_SETTLEMENT_FAILED\",\"message\":\"The payment could not be settled (invalid_signature).\",\"x402_status\":\"settlement_failed\"}",
+  "headers": [
+   [
+    "content-length",
+    "282"
+   ],
+   [
+    "content-type",
+    "application/json"
+   ],
+   [
+    "x-payment-mode",
+    "failed"
+   ]
+  ],
+  "metric": {
+   "refused": 1.0
+  },
+  "ran": [
+   "paid"
+  ],
+  "status": 402
+ },
+ "v1/after_work/invalid_transaction_state/200": {
+  "body": "{\"detail\":{\"code\":\"PAYMENT_SETTLEMENT_FAILED\",\"message\":\"The payment could not be settled (invalid_transaction_state).\",\"x402_status\":\"settlement_failed\"},\"code\":\"PAYMENT_SETTLEMENT_FAILED\",\"message\":\"The payment could not be settled (invalid_transaction_state).\",\"x402_status\":\"settlement_failed\"}",
+  "headers": [
+   [
+    "content-length",
+    "298"
+   ],
+   [
+    "content-type",
+    "application/json"
+   ],
+   [
+    "x-payment-mode",
+    "failed"
+   ]
+  ],
+  "metric": {
+   "refused": 1.0
+  },
+  "ran": [
+   "paid"
+  ],
+  "status": 402
+ },
+ "v1/after_work/no_reason/200": {
+  "body": "{\"detail\":{\"code\":\"PAYMENT_SETTLEMENT_FAILED\",\"message\":\"The payment could not be settled (unknown).\",\"x402_status\":\"settlement_failed\"},\"code\":\"PAYMENT_SETTLEMENT_FAILED\",\"message\":\"The payment could not be settled (unknown).\",\"x402_status\":\"settlement_failed\"}",
+  "headers": [
+   [
+    "content-length",
+    "262"
+   ],
+   [
+    "content-type",
+    "application/json"
+   ],
+   [
+    "x-payment-mode",
+    "failed"
+   ]
+  ],
+  "metric": {
+   "refused": 1.0
+  },
+  "ran": [
+   "paid"
+  ],
+  "status": 402
+ },
+ "v1/after_work/nonce_already_used/200": {
+  "body": "{\"detail\":{\"code\":\"PAYMENT_SETTLEMENT_FAILED\",\"message\":\"The payment could not be settled (invalid_exact_evm_nonce_already_used).\",\"x402_status\":\"settlement_failed\"},\"code\":\"PAYMENT_SETTLEMENT_FAILED\",\"message\":\"The payment could not be settled (invalid_exact_evm_nonce_already_used).\",\"x402_status\":\"settlement_failed\"}",
+  "headers": [
+   [
+    "content-length",
+    "320"
+   ],
+   [
+    "content-type",
+    "application/json"
+   ],
+   [
+    "x-payment-mode",
+    "failed"
+   ]
+  ],
+  "metric": {
+   "refused": 1.0
+  },
+  "ran": [
+   "paid"
+  ],
+  "status": 402
+ },
+ "v1/after_work/unverified_code/200": {
+  "body": "{\"detail\":{\"code\":\"PAYMENT_SETTLEMENT_FAILED\",\"message\":\"The payment could not be settled (settle_failed).\",\"x402_status\":\"settlement_failed\"},\"code\":\"PAYMENT_SETTLEMENT_FAILED\",\"message\":\"The payment could not be settled (settle_failed).\",\"x402_status\":\"settlement_failed\"}",
+  "headers": [
+   [
+    "content-length",
+    "274"
+   ],
+   [
+    "content-type",
+    "application/json"
+   ],
+   [
+    "x-payment-mode",
+    "failed"
+   ]
+  ],
+  "metric": {
+   "refused": 1.0
+  },
+  "ran": [
+   "paid"
+  ],
+  "status": 402
+ },
+ "v1/before_work/free_text/200": {
+  "body": "{\"code\":\"PAYMENT_SETTLEMENT_FAILED\",\"message\":\"The payment could not be settled (facilitator error; details in the gateway log). Nothing was delivered.\",\"x402_status\":\"settlement_failed\",\"reason\":\"facilitator error; details in the gateway log\",\"x402Version\":1,\"error\":\"The payment could not be settled (facilitator error; details in the gateway log). Nothing was delivered.\",\"accepts\":[{\"scheme\":\"exact\",\"network\":\"base-sepolia\",\"maxAmountRequired\":\"20000\",\"resource\":\"http://testserver/api/v1/stamps/\",\"description\":\"Test operation\",\"mimeType\":\"application/json\",\"outputSchema\":null,\"payTo\":\"0x2222222222222222222222222222222222222222\",\"maxTimeoutSeconds\":300,\"asset\":\"0x036CbD53842c5426634e7929541eC2318f3dCF7e\",\"extra\":{\"name\":\"USDC\",\"version\":\"2\"}}],\"detail\":{\"code\":\"PAYMENT_SETTLEMENT_FAILED\",\"message\":\"The payment could not be settled (facilitator error; details in the gateway log). Nothing was delivered.\",\"x402_status\":\"settlement_failed\",\"reason\":\"facilitator error; details in the gateway log\",\"x402Version\":1,\"error\":\"The payment could not be settled (facilitator error; details in the gateway log). Nothing was delivered.\",\"accepts\":[{\"scheme\":\"exact\",\"network\":\"base-sepolia\",\"maxAmountRequired\":\"20000\",\"resource\":\"http://testserver/api/v1/stamps/\",\"description\":\"Test operation\",\"mimeType\":\"application/json\",\"outputSchema\":null,\"payTo\":\"0x2222222222222222222222222222222222222222\",\"maxTimeoutSeconds\":300,\"asset\":\"0x036CbD53842c5426634e7929541eC2318f3dCF7e\",\"extra\":{\"name\":\"USDC\",\"version\":\"2\"}}]}}",
+  "headers": [
+   [
+    "content-length",
+    "1518"
+   ],
+   [
+    "content-type",
+    "application/json"
+   ],
+   [
+    "payment-required",
+    "eyJ4NDAyVmVyc2lvbiI6MiwiZXJyb3IiOiJUaGUgcGF5bWVudCBjb3VsZCBub3QgYmUgc2V0dGxlZCAoZmFjaWxpdGF0b3IgZXJyb3I7IGRldGFpbHMgaW4gdGhlIGdhdGV3YXkgbG9nKS4gTm90aGluZyB3YXMgZGVsaXZlcmVkLiIsInJlc291cmNlIjp7InVybCI6Imh0dHA6Ly90ZXN0c2VydmVyL2FwaS92MS9zdGFtcHMvIiwiZGVzY3JpcHRpb24iOiJUZXN0IG9wZXJhdGlvbiIsIm1pbWVUeXBlIjoiYXBwbGljYXRpb24vanNvbiJ9LCJhY2NlcHRzIjpbeyJzY2hlbWUiOiJleGFjdCIsIm5ldHdvcmsiOiJlaXAxNTU6ODQ1MzIiLCJhc3NldCI6IjB4MDM2Q2JENTM4NDJjNTQyNjYzNGU3OTI5NTQxZUMyMzE4ZjNkQ0Y3ZSIsImFtb3VudCI6IjIwMDAwIiwicGF5VG8iOiIweDIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIiLCJtYXhUaW1lb3V0U2Vjb25kcyI6MzAwLCJleHRyYSI6eyJuYW1lIjoiVVNEQyIsInZlcnNpb24iOiIyIn19XX0="
+   ]
+  ],
+  "metric": {
+   "refused": 1.0
+  },
+  "ran": [],
+  "status": 402
+ },
+ "v1/before_work/insufficient_funds/200": {
+  "body": "{\"code\":\"PAYMENT_SETTLEMENT_FAILED\",\"message\":\"The payment could not be settled (insufficient_funds). Nothing was delivered.\",\"x402_status\":\"settlement_failed\",\"reason\":\"insufficient_funds\",\"x402Version\":1,\"error\":\"The payment could not be settled (insufficient_funds). Nothing was delivered.\",\"accepts\":[{\"scheme\":\"exact\",\"network\":\"base-sepolia\",\"maxAmountRequired\":\"20000\",\"resource\":\"http://testserver/api/v1/stamps/\",\"description\":\"Test operation\",\"mimeType\":\"application/json\",\"outputSchema\":null,\"payTo\":\"0x2222222222222222222222222222222222222222\",\"maxTimeoutSeconds\":300,\"asset\":\"0x036CbD53842c5426634e7929541eC2318f3dCF7e\",\"extra\":{\"name\":\"USDC\",\"version\":\"2\"}}],\"detail\":{\"code\":\"PAYMENT_SETTLEMENT_FAILED\",\"message\":\"The payment could not be settled (insufficient_funds). Nothing was delivered.\",\"x402_status\":\"settlement_failed\",\"reason\":\"insufficient_funds\",\"x402Version\":1,\"error\":\"The payment could not be settled (insufficient_funds). Nothing was delivered.\",\"accepts\":[{\"scheme\":\"exact\",\"network\":\"base-sepolia\",\"maxAmountRequired\":\"20000\",\"resource\":\"http://testserver/api/v1/stamps/\",\"description\":\"Test operation\",\"mimeType\":\"application/json\",\"outputSchema\":null,\"payTo\":\"0x2222222222222222222222222222222222222222\",\"maxTimeoutSeconds\":300,\"asset\":\"0x036CbD53842c5426634e7929541eC2318f3dCF7e\",\"extra\":{\"name\":\"USDC\",\"version\":\"2\"}}]}}",
+  "headers": [
+   [
+    "content-length",
+    "1356"
+   ],
+   [
+    "content-type",
+    "application/json"
+   ],
+   [
+    "payment-required",
+    "eyJ4NDAyVmVyc2lvbiI6MiwiZXJyb3IiOiJUaGUgcGF5bWVudCBjb3VsZCBub3QgYmUgc2V0dGxlZCAoaW5zdWZmaWNpZW50X2Z1bmRzKS4gTm90aGluZyB3YXMgZGVsaXZlcmVkLiIsInJlc291cmNlIjp7InVybCI6Imh0dHA6Ly90ZXN0c2VydmVyL2FwaS92MS9zdGFtcHMvIiwiZGVzY3JpcHRpb24iOiJUZXN0IG9wZXJhdGlvbiIsIm1pbWVUeXBlIjoiYXBwbGljYXRpb24vanNvbiJ9LCJhY2NlcHRzIjpbeyJzY2hlbWUiOiJleGFjdCIsIm5ldHdvcmsiOiJlaXAxNTU6ODQ1MzIiLCJhc3NldCI6IjB4MDM2Q2JENTM4NDJjNTQyNjYzNGU3OTI5NTQxZUMyMzE4ZjNkQ0Y3ZSIsImFtb3VudCI6IjIwMDAwIiwicGF5VG8iOiIweDIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIiLCJtYXhUaW1lb3V0U2Vjb25kcyI6MzAwLCJleHRyYSI6eyJuYW1lIjoiVVNEQyIsInZlcnNpb24iOiIyIn19XX0="
+   ]
+  ],
+  "metric": {
+   "refused": 1.0
+  },
+  "ran": [],
+  "status": 402
+ },
+ "v1/before_work/invalid_signature/200": {
+  "body": "{\"code\":\"PAYMENT_SETTLEMENT_FAILED\",\"message\":\"The payment could not be settled (invalid_signature). Nothing was delivered.\",\"x402_status\":\"settlement_failed\",\"reason\":\"invalid_signature\",\"x402Version\":1,\"error\":\"The payment could not be settled (invalid_signature). Nothing was delivered.\",\"accepts\":[{\"scheme\":\"exact\",\"network\":\"base-sepolia\",\"maxAmountRequired\":\"20000\",\"resource\":\"http://testserver/api/v1/stamps/\",\"description\":\"Test operation\",\"mimeType\":\"application/json\",\"outputSchema\":null,\"payTo\":\"0x2222222222222222222222222222222222222222\",\"maxTimeoutSeconds\":300,\"asset\":\"0x036CbD53842c5426634e7929541eC2318f3dCF7e\",\"extra\":{\"name\":\"USDC\",\"version\":\"2\"}}],\"detail\":{\"code\":\"PAYMENT_SETTLEMENT_FAILED\",\"message\":\"The payment could not be settled (invalid_signature). Nothing was delivered.\",\"x402_status\":\"settlement_failed\",\"reason\":\"invalid_signature\",\"x402Version\":1,\"error\":\"The payment could not be settled (invalid_signature). Nothing was delivered.\",\"accepts\":[{\"scheme\":\"exact\",\"network\":\"base-sepolia\",\"maxAmountRequired\":\"20000\",\"resource\":\"http://testserver/api/v1/stamps/\",\"description\":\"Test operation\",\"mimeType\":\"application/json\",\"outputSchema\":null,\"payTo\":\"0x2222222222222222222222222222222222222222\",\"maxTimeoutSeconds\":300,\"asset\":\"0x036CbD53842c5426634e7929541eC2318f3dCF7e\",\"extra\":{\"name\":\"USDC\",\"version\":\"2\"}}]}}",
+  "headers": [
+   [
+    "content-length",
+    "1350"
+   ],
+   [
+    "content-type",
+    "application/json"
+   ],
+   [
+    "payment-required",
+    "eyJ4NDAyVmVyc2lvbiI6MiwiZXJyb3IiOiJUaGUgcGF5bWVudCBjb3VsZCBub3QgYmUgc2V0dGxlZCAoaW52YWxpZF9zaWduYXR1cmUpLiBOb3RoaW5nIHdhcyBkZWxpdmVyZWQuIiwicmVzb3VyY2UiOnsidXJsIjoiaHR0cDovL3Rlc3RzZXJ2ZXIvYXBpL3YxL3N0YW1wcy8iLCJkZXNjcmlwdGlvbiI6IlRlc3Qgb3BlcmF0aW9uIiwibWltZVR5cGUiOiJhcHBsaWNhdGlvbi9qc29uIn0sImFjY2VwdHMiOlt7InNjaGVtZSI6ImV4YWN0IiwibmV0d29yayI6ImVpcDE1NTo4NDUzMiIsImFzc2V0IjoiMHgwMzZDYkQ1Mzg0MmM1NDI2NjM0ZTc5Mjk1NDFlQzIzMThmM2RDRjdlIiwiYW1vdW50IjoiMjAwMDAiLCJwYXlUbyI6IjB4MjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMiIsIm1heFRpbWVvdXRTZWNvbmRzIjozMDAsImV4dHJhIjp7Im5hbWUiOiJVU0RDIiwidmVyc2lvbiI6IjIifX1dfQ=="
+   ]
+  ],
+  "metric": {
+   "refused": 1.0
+  },
+  "ran": [],
+  "status": 402
+ },
+ "v1/before_work/invalid_transaction_state/200": {
+  "body": "{\"code\":\"PAYMENT_SETTLEMENT_FAILED\",\"message\":\"The payment could not be settled (invalid_transaction_state). Nothing was delivered.\",\"x402_status\":\"settlement_failed\",\"reason\":\"invalid_transaction_state\",\"x402Version\":1,\"error\":\"The payment could not be settled (invalid_transaction_state). Nothing was delivered.\",\"accepts\":[{\"scheme\":\"exact\",\"network\":\"base-sepolia\",\"maxAmountRequired\":\"20000\",\"resource\":\"http://testserver/api/v1/stamps/\",\"description\":\"Test operation\",\"mimeType\":\"application/json\",\"outputSchema\":null,\"payTo\":\"0x2222222222222222222222222222222222222222\",\"maxTimeoutSeconds\":300,\"asset\":\"0x036CbD53842c5426634e7929541eC2318f3dCF7e\",\"extra\":{\"name\":\"USDC\",\"version\":\"2\"}}],\"detail\":{\"code\":\"PAYMENT_SETTLEMENT_FAILED\",\"message\":\"The payment could not be settled (invalid_transaction_state). Nothing was delivered.\",\"x402_status\":\"settlement_failed\",\"reason\":\"invalid_transaction_state\",\"x402Version\":1,\"error\":\"The payment could not be settled (invalid_transaction_state). Nothing was delivered.\",\"accepts\":[{\"scheme\":\"exact\",\"network\":\"base-sepolia\",\"maxAmountRequired\":\"20000\",\"resource\":\"http://testserver/api/v1/stamps/\",\"description\":\"Test operation\",\"mimeType\":\"application/json\",\"outputSchema\":null,\"payTo\":\"0x2222222222222222222222222222222222222222\",\"maxTimeoutSeconds\":300,\"asset\":\"0x036CbD53842c5426634e7929541eC2318f3dCF7e\",\"extra\":{\"name\":\"USDC\",\"version\":\"2\"}}]}}",
+  "headers": [
+   [
+    "content-length",
+    "1398"
+   ],
+   [
+    "content-type",
+    "application/json"
+   ],
+   [
+    "payment-required",
+    "eyJ4NDAyVmVyc2lvbiI6MiwiZXJyb3IiOiJUaGUgcGF5bWVudCBjb3VsZCBub3QgYmUgc2V0dGxlZCAoaW52YWxpZF90cmFuc2FjdGlvbl9zdGF0ZSkuIE5vdGhpbmcgd2FzIGRlbGl2ZXJlZC4iLCJyZXNvdXJjZSI6eyJ1cmwiOiJodHRwOi8vdGVzdHNlcnZlci9hcGkvdjEvc3RhbXBzLyIsImRlc2NyaXB0aW9uIjoiVGVzdCBvcGVyYXRpb24iLCJtaW1lVHlwZSI6ImFwcGxpY2F0aW9uL2pzb24ifSwiYWNjZXB0cyI6W3sic2NoZW1lIjoiZXhhY3QiLCJuZXR3b3JrIjoiZWlwMTU1Ojg0NTMyIiwiYXNzZXQiOiIweDAzNkNiRDUzODQyYzU0MjY2MzRlNzkyOTU0MWVDMjMxOGYzZENGN2UiLCJhbW91bnQiOiIyMDAwMCIsInBheVRvIjoiMHgyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyIiwibWF4VGltZW91dFNlY29uZHMiOjMwMCwiZXh0cmEiOnsibmFtZSI6IlVTREMiLCJ2ZXJzaW9uIjoiMiJ9fV19"
+   ]
+  ],
+  "metric": {
+   "refused": 1.0
+  },
+  "ran": [],
+  "status": 402
+ },
+ "v1/before_work/no_reason/200": {
+  "body": "{\"code\":\"PAYMENT_SETTLEMENT_FAILED\",\"message\":\"The payment could not be settled (unknown). Nothing was delivered.\",\"x402_status\":\"settlement_failed\",\"reason\":\"unknown\",\"x402Version\":1,\"error\":\"The payment could not be settled (unknown). Nothing was delivered.\",\"accepts\":[{\"scheme\":\"exact\",\"network\":\"base-sepolia\",\"maxAmountRequired\":\"20000\",\"resource\":\"http://testserver/api/v1/stamps/\",\"description\":\"Test operation\",\"mimeType\":\"application/json\",\"outputSchema\":null,\"payTo\":\"0x2222222222222222222222222222222222222222\",\"maxTimeoutSeconds\":300,\"asset\":\"0x036CbD53842c5426634e7929541eC2318f3dCF7e\",\"extra\":{\"name\":\"USDC\",\"version\":\"2\"}}],\"detail\":{\"code\":\"PAYMENT_SETTLEMENT_FAILED\",\"message\":\"The payment could not be settled (unknown). Nothing was delivered.\",\"x402_status\":\"settlement_failed\",\"reason\":\"unknown\",\"x402Version\":1,\"error\":\"The payment could not be settled (unknown). Nothing was delivered.\",\"accepts\":[{\"scheme\":\"exact\",\"network\":\"base-sepolia\",\"maxAmountRequired\":\"20000\",\"resource\":\"http://testserver/api/v1/stamps/\",\"description\":\"Test operation\",\"mimeType\":\"application/json\",\"outputSchema\":null,\"payTo\":\"0x2222222222222222222222222222222222222222\",\"maxTimeoutSeconds\":300,\"asset\":\"0x036CbD53842c5426634e7929541eC2318f3dCF7e\",\"extra\":{\"name\":\"USDC\",\"version\":\"2\"}}]}}",
+  "headers": [
+   [
+    "content-length",
+    "1290"
+   ],
+   [
+    "content-type",
+    "application/json"
+   ],
+   [
+    "payment-required",
+    "eyJ4NDAyVmVyc2lvbiI6MiwiZXJyb3IiOiJUaGUgcGF5bWVudCBjb3VsZCBub3QgYmUgc2V0dGxlZCAodW5rbm93bikuIE5vdGhpbmcgd2FzIGRlbGl2ZXJlZC4iLCJyZXNvdXJjZSI6eyJ1cmwiOiJodHRwOi8vdGVzdHNlcnZlci9hcGkvdjEvc3RhbXBzLyIsImRlc2NyaXB0aW9uIjoiVGVzdCBvcGVyYXRpb24iLCJtaW1lVHlwZSI6ImFwcGxpY2F0aW9uL2pzb24ifSwiYWNjZXB0cyI6W3sic2NoZW1lIjoiZXhhY3QiLCJuZXR3b3JrIjoiZWlwMTU1Ojg0NTMyIiwiYXNzZXQiOiIweDAzNkNiRDUzODQyYzU0MjY2MzRlNzkyOTU0MWVDMjMxOGYzZENGN2UiLCJhbW91bnQiOiIyMDAwMCIsInBheVRvIjoiMHgyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyIiwibWF4VGltZW91dFNlY29uZHMiOjMwMCwiZXh0cmEiOnsibmFtZSI6IlVTREMiLCJ2ZXJzaW9uIjoiMiJ9fV19"
+   ]
+  ],
+  "metric": {
+   "refused": 1.0
+  },
+  "ran": [],
+  "status": 402
+ },
+ "v1/before_work/nonce_already_used/200": {
+  "body": "{\"code\":\"PAYMENT_SETTLEMENT_FAILED\",\"message\":\"The payment could not be settled (invalid_exact_evm_nonce_already_used). Nothing was delivered.\",\"x402_status\":\"settlement_failed\",\"reason\":\"invalid_exact_evm_nonce_already_used\",\"x402Version\":1,\"error\":\"The payment could not be settled (invalid_exact_evm_nonce_already_used). Nothing was delivered.\",\"accepts\":[{\"scheme\":\"exact\",\"network\":\"base-sepolia\",\"maxAmountRequired\":\"20000\",\"resource\":\"http://testserver/api/v1/stamps/\",\"description\":\"Test operation\",\"mimeType\":\"application/json\",\"outputSchema\":null,\"payTo\":\"0x2222222222222222222222222222222222222222\",\"maxTimeoutSeconds\":300,\"asset\":\"0x036CbD53842c5426634e7929541eC2318f3dCF7e\",\"extra\":{\"name\":\"USDC\",\"version\":\"2\"}}],\"detail\":{\"code\":\"PAYMENT_SETTLEMENT_FAILED\",\"message\":\"The payment could not be settled (invalid_exact_evm_nonce_already_used). Nothing was delivered.\",\"x402_status\":\"settlement_failed\",\"reason\":\"invalid_exact_evm_nonce_already_used\",\"x402Version\":1,\"error\":\"The payment could not be settled (invalid_exact_evm_nonce_already_used). Nothing was delivered.\",\"accepts\":[{\"scheme\":\"exact\",\"network\":\"base-sepolia\",\"maxAmountRequired\":\"20000\",\"resource\":\"http://testserver/api/v1/stamps/\",\"description\":\"Test operation\",\"mimeType\":\"application/json\",\"outputSchema\":null,\"payTo\":\"0x2222222222222222222222222222222222222222\",\"maxTimeoutSeconds\":300,\"asset\":\"0x036CbD53842c5426634e7929541eC2318f3dCF7e\",\"extra\":{\"name\":\"USDC\",\"version\":\"2\"}}]}}",
+  "headers": [
+   [
+    "content-length",
+    "1464"
+   ],
+   [
+    "content-type",
+    "application/json"
+   ],
+   [
+    "payment-required",
+    "eyJ4NDAyVmVyc2lvbiI6MiwiZXJyb3IiOiJUaGUgcGF5bWVudCBjb3VsZCBub3QgYmUgc2V0dGxlZCAoaW52YWxpZF9leGFjdF9ldm1fbm9uY2VfYWxyZWFkeV91c2VkKS4gTm90aGluZyB3YXMgZGVsaXZlcmVkLiIsInJlc291cmNlIjp7InVybCI6Imh0dHA6Ly90ZXN0c2VydmVyL2FwaS92MS9zdGFtcHMvIiwiZGVzY3JpcHRpb24iOiJUZXN0IG9wZXJhdGlvbiIsIm1pbWVUeXBlIjoiYXBwbGljYXRpb24vanNvbiJ9LCJhY2NlcHRzIjpbeyJzY2hlbWUiOiJleGFjdCIsIm5ldHdvcmsiOiJlaXAxNTU6ODQ1MzIiLCJhc3NldCI6IjB4MDM2Q2JENTM4NDJjNTQyNjYzNGU3OTI5NTQxZUMyMzE4ZjNkQ0Y3ZSIsImFtb3VudCI6IjIwMDAwIiwicGF5VG8iOiIweDIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIiLCJtYXhUaW1lb3V0U2Vjb25kcyI6MzAwLCJleHRyYSI6eyJuYW1lIjoiVVNEQyIsInZlcnNpb24iOiIyIn19XX0="
+   ]
+  ],
+  "metric": {
+   "refused": 1.0
+  },
+  "ran": [],
+  "status": 402
+ },
+ "v1/before_work/unverified_code/200": {
+  "body": "{\"code\":\"PAYMENT_SETTLEMENT_FAILED\",\"message\":\"The payment could not be settled (settle_failed). Nothing was delivered.\",\"x402_status\":\"settlement_failed\",\"reason\":\"settle_failed\",\"x402Version\":1,\"error\":\"The payment could not be settled (settle_failed). Nothing was delivered.\",\"accepts\":[{\"scheme\":\"exact\",\"network\":\"base-sepolia\",\"maxAmountRequired\":\"20000\",\"resource\":\"http://testserver/api/v1/stamps/\",\"description\":\"Test operation\",\"mimeType\":\"application/json\",\"outputSchema\":null,\"payTo\":\"0x2222222222222222222222222222222222222222\",\"maxTimeoutSeconds\":300,\"asset\":\"0x036CbD53842c5426634e7929541eC2318f3dCF7e\",\"extra\":{\"name\":\"USDC\",\"version\":\"2\"}}],\"detail\":{\"code\":\"PAYMENT_SETTLEMENT_FAILED\",\"message\":\"The payment could not be settled (settle_failed). Nothing was delivered.\",\"x402_status\":\"settlement_failed\",\"reason\":\"settle_failed\",\"x402Version\":1,\"error\":\"The payment could not be settled (settle_failed). Nothing was delivered.\",\"accepts\":[{\"scheme\":\"exact\",\"network\":\"base-sepolia\",\"maxAmountRequired\":\"20000\",\"resource\":\"http://testserver/api/v1/stamps/\",\"description\":\"Test operation\",\"mimeType\":\"application/json\",\"outputSchema\":null,\"payTo\":\"0x2222222222222222222222222222222222222222\",\"maxTimeoutSeconds\":300,\"asset\":\"0x036CbD53842c5426634e7929541eC2318f3dCF7e\",\"extra\":{\"name\":\"USDC\",\"version\":\"2\"}}]}}",
+  "headers": [
+   [
+    "content-length",
+    "1326"
+   ],
+   [
+    "content-type",
+    "application/json"
+   ],
+   [
+    "payment-required",
+    "eyJ4NDAyVmVyc2lvbiI6MiwiZXJyb3IiOiJUaGUgcGF5bWVudCBjb3VsZCBub3QgYmUgc2V0dGxlZCAoc2V0dGxlX2ZhaWxlZCkuIE5vdGhpbmcgd2FzIGRlbGl2ZXJlZC4iLCJyZXNvdXJjZSI6eyJ1cmwiOiJodHRwOi8vdGVzdHNlcnZlci9hcGkvdjEvc3RhbXBzLyIsImRlc2NyaXB0aW9uIjoiVGVzdCBvcGVyYXRpb24iLCJtaW1lVHlwZSI6ImFwcGxpY2F0aW9uL2pzb24ifSwiYWNjZXB0cyI6W3sic2NoZW1lIjoiZXhhY3QiLCJuZXR3b3JrIjoiZWlwMTU1Ojg0NTMyIiwiYXNzZXQiOiIweDAzNkNiRDUzODQyYzU0MjY2MzRlNzkyOTU0MWVDMjMxOGYzZENGN2UiLCJhbW91bnQiOiIyMDAwMCIsInBheVRvIjoiMHgyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyIiwibWF4VGltZW91dFNlY29uZHMiOjMwMCwiZXh0cmEiOnsibmFtZSI6IlVTREMiLCJ2ZXJzaW9uIjoiMiJ9fV19"
+   ]
+  ],
+  "metric": {
+   "refused": 1.0
+  },
+  "ran": [],
+  "status": 402
+ },
+ "v2/after_work/free_text/200": {
+  "body": "{\"detail\":{\"code\":\"PAYMENT_SETTLEMENT_FAILED\",\"message\":\"The payment could not be settled (facilitator error; details in the gateway log).\",\"x402_status\":\"settlement_failed\"},\"code\":\"PAYMENT_SETTLEMENT_FAILED\",\"message\":\"The payment could not be settled (facilitator error; details in the gateway log).\",\"x402_status\":\"settlement_failed\"}",
+  "headers": [
+   [
+    "content-length",
+    "338"
+   ],
+   [
+    "content-type",
+    "application/json"
+   ],
+   [
+    "x-payment-mode",
+    "failed"
+   ]
+  ],
+  "metric": {
+   "refused": 1.0
+  },
+  "ran": [
+   "paid"
+  ],
+  "status": 402
+ },
+ "v2/after_work/free_text/400": {
+  "body": "{\"detail\":{\"code\":\"PAYMENT_SETTLEMENT_FAILED\",\"message\":\"The payment could not be settled (facilitator error; details in the gateway log).\",\"x402_status\":\"settlement_failed\"},\"code\":\"PAYMENT_SETTLEMENT_FAILED\",\"message\":\"The payment could not be settled (facilitator error; details in the gateway log).\",\"x402_status\":\"settlement_failed\"}",
+  "headers": [
+   [
+    "content-length",
+    "338"
+   ],
+   [
+    "content-type",
+    "application/json"
+   ],
+   [
+    "x-payment-mode",
+    "failed"
+   ]
+  ],
+  "metric": {
+   "refused": 1.0
+  },
+  "ran": [
+   "paid"
+  ],
+  "status": 402
+ },
+ "v2/after_work/insufficient_funds/200": {
+  "body": "{\"detail\":{\"code\":\"PAYMENT_SETTLEMENT_FAILED\",\"message\":\"The payment could not be settled (insufficient_funds).\",\"x402_status\":\"settlement_failed\"},\"code\":\"PAYMENT_SETTLEMENT_FAILED\",\"message\":\"The payment could not be settled (insufficient_funds).\",\"x402_status\":\"settlement_failed\"}",
+  "headers": [
+   [
+    "content-length",
+    "284"
+   ],
+   [
+    "content-type",
+    "application/json"
+   ],
+   [
+    "x-payment-mode",
+    "failed"
+   ]
+  ],
+  "metric": {
+   "refused": 1.0
+  },
+  "ran": [
+   "paid"
+  ],
+  "status": 402
+ },
+ "v2/after_work/insufficient_funds/400": {
+  "body": "{\"detail\":{\"code\":\"PAYMENT_SETTLEMENT_FAILED\",\"message\":\"The payment could not be settled (insufficient_funds).\",\"x402_status\":\"settlement_failed\"},\"code\":\"PAYMENT_SETTLEMENT_FAILED\",\"message\":\"The payment could not be settled (insufficient_funds).\",\"x402_status\":\"settlement_failed\"}",
+  "headers": [
+   [
+    "content-length",
+    "284"
+   ],
+   [
+    "content-type",
+    "application/json"
+   ],
+   [
+    "x-payment-mode",
+    "failed"
+   ]
+  ],
+  "metric": {
+   "refused": 1.0
+  },
+  "ran": [
+   "paid"
+  ],
+  "status": 402
+ },
+ "v2/after_work/invalid_signature/200": {
+  "body": "{\"detail\":{\"code\":\"PAYMENT_SETTLEMENT_FAILED\",\"message\":\"The payment could not be settled (invalid_signature).\",\"x402_status\":\"settlement_failed\"},\"code\":\"PAYMENT_SETTLEMENT_FAILED\",\"message\":\"The payment could not be settled (invalid_signature).\",\"x402_status\":\"settlement_failed\"}",
+  "headers": [
+   [
+    "content-length",
+    "282"
+   ],
+   [
+    "content-type",
+    "application/json"
+   ],
+   [
+    "x-payment-mode",
+    "failed"
+   ]
+  ],
+  "metric": {
+   "refused": 1.0
+  },
+  "ran": [
+   "paid"
+  ],
+  "status": 402
+ },
+ "v2/after_work/invalid_signature/400": {
+  "body": "{\"detail\":{\"code\":\"PAYMENT_SETTLEMENT_FAILED\",\"message\":\"The payment could not be settled (invalid_signature).\",\"x402_status\":\"settlement_failed\"},\"code\":\"PAYMENT_SETTLEMENT_FAILED\",\"message\":\"The payment could not be settled (invalid_signature).\",\"x402_status\":\"settlement_failed\"}",
+  "headers": [
+   [
+    "content-length",
+    "282"
+   ],
+   [
+    "content-type",
+    "application/json"
+   ],
+   [
+    "x-payment-mode",
+    "failed"
+   ]
+  ],
+  "metric": {
+   "refused": 1.0
+  },
+  "ran": [
+   "paid"
+  ],
+  "status": 402
+ },
+ "v2/after_work/invalid_transaction_state/200": {
+  "body": "{\"detail\":{\"code\":\"PAYMENT_SETTLEMENT_FAILED\",\"message\":\"The payment could not be settled (invalid_transaction_state).\",\"x402_status\":\"settlement_failed\"},\"code\":\"PAYMENT_SETTLEMENT_FAILED\",\"message\":\"The payment could not be settled (invalid_transaction_state).\",\"x402_status\":\"settlement_failed\"}",
+  "headers": [
+   [
+    "content-length",
+    "298"
+   ],
+   [
+    "content-type",
+    "application/json"
+   ],
+   [
+    "x-payment-mode",
+    "failed"
+   ]
+  ],
+  "metric": {
+   "refused": 1.0
+  },
+  "ran": [
+   "paid"
+  ],
+  "status": 402
+ },
+ "v2/after_work/invalid_transaction_state/400": {
+  "body": "{\"detail\":{\"code\":\"PAYMENT_SETTLEMENT_FAILED\",\"message\":\"The payment could not be settled (invalid_transaction_state).\",\"x402_status\":\"settlement_failed\"},\"code\":\"PAYMENT_SETTLEMENT_FAILED\",\"message\":\"The payment could not be settled (invalid_transaction_state).\",\"x402_status\":\"settlement_failed\"}",
+  "headers": [
+   [
+    "content-length",
+    "298"
+   ],
+   [
+    "content-type",
+    "application/json"
+   ],
+   [
+    "x-payment-mode",
+    "failed"
+   ]
+  ],
+  "metric": {
+   "refused": 1.0
+  },
+  "ran": [
+   "paid"
+  ],
+  "status": 402
+ },
+ "v2/after_work/no_reason/200": {
+  "body": "{\"detail\":{\"code\":\"PAYMENT_SETTLEMENT_FAILED\",\"message\":\"The payment could not be settled (unknown).\",\"x402_status\":\"settlement_failed\"},\"code\":\"PAYMENT_SETTLEMENT_FAILED\",\"message\":\"The payment could not be settled (unknown).\",\"x402_status\":\"settlement_failed\"}",
+  "headers": [
+   [
+    "content-length",
+    "262"
+   ],
+   [
+    "content-type",
+    "application/json"
+   ],
+   [
+    "x-payment-mode",
+    "failed"
+   ]
+  ],
+  "metric": {
+   "refused": 1.0
+  },
+  "ran": [
+   "paid"
+  ],
+  "status": 402
+ },
+ "v2/after_work/no_reason/400": {
+  "body": "{\"detail\":{\"code\":\"PAYMENT_SETTLEMENT_FAILED\",\"message\":\"The payment could not be settled (unknown).\",\"x402_status\":\"settlement_failed\"},\"code\":\"PAYMENT_SETTLEMENT_FAILED\",\"message\":\"The payment could not be settled (unknown).\",\"x402_status\":\"settlement_failed\"}",
+  "headers": [
+   [
+    "content-length",
+    "262"
+   ],
+   [
+    "content-type",
+    "application/json"
+   ],
+   [
+    "x-payment-mode",
+    "failed"
+   ]
+  ],
+  "metric": {
+   "refused": 1.0
+  },
+  "ran": [
+   "paid"
+  ],
+  "status": 402
+ },
+ "v2/after_work/nonce_already_used/200": {
+  "body": "{\"detail\":{\"code\":\"PAYMENT_SETTLEMENT_FAILED\",\"message\":\"The payment could not be settled (invalid_exact_evm_nonce_already_used).\",\"x402_status\":\"settlement_failed\"},\"code\":\"PAYMENT_SETTLEMENT_FAILED\",\"message\":\"The payment could not be settled (invalid_exact_evm_nonce_already_used).\",\"x402_status\":\"settlement_failed\"}",
+  "headers": [
+   [
+    "content-length",
+    "320"
+   ],
+   [
+    "content-type",
+    "application/json"
+   ],
+   [
+    "x-payment-mode",
+    "failed"
+   ]
+  ],
+  "metric": {
+   "refused": 1.0
+  },
+  "ran": [
+   "paid"
+  ],
+  "status": 402
+ },
+ "v2/after_work/nonce_already_used/400": {
+  "body": "{\"detail\":{\"code\":\"PAYMENT_SETTLEMENT_FAILED\",\"message\":\"The payment could not be settled (invalid_exact_evm_nonce_already_used).\",\"x402_status\":\"settlement_failed\"},\"code\":\"PAYMENT_SETTLEMENT_FAILED\",\"message\":\"The payment could not be settled (invalid_exact_evm_nonce_already_used).\",\"x402_status\":\"settlement_failed\"}",
+  "headers": [
+   [
+    "content-length",
+    "320"
+   ],
+   [
+    "content-type",
+    "application/json"
+   ],
+   [
+    "x-payment-mode",
+    "failed"
+   ]
+  ],
+  "metric": {
+   "refused": 1.0
+  },
+  "ran": [
+   "paid"
+  ],
+  "status": 402
+ },
+ "v2/after_work/unverified_code/200": {
+  "body": "{\"detail\":{\"code\":\"PAYMENT_SETTLEMENT_FAILED\",\"message\":\"The payment could not be settled (settle_failed).\",\"x402_status\":\"settlement_failed\"},\"code\":\"PAYMENT_SETTLEMENT_FAILED\",\"message\":\"The payment could not be settled (settle_failed).\",\"x402_status\":\"settlement_failed\"}",
+  "headers": [
+   [
+    "content-length",
+    "274"
+   ],
+   [
+    "content-type",
+    "application/json"
+   ],
+   [
+    "x-payment-mode",
+    "failed"
+   ]
+  ],
+  "metric": {
+   "refused": 1.0
+  },
+  "ran": [
+   "paid"
+  ],
+  "status": 402
+ },
+ "v2/after_work/unverified_code/400": {
+  "body": "{\"detail\":{\"code\":\"PAYMENT_SETTLEMENT_FAILED\",\"message\":\"The payment could not be settled (settle_failed).\",\"x402_status\":\"settlement_failed\"},\"code\":\"PAYMENT_SETTLEMENT_FAILED\",\"message\":\"The payment could not be settled (settle_failed).\",\"x402_status\":\"settlement_failed\"}",
+  "headers": [
+   [
+    "content-length",
+    "274"
+   ],
+   [
+    "content-type",
+    "application/json"
+   ],
+   [
+    "x-payment-mode",
+    "failed"
+   ]
+  ],
+  "metric": {
+   "refused": 1.0
+  },
+  "ran": [
+   "paid"
+  ],
+  "status": 402
+ },
+ "v2/before_work/free_text/200": {
+  "body": "{\"code\":\"PAYMENT_SETTLEMENT_FAILED\",\"message\":\"The payment could not be settled (facilitator error; details in the gateway log). Nothing was delivered.\",\"x402_status\":\"settlement_failed\",\"reason\":\"facilitator error; details in the gateway log\",\"x402Version\":1,\"error\":\"The payment could not be settled (facilitator error; details in the gateway log). Nothing was delivered.\",\"accepts\":[{\"scheme\":\"exact\",\"network\":\"base-sepolia\",\"maxAmountRequired\":\"20000\",\"resource\":\"http://testserver/api/v1/stamps/\",\"description\":\"Test operation\",\"mimeType\":\"application/json\",\"outputSchema\":null,\"payTo\":\"0x2222222222222222222222222222222222222222\",\"maxTimeoutSeconds\":300,\"asset\":\"0x036CbD53842c5426634e7929541eC2318f3dCF7e\",\"extra\":{\"name\":\"USDC\",\"version\":\"2\"}}],\"detail\":{\"code\":\"PAYMENT_SETTLEMENT_FAILED\",\"message\":\"The payment could not be settled (facilitator error; details in the gateway log). Nothing was delivered.\",\"x402_status\":\"settlement_failed\",\"reason\":\"facilitator error; details in the gateway log\",\"x402Version\":1,\"error\":\"The payment could not be settled (facilitator error; details in the gateway log). Nothing was delivered.\",\"accepts\":[{\"scheme\":\"exact\",\"network\":\"base-sepolia\",\"maxAmountRequired\":\"20000\",\"resource\":\"http://testserver/api/v1/stamps/\",\"description\":\"Test operation\",\"mimeType\":\"application/json\",\"outputSchema\":null,\"payTo\":\"0x2222222222222222222222222222222222222222\",\"maxTimeoutSeconds\":300,\"asset\":\"0x036CbD53842c5426634e7929541eC2318f3dCF7e\",\"extra\":{\"name\":\"USDC\",\"version\":\"2\"}}]}}",
+  "headers": [
+   [
+    "content-length",
+    "1518"
+   ],
+   [
+    "content-type",
+    "application/json"
+   ],
+   [
+    "payment-required",
+    "eyJ4NDAyVmVyc2lvbiI6MiwiZXJyb3IiOiJUaGUgcGF5bWVudCBjb3VsZCBub3QgYmUgc2V0dGxlZCAoZmFjaWxpdGF0b3IgZXJyb3I7IGRldGFpbHMgaW4gdGhlIGdhdGV3YXkgbG9nKS4gTm90aGluZyB3YXMgZGVsaXZlcmVkLiIsInJlc291cmNlIjp7InVybCI6Imh0dHA6Ly90ZXN0c2VydmVyL2FwaS92MS9zdGFtcHMvIiwiZGVzY3JpcHRpb24iOiJUZXN0IG9wZXJhdGlvbiIsIm1pbWVUeXBlIjoiYXBwbGljYXRpb24vanNvbiJ9LCJhY2NlcHRzIjpbeyJzY2hlbWUiOiJleGFjdCIsIm5ldHdvcmsiOiJlaXAxNTU6ODQ1MzIiLCJhc3NldCI6IjB4MDM2Q2JENTM4NDJjNTQyNjYzNGU3OTI5NTQxZUMyMzE4ZjNkQ0Y3ZSIsImFtb3VudCI6IjIwMDAwIiwicGF5VG8iOiIweDIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIiLCJtYXhUaW1lb3V0U2Vjb25kcyI6MzAwLCJleHRyYSI6eyJuYW1lIjoiVVNEQyIsInZlcnNpb24iOiIyIn19XX0="
+   ]
+  ],
+  "metric": {
+   "refused": 1.0
+  },
+  "ran": [],
+  "status": 402
+ },
+ "v2/before_work/free_text/400": {
+  "body": "{\"code\":\"PAYMENT_SETTLEMENT_FAILED\",\"message\":\"The payment could not be settled (facilitator error; details in the gateway log). Nothing was delivered.\",\"x402_status\":\"settlement_failed\",\"reason\":\"facilitator error; details in the gateway log\",\"x402Version\":1,\"error\":\"The payment could not be settled (facilitator error; details in the gateway log). Nothing was delivered.\",\"accepts\":[{\"scheme\":\"exact\",\"network\":\"base-sepolia\",\"maxAmountRequired\":\"20000\",\"resource\":\"http://testserver/api/v1/stamps/\",\"description\":\"Test operation\",\"mimeType\":\"application/json\",\"outputSchema\":null,\"payTo\":\"0x2222222222222222222222222222222222222222\",\"maxTimeoutSeconds\":300,\"asset\":\"0x036CbD53842c5426634e7929541eC2318f3dCF7e\",\"extra\":{\"name\":\"USDC\",\"version\":\"2\"}}],\"detail\":{\"code\":\"PAYMENT_SETTLEMENT_FAILED\",\"message\":\"The payment could not be settled (facilitator error; details in the gateway log). Nothing was delivered.\",\"x402_status\":\"settlement_failed\",\"reason\":\"facilitator error; details in the gateway log\",\"x402Version\":1,\"error\":\"The payment could not be settled (facilitator error; details in the gateway log). Nothing was delivered.\",\"accepts\":[{\"scheme\":\"exact\",\"network\":\"base-sepolia\",\"maxAmountRequired\":\"20000\",\"resource\":\"http://testserver/api/v1/stamps/\",\"description\":\"Test operation\",\"mimeType\":\"application/json\",\"outputSchema\":null,\"payTo\":\"0x2222222222222222222222222222222222222222\",\"maxTimeoutSeconds\":300,\"asset\":\"0x036CbD53842c5426634e7929541eC2318f3dCF7e\",\"extra\":{\"name\":\"USDC\",\"version\":\"2\"}}]}}",
+  "headers": [
+   [
+    "content-length",
+    "1518"
+   ],
+   [
+    "content-type",
+    "application/json"
+   ],
+   [
+    "payment-required",
+    "eyJ4NDAyVmVyc2lvbiI6MiwiZXJyb3IiOiJUaGUgcGF5bWVudCBjb3VsZCBub3QgYmUgc2V0dGxlZCAoZmFjaWxpdGF0b3IgZXJyb3I7IGRldGFpbHMgaW4gdGhlIGdhdGV3YXkgbG9nKS4gTm90aGluZyB3YXMgZGVsaXZlcmVkLiIsInJlc291cmNlIjp7InVybCI6Imh0dHA6Ly90ZXN0c2VydmVyL2FwaS92MS9zdGFtcHMvIiwiZGVzY3JpcHRpb24iOiJUZXN0IG9wZXJhdGlvbiIsIm1pbWVUeXBlIjoiYXBwbGljYXRpb24vanNvbiJ9LCJhY2NlcHRzIjpbeyJzY2hlbWUiOiJleGFjdCIsIm5ldHdvcmsiOiJlaXAxNTU6ODQ1MzIiLCJhc3NldCI6IjB4MDM2Q2JENTM4NDJjNTQyNjYzNGU3OTI5NTQxZUMyMzE4ZjNkQ0Y3ZSIsImFtb3VudCI6IjIwMDAwIiwicGF5VG8iOiIweDIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIiLCJtYXhUaW1lb3V0U2Vjb25kcyI6MzAwLCJleHRyYSI6eyJuYW1lIjoiVVNEQyIsInZlcnNpb24iOiIyIn19XX0="
+   ]
+  ],
+  "metric": {
+   "refused": 1.0
+  },
+  "ran": [],
+  "status": 402
+ },
+ "v2/before_work/insufficient_funds/200": {
+  "body": "{\"code\":\"PAYMENT_SETTLEMENT_FAILED\",\"message\":\"The payment could not be settled (insufficient_funds). Nothing was delivered.\",\"x402_status\":\"settlement_failed\",\"reason\":\"insufficient_funds\",\"x402Version\":1,\"error\":\"The payment could not be settled (insufficient_funds). Nothing was delivered.\",\"accepts\":[{\"scheme\":\"exact\",\"network\":\"base-sepolia\",\"maxAmountRequired\":\"20000\",\"resource\":\"http://testserver/api/v1/stamps/\",\"description\":\"Test operation\",\"mimeType\":\"application/json\",\"outputSchema\":null,\"payTo\":\"0x2222222222222222222222222222222222222222\",\"maxTimeoutSeconds\":300,\"asset\":\"0x036CbD53842c5426634e7929541eC2318f3dCF7e\",\"extra\":{\"name\":\"USDC\",\"version\":\"2\"}}],\"detail\":{\"code\":\"PAYMENT_SETTLEMENT_FAILED\",\"message\":\"The payment could not be settled (insufficient_funds). Nothing was delivered.\",\"x402_status\":\"settlement_failed\",\"reason\":\"insufficient_funds\",\"x402Version\":1,\"error\":\"The payment could not be settled (insufficient_funds). Nothing was delivered.\",\"accepts\":[{\"scheme\":\"exact\",\"network\":\"base-sepolia\",\"maxAmountRequired\":\"20000\",\"resource\":\"http://testserver/api/v1/stamps/\",\"description\":\"Test operation\",\"mimeType\":\"application/json\",\"outputSchema\":null,\"payTo\":\"0x2222222222222222222222222222222222222222\",\"maxTimeoutSeconds\":300,\"asset\":\"0x036CbD53842c5426634e7929541eC2318f3dCF7e\",\"extra\":{\"name\":\"USDC\",\"version\":\"2\"}}]}}",
+  "headers": [
+   [
+    "content-length",
+    "1356"
+   ],
+   [
+    "content-type",
+    "application/json"
+   ],
+   [
+    "payment-required",
+    "eyJ4NDAyVmVyc2lvbiI6MiwiZXJyb3IiOiJUaGUgcGF5bWVudCBjb3VsZCBub3QgYmUgc2V0dGxlZCAoaW5zdWZmaWNpZW50X2Z1bmRzKS4gTm90aGluZyB3YXMgZGVsaXZlcmVkLiIsInJlc291cmNlIjp7InVybCI6Imh0dHA6Ly90ZXN0c2VydmVyL2FwaS92MS9zdGFtcHMvIiwiZGVzY3JpcHRpb24iOiJUZXN0IG9wZXJhdGlvbiIsIm1pbWVUeXBlIjoiYXBwbGljYXRpb24vanNvbiJ9LCJhY2NlcHRzIjpbeyJzY2hlbWUiOiJleGFjdCIsIm5ldHdvcmsiOiJlaXAxNTU6ODQ1MzIiLCJhc3NldCI6IjB4MDM2Q2JENTM4NDJjNTQyNjYzNGU3OTI5NTQxZUMyMzE4ZjNkQ0Y3ZSIsImFtb3VudCI6IjIwMDAwIiwicGF5VG8iOiIweDIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIiLCJtYXhUaW1lb3V0U2Vjb25kcyI6MzAwLCJleHRyYSI6eyJuYW1lIjoiVVNEQyIsInZlcnNpb24iOiIyIn19XX0="
+   ]
+  ],
+  "metric": {
+   "refused": 1.0
+  },
+  "ran": [],
+  "status": 402
+ },
+ "v2/before_work/insufficient_funds/400": {
+  "body": "{\"code\":\"PAYMENT_SETTLEMENT_FAILED\",\"message\":\"The payment could not be settled (insufficient_funds). Nothing was delivered.\",\"x402_status\":\"settlement_failed\",\"reason\":\"insufficient_funds\",\"x402Version\":1,\"error\":\"The payment could not be settled (insufficient_funds). Nothing was delivered.\",\"accepts\":[{\"scheme\":\"exact\",\"network\":\"base-sepolia\",\"maxAmountRequired\":\"20000\",\"resource\":\"http://testserver/api/v1/stamps/\",\"description\":\"Test operation\",\"mimeType\":\"application/json\",\"outputSchema\":null,\"payTo\":\"0x2222222222222222222222222222222222222222\",\"maxTimeoutSeconds\":300,\"asset\":\"0x036CbD53842c5426634e7929541eC2318f3dCF7e\",\"extra\":{\"name\":\"USDC\",\"version\":\"2\"}}],\"detail\":{\"code\":\"PAYMENT_SETTLEMENT_FAILED\",\"message\":\"The payment could not be settled (insufficient_funds). Nothing was delivered.\",\"x402_status\":\"settlement_failed\",\"reason\":\"insufficient_funds\",\"x402Version\":1,\"error\":\"The payment could not be settled (insufficient_funds). Nothing was delivered.\",\"accepts\":[{\"scheme\":\"exact\",\"network\":\"base-sepolia\",\"maxAmountRequired\":\"20000\",\"resource\":\"http://testserver/api/v1/stamps/\",\"description\":\"Test operation\",\"mimeType\":\"application/json\",\"outputSchema\":null,\"payTo\":\"0x2222222222222222222222222222222222222222\",\"maxTimeoutSeconds\":300,\"asset\":\"0x036CbD53842c5426634e7929541eC2318f3dCF7e\",\"extra\":{\"name\":\"USDC\",\"version\":\"2\"}}]}}",
+  "headers": [
+   [
+    "content-length",
+    "1356"
+   ],
+   [
+    "content-type",
+    "application/json"
+   ],
+   [
+    "payment-required",
+    "eyJ4NDAyVmVyc2lvbiI6MiwiZXJyb3IiOiJUaGUgcGF5bWVudCBjb3VsZCBub3QgYmUgc2V0dGxlZCAoaW5zdWZmaWNpZW50X2Z1bmRzKS4gTm90aGluZyB3YXMgZGVsaXZlcmVkLiIsInJlc291cmNlIjp7InVybCI6Imh0dHA6Ly90ZXN0c2VydmVyL2FwaS92MS9zdGFtcHMvIiwiZGVzY3JpcHRpb24iOiJUZXN0IG9wZXJhdGlvbiIsIm1pbWVUeXBlIjoiYXBwbGljYXRpb24vanNvbiJ9LCJhY2NlcHRzIjpbeyJzY2hlbWUiOiJleGFjdCIsIm5ldHdvcmsiOiJlaXAxNTU6ODQ1MzIiLCJhc3NldCI6IjB4MDM2Q2JENTM4NDJjNTQyNjYzNGU3OTI5NTQxZUMyMzE4ZjNkQ0Y3ZSIsImFtb3VudCI6IjIwMDAwIiwicGF5VG8iOiIweDIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIiLCJtYXhUaW1lb3V0U2Vjb25kcyI6MzAwLCJleHRyYSI6eyJuYW1lIjoiVVNEQyIsInZlcnNpb24iOiIyIn19XX0="
+   ]
+  ],
+  "metric": {
+   "refused": 1.0
+  },
+  "ran": [],
+  "status": 402
+ },
+ "v2/before_work/invalid_signature/200": {
+  "body": "{\"code\":\"PAYMENT_SETTLEMENT_FAILED\",\"message\":\"The payment could not be settled (invalid_signature). Nothing was delivered.\",\"x402_status\":\"settlement_failed\",\"reason\":\"invalid_signature\",\"x402Version\":1,\"error\":\"The payment could not be settled (invalid_signature). Nothing was delivered.\",\"accepts\":[{\"scheme\":\"exact\",\"network\":\"base-sepolia\",\"maxAmountRequired\":\"20000\",\"resource\":\"http://testserver/api/v1/stamps/\",\"description\":\"Test operation\",\"mimeType\":\"application/json\",\"outputSchema\":null,\"payTo\":\"0x2222222222222222222222222222222222222222\",\"maxTimeoutSeconds\":300,\"asset\":\"0x036CbD53842c5426634e7929541eC2318f3dCF7e\",\"extra\":{\"name\":\"USDC\",\"version\":\"2\"}}],\"detail\":{\"code\":\"PAYMENT_SETTLEMENT_FAILED\",\"message\":\"The payment could not be settled (invalid_signature). Nothing was delivered.\",\"x402_status\":\"settlement_failed\",\"reason\":\"invalid_signature\",\"x402Version\":1,\"error\":\"The payment could not be settled (invalid_signature). Nothing was delivered.\",\"accepts\":[{\"scheme\":\"exact\",\"network\":\"base-sepolia\",\"maxAmountRequired\":\"20000\",\"resource\":\"http://testserver/api/v1/stamps/\",\"description\":\"Test operation\",\"mimeType\":\"application/json\",\"outputSchema\":null,\"payTo\":\"0x2222222222222222222222222222222222222222\",\"maxTimeoutSeconds\":300,\"asset\":\"0x036CbD53842c5426634e7929541eC2318f3dCF7e\",\"extra\":{\"name\":\"USDC\",\"version\":\"2\"}}]}}",
+  "headers": [
+   [
+    "content-length",
+    "1350"
+   ],
+   [
+    "content-type",
+    "application/json"
+   ],
+   [
+    "payment-required",
+    "eyJ4NDAyVmVyc2lvbiI6MiwiZXJyb3IiOiJUaGUgcGF5bWVudCBjb3VsZCBub3QgYmUgc2V0dGxlZCAoaW52YWxpZF9zaWduYXR1cmUpLiBOb3RoaW5nIHdhcyBkZWxpdmVyZWQuIiwicmVzb3VyY2UiOnsidXJsIjoiaHR0cDovL3Rlc3RzZXJ2ZXIvYXBpL3YxL3N0YW1wcy8iLCJkZXNjcmlwdGlvbiI6IlRlc3Qgb3BlcmF0aW9uIiwibWltZVR5cGUiOiJhcHBsaWNhdGlvbi9qc29uIn0sImFjY2VwdHMiOlt7InNjaGVtZSI6ImV4YWN0IiwibmV0d29yayI6ImVpcDE1NTo4NDUzMiIsImFzc2V0IjoiMHgwMzZDYkQ1Mzg0MmM1NDI2NjM0ZTc5Mjk1NDFlQzIzMThmM2RDRjdlIiwiYW1vdW50IjoiMjAwMDAiLCJwYXlUbyI6IjB4MjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMiIsIm1heFRpbWVvdXRTZWNvbmRzIjozMDAsImV4dHJhIjp7Im5hbWUiOiJVU0RDIiwidmVyc2lvbiI6IjIifX1dfQ=="
+   ]
+  ],
+  "metric": {
+   "refused": 1.0
+  },
+  "ran": [],
+  "status": 402
+ },
+ "v2/before_work/invalid_signature/400": {
+  "body": "{\"code\":\"PAYMENT_SETTLEMENT_FAILED\",\"message\":\"The payment could not be settled (invalid_signature). Nothing was delivered.\",\"x402_status\":\"settlement_failed\",\"reason\":\"invalid_signature\",\"x402Version\":1,\"error\":\"The payment could not be settled (invalid_signature). Nothing was delivered.\",\"accepts\":[{\"scheme\":\"exact\",\"network\":\"base-sepolia\",\"maxAmountRequired\":\"20000\",\"resource\":\"http://testserver/api/v1/stamps/\",\"description\":\"Test operation\",\"mimeType\":\"application/json\",\"outputSchema\":null,\"payTo\":\"0x2222222222222222222222222222222222222222\",\"maxTimeoutSeconds\":300,\"asset\":\"0x036CbD53842c5426634e7929541eC2318f3dCF7e\",\"extra\":{\"name\":\"USDC\",\"version\":\"2\"}}],\"detail\":{\"code\":\"PAYMENT_SETTLEMENT_FAILED\",\"message\":\"The payment could not be settled (invalid_signature). Nothing was delivered.\",\"x402_status\":\"settlement_failed\",\"reason\":\"invalid_signature\",\"x402Version\":1,\"error\":\"The payment could not be settled (invalid_signature). Nothing was delivered.\",\"accepts\":[{\"scheme\":\"exact\",\"network\":\"base-sepolia\",\"maxAmountRequired\":\"20000\",\"resource\":\"http://testserver/api/v1/stamps/\",\"description\":\"Test operation\",\"mimeType\":\"application/json\",\"outputSchema\":null,\"payTo\":\"0x2222222222222222222222222222222222222222\",\"maxTimeoutSeconds\":300,\"asset\":\"0x036CbD53842c5426634e7929541eC2318f3dCF7e\",\"extra\":{\"name\":\"USDC\",\"version\":\"2\"}}]}}",
+  "headers": [
+   [
+    "content-length",
+    "1350"
+   ],
+   [
+    "content-type",
+    "application/json"
+   ],
+   [
+    "payment-required",
+    "eyJ4NDAyVmVyc2lvbiI6MiwiZXJyb3IiOiJUaGUgcGF5bWVudCBjb3VsZCBub3QgYmUgc2V0dGxlZCAoaW52YWxpZF9zaWduYXR1cmUpLiBOb3RoaW5nIHdhcyBkZWxpdmVyZWQuIiwicmVzb3VyY2UiOnsidXJsIjoiaHR0cDovL3Rlc3RzZXJ2ZXIvYXBpL3YxL3N0YW1wcy8iLCJkZXNjcmlwdGlvbiI6IlRlc3Qgb3BlcmF0aW9uIiwibWltZVR5cGUiOiJhcHBsaWNhdGlvbi9qc29uIn0sImFjY2VwdHMiOlt7InNjaGVtZSI6ImV4YWN0IiwibmV0d29yayI6ImVpcDE1NTo4NDUzMiIsImFzc2V0IjoiMHgwMzZDYkQ1Mzg0MmM1NDI2NjM0ZTc5Mjk1NDFlQzIzMThmM2RDRjdlIiwiYW1vdW50IjoiMjAwMDAiLCJwYXlUbyI6IjB4MjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMiIsIm1heFRpbWVvdXRTZWNvbmRzIjozMDAsImV4dHJhIjp7Im5hbWUiOiJVU0RDIiwidmVyc2lvbiI6IjIifX1dfQ=="
+   ]
+  ],
+  "metric": {
+   "refused": 1.0
+  },
+  "ran": [],
+  "status": 402
+ },
+ "v2/before_work/invalid_transaction_state/200": {
+  "body": "{\"code\":\"PAYMENT_SETTLEMENT_FAILED\",\"message\":\"The payment could not be settled (invalid_transaction_state). Nothing was delivered.\",\"x402_status\":\"settlement_failed\",\"reason\":\"invalid_transaction_state\",\"x402Version\":1,\"error\":\"The payment could not be settled (invalid_transaction_state). Nothing was delivered.\",\"accepts\":[{\"scheme\":\"exact\",\"network\":\"base-sepolia\",\"maxAmountRequired\":\"20000\",\"resource\":\"http://testserver/api/v1/stamps/\",\"description\":\"Test operation\",\"mimeType\":\"application/json\",\"outputSchema\":null,\"payTo\":\"0x2222222222222222222222222222222222222222\",\"maxTimeoutSeconds\":300,\"asset\":\"0x036CbD53842c5426634e7929541eC2318f3dCF7e\",\"extra\":{\"name\":\"USDC\",\"version\":\"2\"}}],\"detail\":{\"code\":\"PAYMENT_SETTLEMENT_FAILED\",\"message\":\"The payment could not be settled (invalid_transaction_state). Nothing was delivered.\",\"x402_status\":\"settlement_failed\",\"reason\":\"invalid_transaction_state\",\"x402Version\":1,\"error\":\"The payment could not be settled (invalid_transaction_state). Nothing was delivered.\",\"accepts\":[{\"scheme\":\"exact\",\"network\":\"base-sepolia\",\"maxAmountRequired\":\"20000\",\"resource\":\"http://testserver/api/v1/stamps/\",\"description\":\"Test operation\",\"mimeType\":\"application/json\",\"outputSchema\":null,\"payTo\":\"0x2222222222222222222222222222222222222222\",\"maxTimeoutSeconds\":300,\"asset\":\"0x036CbD53842c5426634e7929541eC2318f3dCF7e\",\"extra\":{\"name\":\"USDC\",\"version\":\"2\"}}]}}",
+  "headers": [
+   [
+    "content-length",
+    "1398"
+   ],
+   [
+    "content-type",
+    "application/json"
+   ],
+   [
+    "payment-required",
+    "eyJ4NDAyVmVyc2lvbiI6MiwiZXJyb3IiOiJUaGUgcGF5bWVudCBjb3VsZCBub3QgYmUgc2V0dGxlZCAoaW52YWxpZF90cmFuc2FjdGlvbl9zdGF0ZSkuIE5vdGhpbmcgd2FzIGRlbGl2ZXJlZC4iLCJyZXNvdXJjZSI6eyJ1cmwiOiJodHRwOi8vdGVzdHNlcnZlci9hcGkvdjEvc3RhbXBzLyIsImRlc2NyaXB0aW9uIjoiVGVzdCBvcGVyYXRpb24iLCJtaW1lVHlwZSI6ImFwcGxpY2F0aW9uL2pzb24ifSwiYWNjZXB0cyI6W3sic2NoZW1lIjoiZXhhY3QiLCJuZXR3b3JrIjoiZWlwMTU1Ojg0NTMyIiwiYXNzZXQiOiIweDAzNkNiRDUzODQyYzU0MjY2MzRlNzkyOTU0MWVDMjMxOGYzZENGN2UiLCJhbW91bnQiOiIyMDAwMCIsInBheVRvIjoiMHgyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyIiwibWF4VGltZW91dFNlY29uZHMiOjMwMCwiZXh0cmEiOnsibmFtZSI6IlVTREMiLCJ2ZXJzaW9uIjoiMiJ9fV19"
+   ]
+  ],
+  "metric": {
+   "refused": 1.0
+  },
+  "ran": [],
+  "status": 402
+ },
+ "v2/before_work/invalid_transaction_state/400": {
+  "body": "{\"code\":\"PAYMENT_SETTLEMENT_FAILED\",\"message\":\"The payment could not be settled (invalid_transaction_state). Nothing was delivered.\",\"x402_status\":\"settlement_failed\",\"reason\":\"invalid_transaction_state\",\"x402Version\":1,\"error\":\"The payment could not be settled (invalid_transaction_state). Nothing was delivered.\",\"accepts\":[{\"scheme\":\"exact\",\"network\":\"base-sepolia\",\"maxAmountRequired\":\"20000\",\"resource\":\"http://testserver/api/v1/stamps/\",\"description\":\"Test operation\",\"mimeType\":\"application/json\",\"outputSchema\":null,\"payTo\":\"0x2222222222222222222222222222222222222222\",\"maxTimeoutSeconds\":300,\"asset\":\"0x036CbD53842c5426634e7929541eC2318f3dCF7e\",\"extra\":{\"name\":\"USDC\",\"version\":\"2\"}}],\"detail\":{\"code\":\"PAYMENT_SETTLEMENT_FAILED\",\"message\":\"The payment could not be settled (invalid_transaction_state). Nothing was delivered.\",\"x402_status\":\"settlement_failed\",\"reason\":\"invalid_transaction_state\",\"x402Version\":1,\"error\":\"The payment could not be settled (invalid_transaction_state). Nothing was delivered.\",\"accepts\":[{\"scheme\":\"exact\",\"network\":\"base-sepolia\",\"maxAmountRequired\":\"20000\",\"resource\":\"http://testserver/api/v1/stamps/\",\"description\":\"Test operation\",\"mimeType\":\"application/json\",\"outputSchema\":null,\"payTo\":\"0x2222222222222222222222222222222222222222\",\"maxTimeoutSeconds\":300,\"asset\":\"0x036CbD53842c5426634e7929541eC2318f3dCF7e\",\"extra\":{\"name\":\"USDC\",\"version\":\"2\"}}]}}",
+  "headers": [
+   [
+    "content-length",
+    "1398"
+   ],
+   [
+    "content-type",
+    "application/json"
+   ],
+   [
+    "payment-required",
+    "eyJ4NDAyVmVyc2lvbiI6MiwiZXJyb3IiOiJUaGUgcGF5bWVudCBjb3VsZCBub3QgYmUgc2V0dGxlZCAoaW52YWxpZF90cmFuc2FjdGlvbl9zdGF0ZSkuIE5vdGhpbmcgd2FzIGRlbGl2ZXJlZC4iLCJyZXNvdXJjZSI6eyJ1cmwiOiJodHRwOi8vdGVzdHNlcnZlci9hcGkvdjEvc3RhbXBzLyIsImRlc2NyaXB0aW9uIjoiVGVzdCBvcGVyYXRpb24iLCJtaW1lVHlwZSI6ImFwcGxpY2F0aW9uL2pzb24ifSwiYWNjZXB0cyI6W3sic2NoZW1lIjoiZXhhY3QiLCJuZXR3b3JrIjoiZWlwMTU1Ojg0NTMyIiwiYXNzZXQiOiIweDAzNkNiRDUzODQyYzU0MjY2MzRlNzkyOTU0MWVDMjMxOGYzZENGN2UiLCJhbW91bnQiOiIyMDAwMCIsInBheVRvIjoiMHgyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyIiwibWF4VGltZW91dFNlY29uZHMiOjMwMCwiZXh0cmEiOnsibmFtZSI6IlVTREMiLCJ2ZXJzaW9uIjoiMiJ9fV19"
+   ]
+  ],
+  "metric": {
+   "refused": 1.0
+  },
+  "ran": [],
+  "status": 402
+ },
+ "v2/before_work/no_reason/200": {
+  "body": "{\"code\":\"PAYMENT_SETTLEMENT_FAILED\",\"message\":\"The payment could not be settled (unknown). Nothing was delivered.\",\"x402_status\":\"settlement_failed\",\"reason\":\"unknown\",\"x402Version\":1,\"error\":\"The payment could not be settled (unknown). Nothing was delivered.\",\"accepts\":[{\"scheme\":\"exact\",\"network\":\"base-sepolia\",\"maxAmountRequired\":\"20000\",\"resource\":\"http://testserver/api/v1/stamps/\",\"description\":\"Test operation\",\"mimeType\":\"application/json\",\"outputSchema\":null,\"payTo\":\"0x2222222222222222222222222222222222222222\",\"maxTimeoutSeconds\":300,\"asset\":\"0x036CbD53842c5426634e7929541eC2318f3dCF7e\",\"extra\":{\"name\":\"USDC\",\"version\":\"2\"}}],\"detail\":{\"code\":\"PAYMENT_SETTLEMENT_FAILED\",\"message\":\"The payment could not be settled (unknown). Nothing was delivered.\",\"x402_status\":\"settlement_failed\",\"reason\":\"unknown\",\"x402Version\":1,\"error\":\"The payment could not be settled (unknown). Nothing was delivered.\",\"accepts\":[{\"scheme\":\"exact\",\"network\":\"base-sepolia\",\"maxAmountRequired\":\"20000\",\"resource\":\"http://testserver/api/v1/stamps/\",\"description\":\"Test operation\",\"mimeType\":\"application/json\",\"outputSchema\":null,\"payTo\":\"0x2222222222222222222222222222222222222222\",\"maxTimeoutSeconds\":300,\"asset\":\"0x036CbD53842c5426634e7929541eC2318f3dCF7e\",\"extra\":{\"name\":\"USDC\",\"version\":\"2\"}}]}}",
+  "headers": [
+   [
+    "content-length",
+    "1290"
+   ],
+   [
+    "content-type",
+    "application/json"
+   ],
+   [
+    "payment-required",
+    "eyJ4NDAyVmVyc2lvbiI6MiwiZXJyb3IiOiJUaGUgcGF5bWVudCBjb3VsZCBub3QgYmUgc2V0dGxlZCAodW5rbm93bikuIE5vdGhpbmcgd2FzIGRlbGl2ZXJlZC4iLCJyZXNvdXJjZSI6eyJ1cmwiOiJodHRwOi8vdGVzdHNlcnZlci9hcGkvdjEvc3RhbXBzLyIsImRlc2NyaXB0aW9uIjoiVGVzdCBvcGVyYXRpb24iLCJtaW1lVHlwZSI6ImFwcGxpY2F0aW9uL2pzb24ifSwiYWNjZXB0cyI6W3sic2NoZW1lIjoiZXhhY3QiLCJuZXR3b3JrIjoiZWlwMTU1Ojg0NTMyIiwiYXNzZXQiOiIweDAzNkNiRDUzODQyYzU0MjY2MzRlNzkyOTU0MWVDMjMxOGYzZENGN2UiLCJhbW91bnQiOiIyMDAwMCIsInBheVRvIjoiMHgyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyIiwibWF4VGltZW91dFNlY29uZHMiOjMwMCwiZXh0cmEiOnsibmFtZSI6IlVTREMiLCJ2ZXJzaW9uIjoiMiJ9fV19"
+   ]
+  ],
+  "metric": {
+   "refused": 1.0
+  },
+  "ran": [],
+  "status": 402
+ },
+ "v2/before_work/no_reason/400": {
+  "body": "{\"code\":\"PAYMENT_SETTLEMENT_FAILED\",\"message\":\"The payment could not be settled (unknown). Nothing was delivered.\",\"x402_status\":\"settlement_failed\",\"reason\":\"unknown\",\"x402Version\":1,\"error\":\"The payment could not be settled (unknown). Nothing was delivered.\",\"accepts\":[{\"scheme\":\"exact\",\"network\":\"base-sepolia\",\"maxAmountRequired\":\"20000\",\"resource\":\"http://testserver/api/v1/stamps/\",\"description\":\"Test operation\",\"mimeType\":\"application/json\",\"outputSchema\":null,\"payTo\":\"0x2222222222222222222222222222222222222222\",\"maxTimeoutSeconds\":300,\"asset\":\"0x036CbD53842c5426634e7929541eC2318f3dCF7e\",\"extra\":{\"name\":\"USDC\",\"version\":\"2\"}}],\"detail\":{\"code\":\"PAYMENT_SETTLEMENT_FAILED\",\"message\":\"The payment could not be settled (unknown). Nothing was delivered.\",\"x402_status\":\"settlement_failed\",\"reason\":\"unknown\",\"x402Version\":1,\"error\":\"The payment could not be settled (unknown). Nothing was delivered.\",\"accepts\":[{\"scheme\":\"exact\",\"network\":\"base-sepolia\",\"maxAmountRequired\":\"20000\",\"resource\":\"http://testserver/api/v1/stamps/\",\"description\":\"Test operation\",\"mimeType\":\"application/json\",\"outputSchema\":null,\"payTo\":\"0x2222222222222222222222222222222222222222\",\"maxTimeoutSeconds\":300,\"asset\":\"0x036CbD53842c5426634e7929541eC2318f3dCF7e\",\"extra\":{\"name\":\"USDC\",\"version\":\"2\"}}]}}",
+  "headers": [
+   [
+    "content-length",
+    "1290"
+   ],
+   [
+    "content-type",
+    "application/json"
+   ],
+   [
+    "payment-required",
+    "eyJ4NDAyVmVyc2lvbiI6MiwiZXJyb3IiOiJUaGUgcGF5bWVudCBjb3VsZCBub3QgYmUgc2V0dGxlZCAodW5rbm93bikuIE5vdGhpbmcgd2FzIGRlbGl2ZXJlZC4iLCJyZXNvdXJjZSI6eyJ1cmwiOiJodHRwOi8vdGVzdHNlcnZlci9hcGkvdjEvc3RhbXBzLyIsImRlc2NyaXB0aW9uIjoiVGVzdCBvcGVyYXRpb24iLCJtaW1lVHlwZSI6ImFwcGxpY2F0aW9uL2pzb24ifSwiYWNjZXB0cyI6W3sic2NoZW1lIjoiZXhhY3QiLCJuZXR3b3JrIjoiZWlwMTU1Ojg0NTMyIiwiYXNzZXQiOiIweDAzNkNiRDUzODQyYzU0MjY2MzRlNzkyOTU0MWVDMjMxOGYzZENGN2UiLCJhbW91bnQiOiIyMDAwMCIsInBheVRvIjoiMHgyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyIiwibWF4VGltZW91dFNlY29uZHMiOjMwMCwiZXh0cmEiOnsibmFtZSI6IlVTREMiLCJ2ZXJzaW9uIjoiMiJ9fV19"
+   ]
+  ],
+  "metric": {
+   "refused": 1.0
+  },
+  "ran": [],
+  "status": 402
+ },
+ "v2/before_work/nonce_already_used/200": {
+  "body": "{\"code\":\"PAYMENT_SETTLEMENT_FAILED\",\"message\":\"The payment could not be settled (invalid_exact_evm_nonce_already_used). Nothing was delivered.\",\"x402_status\":\"settlement_failed\",\"reason\":\"invalid_exact_evm_nonce_already_used\",\"x402Version\":1,\"error\":\"The payment could not be settled (invalid_exact_evm_nonce_already_used). Nothing was delivered.\",\"accepts\":[{\"scheme\":\"exact\",\"network\":\"base-sepolia\",\"maxAmountRequired\":\"20000\",\"resource\":\"http://testserver/api/v1/stamps/\",\"description\":\"Test operation\",\"mimeType\":\"application/json\",\"outputSchema\":null,\"payTo\":\"0x2222222222222222222222222222222222222222\",\"maxTimeoutSeconds\":300,\"asset\":\"0x036CbD53842c5426634e7929541eC2318f3dCF7e\",\"extra\":{\"name\":\"USDC\",\"version\":\"2\"}}],\"detail\":{\"code\":\"PAYMENT_SETTLEMENT_FAILED\",\"message\":\"The payment could not be settled (invalid_exact_evm_nonce_already_used). Nothing was delivered.\",\"x402_status\":\"settlement_failed\",\"reason\":\"invalid_exact_evm_nonce_already_used\",\"x402Version\":1,\"error\":\"The payment could not be settled (invalid_exact_evm_nonce_already_used). Nothing was delivered.\",\"accepts\":[{\"scheme\":\"exact\",\"network\":\"base-sepolia\",\"maxAmountRequired\":\"20000\",\"resource\":\"http://testserver/api/v1/stamps/\",\"description\":\"Test operation\",\"mimeType\":\"application/json\",\"outputSchema\":null,\"payTo\":\"0x2222222222222222222222222222222222222222\",\"maxTimeoutSeconds\":300,\"asset\":\"0x036CbD53842c5426634e7929541eC2318f3dCF7e\",\"extra\":{\"name\":\"USDC\",\"version\":\"2\"}}]}}",
+  "headers": [
+   [
+    "content-length",
+    "1464"
+   ],
+   [
+    "content-type",
+    "application/json"
+   ],
+   [
+    "payment-required",
+    "eyJ4NDAyVmVyc2lvbiI6MiwiZXJyb3IiOiJUaGUgcGF5bWVudCBjb3VsZCBub3QgYmUgc2V0dGxlZCAoaW52YWxpZF9leGFjdF9ldm1fbm9uY2VfYWxyZWFkeV91c2VkKS4gTm90aGluZyB3YXMgZGVsaXZlcmVkLiIsInJlc291cmNlIjp7InVybCI6Imh0dHA6Ly90ZXN0c2VydmVyL2FwaS92MS9zdGFtcHMvIiwiZGVzY3JpcHRpb24iOiJUZXN0IG9wZXJhdGlvbiIsIm1pbWVUeXBlIjoiYXBwbGljYXRpb24vanNvbiJ9LCJhY2NlcHRzIjpbeyJzY2hlbWUiOiJleGFjdCIsIm5ldHdvcmsiOiJlaXAxNTU6ODQ1MzIiLCJhc3NldCI6IjB4MDM2Q2JENTM4NDJjNTQyNjYzNGU3OTI5NTQxZUMyMzE4ZjNkQ0Y3ZSIsImFtb3VudCI6IjIwMDAwIiwicGF5VG8iOiIweDIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIiLCJtYXhUaW1lb3V0U2Vjb25kcyI6MzAwLCJleHRyYSI6eyJuYW1lIjoiVVNEQyIsInZlcnNpb24iOiIyIn19XX0="
+   ]
+  ],
+  "metric": {
+   "refused": 1.0
+  },
+  "ran": [],
+  "status": 402
+ },
+ "v2/before_work/nonce_already_used/400": {
+  "body": "{\"code\":\"PAYMENT_SETTLEMENT_FAILED\",\"message\":\"The payment could not be settled (invalid_exact_evm_nonce_already_used). Nothing was delivered.\",\"x402_status\":\"settlement_failed\",\"reason\":\"invalid_exact_evm_nonce_already_used\",\"x402Version\":1,\"error\":\"The payment could not be settled (invalid_exact_evm_nonce_already_used). Nothing was delivered.\",\"accepts\":[{\"scheme\":\"exact\",\"network\":\"base-sepolia\",\"maxAmountRequired\":\"20000\",\"resource\":\"http://testserver/api/v1/stamps/\",\"description\":\"Test operation\",\"mimeType\":\"application/json\",\"outputSchema\":null,\"payTo\":\"0x2222222222222222222222222222222222222222\",\"maxTimeoutSeconds\":300,\"asset\":\"0x036CbD53842c5426634e7929541eC2318f3dCF7e\",\"extra\":{\"name\":\"USDC\",\"version\":\"2\"}}],\"detail\":{\"code\":\"PAYMENT_SETTLEMENT_FAILED\",\"message\":\"The payment could not be settled (invalid_exact_evm_nonce_already_used). Nothing was delivered.\",\"x402_status\":\"settlement_failed\",\"reason\":\"invalid_exact_evm_nonce_already_used\",\"x402Version\":1,\"error\":\"The payment could not be settled (invalid_exact_evm_nonce_already_used). Nothing was delivered.\",\"accepts\":[{\"scheme\":\"exact\",\"network\":\"base-sepolia\",\"maxAmountRequired\":\"20000\",\"resource\":\"http://testserver/api/v1/stamps/\",\"description\":\"Test operation\",\"mimeType\":\"application/json\",\"outputSchema\":null,\"payTo\":\"0x2222222222222222222222222222222222222222\",\"maxTimeoutSeconds\":300,\"asset\":\"0x036CbD53842c5426634e7929541eC2318f3dCF7e\",\"extra\":{\"name\":\"USDC\",\"version\":\"2\"}}]}}",
+  "headers": [
+   [
+    "content-length",
+    "1464"
+   ],
+   [
+    "content-type",
+    "application/json"
+   ],
+   [
+    "payment-required",
+    "eyJ4NDAyVmVyc2lvbiI6MiwiZXJyb3IiOiJUaGUgcGF5bWVudCBjb3VsZCBub3QgYmUgc2V0dGxlZCAoaW52YWxpZF9leGFjdF9ldm1fbm9uY2VfYWxyZWFkeV91c2VkKS4gTm90aGluZyB3YXMgZGVsaXZlcmVkLiIsInJlc291cmNlIjp7InVybCI6Imh0dHA6Ly90ZXN0c2VydmVyL2FwaS92MS9zdGFtcHMvIiwiZGVzY3JpcHRpb24iOiJUZXN0IG9wZXJhdGlvbiIsIm1pbWVUeXBlIjoiYXBwbGljYXRpb24vanNvbiJ9LCJhY2NlcHRzIjpbeyJzY2hlbWUiOiJleGFjdCIsIm5ldHdvcmsiOiJlaXAxNTU6ODQ1MzIiLCJhc3NldCI6IjB4MDM2Q2JENTM4NDJjNTQyNjYzNGU3OTI5NTQxZUMyMzE4ZjNkQ0Y3ZSIsImFtb3VudCI6IjIwMDAwIiwicGF5VG8iOiIweDIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIiLCJtYXhUaW1lb3V0U2Vjb25kcyI6MzAwLCJleHRyYSI6eyJuYW1lIjoiVVNEQyIsInZlcnNpb24iOiIyIn19XX0="
+   ]
+  ],
+  "metric": {
+   "refused": 1.0
+  },
+  "ran": [],
+  "status": 402
+ },
+ "v2/before_work/unverified_code/200": {
+  "body": "{\"code\":\"PAYMENT_SETTLEMENT_FAILED\",\"message\":\"The payment could not be settled (settle_failed). Nothing was delivered.\",\"x402_status\":\"settlement_failed\",\"reason\":\"settle_failed\",\"x402Version\":1,\"error\":\"The payment could not be settled (settle_failed). Nothing was delivered.\",\"accepts\":[{\"scheme\":\"exact\",\"network\":\"base-sepolia\",\"maxAmountRequired\":\"20000\",\"resource\":\"http://testserver/api/v1/stamps/\",\"description\":\"Test operation\",\"mimeType\":\"application/json\",\"outputSchema\":null,\"payTo\":\"0x2222222222222222222222222222222222222222\",\"maxTimeoutSeconds\":300,\"asset\":\"0x036CbD53842c5426634e7929541eC2318f3dCF7e\",\"extra\":{\"name\":\"USDC\",\"version\":\"2\"}}],\"detail\":{\"code\":\"PAYMENT_SETTLEMENT_FAILED\",\"message\":\"The payment could not be settled (settle_failed). Nothing was delivered.\",\"x402_status\":\"settlement_failed\",\"reason\":\"settle_failed\",\"x402Version\":1,\"error\":\"The payment could not be settled (settle_failed). Nothing was delivered.\",\"accepts\":[{\"scheme\":\"exact\",\"network\":\"base-sepolia\",\"maxAmountRequired\":\"20000\",\"resource\":\"http://testserver/api/v1/stamps/\",\"description\":\"Test operation\",\"mimeType\":\"application/json\",\"outputSchema\":null,\"payTo\":\"0x2222222222222222222222222222222222222222\",\"maxTimeoutSeconds\":300,\"asset\":\"0x036CbD53842c5426634e7929541eC2318f3dCF7e\",\"extra\":{\"name\":\"USDC\",\"version\":\"2\"}}]}}",
+  "headers": [
+   [
+    "content-length",
+    "1326"
+   ],
+   [
+    "content-type",
+    "application/json"
+   ],
+   [
+    "payment-required",
+    "eyJ4NDAyVmVyc2lvbiI6MiwiZXJyb3IiOiJUaGUgcGF5bWVudCBjb3VsZCBub3QgYmUgc2V0dGxlZCAoc2V0dGxlX2ZhaWxlZCkuIE5vdGhpbmcgd2FzIGRlbGl2ZXJlZC4iLCJyZXNvdXJjZSI6eyJ1cmwiOiJodHRwOi8vdGVzdHNlcnZlci9hcGkvdjEvc3RhbXBzLyIsImRlc2NyaXB0aW9uIjoiVGVzdCBvcGVyYXRpb24iLCJtaW1lVHlwZSI6ImFwcGxpY2F0aW9uL2pzb24ifSwiYWNjZXB0cyI6W3sic2NoZW1lIjoiZXhhY3QiLCJuZXR3b3JrIjoiZWlwMTU1Ojg0NTMyIiwiYXNzZXQiOiIweDAzNkNiRDUzODQyYzU0MjY2MzRlNzkyOTU0MWVDMjMxOGYzZENGN2UiLCJhbW91bnQiOiIyMDAwMCIsInBheVRvIjoiMHgyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyIiwibWF4VGltZW91dFNlY29uZHMiOjMwMCwiZXh0cmEiOnsibmFtZSI6IlVTREMiLCJ2ZXJzaW9uIjoiMiJ9fV19"
+   ]
+  ],
+  "metric": {
+   "refused": 1.0
+  },
+  "ran": [],
+  "status": 402
+ },
+ "v2/before_work/unverified_code/400": {
+  "body": "{\"code\":\"PAYMENT_SETTLEMENT_FAILED\",\"message\":\"The payment could not be settled (settle_failed). Nothing was delivered.\",\"x402_status\":\"settlement_failed\",\"reason\":\"settle_failed\",\"x402Version\":1,\"error\":\"The payment could not be settled (settle_failed). Nothing was delivered.\",\"accepts\":[{\"scheme\":\"exact\",\"network\":\"base-sepolia\",\"maxAmountRequired\":\"20000\",\"resource\":\"http://testserver/api/v1/stamps/\",\"description\":\"Test operation\",\"mimeType\":\"application/json\",\"outputSchema\":null,\"payTo\":\"0x2222222222222222222222222222222222222222\",\"maxTimeoutSeconds\":300,\"asset\":\"0x036CbD53842c5426634e7929541eC2318f3dCF7e\",\"extra\":{\"name\":\"USDC\",\"version\":\"2\"}}],\"detail\":{\"code\":\"PAYMENT_SETTLEMENT_FAILED\",\"message\":\"The payment could not be settled (settle_failed). Nothing was delivered.\",\"x402_status\":\"settlement_failed\",\"reason\":\"settle_failed\",\"x402Version\":1,\"error\":\"The payment could not be settled (settle_failed). Nothing was delivered.\",\"accepts\":[{\"scheme\":\"exact\",\"network\":\"base-sepolia\",\"maxAmountRequired\":\"20000\",\"resource\":\"http://testserver/api/v1/stamps/\",\"description\":\"Test operation\",\"mimeType\":\"application/json\",\"outputSchema\":null,\"payTo\":\"0x2222222222222222222222222222222222222222\",\"maxTimeoutSeconds\":300,\"asset\":\"0x036CbD53842c5426634e7929541eC2318f3dCF7e\",\"extra\":{\"name\":\"USDC\",\"version\":\"2\"}}]}}",
+  "headers": [
+   [
+    "content-length",
+    "1326"
+   ],
+   [
+    "content-type",
+    "application/json"
+   ],
+   [
+    "payment-required",
+    "eyJ4NDAyVmVyc2lvbiI6MiwiZXJyb3IiOiJUaGUgcGF5bWVudCBjb3VsZCBub3QgYmUgc2V0dGxlZCAoc2V0dGxlX2ZhaWxlZCkuIE5vdGhpbmcgd2FzIGRlbGl2ZXJlZC4iLCJyZXNvdXJjZSI6eyJ1cmwiOiJodHRwOi8vdGVzdHNlcnZlci9hcGkvdjEvc3RhbXBzLyIsImRlc2NyaXB0aW9uIjoiVGVzdCBvcGVyYXRpb24iLCJtaW1lVHlwZSI6ImFwcGxpY2F0aW9uL2pzb24ifSwiYWNjZXB0cyI6W3sic2NoZW1lIjoiZXhhY3QiLCJuZXR3b3JrIjoiZWlwMTU1Ojg0NTMyIiwiYXNzZXQiOiIweDAzNkNiRDUzODQyYzU0MjY2MzRlNzkyOTU0MWVDMjMxOGYzZENGN2UiLCJhbW91bnQiOiIyMDAwMCIsInBheVRvIjoiMHgyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyIiwibWF4VGltZW91dFNlY29uZHMiOjMwMCwiZXh0cmEiOnsibmFtZSI6IlVTREMiLCJ2ZXJzaW9uIjoiMiJ9fV19"
+   ]
+  ],
+  "metric": {
+   "refused": 1.0
+  },
+  "ran": [],
+  "status": 402
+ }
+}
