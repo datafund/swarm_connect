@@ -88,7 +88,8 @@ class Settings(BaseSettings):
     X402_MIN_PRICE_USD: float = 0.01  # Minimum charge per request
     # Optional market price feed for BZZ/USD, used only to watch for drift
     # (#364): prices stay on the configured X402_BZZ_USD_RATE, reviewed by a
-    # person, and an alert fires when it is more than 2x away from the market.
+    # person, and an alert fires when the market price is above 90% or below 20%
+    # of the configured rate.
     # Any JSON endpoint whose first numeric "usd" field is the price works, e.g.
     # https://api.coingecko.com/api/v3/simple/price?ids=swarm-bzz&vs_currencies=usd
     X402_BZZ_PRICE_FEED_URL: str = ""

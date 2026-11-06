@@ -865,6 +865,12 @@ _price_feed_failures = 0
 # After this many consecutive failed reads the market gauge goes back to 0, so a
 # dead feed stops the drift alert from judging against a stale price.
 PRICE_FEED_MAX_FAILURES = 3
+# The market price as a share of X402_BZZ_USD_RATE that is still fine. Above the
+# high mark the margin is nearly gone; below the low mark the gateway charges
+# more than 5x the market. The "BZZ pricing rate off market" alert uses the same
+# bounds.
+MARKET_SHARE_HIGH = 0.9
+MARKET_SHARE_LOW = 0.2
 
 
 def _first_usd_value(data):
@@ -915,11 +921,12 @@ async def _update_bzz_rates() -> None:
     _price_feed_failures = 0
     bzz_usd_rate_market.set(price)
     bzz_usd_rate_market_updated.set(time.time())
-    ratio = settings.X402_BZZ_USD_RATE / price
-    if ratio > 2 or ratio < 0.5:
+    share = price / settings.X402_BZZ_USD_RATE if settings.X402_BZZ_USD_RATE > 0 else math.inf
+    if share > MARKET_SHARE_HIGH or share < MARKET_SHARE_LOW:
         logger.warning(
-            f"BZZ/USD pricing rate {settings.X402_BZZ_USD_RATE} is {ratio:.1f}x the market "
-            f"price {price}; review X402_BZZ_USD_RATE"
+            f"BZZ market price {price} is {share:.0%} of the BZZ/USD pricing rate "
+            f"{settings.X402_BZZ_USD_RATE} (expected {MARKET_SHARE_LOW:.0%} to "
+            f"{MARKET_SHARE_HIGH:.0%}); review X402_BZZ_USD_RATE"
         )
 
 
