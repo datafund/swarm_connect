@@ -68,6 +68,11 @@ class Settings(BaseSettings):
     X402_FACILITATOR_CDP_API_KEY_ID: Optional[str] = None
     X402_FACILITATOR_CDP_API_KEY_SECRET: Optional[str] = None
     X402_FACILITATOR_BEARER_TOKEN: Optional[str] = None
+    # PayAI facilitator API key (#662): the key ID and its secret, a base64
+    # PKCS#8 Ed25519 private key that signs a short-lived JWT per request.
+    # Unset: PayAI's shared free lane. The secret is kept out of repr.
+    X402_FACILITATOR_PAYAI_API_KEY_ID: Optional[str] = None
+    X402_FACILITATOR_PAYAI_API_KEY_SECRET: Optional[str] = Field(None, repr=False)
     X402_NETWORK: str = "base-sepolia"  # Network identifier (v1 style)
     # The x402 protocol versions a payment is accepted in (#607, D3 in #596):
     # "1" (default), "1,2" (dual mode) or "2". Anything else stops startup.
@@ -83,7 +88,8 @@ class Settings(BaseSettings):
     X402_MIN_PRICE_USD: float = 0.01  # Minimum charge per request
     # Optional market price feed for BZZ/USD, used only to watch for drift
     # (#364): prices stay on the configured X402_BZZ_USD_RATE, reviewed by a
-    # person, and an alert fires when it is more than 2x away from the market.
+    # person, and an alert fires when the market price is above 90% or below 20%
+    # of the configured rate.
     # Any JSON endpoint whose first numeric "usd" field is the price works, e.g.
     # https://api.coingecko.com/api/v3/simple/price?ids=swarm-bzz&vs_currencies=usd
     X402_BZZ_PRICE_FEED_URL: str = ""
