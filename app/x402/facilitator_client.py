@@ -40,7 +40,10 @@ facilitator-side switches it never priced. Answers are classified by status
   (the dependency answers 502): a 5xx, a non-2xx isValid:true, a body that
   does not parse. A 5xx saying isValid:true is never taken as verified.
 - settle: a 2xx body that parses is the answer. A 4xx body that parses with
-  success:false is a definite refusal. Everything else raises, so the
+  success:false is a refusal, which the settlement code takes as definite
+  unless its reason means the transaction may have been sent
+  (settlement.settle_outcome_unknown, #660): that is an unknown outcome
+  too. Everything else raises, so the
   settlement code counts it as an unknown outcome: a 5xx (a facilitator or
   proxy in trouble may still have submitted the transfer), a non-2xx
   success:true, or a body that does not parse.
