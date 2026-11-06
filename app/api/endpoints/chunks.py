@@ -3,15 +3,17 @@ import logging
 import re
 from typing import Optional
 
-import httpx
+import httpx2
 from fastapi import APIRouter, Header, HTTPException, Query, Request, status
 
 from app.core.client_ip import get_client_key
-from app.x402.settlement import settle_payment
+from app.x402.settlement import request_nonce, settle_payment
+from app.x402.openapi_docs import paid_route_openapi
 from app.api.models.chunk import ChunkUploadResponse, CreditTopUpResponse, TokenRotationResponse
 from app.core.config import settings
 from app.services.bandwidth_credit import (
-    BYTES_PER_MB, bandwidth_credit_manager, parse_topup_mb,
+    BYTES_PER_MB, bandwidth_credit_manager, invalid_topup_mb_detail, parse_topup_mb,
+    valid_topup_mb,
 )
 from app.services.bandwidth_free_tier import free_tier_tracker
 from app.services.metrics import (
@@ -30,7 +32,7 @@ router = APIRouter()
 # A marshaled postage stamp is 113 bytes = 226 hex characters:
 #   batchID[0:32] + index[32:40] + timestamp[40:48] + signature[48:113]
 MARSHALED_STAMP_HEX_LEN = 226
-_HEX_RE = re.compile(r"^[A-Fa-f0-9]+$")
+_HEX_RE = re.compile(r"^[A-Fa-f0-9]+\Z")
 
 # Header the client uses to present its prepaid bandwidth credit token.
 CREDIT_TOKEN_HEADER = "X-Bandwidth-Credit-Token"
@@ -76,6 +78,7 @@ def _topup_info() -> dict:
     response_model=CreditTopUpResponse,
     status_code=status.HTTP_201_CREATED,
     summary="Top up prepaid bandwidth credit (x402)",
+    openapi_extra=paid_route_openapi([201]),
 )
 async def top_up_credit(
     request: Request,
@@ -109,12 +112,14 @@ async def top_up_credit(
     # Taken as a string and parsed here rather than by Pydantic: Pydantic's int
     # coercion accepts "1000000.0", the x402 pricing dependency's int() does not,
     # and that disagreement let a caller be charged for the minimum while being
-    # credited a thousand times more. Both now use parse_topup_mb.
-    parsed_mb = parse_topup_mb(mb)
-    if parsed_mb is None or parsed_mb < 1:
+    # credited a thousand times more. Both now use parse_topup_mb
+    # (through valid_topup_mb here).
+    # The x402 dependency applies the same rule before payment (#427).
+    parsed_mb = valid_topup_mb(mb)
+    if parsed_mb is None:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail=f"'mb' must be a whole number of megabytes, got {mb!r}",
+            detail=invalid_topup_mb_detail(mb),
         )
     mb = parsed_mb
     # Note: a value below BANDWIDTH_CREDIT_MIN_TOPUP_MB is rejected further down
@@ -188,7 +193,8 @@ async def top_up_credit(
 
     log_audit_event(
         event_type=AuditEventType.CREDIT_TOPPED_UP,
-        data={"credited_bytes": credited_bytes, "balance_bytes": new_balance, "mb": mb},
+        data={"credited_bytes": credited_bytes, "balance_bytes": new_balance, "mb": mb,
+              "nonce": request_nonce(request)},
         wallet_address=payer,
     )
 
@@ -394,14 +400,14 @@ async def upload_chunk(
     # --- Forward the chunk to Bee. Refund the debit if forwarding fails. ---
     try:
         reference = await upload_chunk_to_swarm(chunk_bytes, stamp, deferred=deferred)
-    except (httpx.HTTPError, ValueError) as e:
+    except (httpx2.HTTPError, ValueError) as e:
         # Refund: the upload never landed, so the client shouldn't be charged.
         if billing_address is not None:
             bandwidth_credit_manager.credit(billing_address, chunk_len)
         if free_ip is not None:
             free_tier_tracker.refund(free_ip, chunk_len)
         chunk_uploads_total.labels(status="error", mode=mode).inc()
-        if isinstance(e, httpx.HTTPError):
+        if isinstance(e, httpx2.HTTPError):
             logger.error(f"Failed to forward chunk to Swarm API: {e}")
             raise HTTPException(
                 status_code=status.HTTP_502_BAD_GATEWAY,

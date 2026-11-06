@@ -47,8 +47,9 @@ swarm_connect/
 │
 ├── .env.example            # Example environment file
 ├── docker-compose.yml      # Docker deployment (production + staging)
-├── Dockerfile              # Container image (Python 3.10)
-├── requirements.txt        # Python dependencies
+├── Dockerfile              # Container image (Python 3.12, base pinned by digest)
+├── requirements.txt        # Runtime dependencies (locked in requirements.lock)
+├── requirements-dev.txt    # Test-only dependencies (locked in requirements-dev.lock)
 └── run.py                  # Development server
 ``` 
 
@@ -74,8 +75,11 @@ python3 -m venv venv
 source venv/bin/activate
 # On Windows: venv\Scripts\activate
 
-# Install dependencies
-pip install -r requirements.txt
+# Install dependencies (runtime, plus the test-only packages in requirements-dev.txt)
+pip install -r requirements.txt -r requirements-dev.txt
+# CI installs the locks instead (Python 3.12); the Docker image installs only
+# requirements.lock. To reproduce CI:
+# pip install --no-deps --require-hashes -r requirements.lock -r requirements-dev.lock
 
 # Set up environment file
 cp .env.example .env
@@ -190,7 +194,7 @@ Swarm Connect is a FastAPI-based API gateway that provides comprehensive access 
 │  │                        SERVICE LAYER                               │   │
 │  │  ┌─────────────────┐  ┌─────────────────┐  ┌─────────────────────┐ │   │
 │  │  │  Swarm API      │  │  HTTP Client    │  │   Error Recovery &  │ │   │
-│  │  │  Integration    │  │  (httpx Async)  │  │   Retry Logic       │ │   │
+│  │  │  Integration    │  │ (httpx2 Async)  │  │   Retry Logic       │ │   │
 │  │  └─────────────────┘  └─────────────────┘  └─────────────────────┘ │   │
 │  └─────────────────────────────────────────────────────────────────────┘   │
 │                                    │                                       │
@@ -273,6 +277,7 @@ Swarm Connect is a FastAPI-based API gateway that provides comprehensive access 
 
 #### 🛡️ Reliability Features
 - **Request Timeouts**: 10-second timeout for external API calls
+- **HTTP Client Self-Recovery**: the shared client is replaced when cancelled requests leave its pool stuck (#587); pool timeouts, stuck connections and replacements are exported as metrics
 - **Error Recovery**: Multiple layers of exception handling
 - **Flexible Response Parsing**: Handles different Swarm API response formats
 - **Logging**: Structured logging for debugging and monitoring
@@ -319,7 +324,7 @@ Swarm Connect is a FastAPI-based API gateway that provides comprehensive access 
 ### Available API Endpoints
 
 #### Core Endpoints
-- `GET /` (and `/health`): Health check. Always includes a `bee_node` section describing the Bee node — identity and build (`overlay`, `version`, `api_version`, `bee_status`), connectivity (`mode`, `connected_peers`, `population`, `reachability`, `network_availability` (Available/Unavailable/Unknown)), reserve and radius (`storage_radius`, `committed_depth`, `reserve_size`, `reserve_size_within_radius`, `pullsync_rate`, `batch_commitment`), chain sync (`last_synced_block`, `chain_tip`, `chain_sync_lag_blocks`), plus `warming_up`, a `healthy` flag, and `warnings`. `status` becomes `degraded` when `network_availability` is `Unavailable` (the node can't reach the storer network, so uploads may return success without propagating); other warnings — a low peer count, a large chain-sync lag, or a non-ok Bee status — are advisory and do not change `status`. When x402 is enabled, also includes the `x402` wallet section.
+- `GET /` (and `/health`): Health check. Always includes a `bee_node` section describing the Bee node — identity and build (`overlay`, `version`, `api_version`, `bee_status`), connectivity (`mode`, `connected_peers`, `population`, `reachability`, `network_availability` (Available/Unavailable/Unknown)), reserve and radius (`storage_radius`, `committed_depth`, `reserve_size`, `reserve_size_within_radius`, `pullsync_rate`, `batch_commitment`), chain sync (`last_synced_block`, `chain_tip`, `chain_sync_lag_blocks`), plus `warming_up`, a `healthy` flag, and `warnings`. `status` becomes `degraded` when `network_availability` is `Unavailable` (the node can't reach the storer network, so uploads may return success without propagating). When x402 is enabled, the Bee wallet preflight can also set `status`: `critical` when it reports errors, or `degraded` when it reports that the gateway cannot accept payments. The current preflight reports low xBZZ, xDAI or chequebook balances and an unreachable node as warnings in `x402.warnings`, so today these do not change `status`. Other warnings — a low peer count, a large chain-sync lag, or a non-ok Bee status — are advisory and do not change `status`. Always includes `state.warnings`, a list of fixed-text advisory warnings about the gateway's state files that never changes `status`; today it reports ownership registry changes that are not being saved (refused while the pre-migration copy fails, or a failed write), which are lost on restart. When x402 is enabled, also includes the `x402` wallet section.
 
 #### Stamp Management
 - `POST /api/v1/stamps/`: Purchase new postage stamps with time-based or advanced parameters
@@ -424,7 +429,7 @@ When `X402_ENABLED=true`, protected endpoints (`POST /stamps/`, `POST /data/`) r
 | `POST /api/v1/data/manifest` | Yes |
 | `GET /api/v1/data/{ref}` | No (free) |
 | `GET /api/v1/stamps/` | No (free) |
-| `GET /api/v1/pricing` | No (free): current price quotes for the paid operations, so a client can learn a price without triggering a 402 |
+| `GET /api/v1/pricing` | No (free): current price quotes for the paid operations, so a client can learn a price without triggering a 402. Pass `upload_bytes` and `redundancy` to quote an upload. Each quote's `amount` is the price in USDC smallest units; `max_amount_required` is the same value, deprecated (#602). |
 
 ### Configuration
 
@@ -432,7 +437,7 @@ When `X402_ENABLED=true`, protected endpoints (`POST /stamps/`, `POST /data/`) r
 # Core
 X402_ENABLED=true
 X402_PAY_TO_ADDRESS=0x...       # Your USDC receiving wallet
-X402_NETWORK=base-sepolia       # or "base" for mainnet
+X402_NETWORK=base-sepolia       # or "base" for mainnet; CAIP-2 ids eip155:84532 / eip155:8453 work too
 
 # Pricing
 X402_BZZ_USD_RATE=0.50          # BZZ to USD rate
@@ -551,7 +556,7 @@ List postage stamps. Default returns only local stamps (usable for uploads).
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `global` | bool | `false` | If true, return all stamps including non-local |
-| `wallet` | string | - | Filter to stamps accessible by this wallet (requires x402 enabled) |
+| `wallet` | string | - | Filter to stamps accessible by this wallet (requires x402 enabled). Case-insensitive; `422` if not a 40-hex-digit address (`0x` optional) |
 | `exclusive` | bool | `false` | With `wallet`: only stamps purchased by this wallet (excludes shared/untracked) |
 
 - **Response**: `{"stamps": [...], "total_count": N}`
@@ -629,15 +634,15 @@ Upload data to Swarm (JSON or binary).
 | Deferred | `deferred=true` | Data goes to local node first, syncs to network asynchronously. Faster upload response but data may not be immediately retrievable. |
 
 **Redundancy Levels (Erasure Coding):**
-| Level | Name | Chunk Loss Tolerance | Use Case |
-|-------|------|---------------------|----------|
-| 0 | none | 0% | Maximum storage efficiency, no redundancy |
-| 1 | medium | 1% | Basic redundancy for stable networks |
-| 2 | strong | 5% | **Default** - Good balance of durability and cost |
-| 3 | insane | 10% | High durability for important data |
-| 4 | paranoid | 50% | Maximum durability for critical data |
+| Level | Name | Chunk Loss Tolerance | Parity per full group of data chunks | Use Case |
+|-------|------|---------------------|----------------------------|----------|
+| 0 | none | 0% | none (1.00x) | Maximum storage efficiency, no redundancy |
+| 1 | medium | 1% | 9 per 119 (about 1.08x) | Basic redundancy for stable networks |
+| 2 | strong | 5% | 21 per 107 (about 1.20x) | **Default** - Good balance of durability and cost |
+| 3 | insane | 10% | 31 per 97 (about 1.32x) | High durability for important data |
+| 4 | paranoid | 50% | 89 per 39 (about 3.28x) | Maximum durability for critical data |
 
-Higher redundancy levels increase data durability at the cost of more storage space (and stamp usage).
+Higher redundancy levels increase data durability at the cost of more storage space (and stamp usage). The parity counts come from Bee v2.8.1 (`pkg/file/redundancy/level.go`). When x402 is enabled, a paid upload is priced for the data plus this parity (see the operator guide).
 
 **Examples:**
 ```bash
@@ -885,7 +890,7 @@ A request over the per-request ceiling receives **400**:
 A caller who has spent their daily budget receives **429**, with the reset time and what remains:
 ```json
 {"code": "DAILY_SPEND_BUDGET_EXHAUSTED", "message": "...", "remaining_bzz": 0.02,
- "daily_budget_bzz": 0.5, "resets_at": "2026-09-09T24:00:00Z"}
+ "daily_budget_bzz": 0.5, "resets_at": "2026-09-10T00:00:00Z"}
 ```
 
 Both are checked before the wallet balance, so the answer does not depend on how much money happens to be left, and charged only after the money is actually spent — a purchase the Swarm node refuses costs the caller nothing.
@@ -916,7 +921,7 @@ When the limit is exceeded, the gateway returns **429**:
 {"error": "Rate limit exceeded", "detail": "Too many requests. Try again in 42 seconds.", "retry_after": 42}
 ```
 
-**x402 startup checks** (#370): with `X402_ENABLED=true` the gateway refuses to start on an unknown `X402_NETWORK` (only `base` and `base-sepolia`), a missing, zero or mis-checksummed `X402_PAY_TO_ADDRESS`, a mainnet paired with the public x402.org facilitator (test networks only), or inconsistent facilitator credentials (`X402_FACILITATOR_CDP_API_KEY_ID`/`_SECRET` or `X402_FACILITATOR_BEARER_TOKEN`). The pay-to wallet's Base ETH balance is shown on `/health` for information only; the facilitator pays settlement gas.
+**x402 startup checks** (#370): with `X402_ENABLED=true` the gateway refuses to start on an unknown `X402_NETWORK` (only `base` and `base-sepolia`, or their CAIP-2 ids `eip155:8453` and `eip155:84532`, #599), a missing, zero or mis-checksummed `X402_PAY_TO_ADDRESS`, a mainnet paired with the public x402.org facilitator (test networks only), or inconsistent facilitator credentials (`X402_FACILITATOR_CDP_API_KEY_ID`/`_SECRET` or `X402_FACILITATOR_BEARER_TOKEN`). The pay-to wallet's Base ETH balance is shown on `/health` for information only; the facilitator pays settlement gas.
 
 **Exempt paths** (never rate-limited): `/`, `/health`, `/docs`, `/redoc`, `/api/v1/openapi.json`, `/metrics`. With x402 billing on, pre-stamped chunk uploads (`POST /api/v1/chunks/`) are also exempt, because each chunk is already paid for per byte (prepaid credit or the free daily quota).
 

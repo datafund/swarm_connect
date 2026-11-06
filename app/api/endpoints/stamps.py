@@ -4,16 +4,21 @@ from fastapi.responses import JSONResponse
 from typing import Any, Optional, Union
 import asyncio
 import datetime
-import httpx
+import httpx2
 import json
 import logging
 import secrets
 
 from app.x402.settlement import settle_payment
+from app.x402.openapi_docs import paid_route_openapi
 from app.core.config import settings
+from app.x402.networks import to_v1
+from app.x402.payment_headers import paid_version
 from app.services import swarm_api
+from app.services.bee_errors import error_cause, public_bee_text
+from app.services.http_client import exc_text
 from app.services.swarm_api import expiry_from_amount, get_batch_expiry, plur_to_bzz
-from app.services.stamp_ownership import stamp_ownership_manager
+from app.services.stamp_ownership import normalize_address, stamp_ownership_manager
 from app.services.stamp_tracker import record_purchase
 from app.services.spend_budget import (
     GIVEAWAY_KEY, GLOBAL_KEY, spend_budget_tracker, spend_certainly_did_not_happen,
@@ -55,16 +60,24 @@ class SpendReservation:
         self.cost_bzz = cost_bzz
         self.caller = caller  # None: not charged to a caller's budget (paid)
         self.hold = hold
+        # Set when a background half (a paid purchase answered 202) takes the
+        # reservation over. Its outcome is then settled exactly once, there:
+        # recorded as spent, released, or kept as uncertain (#468).
+        self.handed_off = False
 
     def release_if_unspent(self, exc: BaseException) -> None:
         if spend_certainly_did_not_happen(exc):
             spend_budget_tracker.release_hold(self.hold)
         else:
-            gateway_spend_uncertain_bzz_total.labels(operation=self.operation).inc(self.cost_bzz)
-            logger.warning(
-                "%s failed with %s; the outcome is uncertain, so its %.6f BZZ stays "
-                "charged against the spending limits", self.operation, type(exc).__name__, self.cost_bzz,
-            )
+            self.keep_uncertain(type(exc).__name__)
+
+    def keep_uncertain(self, why: str) -> None:
+        """Keep the hold: the spend may have happened. Counted once, here."""
+        gateway_spend_uncertain_bzz_total.labels(operation=self.operation).inc(self.cost_bzz)
+        logger.warning(
+            "%s failed (%s); the outcome is uncertain, so its %.6f BZZ stays "
+            "charged against the spending limits", self.operation, why, self.cost_bzz,
+        )
 
     def record(self) -> None:
         stamp_spend_bzz_total.labels(
@@ -153,15 +166,21 @@ def _enforce_spend_limits(request: Request, cost_bzz: float, operation: str) -> 
             info["daily_budget_bzz"], operation, cost_bzz,
         )
         stamp_spend_refusals_total.labels(operation=operation, limit=which).inc()
+        if refused == GLOBAL_KEY:
+            reason = "The gateway has reached its daily spending limit"
+        else:
+            reason = "Today's free spending on this gateway is used up"
+            # Only where a payment actually bypasses the free portion (#535):
+            # with x402 off no request is paid, and on a testnet without the
+            # override a paid request is charged to the free portion too. Same
+            # condition as the pool allowance refusal.
+            if settings.X402_ENABLED and settings.paid_bypass_is_honoured():
+                reason += "; paid requests still work"
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail={
                 "code": "GATEWAY_DAILY_SPEND_CEILING",
-                "message": (
-                    ("The gateway has reached its daily spending limit" if refused == GLOBAL_KEY
-                     else "Today's free spending on this gateway is used up; paid requests still work")
-                    + f". It resets at {info['resets_at']}."
-                ),
+                "message": f"{reason}. It resets at {info['resets_at']}.",
                 "resets_at": info["resets_at"],
             },
         )
@@ -190,19 +209,24 @@ def _enforce_spend_limits(request: Request, cost_bzz: float, operation: str) -> 
     )
 
 
-def _bee_error_detail(exc: httpx.HTTPError):
+def _bee_error_detail(exc: httpx2.HTTPError):
     """Extract (status_code, message) from a failed Bee request.
 
     Bee reports refusals as JSON like {"code": 400, "message": "insufficient
     amount for 24h minimum validity"}. That message names the problem exactly,
     so it is worth surfacing rather than replacing with a generic one.
 
-    Returns (None, str(exc)) when there is no response to read — a timeout or a
+    Returns (None, None) when there is no response to read — a timeout or a
     connection failure, which genuinely is the node being unreachable.
+
+    The message reaches the caller, so it never quotes str(exc): httpx2 puts
+    the request URL, the internal Bee API address, in that text. An empty
+    body gives "HTTP <status>", and URLs, IPs, host:port and resolved host
+    names in Bee's own text are replaced (#549). Callers log the full error.
     """
     response = getattr(exc, "response", None)
     if response is None:
-        return None, str(exc)
+        return None, None
     message = None
     try:
         body = response.json()
@@ -211,12 +235,19 @@ def _bee_error_detail(exc: httpx.HTTPError):
     except Exception:
         pass
     if not message:
-        message = (response.text or "").strip()[:200] or str(exc)
-    return response.status_code, message
+        message = (response.text or "").strip() or error_cause(exc)
+    # Scrubbed at a 2 KB cap, cut to 200 without a partial word, and shown
+    # only if the safety gate passes it; otherwise the HTTP status (#549).
+    return response.status_code, public_bee_text(message) or error_cause(exc)
 
 
 def _is_owned_by(batch_id: str, wallet: str) -> bool:
-    """Check if a stamp is owned by the given wallet address."""
+    """Check if a stamp is owned by the given wallet address.
+
+    `wallet` must already be canonical (normalize_address). The registry stores
+    owners only in that form (#384), so the comparison is exact, as in
+    check_access; a raw query value would miss its own stamps by casing (#491).
+    """
     info = stamp_ownership_manager.get_stamp_info(batch_id)
     if not info:
         return False
@@ -231,7 +262,7 @@ def _is_owned_by(batch_id: str, wallet: str) -> bool:
 async def list_stamps(
     wallet: Optional[str] = Query(
         default=None,
-        description="Filter to stamps accessible by this wallet address (owned + shared + untracked local). Requires x402 to be enabled."
+        description="Filter to stamps accessible by this wallet address (owned + shared + untracked local). Requires x402 to be enabled. Case-insensitive; 422 if it is not a 40-hex-digit address."
     ),
     global_view: Optional[bool] = Query(
         default=None,
@@ -255,12 +286,31 @@ async def list_stamps(
       Only effective when x402 is enabled; ignored otherwise.
     - `?wallet=0xABC...&exclusive=true` — Return only stamps purchased by this wallet (excludes shared/free and untracked stamps).
 
+    The wallet is matched case-insensitively: it is canonicalised the same way
+    the ownership registry stores owners, so a checksummed address finds its
+    own stamps (#491). Where the filter applies, a value that is not a
+    40-hex-digit address (0x optional) is rejected with 422 rather than
+    silently matching nothing. Where it is ignored (x402 disabled, or
+    `global=true`) it is not checked.
+
     Returns:
         StampListResponse: Contains list of filtered stamps and total count
 
     Raises:
-        HTTPException: 502 if Swarm API is unreachable, 500 for other errors
+        HTTPException: 422 for an invalid wallet address, 502 if Swarm API is
+            unreachable, 500 for other errors
     """
+    # Validated before the try block: its `except Exception` would turn the
+    # 422 into a 500.
+    owner = None
+    if wallet and settings.X402_ENABLED and not global_view:
+        owner = normalize_address(wallet)
+        if owner is None:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="wallet must be a 40-hex-digit address, optionally 0x-prefixed.",
+            )
+
     try:
         processed_stamps = await swarm_api.get_all_stamps_processed()
 
@@ -278,12 +328,12 @@ async def list_stamps(
         if global_view:
             # No filtering — return everything (old behavior)
             pass
-        elif wallet and settings.X402_ENABLED:
+        elif owner:
             if exclusive:
                 # Only stamps purchased by this wallet
                 stamp_details = [
                     s for s in stamp_details
-                    if _is_owned_by(s.batchID, wallet)
+                    if _is_owned_by(s.batchID, owner)
                 ]
             else:
                 # Stamps accessible to this wallet (owned + shared + untracked local)
@@ -291,7 +341,7 @@ async def list_stamps(
                     s for s in stamp_details
                     if s.accessMode == "shared"
                     or (s.accessMode is None and s.local)
-                    or _is_owned_by(s.batchID, wallet)
+                    or _is_owned_by(s.batchID, owner)
                 ]
         else:
             # Default: local stamps only
@@ -302,8 +352,8 @@ async def list_stamps(
             total_count=len(stamp_details)
         )
 
-    except httpx.HTTPError as e:
-        logger.error(f"Failed to retrieve stamps from Swarm API: {e}")
+    except httpx2.HTTPError as e:
+        logger.error(f"Failed to retrieve stamps from Swarm API: {exc_text(e)}")
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail="Could not fetch stamp data. The Bee node may be unavailable."
@@ -400,8 +450,8 @@ async def check_stamp_health(
             )
         )
 
-    except httpx.HTTPError as e:
-        logger.error(f"Failed to check stamp health from Swarm API: {e}")
+    except httpx2.HTTPError as e:
+        logger.error(f"Failed to check stamp health from Swarm API: {exc_text(e)}")
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail="Could not fetch stamp data. The Bee node may be unavailable."
@@ -429,10 +479,12 @@ async def get_stamp_details(
     calculates the expected expiration time based on the current time and the batchTTL,
     and returns the relevant information.
     """
+    # The path allows A-F, but Bee lists batch IDs in lowercase (#542).
+    stamp_id = stamp_id.lower()
     try:
         all_stamps = await swarm_api.get_all_stamps_processed()
-    except httpx.HTTPError as e:
-        logger.error(f"Failed to retrieve data from upstream Swarm API: {e}")
+    except httpx2.HTTPError as e:
+        logger.error(f"Failed to retrieve data from upstream Swarm API: {exc_text(e)}")
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail="Could not fetch data from the Bee node. The Bee node may be unavailable."
@@ -505,6 +557,9 @@ async def get_stamp_details(
 
 
 _PENDING_FIRST_WAIT_SECONDS = 10
+# Bound on the price read that dates a late 201's expires_at (#468); past it
+# the 201 is stored without one rather than wait on a slow node.
+_LATE_EXPIRY_PRICE_TIMEOUT_SECONDS = 5
 # Background lookups in flight. The event loop keeps only weak references to
 # tasks, so one nobody holds can be garbage-collected mid-search.
 _PENDING_TASKS: set = set()
@@ -554,20 +609,27 @@ def _register_purchase(request: Request, batch_id: str, payer: Optional[str] = N
         only_if_unowned=only_if_unowned)
 
 
-def _outcome_unknown(e: httpx.HTTPError) -> bool:
+def _outcome_unknown(e: httpx2.HTTPError) -> bool:
     """Bee (or a proxy in front of it) gave no answer about the purchase.
 
     A timeout or dropped connection, or a 502/504 from a proxy, says nothing
     about whether Bee bought the batch. Any other status is Bee's own answer.
+
+    A refusal by the gateway's own Bee call gate (#588) is not unknown: the
+    request was never sent to Bee, so nothing was bought.
     """
-    if isinstance(e, httpx.TransportError):
+    from app.services.bee_gate import BeeBusyError
+    if isinstance(e, BeeBusyError):
+        return False
+    if isinstance(e, httpx2.TransportError):
         return True
-    return isinstance(e, httpx.HTTPStatusError) and e.response.status_code in (502, 504)
+    return isinstance(e, httpx2.HTTPStatusError) and e.response.status_code in (502, 504)
 
 
 def _purchase_pending(request: Request, label: str, depth: int, amount: int,
                       start_block: Optional[int], purchase: Optional[asyncio.Task] = None,
-                      taken: Optional[str] = None) -> JSONResponse:
+                      taken: Optional[str] = None,
+                      reservation: Optional[SpendReservation] = None) -> JSONResponse:
     """202 for a paid purchase Bee did not confirm in time (#400).
 
     The payment has settled and the batch may exist. `purchase` is Bee's
@@ -577,8 +639,13 @@ def _purchase_pending(request: Request, label: str, depth: int, amount: int,
     else, which only needs recording. Either way, the batch is registered to
     the payer when it appears; with an Idempotency-Key, a retry then gets the
     201 instead of this 202.
+
+    `reservation` is the purchase's spend hold. The background half records it
+    as spent when the batch is delivered, and gives it back when Bee refuses
+    the purchase outright (#468).
     """
     from app.x402.audit import AuditEventType, log_audit_event, log_payment_failed
+    from app.x402.settlement import request_nonce
     # The audit trail records the address itself; spend limits key on the
     # grouped value (get_client_key), so this is not imported module-wide.
     from app.core.client_ip import get_client_ip
@@ -591,15 +658,20 @@ def _purchase_pending(request: Request, label: str, depth: int, amount: int,
         log_audit_event(event_type=AuditEventType.PURCHASE_PENDING, client_ip=get_client_ip(request),
                         wallet_address=payer,
                         data={"transaction_hash": tx, "label": label, "depth": depth, "amount": str(amount),
-                              "start_block": start_block, "network": settings.X402_NETWORK})
+                              "start_block": start_block, "network": to_v1(settings.X402_NETWORK),
+                              "nonce": request_nonce(request)})
     except Exception as e:
         logger.error(f"Could not record a pending purchase (label {label}, tx {tx}): {e}", exc_info=True)
     try:
         task = asyncio.get_running_loop().create_task(_finish_pending_purchase(
             request, label, depth, amount, start_block, payer, tx,
-            getattr(request.state, "x402_idempotency_id", None), purchase, taken))
+            getattr(request.state, "x402_idempotency_id", None), purchase, taken, reservation))
         _PENDING_TASKS.add(task)
         task.add_done_callback(_PENDING_TASKS.discard)
+        if reservation is not None:
+            # The background half settles the hold from here on, so a request
+            # cancelled right after this does not count it a second time.
+            reservation.handed_off = True
     except Exception as e:
         # Nobody will finish this purchase: record it for the operator, and
         # still observe Bee's request so its outcome is not silently dropped.
@@ -607,7 +679,8 @@ def _purchase_pending(request: Request, label: str, depth: int, amount: int,
         log_payment_failed(client_ip=get_client_ip(request),
                            reason=f"stamp purchase pending but not followed up ({type(e).__name__}); "
                                   f"a batch may exist on-chain; label={label}; tx={tx}",
-                           stage="delivery_after_settlement", wallet_address=payer)
+                           stage="delivery_after_settlement", wallet_address=payer,
+                           nonce=request_nonce(request), x402_version=paid_version(request))
         if purchase is not None:
             purchase.add_done_callback(lambda t: t.cancelled() or t.exception())
     return JSONResponse(status_code=status.HTTP_202_ACCEPTED, content={
@@ -626,7 +699,8 @@ def _purchase_pending(request: Request, label: str, depth: int, amount: int,
 async def _finish_pending_purchase(request: Request, label: str, depth: int, amount: int,
                                    start_block: Optional[int], payer: Optional[str],
                                    tx: Optional[str], idem, purchase: Optional[asyncio.Task] = None,
-                                   taken: Optional[str] = None) -> None:
+                                   taken: Optional[str] = None,
+                                   reservation: Optional[SpendReservation] = None) -> None:
     """Background half of _purchase_pending: find, register, record.
 
     Every way this ends leaves an audit record: delivered (late), or a
@@ -634,16 +708,32 @@ async def _finish_pending_purchase(request: Request, label: str, depth: int, amo
     error of its own.
     """
     from app.x402.audit import AuditEventType, log_audit_event, log_payment_failed
+    from app.x402.settlement import request_nonce
     # The audit trail records the address itself; spend limits key on the
     # grouped value (get_client_key), so this is not imported module-wide.
     from app.core.client_ip import get_client_ip
     from app.x402.idempotency import resolve_idempotent_result
     client_ip = get_client_ip(request)
 
+    # The hold is settled once: spent, released, or uncertain (#468).
+    accounted = False
+
+    def keep_uncertain(why: str) -> None:
+        """No batch delivered, and no definite answer that nothing was spent:
+        the hold stays until midnight and is counted as uncertain (#468)."""
+        nonlocal accounted
+        if reservation is not None and not accounted:
+            accounted = True
+            try:
+                reservation.keep_uncertain(why)
+            except Exception as e:
+                logger.error(f"Could not count the uncertain spend of a pending purchase (label {label}): {e}")
+
     def refund_needed(why: str) -> None:
         log_payment_failed(client_ip=client_ip,
                            reason=f"stamp purchase after settlement: {why}; label={label}; tx={tx}",
-                           stage="delivery_after_settlement", wallet_address=payer)
+                           stage="delivery_after_settlement", wallet_address=payer,
+                           nonce=request_nonce(request), x402_version=paid_version(request))
         # A retry with the key is told the final outcome, not "pending" for 24 h.
         resolve_idempotent_result(idem, status.HTTP_500_INTERNAL_SERVER_ERROR, json.dumps({
             "code": "DELIVERY_FAILED_AFTER_PAYMENT",
@@ -657,6 +747,7 @@ async def _finish_pending_purchase(request: Request, label: str, depth: int, amo
     in_flight = False
     try:
         if taken:
+            keep_uncertain("batch found but registered to someone else")
             refund_needed(f"found ({taken}) but already registered to someone else")
             return
         if purchase is not None:
@@ -666,9 +757,25 @@ async def _finish_pending_purchase(request: Request, label: str, depth: int, amo
                 in_flight = True
                 batch_id = await asyncio.shield(purchase)
                 in_flight = False
-            except httpx.HTTPError as e:
+            except httpx2.HTTPError as e:
                 if not _outcome_unknown(e):
-                    refund_needed(f"refused by Bee ({_bee_error_detail(e)[1] or type(e).__name__})")
+                    # The full text, which _bee_error_detail leaves out (#549).
+                    logger.error(f"Bee refused a paid purchase (label {label}, tx {tx}): {e}")
+                    # A definite 4xx spent nothing: give the hold back now rather
+                    # than keep it until midnight (#468). Any other answer may
+                    # have spent, so it stays charged and is counted as uncertain.
+                    if reservation is not None:
+                        accounted = True
+                        try:
+                            reservation.release_if_unspent(e)
+                        except Exception as release_error:
+                            logger.error(f"Could not release the spend hold of a refused purchase "
+                                         f"(label {label}): {release_error}", exc_info=True)
+                    from app.services.bee_gate import BeeBusyError
+                    if isinstance(e, BeeBusyError):
+                        refund_needed("not sent to Bee: no Bee call slot was free (#588)")
+                    else:
+                        refund_needed(f"refused by Bee ({_bee_error_detail(e)[1] or type(e).__name__})")
                     return
                 logger.error(f"Bee gave no answer to a paid purchase ({type(e).__name__}); looking for the batch")
         if batch_id is None:
@@ -679,12 +786,15 @@ async def _finish_pending_purchase(request: Request, label: str, depth: int, amo
                 label, depth, amount, _is_registered, start_block,
                 wait_seconds=settings.STAMP_PURCHASE_BACKGROUND_LOOKUP_SECONDS, interval=10)
         if batch_id is None:
+            keep_uncertain("batch not found after the payment settled")
             refund_needed("not found")
             return
         if not _register_purchase(request, batch_id, payer=payer, only_if_unowned=True):
+            keep_uncertain("batch found but registered to someone else")
             refund_needed(f"found ({batch_id}) but already registered to someone else")
             return
     except asyncio.CancelledError:
+        keep_uncertain("interrupted by shutdown")
         if in_flight:
             # Bee's request is being cut off with the process: if its
             # transaction was sent, the batch exists on-chain, unlabelled.
@@ -695,19 +805,42 @@ async def _finish_pending_purchase(request: Request, label: str, depth: int, amo
         raise
     except Exception as e:
         logger.error(f"Lost purchase lookup failed: {e}", exc_info=True)
+        keep_uncertain(f"lookup failed ({type(e).__name__})")
         refund_needed(f"lookup failed ({type(e).__name__})")
         return
 
     # Registered: from here on, bookkeeping only; it cannot undo the outcome.
     try:
+        # Counted as spent, as a purchase answered in time is (#468); a late
+        # delivery used to be missing from gateway_stamp_spend_bzz_total.
+        if reservation is not None:
+            try:
+                reservation.record()
+            except Exception as e:
+                logger.error(f"Could not count the spend of late-delivered batch {batch_id[:16]}: {e}")
         record_purchase(batch_id)
         logger.info(f"Pending purchase delivered: {batch_id[:16]} registered to {payer}")
         log_audit_event(event_type=AuditEventType.PAYMENT_DELIVERED, client_ip=client_ip, wallet_address=payer,
                         data={"transaction_hash": tx, "method": "POST", "path": request.url.path,
-                              "network": settings.X402_NETWORK, "resource": {"batchID": batch_id},
-                              "late": True})
-        body = StampPurchaseResponse(batchID=batch_id, message="Postage stamp purchased successfully")
-        resolve_idempotent_result(idem, status.HTTP_201_CREATED, body.model_dump_json().encode())
+                              "network": to_v1(settings.X402_NETWORK), "resource": {"batchID": batch_id},
+                              "late": True, "nonce": request_nonce(request),
+                              "x402_version": paid_version(request)})
+        # Estimated from the amount funded at today's price (#383), like the
+        # 201 answered in time; None when the price cannot be read in time
+        # (#468). The 201 is stored for the Idempotency-Key in `finally`, so a
+        # shutdown that cancels the price read cannot leave a keyed retry
+        # with the 202.
+        expires_at = None
+        try:
+            price = int((await asyncio.wait_for(
+                swarm_api.get_chainstate(), _LATE_EXPIRY_PRICE_TIMEOUT_SECONDS))["currentPrice"])
+            expires_at = expiry_from_amount(amount, price)
+        except Exception as e:
+            logger.warning(f"No expiry for late-delivered batch {batch_id[:16]}: {e!r}")
+        finally:
+            body = StampPurchaseResponse(batchID=batch_id, message="Postage stamp purchased successfully",
+                                         expires_at=expires_at)
+            resolve_idempotent_result(idem, status.HTTP_201_CREATED, body.model_dump_json().encode())
     except Exception as e:
         logger.error(f"Lost purchase {batch_id[:16]} registered; bookkeeping after it failed: {e}", exc_info=True)
 
@@ -716,7 +849,8 @@ async def _finish_pending_purchase(request: Request, label: str, depth: int, amo
     "/",
     response_model=StampPurchaseResponse,
     status_code=status.HTTP_201_CREATED,
-    summary="Purchase a New Swarm Postage Stamp"
+    summary="Purchase a New Swarm Postage Stamp",
+    openapi_extra=paid_route_openapi([201]),
 )
 async def purchase_stamp(
     request: Request,
@@ -874,13 +1008,14 @@ async def purchase_stamp(
                                                           settings.SWARM_STAMP_PURCHASE_TIMEOUT_SECONDS)
                     except asyncio.TimeoutError:
                         return _purchase_pending(request, label, effective_depth, amount, start_block,
-                                                 purchase=purchase)
+                                                 purchase=purchase, reservation=reservation)
                     except asyncio.CancelledError:
                         # This request was cut off; the purchase goes on. Finish it
                         # in the background so the batch still reaches the payer.
-                        _purchase_pending(request, label, effective_depth, amount, start_block, purchase=purchase)
+                        _purchase_pending(request, label, effective_depth, amount, start_block, purchase=purchase,
+                                          reservation=reservation)
                         raise
-            except httpx.HTTPError as e:
+            except httpx2.HTTPError as e:
                 # No answer about the purchase. It may still have happened. Unpaid,
                 # the caller just retries; paid, look for the batch rather than keep
                 # the money and report a failure.
@@ -896,12 +1031,17 @@ async def purchase_stamp(
                     logger.error(f"Lost purchase lookup failed: {lookup_error}")
                     batch_id = None
                 if batch_id is None:
-                    return _purchase_pending(request, label, effective_depth, amount, start_block)
+                    return _purchase_pending(request, label, effective_depth, amount, start_block,
+                                             reservation=reservation)
                 if not _register_purchase(request, batch_id, only_if_unowned=True):
-                    return _purchase_pending(request, label, effective_depth, amount, start_block, taken=batch_id)
+                    return _purchase_pending(request, label, effective_depth, amount, start_block, taken=batch_id,
+                                             reservation=reservation)
                 found_by_lookup = True
         except BaseException as exc:
-            reservation.release_if_unspent(exc)
+            # A request cancelled while Bee works hands the purchase to the
+            # background half first, which settles the hold itself (#468).
+            if not reservation.handed_off:
+                reservation.release_if_unspent(exc)
             raise
 
         # Ownership first: once the batch id is known, nothing that can fail
@@ -937,9 +1077,9 @@ async def purchase_stamp(
         size_label = stamp_request.size or "custom"
         stamp_purchases_total.labels(size=size_label, status="error").inc()
         raise  # Re-raise HTTP exceptions as-is
-    except httpx.HTTPError as e:
+    except httpx2.HTTPError as e:
         stamp_purchases_total.labels(size=stamp_request.size or "custom", status="error").inc()
-        logger.error(f"Failed to purchase stamp from Swarm API: {e}")
+        logger.error(f"Failed to purchase stamp from Swarm API: {exc_text(e)}")
         # A 4xx from Bee is the caller's request being wrong (an amount below the
         # minimum validity, a bad depth), not the node being unavailable. Masking
         # it as 502 tells the caller to go and check node health for a problem
@@ -970,10 +1110,23 @@ async def purchase_stamp(
         )
 
 
+def stamp_not_found(stamp_id: str) -> HTTPException:
+    """The 404 for an extend of a batch the Bee node does not list.
+
+    Raised by extend_stamp and, when x402 is enabled, by the payment dependency
+    before it quotes a price (#572), so both give the same body.
+    """
+    return HTTPException(
+        status_code=status.HTTP_404_NOT_FOUND,
+        detail=f"Stamp batch with ID '{stamp_id}' not found on the connected Swarm node."
+    )
+
+
 @router.patch(
     "/{stamp_id}/extend",
     response_model=StampExtensionResponse,
-    summary="Extend an Existing Swarm Postage Stamp"
+    summary="Extend an Existing Swarm Postage Stamp",
+    openapi_extra=paid_route_openapi([200]),
 )
 async def extend_stamp(
     request: Request,
@@ -1009,6 +1162,12 @@ async def extend_stamp(
     Raises:
         HTTPException: 400 if insufficient funds, 404 if stamp not found, 502 if Swarm API unreachable
     """
+    # One form for everything below: the Bee lookup, the ownership registry
+    # key, the top-up call and the response. The path allows A-F, but Bee lists
+    # batch IDs in lowercase and the registry keys are lowercase (#542). The
+    # x402 price quote matches the batch the same way, so the quote and the
+    # top-up use the same depth.
+    stamp_id = stamp_id.lower()
     try:
         # First, get the stamp to verify it exists and get its depth
         all_stamps = await swarm_api.get_all_stamps_processed()
@@ -1019,10 +1178,7 @@ async def extend_stamp(
                 break
 
         if not found_stamp:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"Stamp batch with ID '{stamp_id}' not found on the connected Swarm node."
-            )
+            raise stamp_not_found(stamp_id)
 
         stamp_depth = found_stamp.get("depth", 17)
 
@@ -1129,8 +1285,8 @@ async def extend_stamp(
 
     except HTTPException:
         raise  # Re-raise HTTP exceptions as-is
-    except httpx.HTTPError as e:
-        logger.error(f"Failed to extend stamp {stamp_id} from Swarm API: {e}")
+    except httpx2.HTTPError as e:
+        logger.error(f"Failed to extend stamp {stamp_id} from Swarm API: {exc_text(e)}")
         # Same reasoning as the purchase path: a 4xx from Bee describes the
         # request, not the node's availability, and its message names the cause.
         bee_status_code, bee_message = _bee_error_detail(e)

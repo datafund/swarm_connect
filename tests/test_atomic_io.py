@@ -86,3 +86,37 @@ class TestAtomicWriteJson:
 
         assert _list_temp_files(str(tmp_path)) == []
         assert not os.path.exists(target)
+
+
+def test_the_directory_is_fsynced_after_the_rename(tmp_path, monkeypatch):
+    """#553 review 7: the rename itself is durable only once the directory is synced."""
+    import os
+    import stat
+    from app.core import atomic_io
+    synced = []
+    real_fsync = os.fsync
+
+    def recording_fsync(fd):
+        synced.append(stat.S_ISDIR(os.fstat(fd).st_mode))
+        real_fsync(fd)
+
+    monkeypatch.setattr(atomic_io.os, "fsync", recording_fsync)
+    atomic_io.atomic_write_json(str(tmp_path / "s.json"), {"a": 1})
+    assert True in synced     # the directory
+    assert synced[-1] is True # after the file's own fsync
+
+
+def test_a_directory_fsync_failure_does_not_fail_the_write(tmp_path, monkeypatch):
+    import os
+    from app.core import atomic_io
+    real_open = os.open
+
+    def refusing_open(path, flags, *a, **kw):
+        if os.path.isdir(path):
+            raise OSError("not supported here")
+        return real_open(path, flags, *a, **kw)
+
+    monkeypatch.setattr(atomic_io.os, "open", refusing_open)
+    atomic_io.atomic_write_json(str(tmp_path / "s.json"), {"a": 1})
+    import json
+    assert json.load(open(tmp_path / "s.json")) == {"a": 1}

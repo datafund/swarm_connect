@@ -14,11 +14,12 @@ from datetime import datetime, timezone
 import logging
 
 from app.x402.settlement import settle_payment
+from app.x402.openapi_docs import paid_route_openapi
 from app.core.config import settings
 from app.services.stamp_pool import stamp_pool_manager, PoolStampStatus
 from app.services.swarm_api import get_batch_expiry
 from app.services.stamp_ownership import stamp_ownership_manager
-from app.services.metrics import pool_acquires_total
+from app.services.metrics import count_pool_allowance_refusal, pool_acquires_total
 from app.services.pool_allowance import pool_allowance_tracker
 from app.core.client_ip import get_client_key
 from app.services.signed_auth import POOL_CHECK_PREFIX, authorize_signed_request
@@ -38,6 +39,11 @@ class PoolStatusResponse(BaseModel):
     current_levels: Dict[int, int] = Field(..., description="Current stamp counts by depth")
     available_stamps: Dict[int, List[str]] = Field(..., description="Available batch IDs by depth")
     total_stamps: int = Field(..., description="Total available stamps in pool")
+    pending_stamps: Dict[int, int] = Field(
+        default_factory=dict,
+        description="Stamps bought but not usable yet, by depth: held for the pool, "
+                    "counted toward the reserve target, not handed out until Bee lists them usable",
+    )
     low_reserve_warning: bool = Field(..., description="True if any depth is below threshold")
     last_check: Optional[str] = Field(None, description="Last maintenance check timestamp (ISO format)")
     next_check: Optional[str] = Field(None, description="Next scheduled check timestamp (ISO format)")
@@ -51,6 +57,7 @@ class PoolStatusResponse(BaseModel):
                 "current_levels": {17: 1, 20: 0},
                 "available_stamps": {17: ["abc123..."]},
                 "total_stamps": 1,
+                "pending_stamps": {20: 1},
                 "low_reserve_warning": True,
                 "last_check": "2026-01-21T10:00:00Z",
                 "next_check": "2026-01-21T10:15:00Z",
@@ -178,6 +185,7 @@ async def get_pool_status():
         current_levels=status.current_levels,
         available_stamps=status.available_stamps,
         total_stamps=status.total_stamps,
+        pending_stamps=status.pending_stamps,
         low_reserve_warning=status.low_reserve_warning,
         last_check=status.last_check.isoformat() if status.last_check else None,
         next_check=status.next_check.isoformat() if status.next_check else None,
@@ -185,16 +193,47 @@ async def get_pool_status():
     )
 
 
-async def _refuse_allowance(http_request: Request, message: str, detail: dict) -> None:
+async def _refuse_allowance(
+    http_request: Request, message: str, detail: dict, *, size: str, scope: str
+) -> None:
     """Refuse an acquire whose free allowance is spent, saying what still works.
+
+    Every refusal is counted in gateway_pool_allowance_refusals_total (#554),
+    labelled with the size charged, which allowance ran out (scope "origin" or
+    "client") and the answer given ("402" or "429").
 
     The offer to pay is conditional. Where a settled payment does not buy a
     bypass — a testnet, without the explicit override — telling the caller to
     pay would send them to a path that takes their payment and still refuses
-    them, which is worse than not offering it at all.
+    them, which is worse than not offering it at all. The same holds with x402
+    switched off: an X-PAYMENT header then passes through unread and the
+    caller is refused again (#480).
     """
     detail = dict(detail)
-    if settings.paid_bypass_is_honoured():
+    # While the gateway cannot accept payments (#589), a paid acquire would
+    # get 503 PAYMENTS_UNAVAILABLE: do not offer it. Where paying would bypass
+    # the allowance, say the paid acquire is temporarily refused. Where it
+    # would not (a testnet without the override), that is no way forward, so
+    # the direct-purchase guidance below stands: its free tier is not gated.
+    payments_refused = False
+    if settings.X402_ENABLED:
+        from app.x402.accept_gate import payments_refusal
+        payments_refused = payments_refusal() is not None
+    bypass = settings.X402_ENABLED and settings.paid_bypass_is_honoured()
+    offer_payment = bypass and not payments_refused
+    if payments_refused and bypass:
+        # No Retry-After: the free allowance stays spent until resets_at, so a
+        # client that honours it would loop on the unpaid acquire.
+        message += (
+            "The paid acquire (X-PAYMENT on this same request) is temporarily refused: "
+            "the gateway cannot accept payments right now. Retry it later, or wait for "
+            "the allowance to reset (resets_at)."
+        )
+        detail["alternative"] = {
+            "note": ("The paid acquire (X-PAYMENT) is temporarily refused while the gateway "
+                     "cannot accept payments; retry it later."),
+        }
+    elif offer_payment:
         message += (
             "To continue now, pay with x402: send an X-PAYMENT header with "
             "this same request and you get a pooled stamp immediately, "
@@ -218,7 +257,7 @@ async def _refuse_allowance(http_request: Request, message: str, detail: dict) -
         }
     detail["message"] = message
 
-    if settings.X402_ENABLED and settings.paid_bypass_is_honoured():
+    if offer_payment:
         # Paying bypasses the allowance here, so answer the way x402 clients
         # understand: 402 with the price, not a 429 they can only report as a
         # rate limit (#374). If the price cannot be worked out right now, the
@@ -238,8 +277,10 @@ async def _refuse_allowance(http_request: Request, message: str, detail: dict) -
         except Exception as e:
             logger.warning("Could not price the allowance refusal, answering 429: %s", e)
         else:
+            count_pool_allowance_refusal(size, scope, "402")
             raise HTTPException(status_code=status.HTTP_402_PAYMENT_REQUIRED, detail=payment_required)
 
+    count_pool_allowance_refusal(size, scope, "429")
     raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail=detail)
 
 
@@ -251,7 +292,9 @@ async def _refuse_allowance(http_request: Request, message: str, detail: dict) -
         "Acquire a stamp from the pool for immediate use. "
         "This is much faster than purchasing a new stamp (~5 seconds vs >1 minute). "
         "The stamp is released from the pool and becomes the caller's responsibility."
-    )
+    ),
+    # Payment is optional here (settle_payment_if_offered in app/main.py).
+    openapi_extra=paid_route_openapi([200], payment_optional=True),
 )
 async def acquire_stamp(
     request: AcquireStampRequest,
@@ -266,8 +309,8 @@ async def acquire_stamp(
     When the allowance is spent the response is **429** with
     `DAILY_STAMP_ALLOWANCE_EXHAUSTED` and what to do instead.
 
-    **Paid (optional, x402).** An `X-PAYMENT` header is settled and, on a
-    mainnet network, bypasses the allowance. See `docs/stamp-pool-guide.md`.
+    **Paid (optional, x402).** When x402 is enabled, an `X-PAYMENT` header is
+    settled and, on a mainnet network, bypasses the allowance. See `docs/stamp-pool-guide.md`.
 
     **Quick start**:
     ```bash
@@ -392,6 +435,14 @@ async def acquire_stamp(
             # it); the accurate answer is that the requested size is
             # momentarily unavailable.
             whose = "this application" if not allowed_by_budget else "this client"
+            # Counted as an allowance refusal with response "409" (#554). The
+            # size is charged_size, the larger size that would have stood in,
+            # because that is the allowance that was spent; the requested size
+            # was out of stock, and its own allowance was never checked. The
+            # scope is whichever check failed: the per-client check runs only
+            # once the per-application budget has passed.
+            count_pool_allowance_refusal(
+                charged_size, "origin" if not allowed_by_budget else "client", "409")
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
                 detail={
@@ -427,6 +478,8 @@ async def acquire_stamp(
                     "used": budget["used"],
                     "resets_at": budget["resets_at"],
                 },
+                size=charged_size,
+                scope="origin",
             )
 
         if not address_ok:
@@ -442,10 +495,9 @@ async def acquire_stamp(
                     "allowance": address_info["address_allowance"],
                     "resets_at": address_info["resets_at"],
                 },
+                size=charged_size,
+                scope="client",
             )
-
-    # Get client identifier for logging
-    client_ip = http_request.client.host if http_request.client else "unknown"
 
     # Reserve the batch first, then collect payment. reserve_stamp is the
     # atomic claim; settling can take seconds, and a batch merely chosen but not
@@ -454,7 +506,10 @@ async def acquire_stamp(
     # the pool (and counts toward its target) until settlement has succeeded; if
     # settlement fails it is simply available again.
     released = None
-    if stamp_pool_manager.reserve_stamp(stamp.batch_id, reserved_for=client_ip):
+    # reserved_for names the caller in the release log line: its key
+    # (get_client_key), not the TCP peer, which behind the reverse proxy is the
+    # proxy's own address (#468).
+    if stamp_pool_manager.reserve_stamp(stamp.batch_id, reserved_for=client_address):
         try:
             await settle_payment(http_request)
         except BaseException as e:
@@ -469,17 +524,31 @@ async def acquire_stamp(
             stamp_pool_manager.unreserve_stamp(stamp.batch_id)
             raise
         released = stamp_pool_manager.release_reserved_stamp(stamp.batch_id)
-        if not released:
+        settlement = getattr(http_request.state, "x402_settlement", None)
+        if not released and settlement is not None:
             # Cannot happen while nothing but this request moves a reserved
-            # batch. If it ever does, the caller has paid and gets a 409, which
-            # must not read as an ordinary lost race.
-            settlement = getattr(http_request.state, "x402_settlement", None)
+            # batch. If it ever does, the caller has paid for nothing, so it
+            # must not read as an ordinary lost race (#476): the documented
+            # refund response, with the transaction to cite, and its own count.
+            tx = getattr(settlement, "transaction", None) or "unknown"
             logger.error(
                 "Pool acquire: PAID NON-DELIVERY: batch %s was no longer reserved "
                 "after settlement (payer=%s, tx=%s)",
                 stamp.batch_id,
                 getattr(http_request.state, "x402_payer", None),
-                getattr(settlement, "transaction", None),
+                tx,
+            )
+            pool_acquires_total.labels(
+                size=depth_to_size_name(requested_depth), status="settled_not_delivered").inc()
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail={
+                    "code": "DELIVERY_FAILED_AFTER_PAYMENT",
+                    "message": ("The payment was collected but the stamp could not be handed over. "
+                                "Contact the operator with this transaction for a refund."),
+                    "transaction": tx,
+                    "x402_status": "settled_not_delivered",
+                },
             )
 
     if not released:
@@ -574,6 +643,15 @@ async def list_available_stamps():
     return stamps
 
 
+async def _check_and_replenish_in_background():
+    """Pool maintenance after the response. It runs at the end of the request,
+    but its Bee calls are background work for the Bee call gate (#588): they may
+    use the reserved slots and wait instead of being refused."""
+    from app.services import bee_gate
+    bee_gate.enter_background()
+    return await stamp_pool_manager.check_and_replenish()
+
+
 @router.post(
     "/check",
     status_code=status.HTTP_202_ACCEPTED,
@@ -623,7 +701,7 @@ async def trigger_pool_check(
         operation="pool maintenance (spends BZZ)",
     )
 
-    background_tasks.add_task(stamp_pool_manager.check_and_replenish)
+    background_tasks.add_task(_check_and_replenish_in_background)
     logger.info("Pool maintenance scheduled by %s", signer)
 
     return ManualCheckAcceptedResponse(

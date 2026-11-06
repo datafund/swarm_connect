@@ -460,9 +460,11 @@ class TestUploadRequestPricing:
     """How the payment dependency sizes an upload (#365)."""
 
     def _request(self, headers):
+        # redundancy=0: these tests are about how the body is sized. The parity
+        # Bee adds at other levels is covered in test_upload_redundancy_pricing.py.
         from starlette.requests import Request
         return Request({"type": "http", "method": "POST", "path": "/api/v1/data/",
-                        "query_string": b"", "headers": [(k.lower().encode(), v.encode()) for k, v in headers.items()]})
+                        "query_string": b"redundancy=0", "headers": [(k.lower().encode(), v.encode()) for k, v in headers.items()]})
 
     @pytest.mark.asyncio
     async def test_priced_from_content_length_as_bandwidth(self, monkeypatch):

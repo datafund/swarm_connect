@@ -2,9 +2,10 @@
 """
 FastAPI dependency for x402 payment verification.
 
-This dependency runs AFTER FastAPI's request validation (Pydantic models,
-path parameters, query parameters), ensuring that malformed requests
-get proper 422 validation errors instead of generic 402 Payment Required.
+FastAPI runs router dependencies BEFORE it validates the route's own
+parameters, so require_x402_payment validates them itself first
+(_validate_before_payment, #427): a malformed request gets 422, not 402, and
+is not counted against the free tier or verified with the facilitator.
 
 The middleware (middleware.py) handles post-response processing only:
 settlement and response headers.
@@ -15,12 +16,15 @@ from typing import Optional
 
 from fastapi import HTTPException, Request
 
-from x402.types import PaymentPayload
-from x402.facilitator import FacilitatorClient
+from app.x402.models_v1 import PaymentPayload
+from app.x402.facilitator_client import FacilitatorClient
 
 from app.core.config import settings
+from app.x402.networks import to_v1
 from app.core.client_ip import client_key
+from app.services.http_client import exc_text
 from app.services.metrics import x402_payments_total
+from app.services.bandwidth_credit import invalid_topup_mb_detail, valid_topup_mb
 from app.services.stamp_ownership import normalize_address
 from app.x402.pricing import get_price_quote
 from app.x402.ratelimit import check_rate_limit, get_rate_limit_headers, get_free_tier_stats
@@ -32,6 +36,16 @@ from app.x402.middleware import (
     X_PAYMENT_HEADER,
     is_free_tier_opt_in,
     X402_VERSION,
+)
+from app.x402.payment_headers import (
+    HEADER_CONFLICT_MESSAGE,
+    PAYMENT_SIGNATURE_HEADER,
+    V1_UNSUPPORTED_MESSAGE,
+    VERSION_UNSUPPORTED_MESSAGE,
+    offered_payment_versions,
+    paid_version_label,
+    payment_version_label,
+    version_enabled,
 )
 
 logger = logging.getLogger(__name__)
@@ -49,6 +63,28 @@ def _request_method(request) -> str:
     if isinstance(scope, dict):
         return scope.get("method", "") or ""
     return getattr(request, "method", "") or ""
+
+
+def _upload_redundancy_level(request) -> int:
+    """The redundancy level an upload will be stored with.
+
+    Parsed as the upload endpoints parse their `redundancy` query parameter
+    (an int, 0-4), so anything they accept as level N is priced as level N. A
+    value they refuse is priced at the default: the request is refused with
+    422 or 400 and never charged. No parameter means the default level, which
+    the gateway always sends to Bee.
+    """
+    from pydantic import TypeAdapter, ValidationError
+    from app.services.swarm_api import DEFAULT_REDUNDANCY_LEVEL, REDUNDANCY_LEVELS
+
+    raw = request.query_params.get("redundancy")
+    if raw is None:
+        return DEFAULT_REDUNDANCY_LEVEL
+    try:
+        level = TypeAdapter(int).validate_python(raw)
+    except ValidationError:
+        return DEFAULT_REDUNDANCY_LEVEL
+    return level if level in REDUNDANCY_LEVELS else DEFAULT_REDUNDANCY_LEVEL
 
 
 async def _calculate_price_for_request(request: Request) -> dict:
@@ -83,9 +119,7 @@ async def _calculate_price_for_request(request: Request) -> dict:
     if _request_method(request) == "PATCH" and path.rstrip("/").endswith("/extend"):
         # Stamp top-up (#350). Priced from the SAME model the endpoint parses and
         # the depth of the batch it will top up, so the quote and the spend
-        # cannot describe different things (the #260/#261 lesson). A batch that
-        # does not exist is refused by the endpoint with 404, so it is never
-        # charged; price it at the smallest depth.
+        # cannot describe different things (the #260/#261 lesson).
         from app.api.models.stamp import StampExtensionRequest
         from app.services import swarm_api
         try:
@@ -96,12 +130,26 @@ async def _calculate_price_for_request(request: Request) -> dict:
             parsed = StampExtensionRequest.model_validate(b)
         except Exception:
             parsed = StampExtensionRequest()
-        batch_id = path.rstrip("/").split("/")[-2]
-        depth = 17
+        # Case-insensitive, like the endpoint (#542): an uppercase ID priced at
+        # the default depth would be topped up at the batch's real depth.
+        batch_id = path.rstrip("/").split("/")[-2].lower()
+        # The listing is fetched live (it is not cached), so a batch bought a
+        # moment ago is found as soon as Bee lists it. If Bee cannot be reached
+        # this raises, and require_x402_payment answers 503 as for any pricing
+        # failure: an outage is not reported as "no such batch".
+        depth = None
         for stamp in await swarm_api.get_all_stamps_processed():
-            if stamp.get("batchID") == batch_id:
+            if str(stamp.get("batchID", "")).lower() == batch_id:
                 depth = int(stamp.get("depth", 17))
                 break
+        if depth is None:
+            # A batch the node does not list gets the route's own 404 now,
+            # before a 402 offer, a free-tier slot or a payment verification
+            # (#572). It used to be quoted at depth 17, so a client signed a
+            # payment for a request that could never succeed. Reuses this
+            # lookup: no second Bee call.
+            from app.api.endpoints.stamps import stamp_not_found
+            raise stamp_not_found(batch_id)
         quote = await get_price_quote(
             operation="stamp_extension", depth=depth,
             duration_hours=parsed.duration_hours, amount=parsed.amount,
@@ -235,16 +283,241 @@ async def _calculate_price_for_request(request: Request) -> dict:
         else:
             size_bytes = settings.MAX_UPLOAD_SIZE_MB * 1024 * 1024
 
-        quote = await get_price_quote(operation="upload", size_bytes=size_bytes)
+        # Bee pushes parity chunks on top of the data at the redundancy level
+        # the gateway asks for, so those bytes are bandwidth too (#429). The
+        # level is the one the upload will use, including the default.
+        from app.services.swarm_api import REDUNDANCY_LEVELS, bytes_with_redundancy
+        level = _upload_redundancy_level(request)
+        priced_bytes = bytes_with_redundancy(size_bytes, level)
+
+        quote = await get_price_quote(operation="upload", size_bytes=priced_bytes)
         return {
             "price_usd": quote["price_usd"],
-            "description": f"Upload bandwidth ({size_bytes} bytes, stored with the stamp you supplied)"
+            "description": (
+                f"Upload bandwidth ({priced_bytes} bytes: {size_bytes} bytes with "
+                f"redundancy {level} ({REDUNDANCY_LEVELS[level]}), stored with the stamp you supplied)"
+            ),
         }
 
     return {
         "price_usd": settings.X402_MIN_PRICE_USD,
         "description": "Gateway operation"
     }
+
+
+# --- Validate the request before pricing or counting it (#427) ---------------
+#
+# The payment dependency is attached to the routers, and FastAPI runs a route's
+# dependencies before it validates the route's own parameters. Without this
+# check a malformed request was priced and then answered 402 (unpaid), used up a
+# free-tier slot (free tier), or was verified with the facilitator (paid), and
+# only then rejected with 422.
+#
+# The check repeats what FastAPI does after the dependencies: it validates the
+# path, query, header, cookie and body parameters of the matched route and its
+# sub-dependencies, with FastAPI's own functions. FastAPI has already read the
+# body into this same Request object (Starlette caches it), so nothing is read
+# twice. It uses FastAPI internals; the shapes of 0.127 and 0.141 are handled
+# below. If a future FastAPI changes them, the check is skipped with one
+# WARNING per process and the request is handled as before: FastAPI still
+# validates it, only after the payment step.
+
+_PREVALIDATION_WARNED = False
+
+
+class _InternalsUnavailable(Exception):
+    """FastAPI's internals do not have the shape this check expects."""
+
+
+# Errors that mean FastAPI's internals changed shape, as opposed to a problem
+# with one request.
+_INTERNALS_ERRORS = (_InternalsUnavailable, AttributeError, TypeError, ImportError, KeyError)
+
+
+def _route_for_validation(request: Request):
+    """The matched route as FastAPI's request handler sees it.
+
+    FastAPI 0.141 keeps the original APIRoute in scope["route"] and the route as
+    included (router prefix and dependencies applied) in an "effective route
+    context" in the scope. 0.127 has only scope["route"], already the included
+    copy. Both carry dependant, body_field and _embed_body_fields.
+    """
+    scope = request.scope
+    route = scope.get("route")
+    try:
+        from fastapi.routing import _get_scope_effective_route_context  # 0.141+
+    except ImportError:  # 0.127
+        effective = None
+    else:
+        effective = _get_scope_effective_route_context(scope)
+        if effective is not None and getattr(effective, "original_route", None) is not route:
+            effective = None
+    target = effective if effective is not None and getattr(effective, "dependant", None) is not None else route
+    if target is None or not all(hasattr(target, a) for a in ("dependant", "body_field", "_embed_body_fields")):
+        raise _InternalsUnavailable(f"no route details on {type(target).__name__}")
+    return target
+
+
+def _strict_content_type(route) -> bool:
+    """0.141 added strict_content_type (default True): a body sent without a
+    Content-Type is not parsed as JSON. 0.127 has no such setting and parses it."""
+    value = getattr(route, "strict_content_type", False)
+    from fastapi.datastructures import DefaultPlaceholder
+    if isinstance(value, DefaultPlaceholder):
+        value = value.value
+    return bool(value)
+
+
+async def _received_body(request: Request, route):
+    """The body as FastAPI's request handler passes it to validation."""
+    import email.message
+    from fastapi import params
+
+    body_field = route.body_field
+    if not body_field:
+        return None
+    if isinstance(body_field.field_info, params.Form):
+        return await request.form()  # cached by Starlette: the same FormData
+    body_bytes = await request.body()
+    if not body_bytes:
+        return None
+    content_type = request.headers.get("content-type")
+    if not content_type:
+        return body_bytes if _strict_content_type(route) else await request.json()
+    message = email.message.Message()
+    message["content-type"] = content_type
+    if message.get_content_maintype() == "application":
+        subtype = message.get_content_subtype()
+        if subtype == "json" or subtype.endswith("+json"):
+            return await request.json()
+    return body_bytes
+
+
+async def _route_validation_errors(request: Request) -> list:
+    """Validation errors FastAPI would report for this request, in its order."""
+    try:
+        from fastapi.dependencies.utils import request_body_to_args, request_params_to_args
+    except ImportError as e:
+        raise _InternalsUnavailable(str(e)) from e
+
+    route = _route_for_validation(request)
+    body = await _received_body(request, route)
+    try:
+        return await _validate_params(request, route, body, request_params_to_args, request_body_to_args)
+    finally:
+        await _rewind_uploads(body)
+
+
+async def _rewind_uploads(body) -> None:
+    """Put every uploaded file back at its start.
+
+    For a field typed `bytes = File()` or `list[bytes]`, request_body_to_args
+    reads the UploadFile. FastAPI's own validation pass then reads the same
+    cached FormData, and would get an empty file without this rewind. Runs
+    whether validation passed or failed.
+    """
+    from starlette.datastructures import FormData, UploadFile
+    if not isinstance(body, FormData):
+        return
+    for _, value in body.multi_items():
+        if isinstance(value, UploadFile):
+            await value.seek(0)
+
+
+async def _validate_params(request: Request, route, body, request_params_to_args, request_body_to_args) -> list:
+    embed = route._embed_body_fields
+    errors: list = []
+
+    async def walk(dependant) -> None:
+        # Mirrors solve_dependencies: sub-dependencies first, then own params.
+        for sub in dependant.dependencies:
+            await walk(sub)
+        for fields, received in (
+            (dependant.path_params, request.path_params),
+            (dependant.query_params, request.query_params),
+            (dependant.header_params, request.headers),
+            (dependant.cookie_params, request.cookies),
+        ):
+            errors.extend(request_params_to_args(fields, received)[1])
+        if dependant.body_params:
+            _, body_errors = await request_body_to_args(
+                body_fields=dependant.body_params, received_body=body, embed_body_fields=embed,
+            )
+            errors.extend(body_errors)
+
+    await walk(route.dependant)
+    return errors
+
+
+async def _validate_before_payment(request: Request) -> None:
+    """Raise the route's 422 now, before the request is priced, counted against
+    the free tier, or its payment verified."""
+    global _PREVALIDATION_WARNED
+    from fastapi.exceptions import RequestValidationError
+    try:
+        errors = await _route_validation_errors(request)
+    except _INTERNALS_ERRORS as e:
+        # FastAPI's internals do not have the shape this check expects. Warn
+        # once per process; FastAPI still validates after the payment step.
+        if not _PREVALIDATION_WARNED:
+            _PREVALIDATION_WARNED = True
+            logger.warning(
+                "x402: could not validate the request before payment (%s: %s); "
+                "malformed requests are checked after the payment step until this is fixed",
+                type(e).__name__, e,
+            )
+        else:
+            logger.debug("x402: early validation skipped, FastAPI internals unavailable (%s: %s)",
+                         type(e).__name__, e)
+        return
+    except Exception as e:
+        # Anything else (for example the client disconnecting while the body is
+        # read) concerns this request only: skip the early check for it, without
+        # the warning, so a later real change in FastAPI is still reported.
+        logger.debug("x402: early validation skipped for this request (%s: %s)", type(e).__name__, e)
+        return
+    if errors:
+        raise RequestValidationError(errors)
+
+
+def _check_before_payment(request: Request) -> None:
+    """Route rules that FastAPI's parameter validation cannot express, applied
+    before payment as well as in the handler (#427).
+
+    POST /chunks/credit takes `mb` as a string on purpose (#260/#261), so FastAPI
+    accepts "abc", "100.0" or "0" and the handler refuses them with 422. The
+    same rule (valid_topup_mb) and the same 422 apply here, so such a request is
+    not priced, counted against the free tier or verified first.
+    """
+    # Keyed to the handler rather than the path, so the rule applies exactly
+    # where the handler that enforces it is mounted.
+    from app.api.endpoints.chunks import top_up_credit
+    if getattr(request.scope.get("route"), "endpoint", None) is top_up_credit:
+        raw = request.query_params.get("mb")
+        if valid_topup_mb(raw) is None:
+            raise HTTPException(status_code=422, detail=invalid_topup_mb_detail(raw))
+
+
+def _decode_v1_payment(header_value, payment_requirements):
+    """The X-PAYMENT payload, None if it cannot be decoded (answered 402 as
+    before), or raise 400 for one whose x402Version is not 1 (#639).
+
+    The header decides the version (D2, D7 in #596): a payload claiming
+    another version inside X-PAYMENT contradicts itself, and used to be sent
+    to the facilitator with that version on the envelope and v1 requirements.
+    """
+    payment_payload = decode_payment_header(header_value)
+    if payment_payload is not None and payment_payload.x402_version != 1:
+        logger.warning(f"x402: refusing an X-PAYMENT whose payload says x402Version "
+                       f"{payment_payload.x402_version!r}, not 1")
+        raise HTTPException(status_code=400, detail={
+            "code": "PAYMENT_HEADER_INVALID",
+            "message": ("The X-PAYMENT header carries a payment whose x402Version is not 1. "
+                        "X-PAYMENT is x402 v1 only; send an x402 v2 payment in PAYMENT-SIGNATURE"
+                        + (" instead." if version_enabled(2) else ", once this gateway accepts v2.")
+                        + " Nothing was charged."),
+        })
+    return payment_payload
 
 
 async def settle_payment_if_offered(request: Request) -> None:
@@ -268,10 +541,15 @@ async def settle_payment_if_offered(request: Request) -> None:
     The effect is that paying callers bypass the allowance entirely, which is the
     point: the allowance exists to bound what the operator gives away, not to
     limit what someone has paid for.
+
+    A PAYMENT-SIGNATURE (x402 v2) header counts as offered too, even empty
+    (#600): such a request goes to require_x402_payment, which refuses it,
+    rather than to the allowance. An empty X-PAYMENT alone is still no offer,
+    as before.
     """
     if not settings.X402_ENABLED:
         return
-    if not request.headers.get("X-PAYMENT"):
+    if not request.headers.get(X_PAYMENT_HEADER) and 2 not in offered_payment_versions(request.headers):
         return
     await require_x402_payment(request)
 
@@ -280,8 +558,9 @@ async def require_x402_payment(request: Request) -> None:
     """
     FastAPI dependency that enforces x402 payment on protected endpoints.
 
-    Runs AFTER FastAPI routing and Pydantic validation, so invalid requests
-    get 422 errors before payment is checked.
+    Runs after FastAPI routing but before FastAPI validates the route's
+    parameters, so it validates them itself first (#427): invalid requests get
+    422 before payment is checked.
 
     Stores payment state on request.state for the middleware to use:
     - request.state.x402_mode: "free-tier" | "paid" | None
@@ -296,6 +575,26 @@ async def require_x402_payment(request: Request) -> None:
     if not is_protected_endpoint(request.method, request.url.path):
         return
 
+    # A malformed request gets its 422 before anything else here (#427): before
+    # it is priced, before a 402, before it uses a free-tier slot, and before a
+    # payment is verified or reserved.
+    await _validate_before_payment(request)
+    _check_before_payment(request)
+
+    # Payment headers, of either x402 version (#600). Both at once cannot be
+    # answered either way: 400 now, before anything is priced or counted.
+    payment_versions = offered_payment_versions(request.headers)
+    # The metrics' `version` label (#601): 1, 2 or none.
+    version = payment_version_label(payment_versions)
+    if payment_versions == {1, 2}:
+        logger.warning(f"x402: refusing {request.method} {request.url.path} from {get_client_ip(request)}: "
+                       f"both X-PAYMENT and PAYMENT-SIGNATURE sent (version=2)")
+        x402_payments_total.labels(mode="header_conflict", version=version).inc()
+        raise HTTPException(status_code=400, detail={
+            "code": "PAYMENT_HEADER_CONFLICT",
+            "message": HEADER_CONFLICT_MESSAGE,
+        })
+
     # No pay-to balance check here (#371). With x402 the facilitator submits
     # the transfer and pays its gas; the pay-to address never sends anything.
     # The check made every protected request, free tier included, depend on a
@@ -305,13 +604,41 @@ async def require_x402_payment(request: Request) -> None:
     client_ip = get_client_ip(request)
     logger.info(f"x402: Processing protected request from {client_ip}: {request.method} {request.url.path}")
 
+    # While the gateway cannot accept payments (its Bee wallet balances cannot
+    # be read, or its /health snapshot is too old to trust), a request that
+    # would pay or be offered a 402 gets 503 here, before it is priced,
+    # verified or settled (#589). Free-tier requests are not affected, nor is
+    # a retry of an attempt that may have been charged: it goes on to its
+    # stored result or 409 below. Reads memory only: no Bee call.
+    # An exempted retry is noted, so that if it still reaches a new settlement
+    # (its state changed in the meantime) it is refused below, before that.
+    # A v2 payment (PAYMENT-SIGNATURE, v2 enabled) is paid even with
+    # X-Payment-Mode: free (#607), so free mode never exempts it: otherwise it
+    # would be verified and settled while payments are refused.
+    gate_reason = None
+    v2_payment = 2 in payment_versions and version_enabled(2)
+    if v2_payment or not (is_free_tier_opt_in(request) and settings.X402_FREE_TIER_ENABLED):
+        from app.x402.accept_gate import is_retry_of_possibly_charged, payments_refusal, refusal
+        reason = payments_refusal()
+        if reason is not None and is_retry_of_possibly_charged(request):
+            gate_reason = reason
+        elif reason is not None:
+            logger.warning(f"x402: refusing {request.method} {request.url.path} from {client_ip} "
+                           f"before payment: payments unavailable ({reason})")
+            x402_payments_total.labels(mode="unavailable", version=version).inc()
+            raise refusal(reason)
+
     # Calculate price for this operation
     try:
         price_quote = await _calculate_price_for_request(request)
         price_usd = price_quote["price_usd"]
         description = price_quote.get("description", "Gateway operation")
+    except HTTPException:
+        # A refusal decided while pricing (an extend of a batch the node does
+        # not have: 404, #572) is the answer, not a pricing failure.
+        raise
     except Exception as e:
-        logger.error(f"x402: Failed to calculate price: {e}")
+        logger.error(f"x402: Failed to calculate price: {exc_text(e)}")
         raise HTTPException(
             status_code=503,
             detail={
@@ -327,16 +654,44 @@ async def require_x402_payment(request: Request) -> None:
         description=description
     )
 
+    # A v2 payment (PAYMENT-SIGNATURE) cannot be settled until v2 is enabled
+    # (#600). Before #600 it was taken for no payment and, with X-Payment-Mode:
+    # free, served free while the client believed it had paid. Refused here,
+    # before the free tier and before anything is verified, with a v1 Payment
+    # Required body that a v1 client can still pay.
+    # With X402_PROTOCOL_VERSIONS=2, an X-PAYMENT is refused the same way (#607).
+    unsupported = (2 if 2 in payment_versions and not version_enabled(2)
+                   else 1 if 1 in payment_versions and not version_enabled(1) else None)
+    if unsupported is not None:
+        message = VERSION_UNSUPPORTED_MESSAGE if unsupported == 2 else V1_UNSUPPORTED_MESSAGE
+        logger.warning(f"x402: refusing {request.method} {request.url.path} from {client_ip}: "
+                       f"x402 v{unsupported} payment is not enabled (version={version})")
+        x402_payments_total.labels(mode="version_unsupported", version=version).inc()
+        response_body = {
+            "code": "X402_VERSION_UNSUPPORTED",
+            "message": message,
+            "x402Version": X402_VERSION,
+            "error": message,
+            "accepts": [payment_requirements.model_dump(by_alias=True)],
+        }
+        free_tier_info = get_free_tier_stats(client_key(client_ip)) if settings.X402_FREE_TIER_ENABLED else None
+        if free_tier_info and free_tier_info.get("available"):
+            response_body["freeTier"] = free_tier_info
+        raise HTTPException(status_code=402, detail=response_body)
+
     # Get X-PAYMENT header and payment mode
     payment_header = request.headers.get(X_PAYMENT_HEADER)
     payment_mode = "free" if is_free_tier_opt_in(request) else ""
+    # An x402 v2 payment (PAYMENT-SIGNATURE, v2 enabled, #607) is always a
+    # payment: it never takes the no-payment 402 or the free tier (#600).
+    paid_v2 = 2 in payment_versions
 
     # If no payment header AND no free tier opt-in, return 402
-    if not payment_header and payment_mode != "free":
+    if not paid_v2 and not payment_header and payment_mode != "free":
         free_tier_info = get_free_tier_stats(client_key(client_ip)) if settings.X402_FREE_TIER_ENABLED else None
 
         logger.info(f"x402: No payment header, returning 402 for ${price_usd}")
-        x402_payments_total.labels(mode="rejected").inc()
+        x402_payments_total.labels(mode="rejected", version=version).inc()
 
         response_body = {
             "x402Version": X402_VERSION,
@@ -349,7 +704,7 @@ async def require_x402_payment(request: Request) -> None:
         raise HTTPException(status_code=402, detail=response_body)
 
     # Handle free tier opt-in
-    if payment_mode == "free":
+    if not paid_v2 and payment_mode == "free":
         if not settings.X402_FREE_TIER_ENABLED:
             logger.warning(f"x402: Free tier requested but disabled for {client_ip}")
             response_body = {
@@ -364,7 +719,7 @@ async def require_x402_payment(request: Request) -> None:
 
         if is_allowed:
             logger.info(f"x402: Free tier access granted for {client_ip} ({stats['requests_made']}/{stats['limit']} requests)")
-            x402_payments_total.labels(mode="free").inc()
+            x402_payments_total.labels(mode="free", version=version).inc()
             request.state.x402_mode = "free-tier"
             request.state.x402_payer = None
             request.state.x402_rate_limit_stats = stats
@@ -380,7 +735,7 @@ async def require_x402_payment(request: Request) -> None:
                     "message": "Free tier rate limit exceeded. Use x402 payment for higher limits.",
                     "payment_info": {
                         "price_usd": price_usd,
-                        "network": settings.X402_NETWORK,
+                        "network": to_v1(settings.X402_NETWORK),
                         "pay_to": settings.X402_PAY_TO_ADDRESS,
                     }
                 },
@@ -390,8 +745,18 @@ async def require_x402_payment(request: Request) -> None:
                          "Retry-After": str(stats.get("window_seconds", 60))},
             )
 
-    # At this point, we have an X-PAYMENT header - verify payment
-    payment_payload = decode_payment_header(payment_header)
+    # The requirements sent to the facilitator: the v1 ones, or for v2 the
+    # gateway's own v2 offer (never the client's `accepted`, #607).
+    facilitator_requirements = payment_requirements
+    if paid_v2:
+        # Decoded and checked against the gateway's offer, refused before the
+        # facilitator if anything is wrong (app/x402/v2_payment.py).
+        from app.x402.v2_payment import read_v2_payment
+        payment_payload, facilitator_requirements = read_v2_payment(
+            request.headers.get(PAYMENT_SIGNATURE_HEADER), payment_requirements)
+    else:
+        payment_payload = _decode_v1_payment(payment_header, payment_requirements)
+
     if payment_payload is None:
         logger.warning(f"x402: Invalid X-PAYMENT header from {client_ip}")
         response_body = {
@@ -401,13 +766,22 @@ async def require_x402_payment(request: Request) -> None:
         }
         raise HTTPException(status_code=402, detail=response_body)
 
+    # Without its record of payments whose settlement got no answer, the
+    # gateway could answer a retry of a collected payment with a payable 402
+    # or run work again: refuse paid requests, unpaid, until it is repaired.
+    from app.x402.settlement import outcome_unknown as _outcome_unknown
+    if _outcome_unknown.unavailable:
+        from app.x402.settlement import payment_state_unavailable_detail
+        raise HTTPException(status_code=503, headers={"Retry-After": "60"},
+                            detail=payment_state_unavailable_detail())
+
     # Verify payment with facilitator
     try:
         facilitator = _get_facilitator_client()
         logger.debug(f"x402: Calling facilitator verify at {settings.X402_FACILITATOR_URL}")
         verify_response = await facilitator.verify(
             payment=payment_payload,
-            payment_requirements=payment_requirements
+            payment_requirements=facilitator_requirements
         )
         logger.debug(f"x402: Verify response: is_valid={verify_response.is_valid}, payer={getattr(verify_response, 'payer', 'unknown')}")
     except Exception as e:
@@ -423,9 +797,33 @@ async def require_x402_payment(request: Request) -> None:
     if not verify_response.is_valid:
         invalid_reason = getattr(verify_response, 'invalid_reason', None) or 'Unknown reason'
         logger.warning(f"x402: Payment verification failed: {invalid_reason}")
+        # A facilitator may reject a spent nonce at verify. If this
+        # authorization's earlier settlement got no answer, that is likely
+        # why: no 402 and no `accepts`, or the client pays again (#553).
+        from app.x402.settlement import (authorization_key, outcome_unknown, outcome_unknown_refusal,
+                                         settlement_in_progress_refusal)
+        unknown_key = authorization_key(payment_payload)
+        in_flight, unknown_kind = outcome_unknown.state(unknown_key)
+        if in_flight:
+            raise settlement_in_progress_refusal(unknown_key, request)
+        if unknown_kind is not None:
+            # Counted like a refusal at settle (#553): probably the earlier
+            # transfer spent the nonce.
+            from app.services.metrics import x402_settlements_total
+            # The version of the payment header this request carried, computed
+            # above: request.state.x402_version is set only once verified.
+            x402_settlements_total.labels(result="refused_after_unknown", version=version).inc()
+            raise outcome_unknown_refusal(
+                unknown_key, getattr(verify_response, 'invalid_reason', None) or 'unknown',
+                where="verify", request=request)
+        # The full reason is in the log above; the caller sees it only if it
+        # is a short machine code (#576).
+        from app.x402.settlement import public_facilitator_reason
+        raw_reason = getattr(verify_response, 'invalid_reason', None)
+        shown = public_facilitator_reason(raw_reason) if raw_reason else 'Unknown reason'
         response_body = {
             "x402Version": X402_VERSION,
-            "error": f"Payment verification failed: {invalid_reason}",
+            "error": f"Payment verification failed: {shown}",
             "accepts": [payment_requirements.model_dump(by_alias=True)]
         }
         raise HTTPException(status_code=402, detail=response_body)
@@ -476,8 +874,38 @@ async def require_x402_payment(request: Request) -> None:
             },
         )
 
+    # An authorization whose settlement got no answer AFTER its work ran (the
+    # middleware fallback) never runs the work again, also once its
+    # reservation has lapsed (#553). One whose settlement got no answer before
+    # any work (settle_payment) may be retried: it settles at most once.
+    from app.x402.settlement import (AFTER_WORK, outcome_unknown, outcome_unknown_refusal,
+                                     settlement_in_progress_refusal)
+    # A parallel duplicate while this process waits on the facilitator for the
+    # same authorization: "in progress", not "unknown" (#553).
+    in_flight, unknown_kind = outcome_unknown.state(auth_key)
+    if in_flight:
+        raise settlement_in_progress_refusal(auth_key, request)
+    if unknown_kind == AFTER_WORK:
+        logger.warning(f"x402: retry of an authorization whose settlement outcome is unknown "
+                       f"after its work ran, from {client_ip}")
+        raise outcome_unknown_refusal(auth_key, where="after_work", request=request)
+
     if not replay_guard.reserve(auth_key):
         logger.warning(f"x402: Payment authorization reused by {client_ip}")
+        # Read again, atomically: the first request's write-ahead may have run
+        # on another thread since the check above.
+        in_flight, unknown_kind = outcome_unknown.state(auth_key)
+        if in_flight:
+            raise settlement_in_progress_refusal(auth_key, request)
+        if unknown_kind is not None:
+            # In use by a concurrent retry of an authorization whose
+            # settlement outcome is unknown: not "sign a new payment" (#553).
+            raise outcome_unknown_refusal(auth_key, where="in_use", request=request)
+        # The same authorization under an Idempotency-Key whose first request's
+        # settlement got no answer: that key's 409, as documented, even when
+        # the authorization has since settled under another key (#553).
+        from app.x402.idempotency import raise_if_key_settlement_unknown
+        await raise_if_key_settlement_unknown(request, payer=auth_key[0])
         raise HTTPException(
             status_code=402,
             detail={
@@ -496,18 +924,40 @@ async def require_x402_payment(request: Request) -> None:
     from app.x402.idempotency import begin_idempotent_request
     request.state.x402_requirements = payment_requirements
     try:
-        idempotency_id = await begin_idempotent_request(request, payer=auth_key[0], auth_key=auth_key)
+        idempotency_id = await begin_idempotent_request(request, payer=auth_key[0], auth_key=auth_key,
+                                                        version=2 if paid_v2 else 1)
     except BaseException:
         replay_guard.release(auth_key)
         raise
 
+    # A retry let past the payment gate (#589) was expected to be answered
+    # from stored state above. Reaching here, it would be settled anew while
+    # payments are refused: refuse it as the gate would have, unpaid.
+    if gate_reason is not None:
+        replay_guard.release(auth_key)
+        if idempotency_id is not None:
+            from app.x402.idempotency import idempotency_store
+            idempotency_store.abandon(*idempotency_id)
+        logger.warning(f"x402: refusing a retry from {client_ip} that would settle anew "
+                       f"while payments are unavailable ({gate_reason})")
+        x402_payments_total.labels(mode="unavailable", version=version).inc()
+        from app.x402.accept_gate import refusal
+        raise refusal(gate_reason)
+
     logger.info(f"x402: Payment verified for payer {verify_response.payer}")
-    x402_payments_total.labels(mode="paid").inc()
+    # The protocol version is the one this request was dispatched on, decided
+    # by its payment header (X-PAYMENT is v1, PAYMENT-SIGNATURE is v2; D2/D7 in
+    # #596), never the x402Version inside the client's payload (#601). Read by
+    # the settlement metrics and audit records (payment_headers.paid_version_label).
+    request.state.x402_version = {"1": 1, "2": 2}.get(version, X402_VERSION)
+    x402_payments_total.labels(mode="paid", version=paid_version_label(request)).inc()
 
     # Store payment info on request.state for middleware settlement
     request.state.x402_mode = "paid"
     request.state.x402_payer = payer
     request.state.x402_payment = payment_payload
     request.state.x402_requirements = payment_requirements
+    # The gateway's v2 offer, sent to the facilitator for a v2 payment (#607).
+    request.state.x402_requirements_v2 = facilitator_requirements if paid_v2 else None
     request.state.x402_auth_key = auth_key
     request.state.x402_idempotency_id = idempotency_id

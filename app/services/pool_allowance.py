@@ -33,6 +33,7 @@ from urllib.parse import urlparse
 
 from app.core.config import settings
 from app.core.atomic_io import StateLoadError, atomic_write_json, load_json_state, unreadable_state
+from app.core.day_reset import next_reset_at
 
 logger = logging.getLogger(__name__)
 
@@ -160,6 +161,14 @@ class PoolAllowanceTracker:
             self._unreadable = None
             self._save()
 
+    def state_unreadable(self) -> bool:
+        """Whether today's file was unreadable, so limited allowances are refused (#468).
+
+        False once the UTC day has rolled over, as check() then starts afresh.
+        """
+        with self._lock:
+            return bool(self._unreadable) and self._day == _today()
+
     def allowance_for(self, origin: Optional[str]) -> int:
         """Configured daily allowance for an origin, or the default.
 
@@ -179,7 +188,7 @@ class PoolAllowanceTracker:
             self._roll_day()
             used = self._used.get(key, 0)
         info = {"address_allowance": limit, "address_used": used,
-                "resets_at": f"{_today()}T24:00:00Z", "size": size}
+                "resets_at": next_reset_at(_today()), "size": size}
         if limit == UNLIMITED:
             return True, info
         if self._unreadable:
@@ -211,7 +220,7 @@ class PoolAllowanceTracker:
             "allowance": limit,
             "used": used,
             "remaining": UNLIMITED if limit == UNLIMITED else max(0, limit - used),
-            "resets_at": f"{_today()}T24:00:00Z",
+            "resets_at": next_reset_at(_today()),
         }
         if limit == UNLIMITED:
             return True, info

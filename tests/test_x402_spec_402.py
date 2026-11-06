@@ -75,7 +75,7 @@ def _full_app(verify_ok=True, settle_ok=True, free_tier=True):
     """Stamps route with the payment dependency, the pool-style optional route,
     x402 middleware and CORS outermost, as in app/main.py."""
     from fastapi.middleware.cors import CORSMiddleware
-    from x402.types import SettleResponse, VerifyResponse
+    from app.x402.models_v1 import SettleResponse, VerifyResponse
     from unittest.mock import MagicMock
     from app.x402.dependency import settle_payment_if_offered
     from app.x402.settlement import settle_payment

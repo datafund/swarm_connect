@@ -1,7 +1,9 @@
 """x402 configuration is checked at startup, and the facilitator can authenticate (#369, #370, #371)."""
 import asyncio
+import re
 import sys
 import types
+from pathlib import Path
 
 import pytest
 
@@ -29,11 +31,33 @@ def test_testnet_with_public_facilitator_is_accepted(x402):
     facilitator.validate_x402_config()
 
 
-@pytest.mark.parametrize("network", ["base-mainnet", "eip155:8453", "Base", "", "polygon"])
+# eip155:8453 used to be in this list. Since #599 the CAIP-2 ids of the two
+# known networks are valid X402_NETWORK values (D6 in #596), so it moved to the
+# tests below; CAIP-2 ids of networks without a USDC entry are still refused.
+@pytest.mark.parametrize("network", ["base-mainnet", "Base", "", "polygon",
+                                     "eip155:1", "eip155:137", "EIP155:8453"])
 def test_unknown_networks_refuse_to_start(x402, network):
     x402.setattr(settings, "X402_NETWORK", network)
-    with pytest.raises(RuntimeError, match="X402_NETWORK"):
+    with pytest.raises(RuntimeError, match="X402_NETWORK=.* is not one of"):
         facilitator.validate_x402_config()
+
+
+def test_caip2_testnet_id_starts_like_its_v1_name(x402):
+    x402.setattr(settings, "X402_NETWORK", "eip155:84532")
+    facilitator.validate_x402_config()
+
+
+def test_caip2_mainnet_id_with_the_public_testnet_facilitator_refuses_to_start(x402):
+    x402.setattr(settings, "X402_NETWORK", "eip155:8453")
+    with pytest.raises(RuntimeError, match="mainnet") as exc:
+        facilitator.validate_x402_config()
+    assert "is not one of" not in str(exc.value)
+
+
+def test_caip2_mainnet_id_with_another_facilitator_is_accepted(x402):
+    x402.setattr(settings, "X402_NETWORK", "eip155:8453")
+    x402.setattr(settings, "X402_FACILITATOR_URL", "https://facilitator.example.com")
+    facilitator.validate_x402_config()
 
 
 @pytest.mark.parametrize("pay_to", [None, "", "0x0", "not-an-address"])
@@ -67,6 +91,27 @@ def test_bearer_token_is_sent_on_verify_and_settle(x402):
     headers = asyncio.run(config["create_headers"]())
     assert headers["verify"]["Authorization"] == "Bearer s3cret"
     assert headers["settle"]["Authorization"] == "Bearer s3cret"
+
+
+def test_bearer_token_is_sent_on_supported(x402):
+    # The startup /supported check (#608) calls the facilitator with the same
+    # token; without a "supported" entry it went unauthenticated.
+    import httpx2
+    x402.setattr(settings, "X402_FACILITATOR_BEARER_TOKEN", "s3cret")
+    seen = {}
+
+    def handler(request):
+        seen["path"] = request.url.path
+        seen["auth"] = request.headers.get("Authorization")
+        return httpx2.Response(200, json={"kinds": []})
+
+    from app.x402.facilitator_client import FacilitatorClient
+    config = facilitator.get_facilitator_client().config
+    headers = asyncio.run(config["create_headers"]())
+    assert headers["supported"] == headers["verify"]
+    client = FacilitatorClient(config, transport=httpx2.MockTransport(handler))
+    asyncio.run(client.supported())
+    assert seen == {"path": "/facilitator/supported", "auth": "Bearer s3cret"}
 
 
 def test_no_auth_by_default(x402):
@@ -128,6 +173,53 @@ def test_cdp_credentials_are_never_sent_to_another_host(x402):
         facilitator.validate_x402_config()
 
 
+# #527: the x402 client calls {url}/verify and {url}/settle, and cdp-sdk signs
+# each token for /platform/v2/x402/verify and /settle. Any other URL on the CDP
+# host sends a token signed for one path to another, so every payment fails.
+@pytest.mark.parametrize("url", [
+    "https://api.cdp.coinbase.com",
+    "https://api.cdp.coinbase.com/",
+    "https://api.cdp.coinbase.com/platform/v2",
+    "https://api.cdp.coinbase.com/platform/v1/x402",
+    "https://api.cdp.coinbase.com/platform/v2/x402/verify",
+    "https://api.cdp.coinbase.com/platform/v2/x402//",
+    "http://api.cdp.coinbase.com/platform/v2/x402",
+    "https://api.cdp.coinbase.com:443/platform/v2/x402",
+    "https://api.cdp.coinbase.com/platform/v2/x402?probe=1",
+    "https://api.cdp.coinbase.com/platform/v2/x402#probe",
+])
+def test_cdp_url_not_on_the_signed_route_is_refused(x402, url):
+    _fake_cdp(x402)
+    x402.setattr(settings, "X402_NETWORK", "base")
+    x402.setattr(settings, "X402_FACILITATOR_URL", url)
+    with pytest.raises(RuntimeError, match="X402_FACILITATOR_URL is not CDP's x402 route") as e:
+        facilitator.validate_x402_config()
+    message = str(e.value)
+    assert facilitator.CDP_FACILITATOR_URL in message
+    # The deploy log is public: the configured value is never echoed.
+    assert "probe" not in message and ":443" not in message and "/platform/v1" not in message
+
+
+@pytest.mark.parametrize("url", [
+    "",
+    "https://api.cdp.coinbase.com/platform/v2/x402",
+    "https://api.cdp.coinbase.com/platform/v2/x402/",  # the x402 client drops one trailing slash
+])
+def test_cdp_url_empty_or_the_signed_route_is_accepted(x402, url):
+    _fake_cdp(x402)
+    x402.setattr(settings, "X402_NETWORK", "base")
+    x402.setattr(settings, "X402_FACILITATOR_URL", url)
+    facilitator.validate_x402_config()
+    assert facilitator.get_facilitator_client().config["url"] == facilitator.CDP_FACILITATOR_URL
+
+
+def test_cdp_config_never_uses_the_configured_url(x402):
+    """Even if the startup check were bypassed, CDP requests go to the signed route."""
+    _fake_cdp(x402)
+    x402.setattr(settings, "X402_FACILITATOR_URL", "https://api.cdp.coinbase.com")
+    assert facilitator._config()["url"] == "https://api.cdp.coinbase.com/platform/v2/x402"
+
+
 def test_cdp_and_bearer_together_are_refused(x402):
     _fake_cdp(x402)
     x402.setattr(settings, "X402_FACILITATOR_URL", "")
@@ -172,3 +264,105 @@ def test_startup_runs_the_check(x402):
     with pytest.raises(RuntimeError, match="Refusing to start"):
         with TestClient(app):
             pass
+
+
+# cdp-sdk ships in the image (#513). Without it, a cutover with CDP credentials
+# is refused at startup, so it must not drop out of the lockfile unnoticed.
+ROOT = Path(__file__).resolve().parent.parent
+
+
+def _pin(text, name):
+    match = re.search(rf"^{re.escape(name)}==(\S+)", text, re.MULTILINE)
+    return match.group(1) if match else None
+
+
+def test_cdp_sdk_is_pinned_in_requirements_and_the_lock():
+    wanted = _pin((ROOT / "requirements.txt").read_text(), "cdp-sdk")
+    assert wanted, "requirements.txt must pin cdp-sdk (the CDP facilitator route needs it)"
+    lock = (ROOT / "requirements.lock").read_text()
+    assert _pin(lock, "cdp-sdk") == wanted, "requirements.lock is out of date: regenerate it"
+    entry = lock.split(f"\ncdp-sdk=={wanted}", 1)[1].split("# via", 1)[0]
+    assert "--hash=sha256:" in entry, "the Docker build installs with --require-hashes"
+
+
+def test_real_cdp_sdk_config_is_accepted(x402):
+    # Runs where cdp-sdk is installed (the image, CI); skipped otherwise. Never
+    # calls create_headers, so no token is signed and nothing goes on the network.
+    pytest.importorskip("cdp.x402")
+    x402.setattr(settings, "X402_FACILITATOR_CDP_API_KEY_ID", "id")
+    x402.setattr(settings, "X402_FACILITATOR_CDP_API_KEY_SECRET", "secret")
+    x402.setattr(settings, "X402_NETWORK", "base")
+    x402.setattr(settings, "X402_FACILITATOR_URL", "")  # production: no default URL
+    facilitator.validate_x402_config()
+    config = facilitator.get_facilitator_client().config
+    assert facilitator._host(config["url"]) == facilitator.CDP_HOST
+    assert callable(config["create_headers"])
+
+
+def test_real_cdp_sdk_headers_go_through_the_async_adapter(x402):
+    # The x402 1.x client awaits create_headers; cdp-sdk's is synchronous and
+    # signs a fresh JWT per call. Run the gateway's adapter against the real
+    # package, offline, with a throwaway key made here (never a key literal).
+    pytest.importorskip("cdp.x402")
+    import base64
+
+    import jwt
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric import ed25519
+
+    key = ed25519.Ed25519PrivateKey.generate()
+    raw = serialization.Encoding.Raw
+    seed = key.private_bytes(raw, serialization.PrivateFormat.Raw, serialization.NoEncryption())
+    public = key.public_key().public_bytes(raw, serialization.PublicFormat.Raw)
+    # cdp-sdk takes an Ed25519 secret as base64 of seed + public key (64 bytes).
+    x402.setattr(settings, "X402_FACILITATOR_CDP_API_KEY_ID", "test-key-id")
+    x402.setattr(settings, "X402_FACILITATOR_CDP_API_KEY_SECRET", base64.b64encode(seed + public).decode())
+    x402.setattr(settings, "X402_NETWORK", "base")
+    x402.setattr(settings, "X402_FACILITATOR_URL", "")
+    facilitator.validate_x402_config()
+
+    headers = asyncio.run(facilitator.get_facilitator_client().config["create_headers"]())
+    for route in ("verify", "settle", "supported"):
+        auth = headers[route]["Authorization"]
+        assert auth.startswith("Bearer ")
+        claims = jwt.decode(auth[len("Bearer "):], key.public_key(), algorithms=["EdDSA"],
+                            options={"verify_aud": False})
+        assert claims["sub"] == "test-key-id"
+
+
+def test_real_cdp_sdk_route_matches_the_accepted_url():
+    # The startup check accepts only CDP_FACILITATOR_URL; it must be the URL
+    # the installed cdp-sdk returns, or an upgrade would drift silently (#527).
+    cdp_x402 = pytest.importorskip("cdp.x402")
+    assert cdp_x402.create_facilitator_config("id", "secret")["url"] == facilitator.CDP_FACILITATOR_URL
+
+
+def test_real_cdp_sdk_tokens_are_signed_for_the_paths_the_client_calls(x402):
+    # #527: the x402 1.x client posts to {url}/verify and {url}/settle. Each CDP
+    # token names the one request it is valid for ("uris" claim). Offline, with
+    # a throwaway key made here; nothing is sent.
+    pytest.importorskip("cdp.x402")
+    import base64
+    from urllib.parse import urlparse
+
+    import jwt
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric import ed25519
+
+    key = ed25519.Ed25519PrivateKey.generate()
+    raw = serialization.Encoding.Raw
+    seed = key.private_bytes(raw, serialization.PrivateFormat.Raw, serialization.NoEncryption())
+    public = key.public_key().public_bytes(raw, serialization.PublicFormat.Raw)
+    x402.setattr(settings, "X402_FACILITATOR_CDP_API_KEY_ID", "test-key-id")
+    x402.setattr(settings, "X402_FACILITATOR_CDP_API_KEY_SECRET", base64.b64encode(seed + public).decode())
+    x402.setattr(settings, "X402_NETWORK", "base")
+    x402.setattr(settings, "X402_FACILITATOR_URL", facilitator.CDP_FACILITATOR_URL)
+    facilitator.validate_x402_config()
+
+    config = facilitator.get_facilitator_client().config
+    headers = asyncio.run(config["create_headers"]())
+    for route in ("verify", "settle"):
+        called = urlparse(f"{config['url']}/{route}")
+        token = headers[route]["Authorization"][len("Bearer "):]
+        claims = jwt.decode(token, key.public_key(), algorithms=["EdDSA"], options={"verify_aud": False})
+        assert claims["uris"] == [f"POST {called.hostname}{called.path}"]

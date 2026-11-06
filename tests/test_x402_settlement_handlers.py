@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from fastapi import Depends, FastAPI
 from fastapi.testclient import TestClient
-from x402.types import SettleResponse, VerifyResponse
+from app.x402.models_v1 import SettleResponse, VerifyResponse
 
 from app.core.config import settings
 from app.x402.dependency import require_x402_payment, settle_payment_if_offered
@@ -126,19 +126,19 @@ def test_pool_batch_taken_by_someone_else_is_not_charged(x402_on, monkeypatch):
 
 
 def _bee(handler):
-    import httpx
-    return httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    import httpx2
+    return httpx2.AsyncClient(transport=httpx2.MockTransport(handler))
 
 
 def test_local_only_validation_uses_one_batch_lookup(monkeypatch):
     import asyncio
-    import httpx
+    import httpx2
     from app.services import swarm_api
     seen = []
 
     def handler(request):
         seen.append(request.url.path)
-        return httpx.Response(200, json={"batchID": BATCH, "utilization": 0, "depth": 17,
+        return httpx2.Response(200, json={"batchID": BATCH, "utilization": 0, "depth": 17,
                                          "bucketDepth": 16, "batchTTL": 86400, "usable": True})
 
     with patch("app.services.swarm_api.get_client", return_value=_bee(handler)):
@@ -156,10 +156,10 @@ def test_local_only_validation_uses_one_batch_lookup(monkeypatch):
 ])
 def test_local_only_validation_refuses_what_bee_would_refuse(status, body, code):
     import asyncio
-    import httpx
+    import httpx2
     from app.services import swarm_api
     with patch("app.services.swarm_api.get_client",
-               return_value=_bee(lambda r: httpx.Response(status, json=body))):
+               return_value=_bee(lambda r: httpx2.Response(status, json=body))):
         with pytest.raises(swarm_api.StampValidationError) as exc:
             asyncio.run(swarm_api.validate_stamp_for_upload(BATCH, local_only=True))
     assert exc.value.code == code

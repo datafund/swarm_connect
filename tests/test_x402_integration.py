@@ -21,8 +21,8 @@ from fastapi import FastAPI, Depends, APIRouter, Path
 from fastapi.testclient import TestClient
 from pydantic import BaseModel
 
-from x402.types import PaymentRequirements, PaymentPayload, VerifyResponse, SettleResponse
-from x402.encoding import safe_base64_encode
+from app.x402.models_v1 import PaymentRequirements, PaymentPayload, VerifyResponse, SettleResponse
+from app.x402.encoding import safe_base64_encode
 
 from app.x402.middleware import X402Middleware, PROTECTED_ENDPOINTS
 from app.x402.dependency import require_x402_payment
@@ -450,7 +450,7 @@ class TestFullPaymentFlow:
 
         mock_fac = MagicMock()
         mock_fac.verify = AsyncMock(return_value=VerifyResponse(
-            is_valid=False, invalid_reason="Insufficient balance", payer=None
+            is_valid=False, invalid_reason="insufficient_funds", payer=None
         ))
         mock_get_fac.return_value = mock_fac
 
@@ -461,7 +461,7 @@ class TestFullPaymentFlow:
         response = client.post("/api/v1/stamps/", headers={"X-PAYMENT": payment_header})
 
         assert response.status_code == 402
-        assert "Insufficient balance" in response.json()["detail"]["error"]
+        assert "insufficient_funds" in response.json()["detail"]["error"]
 
     # create=True: the balance gate is removed by the settlement-stack catch-up
     # (#371); this test must pass with or without it.
@@ -695,7 +695,11 @@ class TestHealthEndpointWithX402:
             "warnings": [], "errors": []
         }
         from app.main import read_root
-        response = await read_root()
+        # A reachable, healthy Bee node: this test is about the pay-to wallet,
+        # and an unreachable node makes /health degraded (#589).
+        with patch("app.services.swarm_api.get_node_status_summary",
+                   new=AsyncMock(return_value={"healthy": True, "network_availability": "Available", "warnings": []})):
+            response = await read_root()
         # The pay-to balance is informational (#371): a low one is reported but
         # does not degrade the gateway.
         assert response["status"] == "ok"
@@ -724,7 +728,11 @@ class TestHealthEndpointWithX402:
             "warnings": [], "errors": []
         }
         from app.main import read_root
-        response = await read_root()
+        # A reachable, healthy Bee node: this test is about the pay-to wallet,
+        # and an unreachable node makes /health degraded (#589).
+        with patch("app.services.swarm_api.get_node_status_summary",
+                   new=AsyncMock(return_value={"healthy": True, "network_availability": "Available", "warnings": []})):
+            response = await read_root()
         # A (near-)empty pay-to wallet is correct for a cold mainnet address (#371).
         assert response["status"] == "ok"
         assert response["x402"]["base_wallet"]["is_critical"] is True

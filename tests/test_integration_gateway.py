@@ -24,6 +24,17 @@ So this module is now opt-in on three axes, each with its own switch:
     GATEWAY_URL=...               which gateway (defaults to STAGING, never production)
     ALLOW_LIVE_STAMP_PURCHASE=1   permit the fixture to spend
 
+Where the upload tests get a stamp: they acquire one from the gateway's pool
+(free, within the pool's daily allowance). They never upload to a batch taken
+from GET /stamps/: since #313 a batch the pool still holds is refused with 403
+STAMP_OWNERSHIP_DENIED until someone acquires it. With the pool empty or the
+allowance spent, the upload tests skip and say why.
+
+Free-tier POSTs are paced to the free tier's limit (three a minute). A 429 the
+pacer could not prevent, e.g. from other traffic on the same IP, is retried once
+after the window; if it persists the test skips as "not checked" rather than
+failing on a status it never got to test.
+
 Run with:
     RUN_LIVE_TESTS=1 pytest tests/test_integration_gateway.py -v -s          # staging
     RUN_LIVE_TESTS=1 GATEWAY_URL=http://localhost:8000 pytest ... -v -s      # local
@@ -57,7 +68,13 @@ RUN_LIVE_TESTS = _flag("RUN_LIVE_TESTS")
 # deployed yet — so matching it would test the environment you are about to
 # deploy into, not the change you are making.
 STAGING_URL = "https://provenance-gateway.dev.datafund.io"
-GATEWAY_URL = os.environ.get("GATEWAY_URL", STAGING_URL)
+#
+# GATEWAY_URL is shared with tests/test_x402_live.py, so one variable points both
+# live modules at the same gateway. TEST_GATEWAY_URL, which that module used to
+# read, is accepted as a legacy alias.
+GATEWAY_URL = (os.environ.get("GATEWAY_URL")
+               or os.environ.get("TEST_GATEWAY_URL")
+               or STAGING_URL).rstrip("/")
 
 # Spending is a separate decision from running live tests. Opting in to live
 # tests should not silently opt in to buying postage batches.
@@ -98,6 +115,33 @@ class FreeTierPacer:
 
 # Module-level pacer instance shared across all tests
 _pacer = FreeTierPacer()
+
+
+def free_tier_post(url: str, **kwargs) -> requests.Response:
+    """POST with X-Payment-Mode: free, paced to the free-tier limit.
+
+    The pacer only knows about this module's own requests; anything else from
+    the same IP in the last minute (another live run, a shared NAT) still counts
+    on the gateway. So a 429 is retried once after the window it names, and if
+    it persists the calling test is skipped: the status it meant to check was
+    never reached, which is "not checked", not a failure.
+    """
+    headers = {**kwargs.pop("headers", {}), "X-Payment-Mode": "free"}
+    for attempt in range(2):
+        _pacer.wait_if_needed()
+        response = requests.post(url, headers=headers, **kwargs)
+        if response.status_code != 429:
+            return response
+        if attempt == 0:
+            try:
+                wait = int(response.headers.get("Retry-After", FREE_TIER_WINDOW))
+            except ValueError:
+                wait = FREE_TIER_WINDOW
+            wait = min(max(wait, 1), FREE_TIER_WINDOW) + 1
+            print(f"\n  Free tier answered 429; retrying once in {wait}s...")
+            time.sleep(wait)
+            _pacer.timestamps.clear()
+    pytest.skip(f"Not checked: the free tier rate-limited this request (429) twice: {response.text[:200]}")
 
 
 def _detect_free_tier_limit() -> int:
@@ -148,39 +192,71 @@ def pace_free_tier():
     return _pacer
 
 
+def acquire_pool_stamp() -> tuple:
+    """Acquire a small stamp from the gateway's pool on the free route.
+
+    Returns (batch_id, "") on success, or (None, reason) when the pool cannot
+    hand one over: disabled, empty, or the daily allowance used up.
+
+    The acquire registers the batch to the caller ("shared" on the free route),
+    which is what lets a free-tier upload use it. Taking a batch id straight
+    from GET /stamps/ does not: since #313 a batch the pool still holds is
+    refused with 403 STAMP_OWNERSHIP_DENIED.
+    """
+    try:
+        response = requests.post(
+            f"{GATEWAY_URL}/api/v1/pool/acquire",
+            json={"size": "small"},
+            headers={"X-Payment-Mode": "free"},
+            timeout=60,
+        )
+    except requests.RequestException as e:
+        return None, f"pool acquire failed: {e}"
+
+    if response.status_code == 200:
+        data = response.json()
+        batch_id = data.get("batch_id")
+        if data.get("success") and batch_id:
+            print(f"\nAcquired pool stamp: {batch_id[:16]}... (depth {data.get('depth')})")
+            return batch_id, ""
+        return None, f"pool acquire returned no batch: {response.text[:300]}"
+
+    reasons = {
+        404: "the stamp pool is not enabled on this gateway",
+        409: "the stamp pool is empty",
+        429: "the pool's daily free allowance is used up",
+        402: "the pool's daily free allowance is used up (payment would bypass it)",
+    }
+    reason = reasons.get(response.status_code, "pool acquire was refused")
+    return None, f"{reason} ({response.status_code}: {response.text[:300]})"
+
+
 @pytest.fixture(scope="module")
 def usable_stamp(gateway_available):
     """
-    Get or purchase a usable stamp for testing.
+    A stamp the upload tests are allowed to use.
 
-    First checks for existing usable stamps, then purchases one if needed.
+    Acquired from the gateway's pool on the free route. If the pool cannot
+    supply one, a stamp is purchased only with ALLOW_LIVE_STAMP_PURCHASE=1;
+    otherwise the dependent tests skip with the reason.
     """
     if not gateway_available:
         pytest.skip("Gateway not available")
 
-    # First, check for existing usable local stamps
-    try:
-        response = requests.get(f"{GATEWAY_URL}/api/v1/stamps/", timeout=30)
-        if response.status_code == 200:
-            stamps = response.json().get("stamps", [])
-            # Look for a usable stamp with good TTL that is local (owned by this node)
-            for stamp in stamps:
-                if stamp.get("usable") and stamp.get("local") and stamp.get("batchTTL", 0) > 3600:
-                    print(f"\nUsing existing local stamp: {stamp['batchID'][:16]}...")
-                    return stamp["batchID"]
-    except requests.RequestException:
-        pass
+    batch_id, reason = acquire_pool_stamp()
+    if batch_id:
+        return batch_id
 
-    # No usable local stamp found. Purchasing one costs real BZZ, so it needs its
+    # The pool could not supply one. Purchasing costs real BZZ, so it needs its
     # own opt-in — running live tests is not the same decision as spending money,
     # and this fixture is reached by any test that needs a stamp.
     if not ALLOW_LIVE_STAMP_PURCHASE:
         pytest.skip(
-            f"No usable local stamp on {GATEWAY_URL} and purchasing is not enabled. "
-            "Set ALLOW_LIVE_STAMP_PURCHASE=1 to let this test buy one with real BZZ."
+            f"No stamp from the pool on {GATEWAY_URL}: {reason}. Purchasing is not enabled; "
+            "set ALLOW_LIVE_STAMP_PURCHASE=1 to let this test buy one with real BZZ."
         )
 
-    print("\nNo usable local stamp found, purchasing new stamp...")
+    print(f"\nNo stamp from the pool ({reason}), purchasing new stamp...")
 
     # Get current price - try multiple sources
     try:
@@ -215,15 +291,13 @@ def usable_stamp(gateway_available):
         print(f"Purchasing stamp: amount={amount}, depth={depth} (~{MIN_STAMP_HOURS}h)")
 
         # Purchase stamp via our gateway (use free tier header for x402-enabled gateways)
-        _pacer.wait_if_needed()
-        purchase_response = requests.post(
+        purchase_response = free_tier_post(
             f"{GATEWAY_URL}/api/v1/stamps/",
             json={"amount": amount, "depth": depth},
-            headers={"X-Payment-Mode": "free"},
             timeout=120
         )
 
-        if purchase_response.status_code != 200:
+        if purchase_response.status_code not in (200, 201):  # POST /stamps/ answers 201 Created
             pytest.skip(f"Could not purchase stamp: {purchase_response.text}")
 
         batch_id = purchase_response.json().get("batchID")
@@ -301,11 +375,9 @@ class TestManifestUploadIntegration:
         tar_data = create_test_tar(test_files)
 
         # Upload via manifest endpoint (use free tier header for x402-enabled gateways)
-        _pacer.wait_if_needed()
-        response = requests.post(
+        response = free_tier_post(
             f"{GATEWAY_URL}/api/v1/data/manifest",
             params={"stamp_id": usable_stamp},
-            headers={"X-Payment-Mode": "free"},
             files={"file": ("test.tar", tar_data, "application/x-tar")},
             timeout=120
         )
@@ -348,11 +420,9 @@ class TestManifestUploadIntegration:
         tar_buffer.seek(0)
         empty_tar = tar_buffer.read()
 
-        _pacer.wait_if_needed()
-        response = requests.post(
+        response = free_tier_post(
             f"{GATEWAY_URL}/api/v1/data/manifest",
             params={"stamp_id": usable_stamp},
-            headers={"X-Payment-Mode": "free"},
             files={"file": ("empty.tar", empty_tar, "application/x-tar")},
             timeout=60
         )
@@ -367,11 +437,9 @@ class TestManifestUploadIntegration:
 
         invalid_data = b"This is not a TAR file"
 
-        _pacer.wait_if_needed()
-        response = requests.post(
+        response = free_tier_post(
             f"{GATEWAY_URL}/api/v1/data/manifest",
             params={"stamp_id": usable_stamp},
-            headers={"X-Payment-Mode": "free"},
             files={"file": ("invalid.tar", invalid_data, "application/x-tar")},
             timeout=60
         )
@@ -386,10 +454,8 @@ class TestManifestUploadIntegration:
 
         tar_data = create_test_tar({"test.txt": "test"})
 
-        _pacer.wait_if_needed()
-        response = requests.post(
+        response = free_tier_post(
             f"{GATEWAY_URL}/api/v1/data/manifest",
-            headers={"X-Payment-Mode": "free"},
             files={"file": ("test.tar", tar_data, "application/x-tar")},
             timeout=60
         )
@@ -408,11 +474,9 @@ class TestDataUploadIntegration:
 
         test_data = b"Integration test data upload"
 
-        _pacer.wait_if_needed()
-        response = requests.post(
+        response = free_tier_post(
             f"{GATEWAY_URL}/api/v1/data/",
             params={"stamp_id": usable_stamp},
-            headers={"X-Payment-Mode": "free"},
             files={"file": ("test.bin", test_data, "application/octet-stream")},
             timeout=60
         )

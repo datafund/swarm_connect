@@ -2,7 +2,7 @@
 import os
 from typing import Optional, List
 from pydantic_settings import BaseSettings, SettingsConfigDict
-from pydantic import Field, AnyHttpUrl, field_validator
+from pydantic import Field, AnyHttpUrl, field_validator, model_validator
 from functools import lru_cache
 from dotenv import load_dotenv
 
@@ -16,7 +16,15 @@ load_dotenv()
 # version ("base-sepolia", "base_sepolia", "sepolia") and a name we fail to
 # recognise must be treated as a testnet: guessing wrong in that direction
 # refuses a real payment, guessing wrong the other way gives batches away.
-_MAINNET_NETWORKS = {"base", "base-mainnet", "ethereum", "mainnet", "polygon", "avalanche"}
+# x402 v2 uses CAIP-2 ids ("eip155:8453"), so each mainnet name below has
+# its CAIP-2 id here too; eip155:84532 (Base Sepolia) stays a testnet (#598).
+_MAINNET_NETWORKS = {
+    "base", "base-mainnet", "ethereum", "mainnet", "polygon", "avalanche",
+    "eip155:8453",   # Base
+    "eip155:1",      # Ethereum
+    "eip155:137",    # Polygon
+    "eip155:43114",  # Avalanche C-Chain
+}
 
 
 def is_testnet_network(network: str) -> bool:
@@ -27,6 +35,20 @@ def is_testnet_network(network: str) -> bool:
     if not network:
         return True
     return network.strip().lower().replace("_", "-") not in _MAINNET_NETWORKS
+
+
+def parse_x402_protocol_versions(value) -> tuple:
+    """X402_PROTOCOL_VERSIONS as a sorted tuple of ints (#607).
+
+    Comma-separated, each 1 or 2, at least one, no repeats; whitespace and
+    order do not matter. Raises ValueError otherwise.
+    """
+    if not isinstance(value, str):
+        raise ValueError("X402_PROTOCOL_VERSIONS must be text: 1, 1,2 or 2")
+    tokens = [t.strip() for t in value.split(",")]
+    if not tokens or any(t not in ("1", "2") for t in tokens) or len(set(tokens)) != len(tokens):
+        raise ValueError("X402_PROTOCOL_VERSIONS must be 1, 1,2 or 2")
+    return tuple(sorted(int(t) for t in tokens))
 
 
 class Settings(BaseSettings):
@@ -47,6 +69,13 @@ class Settings(BaseSettings):
     X402_FACILITATOR_CDP_API_KEY_SECRET: Optional[str] = None
     X402_FACILITATOR_BEARER_TOKEN: Optional[str] = None
     X402_NETWORK: str = "base-sepolia"  # Network identifier (v1 style)
+    # The x402 protocol versions a payment is accepted in (#607, D3 in #596):
+    # "1" (default), "1,2" (dual mode) or "2". Anything else stops startup.
+    # v1 pays with X-PAYMENT, v2 with PAYMENT-SIGNATURE; with 2 enabled every
+    # 402 with an offer carries PAYMENT-REQUIRED, and startup requires the
+    # facilitator's /supported to list v2 exact on the network (#608). "2"
+    # alone refuses X-PAYMENT.
+    X402_PROTOCOL_VERSIONS: str = "1"
 
     # === x402 Pricing Settings ===
     X402_BZZ_USD_RATE: float = 0.50  # Manual BZZ/USD rate (1 BZZ = $0.50)
@@ -116,7 +145,7 @@ class Settings(BaseSettings):
     SWARM_STAMP_PURCHASE_TIMEOUT_SECONDS: float = 120.0
     STAMP_PURCHASE_BEE_TIMEOUT_SECONDS: float = 900.0
     # Paid purchases waiting on Bee at once. Each holds a connection of the
-    # shared Bee client (100) for up to STAMP_PURCHASE_BEE_TIMEOUT_SECONDS; the
+    # shared Bee client (BEE_HTTP_MAX_CONNECTIONS) for up to STAMP_PURCHASE_BEE_TIMEOUT_SECONDS; the
     # cap keeps a hung Bee from starving uploads and health checks. Checked
     # before the payment is settled: a caller refused here is not charged.
     STAMP_MAX_CONCURRENT_PAID_PURCHASES: int = 10
@@ -148,6 +177,15 @@ class Settings(BaseSettings):
     X402_IDEMPOTENCY_STATE_FILE: str = "data/x402_idempotency.json"
     # Bound on stored entries; the oldest completed ones are evicted first.
     X402_IDEMPOTENCY_MAX_ENTRIES: int = 10000
+    # Payment authorizations whose settlement got no answer, kept 24 h so a
+    # retry of a possibly collected payment is never answered with a payable
+    # 402, and work that already ran is not run again, across restarts (#553).
+    X402_SETTLEMENT_UNKNOWN_STATE_FILE: str = "data/x402_settlement_unknown.json"
+    # Longest wait for a write of that file on the request path. A write-ahead
+    # that takes longer (a hung disk) refuses the payment with 503, unsettled.
+    # Validated: > 0, at most 60, finite (nan would break the event loop's
+    # timeout handling); anything else stops the gateway at startup.
+    X402_SETTLEMENT_STATE_WRITE_TIMEOUT_SECONDS: float = Field(5.0, gt=0, le=60, allow_inf_nan=False)
 
     # === Base Chain Settings (for monitoring USDC receipts) ===
     BASE_RPC_URL: str = "https://sepolia.base.org"
@@ -171,6 +209,15 @@ class Settings(BaseSettings):
 
     # Pool monitoring settings
     STAMP_POOL_CHECK_INTERVAL_SECONDS: int = 900  # How often to check pool (15 minutes)
+    # A batch the pool bought but Bee has not listed yet (Bee lists it only
+    # after its chain listener processes BatchCreated, some blocks behind the
+    # tip) is held, not dropped, for this long after the purchase. After that
+    # it is treated as gone and removed with its ownership record.
+    STAMP_POOL_UNLISTED_GRACE_SECONDS: int = Field(900, gt=0)
+    # While any batch is held (bought, not usable yet), the background task
+    # re-runs the TTL check this often instead of waiting for the next full
+    # check, so the batch becomes available soon after Bee lists it usable.
+    STAMP_POOL_HELD_RECHECK_SECONDS: int = Field(30, gt=0)
     # Hard ceiling on how many batches the pool may buy in a rolling hour,
     # across every depth and every code path.
     #
@@ -321,9 +368,81 @@ class Settings(BaseSettings):
     # reference, not only ones uploaded here, so without a cap a few requests
     # for large content could exhaust memory and the chequebook.
     MAX_DOWNLOAD_SIZE_MB: int = Field(25, ge=1)
-    # Total time allowed for fetching one download from Bee. httpx timeouts
+    # Total time allowed for fetching one download from Bee. httpx2 timeouts
     # apply per read, so a slow trickle could otherwise hold the request open.
     DOWNLOAD_TIMEOUT_SECONDS: int = Field(120, ge=1)
+
+    # === Shared outbound HTTP client (Bee API, Base RPC) ===
+    # Connection limits of the shared httpx2 client (app/services/http_client.py).
+    # The defaults are httpx2's own defaults, written out.
+    BEE_HTTP_MAX_CONNECTIONS: int = Field(100, ge=1)
+    BEE_HTTP_MAX_KEEPALIVE_CONNECTIONS: int = Field(20, ge=0)
+    BEE_HTTP_KEEPALIVE_EXPIRY_SECONDS: float = Field(5.0, ge=0, allow_inf_nan=False)
+    # Self-recovery of the shared client (#587), a backstop since the switch
+    # to httpcore2 (#595), which fixed the leak. httpcore 1.0.9 kept a
+    # connection slot forever when a request is cancelled right after the pool
+    # gives it a new connection, so cancellations under load can fill the pool
+    # with slots that hold no request, and every call then fails with
+    # PoolTimeout. The client is replaced only when all three hold: this many
+    # PoolTimeouts in a row, at least BEE_HTTP_POOL_STUCK_FRACTION of
+    # BEE_HTTP_MAX_CONNECTIONS held by such stuck connections, and a probe of
+    # Bee's /health on a new connection answering. Attempts are at least
+    # BEE_HTTP_POOL_RECOVERY_COOLDOWN_SECONDS apart.
+    BEE_HTTP_POOL_RECOVERY_THRESHOLD: int = Field(3, ge=1)
+    BEE_HTTP_POOL_STUCK_FRACTION: float = Field(0.25, gt=0, le=1, allow_inf_nan=False)
+    BEE_HTTP_POOL_RECOVERY_COOLDOWN_SECONDS: float = Field(60.0, ge=0, allow_inf_nan=False)
+
+    # === Flood resilience (#588) ===
+    # Cap on Bee calls in flight at once through the shared client
+    # (app/services/bee_gate.py). Only calls to SWARM_BEE_API_URL are counted;
+    # Base RPC is not. A call made while serving a request waits at most
+    # BEE_CALL_SLOT_WAIT_SECONDS for a slot, then the request gets
+    # 503 BEE_BUSY with Retry-After instead of queueing behind the pool.
+    # BEE_RESERVED_BACKGROUND_CALLS slots are kept for work outside requests
+    # (the /health snapshot, stamp pool, metrics poller), so a flood cannot
+    # starve it. Uploads and downloads (bzz, bytes, chunks) made by requests
+    # hold at most BEE_MAX_CONCURRENT_TRANSFERS slots, so long transfers cannot
+    # starve short calls. Bee work of a request whose payment has settled waits
+    # up to BEE_BACKGROUND_SLOT_WAIT_SECONDS, like background work.
+    # Left unset, the three sizes follow BEE_HTTP_MAX_CONNECTIONS at 64%, 8%
+    # and 24% of it (64/8/24 of the default 100; 26/3/10 of 40), so lowering
+    # the pool keeps a valid gate. Set explicitly, they are used as given. The
+    # resulting cap must be below BEE_HTTP_MAX_CONNECTIONS; the gateway refuses
+    # to start otherwise (a pool of 1 leaves no room for a gate: turn it off).
+    # The proportions are a judgement, not measured.
+    BEE_CALL_GATE_ENABLED: bool = True
+    BEE_MAX_CONCURRENT_CALLS: Optional[int] = Field(None, ge=1)
+    BEE_RESERVED_BACKGROUND_CALLS: Optional[int] = Field(None, ge=0)
+    BEE_MAX_CONCURRENT_TRANSFERS: Optional[int] = Field(None, ge=1)
+    BEE_CALL_SLOT_WAIT_SECONDS: float = Field(2.0, ge=0, le=60, allow_inf_nan=False)
+    BEE_BACKGROUND_SLOT_WAIT_SECONDS: float = Field(30.0, ge=0, le=600, allow_inf_nan=False)
+    BEE_BUSY_RETRY_AFTER_SECONDS: int = Field(5, ge=1, le=3600)
+    # /health and / are served from a snapshot of the Bee node summary and the
+    # wallet balances, rebuilt at most once per HEALTH_SNAPSHOT_TTL_SECONDS by a
+    # single background refresh. A stale snapshot is served while it refreshes.
+    # A refresh is abandoned after HEALTH_SNAPSHOT_REFRESH_TIMEOUT_SECONDS. With
+    # no snapshot yet (just after startup) a request waits at most
+    # HEALTH_SNAPSHOT_FIRST_WAIT_SECONDS for the first one; keep this below the
+    # Docker healthcheck timeout (10 s).
+    HEALTH_SNAPSHOT_TTL_SECONDS: float = Field(15.0, gt=0, le=3600, allow_inf_nan=False)
+    HEALTH_SNAPSHOT_REFRESH_TIMEOUT_SECONDS: float = Field(20.0, gt=0, le=600, allow_inf_nan=False)
+    HEALTH_SNAPSHOT_FIRST_WAIT_SECONDS: float = Field(5.0, ge=0, le=60, allow_inf_nan=False)
+    # A snapshot whose last refresh failed and that is older than this is too
+    # old to trust (#589): /health reports `degraded` and paid requests are
+    # refused before payment. Never less than TTL + refresh timeout.
+    HEALTH_SNAPSHOT_MAX_TRUSTED_AGE_SECONDS: float = Field(60.0, gt=0, le=86400, allow_inf_nan=False)
+    # Heaviest callers, per window, without exposing who they are: callers are
+    # keyed by a keyed hash of their grouped address (IPv6 by /64). Metrics carry
+    # only ranks; the WARNING log line carries the hash tag. The hash key is
+    # random per process unless TOP_CALLERS_HASH_KEY is set (a secret: set it in
+    # the environment only), in which case an operator can compute the tag of a
+    # suspected address and tags stay the same across restarts.
+    TOP_CALLERS_ENABLED: bool = True
+    TOP_CALLERS_WINDOW_SECONDS: int = Field(60, ge=5, le=3600)
+    TOP_CALLERS_N: int = Field(5, ge=1, le=20)
+    TOP_CALLERS_MAX_TRACKED: int = Field(10000, ge=10, le=1000000)
+    TOP_CALLERS_LOG_MIN_REQUESTS: int = Field(300, ge=1)
+    TOP_CALLERS_HASH_KEY: str = ""
 
     # === Chunk Upload (stamped-chunk forwarding, Flow A) ===
     # When enabled, the gateway forwards a single client-supplied PRE-STAMPED chunk
@@ -403,6 +522,46 @@ class Settings(BaseSettings):
         same value: a trailing space passed validation and then broke every
         payment with a KeyError (#370)."""
         return v.strip() if isinstance(v, str) else v
+
+    @field_validator("X402_PROTOCOL_VERSIONS", mode="before")
+    @classmethod
+    def check_x402_protocol_versions(cls, v):
+        """Normalise to "1", "1,2" or "2"; refuse anything else (#607)."""
+        return ",".join(str(n) for n in parse_x402_protocol_versions(v))
+
+    def x402_protocol_versions(self) -> tuple:
+        """The accepted x402 versions as sorted ints, for example (1, 2)."""
+        return parse_x402_protocol_versions(self.X402_PROTOCOL_VERSIONS)
+
+    @model_validator(mode="after")
+    def check_bee_call_gate(self):
+        """The Bee call cap must sit below the client's connection limit (#588).
+
+        At or above it, a flood fills the pool before the gate refuses
+        anything, which is the PoolTimeout the gate exists to replace.
+        """
+        pool = self.BEE_HTTP_MAX_CONNECTIONS
+        if self.BEE_MAX_CONCURRENT_CALLS is None:
+            self.BEE_MAX_CONCURRENT_CALLS = max(1, min(pool - 1, round(pool * 0.64)))
+        calls = self.BEE_MAX_CONCURRENT_CALLS
+        if self.BEE_RESERVED_BACKGROUND_CALLS is None:
+            self.BEE_RESERVED_BACKGROUND_CALLS = min(calls - 1, max(1, round(pool * 0.08)))
+        reserved = self.BEE_RESERVED_BACKGROUND_CALLS
+        if self.BEE_MAX_CONCURRENT_TRANSFERS is None:
+            self.BEE_MAX_CONCURRENT_TRANSFERS = max(1, min(calls - reserved, round(pool * 0.24)))
+        if not self.BEE_CALL_GATE_ENABLED:
+            return self
+        problems = []
+        if self.BEE_MAX_CONCURRENT_CALLS >= self.BEE_HTTP_MAX_CONNECTIONS:
+            problems.append("BEE_MAX_CONCURRENT_CALLS must be below BEE_HTTP_MAX_CONNECTIONS")
+        if self.BEE_RESERVED_BACKGROUND_CALLS >= self.BEE_MAX_CONCURRENT_CALLS:
+            problems.append("BEE_RESERVED_BACKGROUND_CALLS must be below BEE_MAX_CONCURRENT_CALLS")
+        elif self.BEE_MAX_CONCURRENT_TRANSFERS > self.BEE_MAX_CONCURRENT_CALLS - self.BEE_RESERVED_BACKGROUND_CALLS:
+            problems.append("BEE_MAX_CONCURRENT_TRANSFERS must be at most "
+                            "BEE_MAX_CONCURRENT_CALLS - BEE_RESERVED_BACKGROUND_CALLS")
+        if problems:
+            raise ValueError("; ".join(problems))
+        return self
 
     @field_validator("X402_BLACKLIST_IPS", "X402_WHITELIST_IPS", mode="before")
     @classmethod

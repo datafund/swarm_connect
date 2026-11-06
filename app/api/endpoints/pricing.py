@@ -80,11 +80,45 @@ async def _quote(path: str, body: Optional[dict] = None, query: str = "",
         "path": path,
         "price_usd": priced["price_usd"],
         "max_amount_required": requirements.max_amount_required,
+        # The same amount under its x402 v2 name (#602, D8 in #596).
+        # max_amount_required stays until v1 is removed, deprecated.
+        "amount": requirements.max_amount_required,
         "description": requirements.description,
     }, requirements
 
 
-@router.get("/pricing", summary="Price quotes for paid operations")
+# Shown in OpenAPI (#602). No response_model: a model would filter or reorder
+# the fields this endpoint has always returned.
+_PRICING_EXAMPLE = {
+    "x402_enabled": True,
+    "currency": "USDC",
+    "network": "base-sepolia",
+    "asset": "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+    "pay_to": "0x<pay-to address>",
+    "min_price_usd": 0.01,
+    "free_tier": {"enabled": True, "header": "X-Payment-Mode: free"},
+    "quotes": {
+        "stamp_purchase": {
+            "method": "POST",
+            "path": "/api/v1/stamps/",
+            "price_usd": 0.05,
+            "max_amount_required": "50000",
+            "amount": "50000",
+            "description": "Postage stamp purchase",
+        },
+    },
+}
+
+
+@router.get(
+    "/pricing",
+    summary="Price quotes for paid operations",
+    responses={200: {
+        "description": ("Price quotes. In each quote, `amount` is the price in USDC smallest units; "
+                        "`max_amount_required` is the same value under its deprecated x402 v1 name."),
+        "content": {"application/json": {"example": _PRICING_EXAMPLE}},
+    }},
+)
 async def get_pricing(
     size: Optional[Literal["small", "medium", "large"]] = Query(
         None, description="Stamp size preset, as in the purchase and pool-acquire bodies."),
@@ -98,14 +132,20 @@ async def get_pricing(
                     "overhead (a few hundred bytes), which is what the 402 prices."),
     mb: Optional[int] = Query(
         None, ge=1, description="Bandwidth credit top-up in MB, as in POST /chunks/credit?mb=."),
+    redundancy: Optional[int] = Query(
+        None, ge=0, le=4,
+        description="Erasure-coding level of the upload (0-4), as in POST /data/?redundancy=. "
+                    "Omitted means the upload's default (2). Parity chunks are priced as bandwidth."),
 ):
     """
     Quote the price of each paid operation **without paying**.
 
     The parameters mirror the bodies of the paid requests. Each quote is computed
     by the same function that prices the 402 for that request, so
-    `max_amount_required` is the amount (USDC, 6 decimals) the 402 would ask for,
-    at the current Bee chain price. Prices move with the chain price, so treat a
+    `amount` is the amount (USDC smallest units, 6 decimals) the 402 would ask
+    for, at the current Bee chain price. `max_amount_required` carries the same
+    value and is **deprecated**: it is the x402 v1 name, kept until v1 is
+    removed. Read `amount`. Prices move with the chain price, so treat a
     quote as current rather than guaranteed.
 
     Operations are listed only when they are enabled on this gateway. When x402
@@ -114,7 +154,8 @@ async def get_pricing(
     - `stamp_purchase`: `POST /api/v1/stamps/` (`size`, `depth`, `duration_hours`)
     - `pool_acquire`: `POST /api/v1/pool/acquire` (`size`, `depth`). Payment is
       optional here; the free daily allowance is used first.
-    - `data_upload`: `POST /api/v1/data/` (`upload_bytes`)
+    - `data_upload`: `POST /api/v1/data/` (`upload_bytes`, `redundancy`). The
+      price covers the parity chunks Bee adds at that redundancy level.
     - `bandwidth_credit`: `POST /api/v1/chunks/credit` (`mb`)
     """
     if not settings.X402_ENABLED:
@@ -164,7 +205,9 @@ async def get_pricing(
         quotes["stamp_purchase"], requirements = await _quote(f"{api}/stamps/", body=stamp_body)
         if settings.STAMP_POOL_ENABLED:
             quotes["pool_acquire"], _ = await _quote(f"{api}/pool/acquire", body=size_body)
-        quotes["data_upload"], _ = await _quote(f"{api}/data/", content_length=upload_bytes)
+        upload_query = f"redundancy={redundancy}" if redundancy is not None else ""
+        quotes["data_upload"], _ = await _quote(
+            f"{api}/data/", query=upload_query, content_length=upload_bytes)
         if settings.CHUNK_UPLOAD_ENABLED:
             query = f"mb={mb}" if mb is not None else ""
             quotes["bandwidth_credit"], _ = await _quote(f"{api}/chunks/credit", query=query)

@@ -1,0 +1,50 @@
+{
+  "versions": {
+    "x402": "2.27.0",
+    "eth-account": "0.14.0",
+    "pydantic": "2.14.3"
+  },
+  "header": "eyJ4NDAyVmVyc2lvbiI6MiwiZXJyb3IiOiJQYXltZW50IHJlcXVpcmVkIiwicmVzb3VyY2UiOnsidXJsIjoiaHR0cHM6Ly9nYXRld2F5LmV4YW1wbGUvYXBpL3YxL3N0YW1wcy8iLCJkZXNjcmlwdGlvbiI6IlBvc3RhZ2Ugc3RhbXAgcHVyY2hhc2UgKGRlcHRoIDE3LCAyNWgpIiwibWltZVR5cGUiOiJhcHBsaWNhdGlvbi9qc29uIn0sImFjY2VwdHMiOlt7InNjaGVtZSI6ImV4YWN0IiwibmV0d29yayI6ImVpcDE1NTo4NDUzMiIsImFzc2V0IjoiMHgwMzZDYkQ1Mzg0MmM1NDI2NjM0ZTc5Mjk1NDFlQzIzMThmM2RDRjdlIiwiYW1vdW50IjoiMjAwMDAiLCJwYXlUbyI6IjB4MDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMSIsIm1heFRpbWVvdXRTZWNvbmRzIjozMDAsImV4dHJhIjp7Im5hbWUiOiJVU0RDIiwidmVyc2lvbiI6IjIifX1dfQ==",
+  "decoded": {
+    "x402Version": 2,
+    "error": "Payment required",
+    "resource": {
+      "url": "https://gateway.example/api/v1/stamps/",
+      "description": "Postage stamp purchase (depth 17, 25h)",
+      "mimeType": "application/json"
+    },
+    "accepts": [
+      {
+        "scheme": "exact",
+        "network": "eip155:84532",
+        "asset": "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+        "amount": "20000",
+        "payTo": "0x0000000000000000000000000000000000000001",
+        "maxTimeoutSeconds": 300,
+        "extra": {
+          "name": "USDC",
+          "version": "2"
+        }
+      }
+    ]
+  },
+  "decodedType": "PaymentRequired",
+  "paymentAccepted": {
+    "scheme": "exact",
+    "network": "eip155:84532",
+    "asset": "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+    "amount": "20000",
+    "payTo": "0x0000000000000000000000000000000000000001",
+    "maxTimeoutSeconds": 300,
+    "extra": {
+      "name": "USDC",
+      "version": "2"
+    }
+  },
+  "paymentResource": {
+    "url": "https://gateway.example/api/v1/stamps/",
+    "description": "Postage stamp purchase (depth 17, 25h)",
+    "mimeType": "application/json"
+  },
+  "ok": true
+}

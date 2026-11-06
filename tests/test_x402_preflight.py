@@ -321,14 +321,21 @@ class TestCheckPreflightBalances:
     @patch("app.x402.preflight.check_xbzz_balance", new_callable=AsyncMock)
     @pytest.mark.asyncio
     async def test_api_error_generates_warning_not_error(self, mock_xbzz, mock_xdai, mock_chequebook):
-        """Bee node connectivity issues are warnings, not blocking errors."""
+        """Bee node connectivity issues are warnings, not blocking errors.
+
+        Since #589 an xBZZ balance that cannot be read closes payments
+        (can_accept false), still without a blocking error (status degraded,
+        not critical).
+        """
         mock_xbzz.return_value = {
             "ok": False,
             "balance_plur": 0,
             "balance_bzz": 0.0,
             "threshold_bzz": 10.0,
             "wallet_address": None,
-            "warning": "Failed to fetch xBZZ balance: Connection refused"
+            "warning": ("Failed to fetch xBZZ balance from the Bee node (ConnectError); "
+                        "see the gateway log for details."),
+            "read_failed": True,
         }
         mock_xdai.return_value = {
             "ok": True,
@@ -351,8 +358,8 @@ class TestCheckPreflightBalances:
 
         result = await check_preflight_balances()
 
-        # Gateway stays available; Bee node issues are warnings not errors
-        assert result["can_accept"] is True
+        # Bee node issues are warnings not errors, but payments are closed (#589)
+        assert result["can_accept"] is False
         assert len(result["errors"]) == 0
         # Original "Failed to fetch" warning + "unreachable" warning
         unreachable_warnings = [w for w in result["warnings"] if "unreachable" in w.lower()]

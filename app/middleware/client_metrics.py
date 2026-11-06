@@ -7,7 +7,7 @@ and why no per-caller identity is exported.
 import hashlib
 import logging
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from threading import Lock
 from typing import Set
 
@@ -16,7 +16,7 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from app.core.client_ip import get_client_ip
 from app.services.client_type import classify, outcome_for
-from app.services.metrics import distinct_callers, requests_by_client_total
+from app.services.metrics import distinct_callers, distinct_callers_previous_day, requests_by_client_total
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +45,8 @@ class _DistinctCallerCounter:
         self._salt = os.urandom(16)
         self._day = self._today()
         self._seen: Set[bytes] = set()
+        # The final count of the UTC day before self._day, kept from the rollover.
+        self._previous = 0
 
     @staticmethod
     def _today() -> str:
@@ -55,16 +57,56 @@ class _DistinctCallerCounter:
         # and it keeps the set small for a long-running process.
         digest = hashlib.blake2b(caller.encode(), key=self._salt, digest_size=8).digest()
         with self._lock:
-            today = self._today()
-            if today != self._day:
-                self._day = today
-                self._seen = set()
+            self._roll_over_locked()
             self._seen.add(digest)
-            count = len(self._seen)
-        distinct_callers.set(count)
+
+    def count(self) -> int:
+        """Distinct callers so far today, checked against the clock at read time.
+
+        Called on every /metrics scrape. If the UTC day has changed since the last
+        request, this resets the count to 0 and drops yesterday's hashes. Without
+        it, the gauge kept showing yesterday's final count until the first
+        request of the new day (#521).
+        """
+        with self._lock:
+            self._roll_over_locked()
+            return len(self._seen)
+
+    def previous_day_count(self) -> int:
+        """The final count of the previous UTC day, checked against the clock.
+
+        Callers seen after the last scrape before midnight are in no sample of
+        gateway_distinct_callers: the first scrape after midnight already reads
+        the new day. This value keeps that final count. It is exported all
+        through the next day, so panel 118 can attribute it to the day it
+        belongs to. It is 0 when this process has not counted the previous
+        day: it started after that day ended, or no rollover fell between the
+        two days. If the process restarted partway through the previous day,
+        the value is the count since that restart, not the whole day's.
+        Neither case overcounts, and panel 118 takes the larger of this and
+        the day's highest count, so a short value only leaves the bar where
+        the day gauge already put it.
+        """
+        with self._lock:
+            self._roll_over_locked()
+            return self._previous
+
+    def _roll_over_locked(self) -> None:
+        today = self._today()
+        if today != self._day:
+            yesterday = (datetime.strptime(today, "%Y-%m-%d") - timedelta(days=1)).strftime("%Y-%m-%d")
+            self._previous = len(self._seen) if self._day == yesterday else 0
+            self._day = today
+            self._seen = set()
 
 
 distinct_caller_counter = _DistinctCallerCounter()
+# The gauge is computed at scrape time from the counter, not pushed on each
+# request, so it drops to 0 at midnight UTC even when no request arrives. This
+# is per process: it assumes one gateway process (no --workers, no prometheus
+# multiprocess mode), as the count itself already does.
+distinct_callers.set_function(distinct_caller_counter.count)
+distinct_callers_previous_day.set_function(distinct_caller_counter.previous_day_count)
 
 
 class ClientMetricsMiddleware:

@@ -1,13 +1,19 @@
-# Direct dependencies, edited by hand. The Docker image installs from
-# requirements.lock, which pins every package (transitive ones included) with
-# hashes. After changing this file, regenerate it (Python 3.10 = the image):
-#   uv pip compile requirements.txt --universal --python-version 3.10 --generate-hashes -o requirements.lock
+# Runtime dependencies, edited by hand. The Docker image and CI (tests.yml)
+# install from requirements.lock, which pins every package (transitive ones
+# included) with hashes. Test-only packages are in requirements-dev.txt.
+# After changing this file, regenerate both locks with uv 0.11.x
+# (Python 3.12 = the image), the runtime lock first:
+#   uv pip compile requirements.txt --universal --python-version 3.12 --generate-hashes -o requirements.lock
+#   uv pip compile requirements-dev.txt -c requirements.lock --universal --python-version 3.12 --generate-hashes -o requirements-dev.lock
 # Re-running it keeps the existing pins wherever they still satisfy this file.
 # To bump a package deliberately, add --upgrade-package <name> (or --upgrade
 # for everything), then run the test suite against the new lock.
+# scripts/check_lock_sync.sh runs both commands and fails if either lock
+# changes; CI runs it on every pull request (#430).
 fastapi>=0.95.0
 uvicorn[standard]>=0.24.0  # ASGI server with performance extras; --timeout-graceful-shutdown
-httpx>=0.24.0              # Async HTTP client for Swarm Bee API calls
+httpx2>=2.16.0             # The gateway's own HTTP client (Bee API, Base RPC, price feed; #595)
+httpx>=0.24.0              # Not used by app/: x402 1.0.0 (test oracle), fastapi-cloud-cli and scripts/flood_replay.py
 python-dotenv>=1.0.0      # For loading .env files
 pydantic[email]>=1.10.0   # Used by FastAPI, explicitly listed
 pydantic-settings>=2.0.0  # Separate settings for pydantic
@@ -15,16 +21,18 @@ python-multipart>=0.0.20  # For file upload support in FastAPI
 # For timezone handling if needed beyond basic UTC
 # pytz
 
-# x402 payment protocol (v1 - v2 under development)
-x402==1.0.0               # Official x402 Python SDK (pinned - v2.x has breaking API changes)
+# x402 payment protocol. The gateway owns its v1 models and facilitator client
+# (app/x402/models_v1.py, facilitator_client.py); it does not import x402.
+x402==1.0.0               # Test oracle only (#604): the goldens and the differential tests compare the
+                          # gateway's own x402 v1 code against it. app/ must not import it
+                          # (tests/test_x402_no_library_import.py). Still in the runtime lock until it
+                          # moves to requirements-dev.txt, which needs both locks regenerated.
+cdp-sdk==1.51.0           # Coinbase CDP facilitator auth (X402_FACILITATOR_CDP_API_KEY_ID/_SECRET)
 eth-account>=0.8.0        # For wallet signature verification
-web3>=6.0.0               # Gnosis chain client (Flow B: createBatch for an external owner). Already pulled in by x402.
+web3>=6.0.0               # Gnosis chain client (Flow B: createBatch for an external owner).
 
 # Prometheus monitoring
 prometheus-fastapi-instrumentator>=6.0.0
 prometheus_client>=0.19.0
 
-# Testing dependencies
-pytest>=7.0.0
-pytest-asyncio>=0.21.0
-requests>=2.28.0          # Used in integration/live tests as HTTP client
+# Test-only packages are in requirements-dev.txt, so the image does not ship them (#430).

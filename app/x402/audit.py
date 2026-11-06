@@ -34,6 +34,13 @@ from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
+# The default x402 version of payment_settled and payment_failed records (#601).
+# Every gateway call site passes the request's version
+# (payment_headers.paid_version); this default applies only to a direct call
+# without one, such as a script or test. Only v1 reaches verify or settle until
+# v2 is enabled (#609).
+PAID_X402_VERSION = 1
+
 
 class AuditEventType(Enum):
     """Types of audit events that can be logged."""
@@ -303,9 +310,13 @@ def log_payment_settled(
     network: str,
     success: bool,
     error_reason: Optional[str] = None,
-    request_id: Optional[str] = None
+    request_id: Optional[str] = None,
+    nonce: Optional[str] = None,
+    x402_version: int = PAID_X402_VERSION,
 ) -> Optional[str]:
-    """Log a payment settlement event."""
+    """Log a payment settlement event. `nonce`: the payment authorization's,
+    which identifies the on-chain transfer whatever its transaction hash.
+    `x402_version`: the protocol version of the payment (#601)."""
     return log_audit_event(
         event_type=AuditEventType.PAYMENT_SETTLED,
         data={
@@ -313,6 +324,8 @@ def log_payment_settled(
             "transaction_hash": transaction_hash,
             "network": network,
             "error_reason": error_reason,
+            "nonce": nonce,
+            "x402_version": x402_version,
         },
         client_ip=client_ip,
         wallet_address=payer,
@@ -325,14 +338,19 @@ def log_payment_failed(
     reason: str,
     stage: str,
     wallet_address: Optional[str] = None,
-    request_id: Optional[str] = None
+    request_id: Optional[str] = None,
+    nonce: Optional[str] = None,
+    x402_version: int = PAID_X402_VERSION,
 ) -> Optional[str]:
-    """Log a payment failure event."""
+    """Log a payment failure event. `nonce`: the payment authorization's.
+    `x402_version`: the protocol version of the payment (#601)."""
     return log_audit_event(
         event_type=AuditEventType.PAYMENT_FAILED,
         data={
             "reason": reason,
             "stage": stage,
+            "nonce": nonce,
+            "x402_version": x402_version,
         },
         client_ip=client_ip,
         wallet_address=wallet_address,

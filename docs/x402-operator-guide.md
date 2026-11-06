@@ -54,7 +54,8 @@ Add these to your `.env` file:
 X402_ENABLED=true                                    # Enable x402 payments
 X402_FACILITATOR_URL=https://x402.org/facilitator   # Testnet facilitator
 X402_PAY_TO_ADDRESS=0xYourBaseSepoliaAddress        # Your USDC receiving wallet
-X402_NETWORK=base-sepolia                            # Network identifier
+X402_NETWORK=base-sepolia                            # base-sepolia or base (or eip155:84532 / eip155:8453)
+X402_PROTOCOL_VERSIONS=1                             # 1 (default), 1,2 or 2: the x402 versions accepted (see below)
 
 # === Pricing ===
 X402_BZZ_USD_RATE=0.50               # Manual BZZ/USD rate
@@ -88,6 +89,69 @@ X402_BLACKLIST_IPS=                  # Comma-separated: 192.168.1.100,10.0.0.50
 X402_AUDIT_LOG_PATH=logs/x402_audit.jsonl
 ```
 
+### x402 protocol versions (`X402_PROTOCOL_VERSIONS`)
+
+Which x402 versions a payment is accepted in. `/health` reports the result under `x402.versions`.
+
+| Value | Accepts | Refuses |
+|---|---|---|
+| `1` (default) | x402 v1 payments in `X-PAYMENT` | `PAYMENT-SIGNATURE` with 402 `X402_VERSION_UNSUPPORTED` |
+| `1,2` | v1 in `X-PAYMENT` and v2 in `PAYMENT-SIGNATURE`, each settled in its own version | both headers in one request (400 `PAYMENT_HEADER_CONFLICT`) |
+| `2` | v2 in `PAYMENT-SIGNATURE` only | `X-PAYMENT` with 402 `X402_VERSION_UNSUPPORTED` |
+
+Any other value (empty, `3`, `1,1`, `v2`) stops the gateway at startup with a settings error that names `X402_PROTOCOL_VERSIONS`. Whitespace and order do not matter (`2, 1` is `1,2`).
+
+With `1` the gateway behaves exactly as before: same 402 bodies, same facilitator requests, same receipts, same state files.
+
+With 2 enabled:
+
+- A v2 payment is checked before the facilitator is called. Its `accepted` offer must equal the gateway's own offer for that request, field by field (scheme `exact`, the CAIP-2 network such as `eip155:84532`, asset, amount, payTo, maxTimeoutSeconds, extra). The signed authorization must pay that offer (`to` is payTo, `value` is the amount). The gateway sends its own offer and its own resource description to the facilitator, never the client's copy. Refusals are 400 `PAYMENT_HEADER_TOO_LARGE`, `PAYMENT_HEADER_MALFORMED` or `PAYMENT_HEADER_INVALID`, and 402 `X402_VERSION_UNSUPPORTED`, `PAYMENT_SCHEME_UNSUPPORTED`, `PAYMENT_METHOD_UNSUPPORTED` (Permit2) or `PAYMENT_OFFER_MISMATCH` (see [error-codes.md](error-codes.md)). None of them charges anything.
+- Every 402 that offers a payment also carries the `PAYMENT-REQUIRED` header (#608): base64 of the x402 v2 `PaymentRequired`, with the same offers as the body in v2 form (CAIP-2 network, `amount`), the body's `error` and the `resource`. v2 clients such as the SDK read the header and pay with v2. With `1,2` the JSON body stays the v1 body, so v1 clients such as the current CLI keep paying with v1 against the same gateway. With `2` alone the body is the JSON copy of the v2 `PaymentRequired` (`x402Version` 2, `error`, `resource`, `accepts`), plus the usual `code`, `message` and other fields, at the top level and under `detail`. A 402 that offers no payment (a chunk-credit refusal, say) has no header.
+- If the header would be over 8192 characters (a very long description, for example), or the offer cannot be written in v2, the 402 is sent without it and with the v1 body (with `2` alone too, so v1 clients can still pay it), a warning is logged, and `gateway_x402_payment_required_header_failures_total{reason="too_large"|"invalid"}` counts it. It is never a 500. v2 clients cannot pay that 402; v1 clients still can with `1,2`. The series exist from startup when 2 is enabled, and should stay at 0.
+- `/verify` and `/settle` are sent with `x402Version: 2`. The facilitator must settle v2 `exact` on the configured network, which the startup check below makes sure of.
+- A v2 settlement answers with the `PAYMENT-RESPONSE` header, a v1 settlement with `X-PAYMENT-RESPONSE`. Never both.
+- A v2 settle answer is a definite refusal only when it is a 4xx with `success: false`. A 5xx, or any answer the gateway cannot read, is an unknown outcome (502, the result withheld), as a timeout is.
+- A v2 verify answer counts only when it is a 2xx, or a 4xx with `isValid: false`. Anything else (a 5xx even if it says `isValid: true`) is answered 502, nothing charged.
+- The v2 receipt (`PAYMENT-RESPONSE`) is built by the gateway: `success`, the transaction hash (when it is a valid 32-byte hash), the network and amount of the gateway's own offer, and the payer. Nothing else from the facilitator's answer is passed on.
+- One signed authorization counts once across both versions. Re-wrapping it in the other version's header is refused like any replay. An `Idempotency-Key` result stored for one version is not served to a request paying in the other: it gets 409 `IDEMPOTENCY_KEY_VERSION_MISMATCH`, unpaid.
+- `gateway_x402_settlements_total{version="2"}` exists from startup for every result, so the "x402 settlement problems" alert sees the first v2 problem after a restart.
+
+Switching `PAYMENT-REQUIRED` on switches v2-capable clients to v2, and switching back to `1` moves them back to v1: the header is what they follow. `2` alone shuts out v1 clients (the current CLI).
+
+#### Turning on dual mode in a deployment
+
+`.github/workflows/deploy.yml` writes `X402_PROTOCOL_VERSIONS` into each environment's env file from the GitHub variable of the same name (#609). Unset or empty, it is `1` in both staging and production. Switching takes a variable and a redeploy, nothing else:
+
+1. Rehearse on staging first. Set the variable on the `staging` environment, not on the repository (a repository value would also reach production):
+
+   ```sh
+   gh variable set X402_PROTOCOL_VERSIONS --repo datafund/swarm_connect --env staging --body 1,2
+   ```
+
+2. Redeploy (push to `dev`, or re-run the deploy workflow on `dev`). The deploy check (`python -m app.x402.check_config`) runs the startup check above with the new value, before the running gateway is stopped. If the facilitator does not list v2 `exact` on the network, the run fails with `x402 configuration refused` and the old gateway keeps serving. A value other than `1`, `1,2` or `2` fails it with `x402 configuration check could not run` (a settings error that names `X402_PROTOCOL_VERSIONS`), also before the gateway is touched.
+3. Check `GET /health`: `x402.versions` is `[1, 2]`, and a 402 from a paid route carries `PAYMENT-REQUIRED`.
+4. For production, do the same with `--env production` and a push to `main`.
+
+**Rolling back.** Set the variable back to `1` (`gh variable set X402_PROTOCOL_VERSIONS --repo datafund/swarm_connect --env <environment> --body 1`, or delete the variable) and redeploy. The gateway then advertises and accepts v1 only, and v2 clients move back to v1. With `1` the startup check does not call the facilitator, so this works during a facilitator outage too. Editing the env file on the host and force-recreating the container applies a value at once, but the next deploy writes the GitHub variable's value again: change both, as for any setting.
+
+#### Startup check: the facilitator must settle v2
+
+With x402 enabled and 2 in `X402_PROTOCOL_VERSIONS`, the gateway calls the facilitator's `GET /supported` once at startup, with the configured facilitator credentials (CDP or the bearer token). Redirects are not followed for this call, so `X402_FACILITATOR_URL` must be the final URL of the facilitator (the public x402.org, PayAI and CDP facilitators answer `/supported` directly). A non-2xx answer, a 3xx included, is refused without its body being read. It starts only if the answer is a 2xx and lists a kind with `x402Version` 2, scheme `exact` and the configured network as a CAIP-2 id (`eip155:84532` for `base-sepolia`, `eip155:8453` for `base`). A v2 kind listed under the v1 name (`base-sepolia`) does not count. The deploy check (`python -m app.x402.check_config`) runs the same call, so a deploy with such a facilitator fails before the running gateway is replaced. With `1`, or with x402 disabled, `/supported` is never called.
+
+The check fails closed. Every failure stops startup with a message that begins `Refusing to start with x402 enabled: X402_PROTOCOL_VERSIONS includes 2, but` and ends with `fix the facilitator, or set X402_PROTOCOL_VERSIONS=1`. Messages name the facilitator host and a short, sanitised summary of what it lists, never a credential:
+
+| Message continues with | Cause | What to do |
+|---|---|---|
+| `the facilitator on <host> does not list x402Version 2, scheme exact, network eip155:84532 in /supported (it lists v2 exact for [...]; for eip155:84532, in either name form: [...])` | The facilitator does not settle v2 `exact` on this network (a kind counts only with `x402Version` the integer 2, not `"2"` or `2.0`). The two lists show what it does settle: only CAIP-2 ids, v1 network names and short lower-case schemes are shown, anything else as `<invalid>`, at most 10 of each and then `and N more`, because this message ends up in the deploy log. | Use a facilitator that settles v2 on the network, or set `X402_PROTOCOL_VERSIONS=1`. |
+| `the facilitator's /supported on <host> could not be reached (ConnectError)` (or `ReadTimeout`, `ConnectTimeout`, `timed out after 15 s`, ...) | No connection, no data for 5 seconds, or the whole answer not complete within 15 seconds. | Check the facilitator URL and the network path from the gateway to it. |
+| `the request to the facilitator's /supported on <host> could not be made (RuntimeError; ...)` (or `InvalidURL`, ...) | The request could not be sent at all: the CDP credential hook failed (a malformed key, say), or the facilitator URL is not a valid URL. The error text itself is not shown, since it may contain a credential. | Check the facilitator URL and the credentials. |
+| `the facilitator's /supported on <host> answered HTTP 401, not a list of payment kinds (an authentication error: check the facilitator credentials)` (the same hint for 403; for a 3xx the hint is `redirects are not followed: set X402_FACILITATOR_URL to the final URL`; any other non-2xx status has no hint) | Any answer that is not 2xx, whatever its body: an authentication error (CDP answers 401 without valid credentials), a 404 for a wrong path, a 5xx from a facilitator in trouble. Kinds in a non-2xx body are never trusted. | For 401 or 403, check the credentials; otherwise the facilitator URL and the facilitator's state. |
+| `the facilitator's /supported on <host> answered HTTP 200 with something that is not a list of payment kinds (ValidationError)` (or `JSONDecodeError`, `TypeError`, `not UTF-8`, `not UTF-8 JSON text: a control character...`, `content-encoded...`, `nested deeper than 32 levels`, `larger than 1048576 bytes`) | A 2xx answer of another shape, such as an HTML page; one not in UTF-8 (RFC 8259 requires it; a UTF-16 or UTF-32 body is refused, a leading UTF-8 byte order mark is ignored); one compressed (the gateway asks for `Accept-Encoding: identity` and never inflates this answer); one nested more than 32 levels deep (checked before parsing); or one over 1 MiB. | Check the facilitator URL. |
+
+**What failing closed costs.** A facilitator outage does not stop a running gateway. But if the gateway restarts (a deploy, a crash, a host reboot) while the facilitator's `/supported` is unreachable, the gateway stays down, free tier and downloads included, until the facilitator answers again. The container restart policy keeps retrying, and the check passes as soon as `/supported` answers. To bring the gateway up during a facilitator outage, set `X402_PROTOCOL_VERSIONS=1` and recreate the container (set the GitHub variable to `1` as well and redeploy, or the next deploy brings `1,2` back; see [Turning on dual mode in a deployment](#turning-on-dual-mode-in-a-deployment)). It then starts without calling `/supported`, advertises and accepts v1 only, and v2 clients move to v1. Set it back to `1,2` once the facilitator answers.
+
+Whatever the setting, an `X-PAYMENT` whose payload claims an `x402Version` other than 1 is refused with 400 `PAYMENT_HEADER_INVALID` before the facilitator (#639).
+
 ### Disabling x402
 
 To run the gateway without x402 (original behavior):
@@ -119,12 +183,54 @@ The minimum price (`X402_MIN_PRICE_USD`) ensures you always cover costs.
 already paid for. The price is:
 
 ```
-Upload Price = max(Content-Length / 10^9 × X402_BANDWIDTH_USD_PER_GB × (1 + MARKUP_PERCENT/100), X402_MIN_PRICE_USD)
+Priced Bytes = ceil(Content-Length × (data + parity) / data)
+Upload Price = max(Priced Bytes / 10^9 × X402_BANDWIDTH_USD_PER_GB × (1 + MARKUP_PERCENT/100), X402_MIN_PRICE_USD)
 ```
 
-A request without `Content-Length` is priced at `MAX_UPLOAD_SIZE_MB`. With the
+`(data + parity) / data` is the erasure-coding overhead of the upload's
+redundancy level (#429). Bee splits the chunks into groups and adds parity
+chunks to each group, and it pushes those chunks to the network too. The
+level is the request's `redundancy` query parameter. Without one, the level
+is the default, 2, because the gateway always asks Bee for a level. A value
+the endpoint refuses is priced at the default, and the request is then
+refused without a charge.
+
+| Level | Name | Data chunks per full group | Parity chunks | Factor |
+|-------|------|---------------------------|---------------|--------|
+| 0 | none | - | 0 | 1.000 |
+| 1 | medium | 119 | 9 | 1.076 |
+| 2 | strong (default) | 107 | 21 | 1.196 |
+| 3 | insane | 97 | 31 | 1.320 |
+| 4 | paranoid | 39 | 89 | 3.282 |
+
+The counts are from Bee v2.8.1, `pkg/file/redundancy/level.go` (`mediumEt`,
+`strongEt`, `insaneEt`, `paranoidEt`), and are set in
+`REDUNDANCY_ERASURE_GROUP` in `app/services/swarm_api.py`. If you upgrade Bee,
+check that these tables have not changed.
+
+Limitations of the factor:
+
+- **Small files are underpriced.** The factor is the overhead of a full
+  group, which is the smallest overhead Bee adds. A file of a few chunks, and
+  the last partial group of a larger file, get more parity per data chunk. For
+  example, one data chunk at level 2 gets 4 parity chunks. Bee also stores the
+  root chunk as 2, 4, 8 or 16 extra copies (levels 1-4). The gateway does not
+  price these extra bytes. Uploads that small cost the `X402_MIN_PRICE_USD`
+  floor unless you raise `X402_BANDWIDTH_USD_PER_GB` by several orders of
+  magnitude.
+- **The gateway cannot count chunks exactly.** It sees only `Content-Length`,
+  which includes the multipart framing. A `/data/manifest` TAR holds several
+  files and manifest nodes, each with its own chunk tree.
+- **Encrypted uploads are out of scope.** Bee uses different tables for
+  encrypted chunks (`encMediumEt` and the others). The gateway does not offer
+  encrypted uploads, so it does not use them.
+
+`GET /api/v1/pricing` takes the same `redundancy` parameter and quotes the
+same amount the 402 asks for.
+
+A request without `Content-Length` is priced at `MAX_UPLOAD_SIZE_MB`, multiplied by the same factor. With the
 defaults ($0.10/GB, 50% markup, 10 MB cap) every upload costs the $0.01
-minimum. There is no setting for the upload price alone:
+minimum, at every redundancy level. There is no setting for the upload price alone:
 `X402_BANDWIDTH_USD_PER_GB` also prices chunk-credit top-ups, and
 `X402_MIN_PRICE_USD` also floors stamp purchases. Before #365 an upload cost
 the price of a new 24-hour stamp sized to it.
@@ -260,6 +366,8 @@ Each log entry includes:
 - Wallet address (if available)
 - Event-specific data
 
+The payment records (`payment_settled`, `payment_failed`, `payment_delivered`) include `data.x402_version`, the x402 protocol version of the payment. It is `1` for every payment unless `X402_PROTOCOL_VERSIONS` enables x402 v2; then a `PAYMENT-SIGNATURE` payment is `2`. The metrics have a matching `version` label. On `gateway_x402_payments_total` it is `1`, `2` or `none`, where `none` means the request carried no payment header. On `gateway_x402_settlements_total` it is `1` or `2` and never `none`, because only a payment is settled.
+
 ### Reading Audit Logs
 
 ```bash
@@ -290,6 +398,7 @@ curl http://localhost:8000/health | jq .
   "message": "Welcome to Swarm API Aggregator",
   "x402": {
     "enabled": true,
+    "versions": [1],
     "base_wallet": {
       "address": "0xYourAddress...",
       "balance_eth": 0.01,
@@ -316,9 +425,17 @@ curl http://localhost:8000/health | jq .
 **Status Values:**
 | Status | Meaning | HTTP Code |
 |--------|---------|-----------|
-| `ok` | All wallets healthy | 200 |
-| `degraded` | Low balance warnings, still operating | 200 |
-| `critical` | Cannot process payments | 200 |
+| `ok` | Bee node reachable and payments accepted | 200 |
+| `degraded` | Something needs attention. Paid requests may be refused. Causes: the Bee node API cannot be reached (`bee_node.api_reachable: false`), the node reports `network_availability: Unavailable`, the xBZZ or xDAI balance cannot be read (`x402.bee_gnosis_wallet.can_accept: false`, paid requests get `503 PAYMENTS_UNAVAILABLE`), payment state cannot be written, there is no snapshot yet (just after startup), or the snapshot is too old to trust | 200 |
+| `critical` | A blocking error in `x402.errors`. Nothing sets one today; the SDK's `health()` reports false only for this value | 200 |
+
+An unreachable Bee node is `degraded` and not `critical` on purpose (#108, #589): the SDK
+treats `critical` as "gateway down", and a Bee outage is usually short. Monitors that
+must tell "gateway alive" from "Bee reachable" should read `bee_node.healthy`. It is also
+false when the health snapshot is too old to trust (its refreshes keep failing): the Bee
+state is then unknown, `bee_node.api_reachable` is null, and a warning says so.
+
+A low balance that could still be read is a warning only and does not change `status`.
 
 ### Pre-flight Checks
 
@@ -333,8 +450,32 @@ The gateway performs pre-flight checks before accepting payments:
 4. **ETH Balance**: Does facilitator have gas for USDC transfers?
 
 **Threshold Behavior:**
-- **Below warning threshold**: Log warning, accept payments, status = `degraded`
-- **Below critical threshold**: Block paid requests via middleware, status = `critical`
+- **Below warning threshold**: Log warning, accept payments. `status` does not change.
+- **Balance cannot be read** (xBZZ or xDAI; #589): `can_accept` is false, `status` is
+  `degraded`, and every paid request (and every request that would be offered a 402)
+  gets `503 PAYMENTS_UNAVAILABLE` before payment, so that request is not charged. A
+  retry of an attempt that may have been charged, answered from stored state (a stored
+  result or a 409), is not refused by this check, though its pricing can still fail while
+  Bee is down. Free-tier
+  requests still run. An unreadable chequebook balance alone is a warning only.
+- **Snapshot too old to trust**: the checks come from the `/health` snapshot (#588). When
+  its refreshes keep failing and it is older than `HEALTH_SNAPSHOT_MAX_TRUSTED_AGE_SECONDS`
+  (default 60, never less than TTL + refresh timeout), paid requests are refused the same
+  way and `status` is `degraded`.
+
+The check reads the cached snapshot, so it adds no Bee call per request. It can lag by
+up to `HEALTH_SNAPSHOT_TTL_SECONDS` (15 s): just after Bee recovers, paid requests can
+still be refused for that long. Just after Bee fails, a paid request can still pass and
+fail after settlement, which leads to the usual refund path. If Bee fails by not
+answering at all, refreshes take until their timeout to fail, so this window can last
+until the snapshot is too old to trust: up to `HEALTH_SNAPSHOT_MAX_TRUSTED_AGE_SECONDS`
+(60 s), not only one TTL.
+
+**Edge case:** the gate keys on Bee's `/wallet` endpoint. If `/wallet` fails while the rest
+of Bee still works (uploads succeed), every paid route is refused, including paid uploads
+that do not spend xBZZ. `/health` shows it as `can_accept: false` with a "Failed to fetch
+xBZZ balance" warning while `bee_node.api_reachable` is true. Check the Bee node's wallet
+API (`curl <bee>/wallet` from the gateway host); free-tier uploads keep working meanwhile.
 
 ### Check Gateway Status
 
@@ -378,10 +519,12 @@ Since there's no automatic bridging, you need to manually manage:
 
 ## Troubleshooting
 
-### Health endpoint shows `critical` status
+### Health endpoint shows `degraded` or `critical` status
 
-Gateway wallet is below critical thresholds. The health endpoint always returns HTTP 200
-so the gateway stays reachable — check the `status` field in the JSON response.
+The health endpoint always returns HTTP 200 so the gateway stays reachable — check the
+`status` field in the JSON response, then `bee_node.api_reachable`, `bee_node.healthy`,
+`snapshot.warnings` and `x402.bee_gnosis_wallet.can_accept`. If `can_accept` is false,
+paid requests are getting `503 PAYMENTS_UNAVAILABLE` until the Bee wallet can be read again.
 
 1. Check health endpoint: `curl http://localhost:8000/health | jq .`
 2. Look at `x402.base_wallet.is_critical` and `x402.bee_gnosis_wallet.can_accept`

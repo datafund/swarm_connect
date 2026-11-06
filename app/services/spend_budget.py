@@ -45,6 +45,7 @@ from typing import Dict, Optional, Tuple
 
 from app.core.config import settings
 from app.core.atomic_io import StateLoadError, atomic_write_json, load_json_state, unreadable_state
+from app.core.day_reset import next_reset_at
 
 logger = logging.getLogger(__name__)
 
@@ -73,18 +74,22 @@ def spend_certainly_did_not_happen(exc: BaseException) -> bool:
     """Whether a failed spend definitely spent nothing, so its hold can go back.
 
     Only when the refusal came before the money moved: a check of our own
-    (HTTPException), a connection that was never made, or Bee answering with a
-    4xx refusal. A timeout after the request was sent, a cancellation, a 5xx or
+    (HTTPException, or the Bee call gate refusing to send the call), a
+    connection that was never made, or Bee answering with a 4xx refusal. A timeout after the request was sent, a cancellation, a 5xx or
     anything unrecognised may have spent money, so the hold is kept and the
     limits fail closed.
     """
-    import httpx
+    import httpx2
     from fastapi import HTTPException
+    from app.services.bee_gate import BeeBusyError
     if isinstance(exc, HTTPException):
         return True
-    if isinstance(exc, (httpx.ConnectError, httpx.ConnectTimeout)):
+    # Refused by the gateway's own Bee call gate (#588): never sent to Bee.
+    if isinstance(exc, BeeBusyError):
         return True
-    if isinstance(exc, httpx.HTTPStatusError):
+    if isinstance(exc, (httpx2.ConnectError, httpx2.ConnectTimeout)):
+        return True
+    if isinstance(exc, httpx2.HTTPStatusError):
         return 400 <= exc.response.status_code < 500
     return False
 
@@ -171,6 +176,14 @@ class SpendBudgetTracker:
             self._unreadable = None
             self._save()
 
+    def state_unreadable(self) -> bool:
+        """Whether today's file was unreadable, so limited spending is refused (#468).
+
+        False once the UTC day has rolled over, as check() then starts afresh.
+        """
+        with self._lock:
+            return bool(self._unreadable) and self._day == _today()
+
     def budget(self) -> float:
         return settings.STAMP_DAILY_BZZ_PER_CALLER
 
@@ -197,7 +210,7 @@ class SpendBudgetTracker:
             "spent_bzz": round(spent, 6),
             "remaining_bzz": remaining if limit == UNLIMITED else round(remaining, 6),
             "request_cost_bzz": round(cost_bzz, 6),
-            "resets_at": f"{_today()}T24:00:00Z",
+            "resets_at": next_reset_at(_today()),
         }
         if limit == UNLIMITED:
             return True, info
@@ -224,7 +237,7 @@ class SpendBudgetTracker:
                         "caller": key,
                         "daily_budget_bzz": limit,
                         "request_cost_bzz": round(cost, 6),
-                        "resets_at": f"{self._day}T24:00:00Z",
+                        "resets_at": next_reset_at(self._day),
                         "state_unreadable": True,
                     }
                 if limit != UNLIMITED and spent + cost > limit:
@@ -235,7 +248,7 @@ class SpendBudgetTracker:
                         "spent_bzz": round(spent, 6),
                         "remaining_bzz": round(remaining, 6),
                         "request_cost_bzz": round(cost, 6),
-                        "resets_at": f"{self._day}T24:00:00Z",
+                        "resets_at": next_reset_at(self._day),
                     }
             for key, cost, _ in charges:
                 self._spent[key] = self._spent.get(key, 0.0) + cost
@@ -296,7 +309,7 @@ class SpendBudgetTracker:
                 "spent_bzz": round(spent, 6),
                 "remaining_bzz": remaining if limit == UNLIMITED else round(remaining, 6),
                 "request_cost_bzz": round(cost_bzz, 6),
-                "resets_at": f"{self._day}T24:00:00Z",
+                "resets_at": next_reset_at(self._day),
             }
             if limit != UNLIMITED and spent + cost_bzz > limit:
                 return False, info

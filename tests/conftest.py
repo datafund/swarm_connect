@@ -44,6 +44,7 @@ for _var, _name in (
     ("STAMP_SPEND_BUDGET_STATE_FILE", "stamp_spend_budget.json"),
     ("X402_AUDIT_LOG_PATH", "x402_audit.jsonl"),
     ("X402_IDEMPOTENCY_STATE_FILE", "x402_idempotency.json"),
+    ("X402_SETTLEMENT_UNKNOWN_STATE_FILE", "x402_settlement_unknown.json"),
 ):
     os.environ[_var] = os.path.join(_STATE_DIR, _name)
 
@@ -95,10 +96,47 @@ def _reset_payment_replay_guard():
     The guard is process-wide by design (one authorization, one delivery), and
     tests reuse the same signed test authorization.
     """
-    from app.x402.settlement import replay_guard
+    from app.x402.settlement import outcome_unknown, replay_guard
     from app.x402.idempotency import idempotency_store
     replay_guard.reset()
+    outcome_unknown.reset()
     idempotency_store.reset()
     yield
     replay_guard.reset()
+    outcome_unknown.reset()
     idempotency_store.reset()
+
+
+@pytest.fixture(autouse=True)
+def _isolate_ownership_registry():
+    """Restore the global ownership registry after each test.
+
+    Tests that buy or acquire through the real endpoints register batches in the
+    module-level singleton and never remove them. Pool sync skips any batch
+    registered to an owner other than the pool (#477), so a record left behind
+    by one test changes the outcome of a later pool test that reuses the batch id.
+    """
+    from app.services.stamp_ownership import stamp_ownership_manager
+
+    registry = stamp_ownership_manager._registry
+    snapshot = {k: dict(v) if isinstance(v, dict) else v for k, v in registry.items()}
+    yield
+    stamp_ownership_manager._registry = registry
+    registry.clear()
+    registry.update(snapshot)
+
+
+@pytest.fixture(autouse=True)
+def _reset_health_snapshot_and_gate():
+    """Each test starts with no /health snapshot and no Bee call slots held.
+
+    The snapshot is process-wide by design (#588): without this, a /health
+    answer built from one test's mocks would be served to the next test.
+    """
+    from app.services import health_snapshot
+    from app.services.bee_gate import bee_call_gate
+    health_snapshot.reset()
+    bee_call_gate.reset()
+    yield
+    health_snapshot.reset()
+    bee_call_gate.reset()

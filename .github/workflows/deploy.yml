@@ -93,6 +93,7 @@ jobs:
           X402_FACILITATOR_CDP_API_KEY_ID=${{ secrets.X402_FACILITATOR_CDP_API_KEY_ID || '' }}
           X402_FACILITATOR_CDP_API_KEY_SECRET=${{ secrets.X402_FACILITATOR_CDP_API_KEY_SECRET || '' }}
           X402_FACILITATOR_BEARER_TOKEN=${{ secrets.X402_FACILITATOR_BEARER_TOKEN || '' }}
+          X402_PROTOCOL_VERSIONS=${{ vars.X402_PROTOCOL_VERSIONS || '1' }}
           X402_FREE_TIER_ENABLED=${{ vars.X402_FREE_TIER_ENABLED || 'true' }}
           STAMP_POOL_ENABLED=${{ vars.STAMP_POOL_ENABLED || 'false' }}
           STAMP_POOL_RESERVE_SMALL=${{ vars.STAMP_POOL_RESERVE_SMALL || '1' }}
@@ -174,6 +175,10 @@ jobs:
           X402_FACILITATOR_CDP_API_KEY_ID=${{ secrets.X402_FACILITATOR_CDP_API_KEY_ID || '' }}
           X402_FACILITATOR_CDP_API_KEY_SECRET=${{ secrets.X402_FACILITATOR_CDP_API_KEY_SECRET || '' }}
           X402_FACILITATOR_BEARER_TOKEN=${{ secrets.X402_FACILITATOR_BEARER_TOKEN || '' }}
+          # Defaults to 1 (x402 v1 only) in both environments, unlike the network and
+          # facilitator above: 1 is the behaviour before x402 v2 existed. 1,2 turns on
+          # dual mode; the deploy check below then requires the facilitator to list v2.
+          X402_PROTOCOL_VERSIONS=${{ vars.X402_PROTOCOL_VERSIONS || '1' }}
           X402_BZZ_USD_RATE=${{ vars.X402_BZZ_USD_RATE || '0.50' }}
           X402_MARKUP_PERCENT=${{ vars.X402_MARKUP_PERCENT || '50' }}
           X402_MIN_PRICE_USD=${{ vars.X402_MIN_PRICE_USD || '0.01' }}
@@ -308,6 +313,37 @@ jobs:
           # Pinning it makes the path irrelevant to identity. Written last so
           # nothing in the host env file can override it.
           echo "COMPOSE_PROJECT_NAME=swarm_connect" >> .env
+
+          # === x402 configuration check (#485) ===
+          # Run the gateway's own startup validation (validate_x402_config)
+          # BEFORE the running gateway is stopped. `compose run` uses the new
+          # image with exactly the env_file and environment the new container
+          # will get; --no-deps starts nothing else, --rm removes it after.
+          # A configuration the gateway would refuse (for example
+          # X402_NETWORK=base with the testnet-only x402.org facilitator) then
+          # fails this job here, and the previous container keeps serving.
+          # Without this, the new container would be created, refuse to start,
+          # and leave the gateway down until the next good deploy.
+          # Note: the env file above already holds the new values. After a
+          # failure, fix the GitHub variables/secrets and re-run the deploy; do
+          # not force-recreate by hand (docs/mainnet-runbook.md, section 1).
+          # Exit 3 means the gateway would refuse the configuration. Any other
+          # non-zero exit means the check itself could not run (a compose
+          # interpolation or daemon error, or a settings error), so it is not
+          # reported as a refusal. Both stop here, before the gateway is touched.
+          echo "Checking x402 configuration for $BRANCH_SERVICE"
+          CHECK_RC=0
+          docker compose run --rm --no-deps -T "$BRANCH_SERVICE" \
+            python -m app.x402.check_config || CHECK_RC=$?
+          case "$CHECK_RC" in
+            0) ;;
+            3)
+              echo "::error title=x402 configuration refused::$BRANCH_SERVICE would refuse to start with this x402 configuration (see the message above); the running gateway was not touched"
+              exit 1 ;;
+            *)
+              echo "::error title=x402 configuration check could not run::exit $CHECK_RC, see the output above; the running gateway was not touched"
+              exit 1 ;;
+          esac
 
           # Recreate ONLY the service this branch owns. `docker compose up -d
           # --force-recreate` with no argument recreates every service, so a push

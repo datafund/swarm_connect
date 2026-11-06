@@ -12,7 +12,8 @@ import time
 from typing import Dict, Any, Optional
 
 from app.core.config import settings
-from app.services.http_client import get_client
+from app.services.bee_errors import error_cause
+from app.services.http_client import exc_text, get_client
 
 logger = logging.getLogger(__name__)
 
@@ -126,6 +127,7 @@ async def check_base_eth_balance() -> Dict[str, Any]:
         logger.error("X402_PAY_TO_ADDRESS not configured - cannot check balance")
         return {
             "ok": False,
+            "fetched": False,
             "is_critical": True,
             "balance_wei": 0,
             "balance_eth": 0.0,
@@ -167,6 +169,8 @@ async def check_base_eth_balance() -> Dict[str, Any]:
 
         return {
             "ok": ok,
+            # The balance was read; `ok` is False also for one read but below threshold.
+            "fetched": True,
             "is_critical": is_critical,
             "balance_wei": balance_wei,
             "balance_eth": balance_eth,
@@ -177,14 +181,18 @@ async def check_base_eth_balance() -> Dict[str, Any]:
         }
 
     except Exception as e:
-        logger.error(f"Failed to check Base ETH balance: {e}")
+        logger.error(f"Failed to check Base ETH balance: {exc_text(e)}")
         return {
             "ok": False,
+            "fetched": False,
             "is_critical": True,  # Treat RPC errors as critical (can't verify)
             "balance_wei": 0,
             "balance_eth": 0.0,
             "threshold_eth": warn_threshold,
             "critical_eth": critical_threshold,
             "address": address,
-            "warning": f"Failed to fetch Base ETH balance: {str(e)}"
+            # str(e) names BASE_RPC_URL, which can carry an API key (#549);
+            # the full text is logged above.
+            "warning": (f"Failed to fetch Base ETH balance "
+                        f"({error_cause(e)}); see the gateway log for details.")
         }

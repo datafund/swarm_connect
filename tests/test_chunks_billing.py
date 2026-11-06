@@ -5,7 +5,7 @@ Tests for x402 bandwidth pricing, credit top-up, and debit-on-upload (issue #221
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import httpx
+import httpx2
 import pytest
 from fastapi.testclient import TestClient
 
@@ -220,7 +220,7 @@ class TestDebitOnUpload:
         with patch("app.api.endpoints.chunks.settings", _enabled_settings()):
             with patch("app.api.endpoints.chunks.bandwidth_credit_manager", mgr):
                 with patch("app.api.endpoints.chunks.upload_chunk_to_swarm",
-                           new=AsyncMock(side_effect=httpx.HTTPError("bee down"))):
+                           new=AsyncMock(side_effect=httpx2.HTTPError("bee down"))):
                     r = client.post(
                         "/api/v1/chunks/",
                         content=b"x" * 8,

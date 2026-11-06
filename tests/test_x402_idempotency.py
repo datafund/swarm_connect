@@ -9,11 +9,12 @@ import json
 import secrets
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import httpx
+import httpx  # x402's own facilitator client raises httpx errors, not httpx2 ones (#595)
+import httpx2
 import pytest
 from fastapi import APIRouter, Depends, FastAPI, File, Request, UploadFile
 from fastapi.testclient import TestClient
-from x402.types import SettleResponse, VerifyResponse
+from app.x402.models_v1 import SettleResponse, VerifyResponse
 
 from app.core.config import settings
 from app.x402.dependency import require_x402_payment
@@ -187,7 +188,7 @@ def test_retry_while_first_is_running_gets_409_and_is_not_charged(fac):
     app, bought = _app(fac, gate=gate)
 
     async def run():
-        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t") as c:
+        async with httpx2.AsyncClient(transport=httpx2.ASGITransport(app=app), base_url="http://t") as c:
             h = lambda: {"X-PAYMENT": pay(), "Idempotency-Key": "k1"}
             first = asyncio.create_task(c.post("/api/v1/stamps/", json={"depth": 17}, headers=h()))
             while fac.settle.await_count == 0:
@@ -394,6 +395,133 @@ def test_unknown_settlement_outcome_keeps_the_key(fac):
     assert detail["code"] == "IDEMPOTENCY_KEY_SETTLEMENT_UNKNOWN"
     assert detail["nonce"] == first_nonce
     assert fac.settle.await_count == 1 and not bought
+
+
+def test_unknown_outcome_on_the_fallback_settlement_keeps_the_key(fac):
+    """#553: a paid route without its own settle point. The middleware settles after
+    the work; the facilitator gives no answer. A retry must not pay again."""
+    ran = []
+
+    async def no_settle_point(request: Request):
+        ran.append(1)
+        return {"reference": "r" * 64}
+
+    router = APIRouter()
+    router.add_api_route("/manifest", no_settle_point, methods=["POST"])
+    app = FastAPI()
+    app.include_router(router, prefix="/api/v1/data", dependencies=[Depends(require_x402_payment)])
+    app.add_middleware(X402Middleware, facilitator_client=fac)
+    c = TestClient(app)
+
+    fac.settle.side_effect = httpx.ReadTimeout("facilitator slow")
+    first_nonce = "0x" + "6f" * 32
+    r = c.post("/api/v1/data/manifest", json={},
+               headers={"X-PAYMENT": pay(nonce=first_nonce), "Idempotency-Key": "k553"})
+    assert r.status_code == 502
+    assert r.json()["code"] == "PAYMENT_SETTLEMENT_UNKNOWN"
+    assert r.json()["nonce"] == first_nonce
+    fac.settle.side_effect = lambda **kw: SettleResponse(success=True, transaction="0x" + "cd" * 32)
+    retry = _post(c, key="k553", body={}, path="/api/v1/data/manifest")
+    assert retry.status_code == 409
+    assert retry.json()["detail"]["code"] == "IDEMPOTENCY_KEY_SETTLEMENT_UNKNOWN"
+    assert retry.json()["detail"]["nonce"] == first_nonce
+    assert fac.settle.await_count == 1 and ran == [1]
+
+
+def test_same_authorization_and_key_after_unknown_outcome_is_not_told_to_pay(fac):
+    """#553 review: after 502 PAYMENT_SETTLEMENT_UNAVAILABLE on a keyed request, the same
+    X-PAYMENT with the same key used to get 402 "already used. Sign a new payment." with
+    accepts; an x402 client pays from that. It gets the settlement-unknown answer."""
+    app, bought = _app(fac)
+    c = TestClient(app)
+    fac.settle.side_effect = httpx.ReadTimeout("facilitator slow")
+    nonce = "0x" + "7a" * 32
+    headers = {"X-PAYMENT": pay(nonce=nonce), "Idempotency-Key": "k-same"}
+    assert c.post("/api/v1/stamps/", json={"depth": 17}, headers=headers).status_code == 502
+    retry = c.post("/api/v1/stamps/", json={"depth": 17}, headers=headers)
+    assert retry.status_code == 409
+    detail = retry.json()["detail"]
+    assert detail["code"] == "IDEMPOTENCY_KEY_SETTLEMENT_UNKNOWN"
+    assert detail["nonce"] == nonce
+    assert "accepts" not in detail
+    assert fac.settle.await_count == 1 and not bought
+
+
+def test_same_authorization_and_key_after_fallback_unknown_is_not_told_to_pay(fac):
+    """Same, on the middleware fallback (work ran, then no answer from the facilitator)."""
+    async def no_settle_point(request: Request):
+        return {"reference": "r" * 64}
+
+    router = APIRouter()
+    router.add_api_route("/manifest", no_settle_point, methods=["POST"])
+    app = FastAPI()
+    app.include_router(router, prefix="/api/v1/data", dependencies=[Depends(require_x402_payment)])
+    app.add_middleware(X402Middleware, facilitator_client=fac)
+    c = TestClient(app)
+    fac.settle.side_effect = httpx.ReadTimeout("facilitator slow")
+    nonce = "0x" + "7b" * 32
+    headers = {"X-PAYMENT": pay(nonce=nonce), "Idempotency-Key": "k-fb"}
+    assert c.post("/api/v1/data/manifest", json={}, headers=headers).status_code == 502
+    retry = c.post("/api/v1/data/manifest", json={}, headers=headers)
+    assert retry.status_code == 409
+    detail = retry.json()["detail"]
+    assert detail["nonce"] == nonce and detail["x402_status"] == "settlement_unknown"
+    assert "accepts" not in detail
+    assert fac.settle.await_count == 1
+
+
+def test_keyed_unavailable_then_same_authorization_under_a_new_key(fac):
+    """#553 review 2: the first key stays taken; the same authorization under another key
+    is an ordinary attempt, and a facilitator refusal of it is not a 402."""
+    app, bought = _app(fac)
+    c = TestClient(app)
+    nonce = "0x" + "7c" * 32
+    fac.settle.side_effect = [httpx.ReadTimeout("facilitator slow"),
+                              SettleResponse(success=False, errorReason="nonce_used")]
+    first = c.post("/api/v1/stamps/", json={"depth": 17},
+                   headers={"X-PAYMENT": pay(nonce=nonce), "Idempotency-Key": "k-a"})
+    assert first.status_code == 502
+    retry = c.post("/api/v1/stamps/", json={"depth": 17},
+                   headers={"X-PAYMENT": pay(nonce=nonce), "Idempotency-Key": "k-b"})
+    assert retry.status_code == 409
+    detail = retry.json()["detail"]
+    assert detail["code"] == "PAYMENT_AUTHORIZATION_OUTCOME_UNKNOWN"
+    assert detail["nonce"] == nonce and "accepts" not in detail
+    assert not bought
+
+
+def test_replay_record_carries_the_retry_nonce(fac):
+    """#553 review 2: the replay record names the retry's own (never settled) nonce."""
+    from app.x402.audit import read_audit_log
+    app, bought = _app(fac)
+    c = TestClient(app)
+    first_nonce, retry_nonce = "0x" + "8a" * 32, "0x" + "8b" * 32
+    hdr = lambda n: {"X-PAYMENT": pay(nonce=n), "Idempotency-Key": "k-replay"}
+    assert c.post("/api/v1/stamps/", json={"depth": 17}, headers=hdr(first_nonce)).status_code == 201
+    assert c.post("/api/v1/stamps/", json={"depth": 17}, headers=hdr(retry_nonce)).status_code == 201
+    replay = [e for e in read_audit_log() if e["event_type"] == "payment_idempotent_replay"][0]
+    assert replay["data"]["nonce"] == retry_nonce
+    settled = [e for e in read_audit_log() if e["event_type"] == "payment_settled"][0]
+    assert settled["data"]["nonce"] == first_nonce
+
+
+def test_p4_settling_key_answers_409_after_the_authorization_settled_elsewhere(fac):
+    """#553 review 3: keyed UNAVAILABLE on key a; the same X-PAYMENT under key b settles;
+    the same X-PAYMENT under key a gets the key's 409, not 402 "already used"."""
+    app, bought = _app(fac)
+    c = TestClient(app)
+    nonce = "0x" + "7d" * 32
+    fac.settle.side_effect = [httpx.ReadTimeout("facilitator slow"),
+                              SettleResponse(success=True, transaction="0x" + "cd" * 32)]
+    hdr = lambda k: {"X-PAYMENT": pay(nonce=nonce), "Idempotency-Key": k}
+    assert c.post("/api/v1/stamps/", json={"depth": 17}, headers=hdr("k-a")).status_code == 502
+    assert c.post("/api/v1/stamps/", json={"depth": 17}, headers=hdr("k-b")).status_code == 201
+    again = c.post("/api/v1/stamps/", json={"depth": 17}, headers=hdr("k-a"))
+    assert again.status_code == 409
+    detail = again.json()["detail"]
+    assert detail["code"] == "IDEMPOTENCY_KEY_SETTLEMENT_UNKNOWN"
+    assert detail["nonce"] == nonce and "accepts" not in detail
+    assert fac.settle.await_count == 2 and len(bought) == 1
 
 
 def test_settling_entry_survives_a_restart(tmp_path):

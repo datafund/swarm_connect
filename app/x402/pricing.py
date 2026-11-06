@@ -19,6 +19,7 @@ from contextvars import ContextVar
 from typing import Dict, Any, Optional
 
 from app.core.config import settings
+from app.x402.networks import to_v1
 from app.services import swarm_api
 from app.services.swarm_api import (
     calculate_stamp_amount,
@@ -362,7 +363,7 @@ async def get_price_quote(
     return {
         "price_usd": price_info["price_usd"],
         "currency": "USDC",
-        "network": settings.X402_NETWORK,
+        "network": to_v1(settings.X402_NETWORK),
         "pay_to": pay_to,
         "details": price_info,
     }

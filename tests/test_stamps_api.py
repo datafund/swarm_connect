@@ -1,6 +1,6 @@
 # tests/test_stamps_api.py
 import pytest
-import httpx
+import httpx2
 from unittest.mock import patch, MagicMock
 from fastapi.testclient import TestClient
 import json
@@ -160,9 +160,33 @@ class TestStampsAPI:
         assert "not found" in response.json()["detail"].lower()
 
     @patch('app.services.swarm_api.get_all_stamps_processed')
+    def test_get_stamp_by_id_accepts_uppercase_id(self, mock_get_stamps):
+        """The path allows A-F, and Bee lists batch IDs in lowercase (#542)."""
+        mock_get_stamps.return_value = [
+            {
+                "batchID": VALID_STAMP_ID,
+                "amount": "1000000000",
+                "blockNumber": 12345,
+                "owner": "0x1234567890abcdef",
+                "immutableFlag": False,
+                "depth": 18,
+                "bucketDepth": 16,
+                "batchTTL": 3600,
+                "usable": True,
+                "expectedExpiration": "2024-12-01-15-30",
+                "local": True
+            }
+        ]
+
+        response = client.get(f"/api/v1/stamps/{VALID_STAMP_ID.upper()}")
+
+        assert response.status_code == 200, response.text
+        assert response.json()["batchID"] == VALID_STAMP_ID
+
+    @patch('app.services.swarm_api.get_all_stamps_processed')
     def test_list_stamps_api_error(self, mock_get_stamps):
         """Test stamps list endpoint when API call fails."""
-        mock_get_stamps.side_effect = httpx.HTTPError("Network error")
+        mock_get_stamps.side_effect = httpx2.HTTPError("Network error")
 
         response = client.get("/api/v1/stamps/")
 
@@ -361,7 +385,7 @@ class TestStampsAPI:
         """Test stamp purchase when API call fails."""
         mock_calc_cost.return_value = 131072000000000
         mock_funds.return_value = {"sufficient": True, "wallet_balance_bzz": 10.0, "required_bzz": 0.013, "shortfall_bzz": 0.0}
-        mock_purchase.side_effect = httpx.HTTPError("Purchase failed")
+        mock_purchase.side_effect = httpx2.HTTPError("Purchase failed")
 
         purchase_data = {
             "amount": 1000000000,
@@ -497,7 +521,7 @@ class TestStampsAPI:
         ]
         mock_calc_cost.return_value = 1048576000000000
         mock_funds.return_value = {"sufficient": True, "wallet_balance_bzz": 10.0, "required_bzz": 0.1, "shortfall_bzz": 0.0}
-        mock_extend.side_effect = httpx.HTTPError("Extension failed")
+        mock_extend.side_effect = httpx2.HTTPError("Extension failed")
 
         extension_data = {
             "amount": 8000000000

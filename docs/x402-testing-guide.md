@@ -189,7 +189,7 @@ Without `--paid` it uses the free tier (`X-Payment-Mode: free`), which needs
 ```bash
 # Set environment
 export TEST_WALLET_PRIVATE_KEY=0x...
-export TEST_GATEWAY_URL=http://localhost:8000
+export GATEWAY_URL=http://localhost:8000   # default: staging; TEST_GATEWAY_URL still works
 export RUN_LIVE_TESTS=1
 
 # Run live tests
@@ -216,7 +216,7 @@ pytest tests/test_x402_live.py -v -s
 **You don't need to register a facilitator.** The public x402.org facilitator handles testnet payments automatically.
 
 - **Testnet facilitator**: `https://x402.org/facilitator`
-- **Mainnet facilitator**: the public x402.org facilitator serves **test networks only** (its `/supported` list has no Base mainnet). Mainnet needs an authenticated facilitator, such as Coinbase CDP: set `X402_FACILITATOR_CDP_API_KEY_ID` / `X402_FACILITATOR_CDP_API_KEY_SECRET` (requires the `cdp-sdk` package), or `X402_FACILITATOR_BEARER_TOKEN` for a facilitator that takes a bearer token. The gateway refuses to start with a mainnet network and the x402.org facilitator.
+- **Mainnet facilitator**: the public x402.org facilitator serves **test networks only** (its `/supported` list has no Base mainnet). Mainnet needs an authenticated facilitator, such as Coinbase CDP: set `X402_FACILITATOR_CDP_API_KEY_ID` / `X402_FACILITATOR_CDP_API_KEY_SECRET` (uses the `cdp-sdk` package, which is in the requirements and the image), or `X402_FACILITATOR_BEARER_TOKEN` for a facilitator that takes a bearer token. The gateway refuses to start with a mainnet network and the x402.org facilitator.
 
 The facilitator:
 - Verifies payment signatures are valid

@@ -9,12 +9,27 @@ This document describes how to integrate x402 payment support into CLI tools and
 **This gateway implements x402 protocol version 1 (v1).**
 
 Key v1 characteristics:
-- Uses string network identifiers: `"base-sepolia"`, `"base"` (not CAIP-2 format like `eip155:84532`)
+- Uses string network identifiers: `"base-sepolia"`, `"base"` (not CAIP-2 format like `eip155:84532`). This holds also when the operator configured the gateway with the CAIP-2 id: v1 output always carries the v1 name
 - Response includes `"x402Version": 1`
 - Payment scheme: `"exact"` with EIP-3009 `transferWithAuthorization`
 - Asset: USDC on Base chain
 
 Clients should check the `x402Version` field in 402 responses to confirm compatibility.
+
+### x402 v2 (opt-in per deployment)
+
+An operator can also accept x402 v2 (`X402_PROTOCOL_VERSIONS`; `GET /health` lists the accepted versions under `x402.versions`). Then:
+
+- Send the v2 payment base64-encoded in `PAYMENT-SIGNATURE` (never together with `X-PAYMENT`). Its `accepted` must be the gateway's offer copied unchanged, with the CAIP-2 network (`eip155:84532`, `eip155:8453`) and `amount` equal to the v1 offer's `maxAmountRequired`. Any difference, even `00020000` for `20000` or another letter case in an address, is refused with 402 `PAYMENT_OFFER_MISMATCH` before anything is charged.
+- Only `exact` with EIP-3009 is accepted. Permit2 is refused with 402 `PAYMENT_METHOD_UNSUPPORTED`.
+- The receipt comes in `PAYMENT-RESPONSE` (base64 JSON `SettleResponse`) instead of `X-PAYMENT-RESPONSE`.
+- An `Idempotency-Key` retry must use the same version as the first request. Otherwise it gets 409 `IDEMPOTENCY_KEY_VERSION_MISMATCH` and is not charged.
+- Every 402 that offers a payment carries the `PAYMENT-REQUIRED` header: standard base64 of the compact JSON x402 v2 `PaymentRequired` (`x402Version` 2, `error`, `resource` with `url`, `description` and `mimeType`, and `accepts`). `@x402/core` clients read it before the body, and pay its offer in `PAYMENT-SIGNATURE`. Decode it with `JSON.parse(atob(value))`, or `decodePaymentRequiredHeader` from `@x402/core/http`. Its `accepts` are the body's offers in v2 form: the CAIP-2 `network` and `amount` instead of `maxAmountRequired`. Copy the offer unchanged into `accepted`. The header is readable cross-origin (CORS exposes it).
+- With `1,2` the JSON body stays the x402 v1 Payment Required body, so a v1 client keeps working unchanged. With `2` alone the body is the JSON copy of the v2 `PaymentRequired` (`x402Version` 2), plus `code`, `message` and the other fields, at the top level and under `detail`.
+- A 402 without the header, while `/health` lists 2, means the offer could not be put in a header: it would exceed 8192 characters, or it cannot be expressed in x402 v2 (the operator sees `reason="too_large"` or `reason="invalid"` in `gateway_x402_payment_required_header_failures_total`). Such a 402 always keeps the v1 body, also with `X402_PROTOCOL_VERSIONS=2`, so a v1 client can still pay it.
+- `@x402/core` 2.30.0's `x402Client` refuses any payment over $1 by default (`spendControls.maxAmountPerPayment`). Larger stamp purchases need that limit raised in the client. The provenance SDK sets its own cap.
+
+An `X-PAYMENT` must carry `x402Version: 1`. Any other value is refused with 400 `PAYMENT_HEADER_INVALID`.
 
 ## Overview
 
@@ -43,6 +58,13 @@ These endpoints require payment (when x402 is enabled and free tier exhausted):
 | POST | `/api/v1/stamps/` | Purchase postage stamps |
 | POST | `/api/v1/data/` | Upload data to Swarm |
 | POST | `/api/v1/data/manifest` | Upload TAR as manifest |
+| PATCH | `/api/v1/stamps/{id}/extend` | Top up an existing batch, priced at the batch's own depth |
+
+An extend of a batch the gateway's Bee node does not list gets `404` before
+any `402`: there is nothing to sign, and an `X-PAYMENT` or
+`X-Payment-Mode: free` sent with it is neither verified nor counted. If the
+gateway cannot reach its Bee node for that lookup, it answers `503` (not
+`404`, since it cannot tell) before any offer; retry later.
 
 **Free endpoints** (never require payment):
 - `GET /api/v1/stamps/` - List stamps
@@ -107,9 +129,18 @@ Content-Type: application/json
 | `network` | Blockchain network (`base-sepolia` for testnet, `base` for mainnet) |
 | `payTo` | Gateway's receiving wallet address |
 | `asset` | USDC contract address on the network |
+| `extra` | EIP-712 domain `name` and `version` of that USDC contract. Build the signing domain from these, never from a constant: the name is `"USDC"` on `base-sepolia` but `"USD Coin"` on `base` |
 
 The price is at least the gateway's minimum (`X402_MIN_PRICE_USD`, $0.01 by
 default), so sign exactly `maxAmountRequired`, never less.
+
+An upload's price covers the request body plus the parity chunks Bee adds at
+the upload's `redundancy` level (default 2). A higher level costs more once the
+price is above the minimum. To learn the price before you upload, call
+`GET /api/v1/pricing?upload_bytes=<body size>&redundancy=<level>`. Read each
+quote's `amount`; its `max_amount_required` is the same value and is deprecated.
+`GET /health` lists the x402 versions the gateway accepts in `x402.versions`
+(`[1]` today).
 
 **Before signing, check `network` and `asset`** against the chain you mean to
 pay on, and `payTo` if you know the gateway's address. A client signs whatever
@@ -511,14 +542,25 @@ requests.post(
 ```
 
 - The timestamp must be within 5 minutes of the gateway's clock.
-- Each proof is accepted once. Sign a new one for every upload. A proof that is
-  refused (for example, signed by a wallet that does not own the stamp) is not used up.
+- Each proof buys one upload. Sign a new one for every upload.
+- A proof is used up only when Bee stores the upload. If the request is refused or
+  fails before that, you can retry with the same proof while it is still fresh.
+  This covers a proof from a wallet that does not own the stamp, a later
+  validation error (stamp not usable, file too large, invalid TAR), a Bee node that
+  cannot be reached, and a Bee 4xx refusal. A Bee 4xx (for example "batch
+  overissued") can follow a partial store. A retry with the same proof still gives
+  you at most one successful upload, but it may use some stamp capacity again.
+- If the outcome at Bee is unknown (a timeout, a Bee 5xx, or a connection closed
+  during the upload), the proof stays used, because the data may have been stored.
+  Sign a new proof to retry.
+- While one request is using a proof, a second request with the same proof is
+  refused with `401 OWNER_PROOF_INVALID` ("in use by another request").
 - A proof signed before the gateway last restarted is refused; sign a new one.
 - A proof is a **bearer credential** for one upload to that stamp. It is not bound to the
   file, so whoever presents it first gets the upload. Send it only over HTTPS, and do not
   log or share it.
 - The proof names the stamp, so it cannot be used for any other stamp.
-- Errors: `401 OWNER_PROOF_INVALID` (malformed, stale or reused proof);
+- Errors: `401 OWNER_PROOF_INVALID` (malformed, stale, in use or already used proof);
   `403 STAMP_OWNERSHIP_DENIED` (valid proof, but the signer does not own the stamp).
 - Owner addresses are compared case-insensitively.
 
@@ -589,11 +631,11 @@ What the gateway does with the key (payments with `X-PAYMENT` only; the free tie
 | Same key, different body or query | `422` `IDEMPOTENCY_KEY_REUSED`. Not charged |
 | Key longer than 255 characters or not printable ASCII | `400` `IDEMPOTENCY_KEY_INVALID`. Not charged |
 | First request paid, but failed or was interrupted afterwards (including a gateway restart) | `409` `IDEMPOTENCY_KEY_SETTLED_PENDING` with the `transaction`. Not charged again; contact the operator with that transaction for the result or a refund |
-| The first payment was sent for settlement but no answer came back (facilitator error or timeout, or the request was cut off while waiting) | `409` `IDEMPOTENCY_KEY_SETTLEMENT_UNKNOWN` with the first authorization's `nonce`. Not charged. The first payment may or may not have been collected: check whether that nonce was used on-chain (USDC `authorizationState(from, nonce)`) before paying again with a new key; if it was, contact the operator |
+| The first payment was sent for settlement but no answer came back (facilitator error or timeout, or the request was cut off while waiting) | `409` `IDEMPOTENCY_KEY_SETTLEMENT_UNKNOWN` with the first authorization's `nonce`, for 24 h, also when the retry presents the first `X-PAYMENT`, except that the same `X-PAYMENT` gets `409` `PAYMENT_AUTHORIZATION_OUTCOME_UNKNOWN` instead when the first request's work had already run (`PAYMENT_SETTLEMENT_UNKNOWN`) or the facilitator rejects that authorization at verify. Not charged. The first payment may or may not have been collected, and this key will not complete. Check the `nonce` on-chain; if it was used, contact the operator. If it was not, the facilitator may still submit it later, so before signing a new payment either wait until its `validBefore` has passed or cancel it on-chain with EIP-3009 `cancelAuthorization`. Then pay with a new key |
 | First request succeeded, but its response was too large to keep (over 64 KB) | `409` `IDEMPOTENCY_KEY_DELIVERED_NOT_STORED` with the `transaction`. It was delivered and paid once; look the result up through the resource itself |
 | The facilitator refused the first payment, or the request failed before settlement | Nothing stored; a retry is a new, paid attempt |
-| The retry presents the same `X-PAYMENT` that paid for the original | `402`: sign a new payment. Only a new, unused authorization gets the stored result |
-| The gateway cannot read its idempotency store | `503` `IDEMPOTENCY_UNAVAILABLE`. Not charged; retry later with the same key |
+| The retry presents the same `X-PAYMENT` that paid for the original | `402`: sign a new payment. Only a new, unused authorization gets the stored result. Not when the original's settlement got no answer: that is the `409` `IDEMPOTENCY_KEY_SETTLEMENT_UNKNOWN` above |
+| The gateway cannot read or write its idempotency store (or its storage does not respond) | `503` `IDEMPOTENCY_UNAVAILABLE`. Not charged; retry later with the same key |
 
 Keys are scoped to the payer (the verified signer of `X-PAYMENT`), the method and the path, so another wallet's request with the same key is unaffected.
 
@@ -609,7 +651,30 @@ What to know about the retry's payment:
 
 ## 202 Accepted from a paid stamp purchase
 
-If the Bee node has not confirmed a paid purchase within the gateway's deadline (120 s by default), the gateway, having already collected the payment, answers `202` with `code: PURCHASE_PENDING`, the payment `transaction`, and the batch `label`. The batch is registered to the paying wallet as soon as the node reports it: list `GET /api/v1/stamps/?wallet=<your address>` and look for that label, or retry with the same `Idempotency-Key`, which returns the `201` with the `batchID` once it is found (or, if it is never found within 15 minutes, `500 DELIVERY_FAILED_AFTER_PAYMENT` with the transaction for a refund). Do not pay again. A `202` is not a failure. A `503` with `code: PURCHASE_CAPACITY` means too many purchases are waiting on the node; nothing was charged, retry shortly.
+If the Bee node has not confirmed a paid purchase within the gateway's deadline (120 s by default), the gateway, having already collected the payment, answers `202` with `code: PURCHASE_PENDING`, the payment `transaction`, and the batch `label`. The batch is registered to the paying wallet as soon as the node reports it: list `GET /api/v1/stamps/?wallet=<your address>` (any casing; an invalid address is `422`) and look for that label, or retry with the same `Idempotency-Key`, which returns the `201` with the `batchID` once it is found (or, if it is never found within 15 minutes, `500 DELIVERY_FAILED_AFTER_PAYMENT` with the transaction for a refund). Do not pay again. A `202` is not a failure. A `503` with `code: PURCHASE_CAPACITY` means too many purchases are waiting on the node; nothing was charged, retry shortly.
+
+## Payment settlement errors
+
+The gateway settles your payment just before it does the work. If settlement does not succeed, the response is one of these. Full detail is in [error-codes.md](error-codes.md#payments-and-pricing).
+
+| Code | Status | Were you charged? | Safe next step |
+|------|--------|-------------------|----------------|
+| `PAYMENT_SETTLEMENT_FAILED` | 402 | No: the facilitator refused the payment, and nothing was delivered | Fix what `reason` or `message` names (usually funds or an expired authorization) and pay again |
+| `PAYMENT_SETTLEMENT_UNAVAILABLE` | 502 | **Maybe**: the facilitator gave no answer. Nothing was delivered. Its `x402_status` is `settlement_failed`, the same as a refusal: branch on `code` | Without an `Idempotency-Key`: retry with the **same** `X-PAYMENT` while it is valid; it is settled at most once. With a key: the key cannot complete (every retry with it gets `409`, not charged); check `detail.nonce` (below), then use a new key. Do not sign a new authorization until you have checked `detail.nonce` |
+| `PAYMENT_SETTLEMENT_UNKNOWN` | 502 | **Maybe**: the work ran, then the facilitator gave no answer. The result is withheld | Do not retry the same `X-PAYMENT`: for 24 hours it is answered `409` before any work runs. Check `nonce` on-chain (below), then pay with a new authorization and, if you use one, a new key |
+| `PAYMENT_AUTHORIZATION_OUTCOME_UNKNOWN` | 409 | This request: no. The earlier request with this authorization: **maybe**, and probably yes if the facilitator refused this one | Do not pay from it. Check `detail.nonce` on-chain (below) |
+
+Checking a nonce: look up the USDC contract's `authorizationState(payer, nonce)` (or the payer's USDC transfers). If the nonce was used, the earlier payment was collected: contact the operator with the nonce for the result or a refund, and do not pay again. If it was not used, the facilitator may still submit that authorization, so before signing a new payment either wait until its `validBefore` has passed or cancel it on-chain with EIP-3009 `cancelAuthorization`. With an `Idempotency-Key`, the old key stays taken for 24 hours (`409 IDEMPOTENCY_KEY_SETTLEMENT_UNKNOWN`), so pay again with a new one.
+
+None of the three "maybe" answers is a `402` or carries `accepts`, so an x402 client that pays automatically on `402` does not pay again from them. Keep it that way in your own client: never sign a new payment from a response with `x402_status: settlement_unknown` or the code `PAYMENT_SETTLEMENT_UNAVAILABLE`. A settlement cut off in a particular way (an inner cancellation, on a paid route that settles after its work) is answered `502 PAYMENT_SETTLEMENT_UNKNOWN` like any other unknown outcome. Gateways before the move to Python 3.12 (#617) answered it with the server's generic `500 Internal Server Error` instead (plain text, no `code`). **A `500` without a JSON error code to a paid request can still mean an unknown outcome**, since any unexpected crash after settlement started ends that way: treat it like `PAYMENT_SETTLEMENT_UNKNOWN` and do not pay again until you have checked the nonce.
+
+**Branch on `code`, not on `x402_status`:** `PAYMENT_SETTLEMENT_UNAVAILABLE` carries `x402_status: settlement_failed`, the value a refusal has, for compatibility. Its headers do say it: `X-Payment-Mode: failed` and `X-Payment-Status: settlement_unknown`, as on the other two "maybe" answers.
+
+The gateway keeps these authorizations on disk for 24 hours, across restarts. After that, a refusal of the same authorization is an ordinary `402` with `accepts` again. So after a `PAYMENT_SETTLEMENT_UNAVAILABLE` or `PAYMENT_SETTLEMENT_UNKNOWN`, do not let your client pay automatically from a later `402` for the same authorization until you have checked its nonce.
+
+**Never send the same `X-PAYMENT` in parallel.** One authorization buys one delivery: of concurrent requests carrying it, at most one is settled. A duplicate that arrives while the first is being settled gets `409 PAYMENT_SETTLEMENT_IN_PROGRESS` (no `accepts`, not charged, no `Retry-After`). Do not resend that `X-PAYMENT`: once the first has settled it gets `402` "already used" with `accepts`, and paying from that charges twice. Wait for that request's answer; if it was interrupted (it ended without a settled result, for example with a `500` or `502`), treat the payment as an unknown outcome and check the nonce before paying again. With an `Idempotency-Key`, get a stored result by sending the same key with a newly signed payment (returned as stored, not charged). Without a key there is no safe way to fetch it again. One that arrives before or after that gets `402` "This payment authorization has already been used. Sign a new payment." with `accepts`. Treat that answer as "this authorization may already have been settled": check its nonce before signing a new payment, rather than paying from it automatically.
+
+If the gateway cannot read or write its record of these authorizations, every paid request gets `503 PAYMENT_STATE_UNAVAILABLE`, uncharged; retry later with the same `X-PAYMENT`. (On a paid route that settles after its work, that retry runs the work again; you are charged at most once. No such route exists today.) Free-tier requests are unaffected.
 
 ## Error Handling
 
@@ -617,15 +682,17 @@ If the Bee node has not confirmed a paid purchase within the gateway's deadline 
 |-------|-------|------------|
 | 402 Payment Required | No payment or free tier exhausted | Make x402 payment |
 | 429 Too Many Requests | Free tier rate limit | Wait or make payment |
+| 404 on `PATCH /stamps/{id}/extend` | The batch is not on the gateway's Bee node | Check the batch ID; do not pay. Nothing was charged or counted |
 | "Insufficient balance" | Wallet lacks USDC | Fund wallet |
 | "Invalid signature" | Wrong private key or network | Check configuration |
 | "Payment verification failed" | Facilitator rejected | Check payment amount |
 | 409 `IDEMPOTENCY_KEY_IN_PROGRESS` | Retry of a paid request still running | Retry with the same key after `Retry-After` |
-| 409 `IDEMPOTENCY_KEY_SETTLEMENT_UNKNOWN` | The first payment's settlement returned no answer | Check the `nonce` on-chain before paying again |
+| 409 `IDEMPOTENCY_KEY_SETTLEMENT_UNKNOWN` | The first payment's settlement returned no answer | This key cannot complete: it keeps answering `409` for 24 h. Check the nonce as in [Payment settlement errors](#payment-settlement-errors), then pay with a new key |
 | 409 `IDEMPOTENCY_KEY_DELIVERED_NOT_STORED` | The first request succeeded; its response was too large to replay | Look up the result; do not pay again |
 | 422 `IDEMPOTENCY_KEY_REUSED` | Same `Idempotency-Key` for a different request | Use a new key |
 | 409 `IDEMPOTENCY_KEY_SETTLED_PENDING` | The first request was paid but produced no stored result | Contact the operator with the `transaction` |
-| 503 `IDEMPOTENCY_UNAVAILABLE` | The gateway's idempotency store is unreadable | Retry later; not charged |
+| 503 `IDEMPOTENCY_UNAVAILABLE` | The gateway's idempotency store is unreadable, unwritable or not responding | Retry later; not charged |
+| 503 `PAYMENTS_UNAVAILABLE` | The gateway cannot accept payments right now (its Bee node is unreachable or its wallet cannot be read). Returned instead of the `402` and before any payment is verified | This request was not charged; retry after `Retry-After`, or use the free tier. A retry of an earlier charged request (same `Idempotency-Key` with a stored result, or an authorization whose settlement is in progress or whose work already ran) is not refused by this check, but it is still priced before verification, so while the gateway cannot price (Bee down) it can get `503` "Failed to calculate price" or `BEE_BUSY` instead of its stored result or `409`; retry it later unchanged |
 
 ## References
 

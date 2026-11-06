@@ -6,10 +6,16 @@ When x402 is enabled, stamps acquired via paid requests are exclusive
 to the payer's wallet address. Free tier stamps are shared/communal.
 Batches not in the registry are denied unless STAMP_OWNERSHIP_ALLOW_UNTRACKED
 is set (#312); the registry is loaded at startup (#349).
+Batch ids are keyed in lowercase on every read and write (#558).
 """
+import filecmp
+import glob
 import json
 import logging
+import os
 import re
+import shutil
+import tempfile
 from datetime import datetime, timezone
 from threading import Lock
 from typing import Dict, Optional, Set, Tuple
@@ -28,7 +34,23 @@ POOL_OWNER = "pool"
 # Owner values that are not wallet addresses.
 _SPECIAL_OWNERS = ("shared", POOL_OWNER)
 
-_ADDRESS_RE = re.compile(r"^(0x)?[0-9a-fA-F]{40}$")
+_ADDRESS_RE = re.compile(r"^(0x)?[0-9a-fA-F]{40}\Z")
+
+# /health warning while saves are refused because the pre-migration copy fails
+# (#558). Fixed text on purpose: no path and no exception text, since /health
+# is public. The ERROR log line has the details.
+SAVES_REFUSED_WARNING = (
+    "ownership registry changes are not being saved: the pre-migration copy of the "
+    "registry file could not be written. Changes are kept in memory only and are "
+    "lost on restart. See the ERROR log and docs/mainnet-runbook.md")
+
+# /health warning while the last save of the registry file failed. Also fixed
+# text. Separate from the one above because the cause differs: the copy may
+# succeed and the write still fail (full disk, permissions).
+SAVE_FAILED_WARNING = (
+    "ownership registry changes are not being saved: the last write of the registry "
+    "file failed. Changes are kept in memory only and are lost on restart. See the "
+    "ERROR log and docs/mainnet-runbook.md")
 
 
 def normalize_address(address: Optional[str]) -> Optional[str]:
@@ -46,6 +68,117 @@ def normalize_address(address: Optional[str]) -> Optional[str]:
     return address if address.startswith("0x") else "0x" + address
 
 
+def _batch_key(batch_id: str) -> str:
+    """Return the registry key for a batch id: the id in lowercase (#558).
+
+    Bee lists batch ids in lowercase, but the API path and query patterns accept
+    either case. Keying the registry by the lowercase id means a caller that
+    forgets to lowercase cannot miss a record and wrongly deny its owner.
+    """
+    return batch_id.lower() if isinstance(batch_id, str) else batch_id
+
+
+def _spellings(keys) -> str:
+    """Name the exact original spellings of one batch id, for a log line or an error."""
+    return ", ".join(repr(k) for k in sorted(keys))
+
+
+def _count_save_failure() -> None:
+    """Count a save that left the change in memory only (#506), for the alert.
+
+    Imported here, not at module level: this module loads before the metrics
+    module is needed, and a metrics problem must never fail a save path.
+    """
+    try:
+        from app.services.metrics import count_state_save_failure
+        count_state_save_failure("ownership")
+    except Exception as e:  # pragma: no cover
+        logger.debug(f"Could not count a failed ownership save: {e}")
+
+
+def _utc_stamp() -> str:
+    return datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')
+
+
+def _keep_pre_migration_copy(state_file: str) -> str:
+    """Copy the state file aside before the load-time migration rewrites it.
+
+    The migration drops the records of merged spellings, so their mode,
+    acquired_at and source survive only in this copy. One copy per distinct
+    content: a restart that migrates the same file again (because the save
+    failed) reuses the existing copy instead of adding another.
+
+    The copy is written atomically (temp file in the same directory, fsync,
+    os.replace), so a failure such as a full disk never leaves a partial
+    ``.pre-558-`` file that a later run would take for the real copy. A name
+    already in use (two different copies in the same UTC second) gets a numeric
+    suffix. Raises on failure.
+    """
+    for existing in sorted(glob.glob(f"{glob.escape(state_file)}.pre-558-*")):
+        if filecmp.cmp(state_file, existing, shallow=False):
+            return existing
+    base = f"{state_file}.pre-558-{_utc_stamp()}"
+    backup, n = base, 0
+    while os.path.exists(backup):
+        n += 1
+        backup = f"{base}-{n}"
+    directory = os.path.dirname(state_file) or "."
+    fd, tmp_path = tempfile.mkstemp(dir=directory, prefix=".tmp-pre558-")
+    try:
+        with os.fdopen(fd, "wb") as dst, open(state_file, "rb") as src:
+            shutil.copyfileobj(src, dst)
+            dst.flush()
+            os.fsync(dst.fileno())
+        os.replace(tmp_path, backup)
+    except Exception:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
+    return backup
+
+
+def _resolve_case_collision(spellings: Dict[str, dict], state_file: str) -> dict:
+    """Pick the record to keep when one batch id is stored under several spellings.
+
+    ``spellings`` maps each original key (all equal when lowercased) to its
+    record. The decision depends only on the set of distinct owners, never on
+    file order, and never grants access to a wallet that did not own the batch
+    or silently drops a real owner:
+    - one distinct owner: one record is enough;
+    - exactly one wallet plus "shared" and/or "pool": the wallet wins. "shared"
+      would open the batch to everyone and "pool" would let the gateway sell it
+      again; the wallet is the only real owner, and owner -> pool/shared is
+      never an expected transition (register_stamp logs it as an error);
+    - anything else (two or more wallets, or "shared" and "pool" with no
+      wallet): there is no safe guess, so the registry is refused as unreadable
+      and the operator resolves it in the file.
+
+    Among the records with the winning owner, the one already under the
+    lowercase key is kept if there is one, else the first spelling in sorted
+    order, so the metadata kept is also independent of file order.
+    """
+    owners = {entry["owner"] for entry in spellings.values()}
+    wallets = owners - set(_SPECIAL_OWNERS)
+    if len(owners) == 1:
+        winner = next(iter(owners))
+    elif len(wallets) == 1:
+        winner = next(iter(wallets))
+    else:
+        reason = (
+            f"one batch is registered under several spellings ({_spellings(spellings)}) "
+            f"with different owners ({', '.join(repr(o) for o in sorted(owners))}); keep the "
+            f"record of the real owner and delete the others")
+        # Logged here as well as raised: if the startup traceback is lost, the
+        # log still says why the gateway refused to start.
+        logger.error(f"Refusing to load ownership registry {state_file}: {reason}")
+        raise unreadable_state(state_file, reason)
+    candidates = sorted(k for k, entry in spellings.items() if entry["owner"] == winner)
+    key = _batch_key(candidates[0])
+    return spellings[key] if key in candidates else spellings[candidates[0]]
+
+
 class StampOwnershipManager:
     """
     Tracks stamp ownership and enforces access control.
@@ -54,9 +187,33 @@ class StampOwnershipManager:
     """
 
     def __init__(self, state_file: Optional[str] = None):
-        self._registry: Dict[str, dict] = {}  # batch_id -> {owner, mode, acquired_at, source}
+        self._registry: Dict[str, dict] = {}  # lowercase batch_id -> {owner, mode, acquired_at, source}
         self._lock = Lock()
         self._state_file = state_file
+        # True while a load-time migration has changed the registry in memory
+        # but the original file has not been copied aside yet (#558). No save
+        # may overwrite the original until that copy exists.
+        self._migration_needs_copy = False
+        # True while saves are being refused because that copy failed; shown on
+        # /health so the refusal is not visible in the logs only.
+        self._saves_refused = False
+        # True while the last write of the registry file failed.
+        self._save_failed = False
+
+    def changes_unsaved(self) -> bool:
+        """Whether a change is in memory only: the last write failed, or saves
+        are refused because the pre-migration copy failed (#506). Clears with
+        the next successful save."""
+        return self._save_failed or self._saves_refused
+
+    def health_warnings(self) -> list:
+        """Return fixed-text warnings for /health; empty once a save succeeds."""
+        warnings = []
+        if self._saves_refused:
+            warnings.append(SAVES_REFUSED_WARNING)
+        if self._save_failed:
+            warnings.append(SAVE_FAILED_WARNING)
+        return warnings
 
     def _get_state_file_path(self) -> str:
         """Get the state file path, using override or settings."""
@@ -65,11 +222,30 @@ class StampOwnershipManager:
     def _save_state(self):
         """Persist ownership registry to state file."""
         state_file = self._get_state_file_path()
+        if self._migration_needs_copy:
+            # The file on disk is still the pre-migration original; it holds
+            # the only copy of merged spellings' records. Copy it first, or do
+            # not write. Not writing behaves like a failed write: logged, and
+            # the change stays in memory for the next save.
+            try:
+                backup = _keep_pre_migration_copy(state_file)
+            except Exception as e:
+                logger.error(f"Not saving ownership state to {state_file}: the pre-migration file "
+                             f"could not be copied aside ({e}); the change is kept in memory only")
+                self._saves_refused = True
+                _count_save_failure()
+                return
+            self._migration_needs_copy = False
+            self._saves_refused = False
+            logger.info(f"Kept the pre-migration ownership registry at {backup}")
         try:
             atomic_write_json(state_file, self._registry)
+            self._save_failed = False
             logger.debug(f"Saved ownership state: {len(self._registry)} stamps to {state_file}")
         except Exception as e:
+            self._save_failed = True
             logger.error(f"Failed to save ownership state to {state_file}: {e}")
+            _count_save_failure()
 
     def _load_state(self):
         """Load ownership registry from state file.
@@ -100,9 +276,43 @@ class StampOwnershipManager:
             if canonical != owner:
                 entry["owner"] = canonical
                 normalized += 1
-        if normalized:
-            logger.info(f"Normalised {normalized} owner address(es) in {state_file}")
-        self._registry = data
+
+        # Keys are lowercase batch ids (#558). A file written before that may
+        # hold mixed-case keys; lowercase them once here. All spellings of one
+        # id are grouped first and resolved together by _resolve_case_collision,
+        # so the outcome does not depend on the order of keys in the file.
+        groups: Dict[str, Dict[str, dict]] = {}
+        for batch_id, entry in data.items():
+            groups.setdefault(_batch_key(batch_id), {})[batch_id] = entry
+        registry: Dict[str, dict] = {}
+        lowered = sum(1 for batch_id in data if _batch_key(batch_id) != batch_id)
+        merged = 0
+        for key, spellings in groups.items():
+            if len(spellings) == 1:
+                registry[key] = next(iter(spellings.values()))
+                continue
+            kept = _resolve_case_collision(spellings, state_file)
+            logger.warning(
+                f"Ownership registry has one batch under {len(spellings)} spellings "
+                f"({_spellings(spellings)}) with owners "
+                f"{', '.join(repr(spellings[k]['owner']) for k in sorted(spellings))}; "
+                f"keeping {kept['owner']!r}")
+            registry[key] = kept
+            merged += len(spellings) - 1
+
+        self._registry = registry
+        self._migration_needs_copy = bool(normalized or lowered)
+        if normalized or lowered:
+            logger.info(
+                f"Migrated {state_file}: {lowered} batch key(s) lowercased, {merged} duplicate "
+                f"spelling(s) merged, {normalized} owner address(es) normalised")
+            # Persist so the file ends lowercase. _save_state first copies the
+            # original aside (merged spellings' records survive only there) and
+            # refuses to write while that copy fails, here and on every later
+            # save. A failed copy or write leaves the original file intact, the
+            # registry in memory is complete, and the next load migrates the
+            # same file again.
+            self._save_state()
         logger.info(f"Loaded ownership state: {len(self._registry)} stamps from {state_file}")
 
     def register_stamp(
@@ -134,6 +344,7 @@ class StampOwnershipManager:
             if canonical is None:
                 raise ValueError(f"invalid owner address: {owner!r}")
             owner = canonical
+        batch_id = _batch_key(batch_id)
         with self._lock:
             existing = self._registry.get(batch_id)
             if existing is not None:
@@ -176,6 +387,7 @@ class StampOwnershipManager:
         if not settings.X402_ENABLED:
             return True, "x402 disabled, no ownership enforcement"
 
+        batch_id = _batch_key(batch_id)
         with self._lock:
             entry = self._registry.get(batch_id)
 
@@ -222,6 +434,7 @@ class StampOwnershipManager:
 
     def remove_stamp(self, batch_id: str):
         """Remove a stamp from the ownership registry."""
+        batch_id = _batch_key(batch_id)
         with self._lock:
             if batch_id in self._registry:
                 del self._registry[batch_id]
@@ -235,6 +448,7 @@ class StampOwnershipManager:
         Args:
             valid_batch_ids: Set of batch IDs that are still valid on the Bee node
         """
+        valid_batch_ids = {_batch_key(bid) for bid in valid_batch_ids}
         with self._lock:
             to_remove = [
                 bid for bid in self._registry
@@ -249,7 +463,7 @@ class StampOwnershipManager:
     def get_stamp_info(self, batch_id: str) -> Optional[dict]:
         """Get ownership info for a stamp (for debugging/status endpoints)."""
         with self._lock:
-            return self._registry.get(batch_id)
+            return self._registry.get(_batch_key(batch_id))
 
     def load_on_startup(self):
         """Load ownership state on application startup."""

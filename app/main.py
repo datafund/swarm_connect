@@ -12,12 +12,17 @@ from fastapi.utils import is_body_allowed_for_status_code
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.responses import Response
 from http import HTTPStatus
+import asyncio
 import logging
 import time
 
 # Configure basic logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+# httpx2's request lines without the server's reason phrase or query (#608):
+# the container log reaches the public deploy log.
+from app.core import http_log  # noqa: E402
+http_log.install()
 
 # Captured at import so /health can report process age without reading /metrics.
 _STARTED_MONOTONIC = time.monotonic()
@@ -30,8 +35,11 @@ async def lifespan(app: FastAPI):
     # Refuse to start with an x402 configuration that cannot take payment
     # safely: an unknown network, a missing pay-to address, or a mainnet
     # paired with the public test-network facilitator (#370).
-    from app.x402.facilitator import validate_x402_config
+    from app.x402.facilitator import check_facilitator_v2_support, validate_x402_config
     validate_x402_config()
+    # With x402 v2 enabled, the facilitator must list v2 exact on the network
+    # in /supported, or the gateway does not start (#608, D3 in #596).
+    await check_facilitator_v2_support()
 
     # Initialize shared HTTP client (must be first — other services depend on it)
     from app.services.http_client import init_client, close_client
@@ -78,9 +86,25 @@ async def lifespan(app: FastAPI):
         })
         await start_metrics_background_task()
 
+    # Build the first /health snapshot now, in the background (#588).
+    from app.services import health_snapshot
+    health_snapshot.start_refresh(bool(settings.X402_ENABLED))
+    # Retry a failed or stalled payment-state write even with no paid traffic,
+    # so a recovered disk stops refusing paid requests by itself (#585).
+    if settings.X402_ENABLED:
+        from app.x402.state_retry import start_state_write_retry_task
+        await start_state_write_retry_task()
+
     yield
 
+    await health_snapshot.stop()
+
     # === Shutdown ===
+    # Stop the payment-state retry task before the state-write lanes shut down
+    # below, so it cannot queue a write on a lane that is closing.
+    from app.x402.state_retry import stop_state_write_retry_task
+    await stop_state_write_retry_task()
+
     # Stop metrics background task
     if settings.METRICS_ENABLED:
         from app.services.metrics import stop_metrics_background_task
@@ -97,6 +121,13 @@ async def lifespan(app: FastAPI):
     # is closed.
     from app.api.endpoints.stamps import drain_pending_purchases
     await drain_pending_purchases(settings.SHUTDOWN_PENDING_PURCHASE_GRACE_SECONDS)
+
+    # Pending settlement-state writes (#553): wait for them, bounded, so a
+    # write-ahead or resolution in progress is not cut off by the exit.
+    from app.x402.settlement import shutdown_registry_io
+    from app.x402.idempotency import shutdown_idempotency_io
+    await asyncio.to_thread(shutdown_registry_io, 5.0)
+    await asyncio.to_thread(shutdown_idempotency_io, 5.0)
 
     # Close shared HTTP client (must be last)
     await close_client()
@@ -207,6 +238,15 @@ if settings.X402_ENABLED:
     app.add_middleware(X402Middleware)
     logger.info("x402 middleware enabled")
 
+# Bee call gate (#588): marks each request so its Bee calls take request slots,
+# turns a request whose own Bee call was refused into 503 BEE_BUSY with
+# Retry-After, and refuses paid routes before payment when no slot is free.
+# Added after the rate limiter and x402 so it wraps them, and before the client
+# metrics and CORS so they see its 503. Does nothing when BEE_CALL_GATE_ENABLED
+# is false (checked per request).
+from app.middleware.bee_gate import BeeGateMiddleware
+app.add_middleware(BeeGateMiddleware)
+
 # Record which client types we serve and whether we serve them (#347).
 #
 # Added AFTER the rate limiter and x402 so that it WRAPS them. Starlette runs the
@@ -218,6 +258,12 @@ if settings.METRICS_ENABLED:
     from app.middleware.client_metrics import ClientMetricsMiddleware
     app.add_middleware(ClientMetricsMiddleware)
     logger.info("Client-type metrics enabled")
+
+# Heaviest callers per window, by keyed hash tag (#588). Outside the rate
+# limiter, the blocklist and x402, so refused floods are counted too.
+if settings.TOP_CALLERS_ENABLED:
+    from app.middleware.top_callers import TopCallersMiddleware
+    app.add_middleware(TopCallersMiddleware)
 
 # Add CORS middleware for browser-based SDK usage
 # IMPORTANT: Add CORS last so it wraps all other middleware.
@@ -232,10 +278,15 @@ app.add_middleware(
     # Browsers hide every response header not listed here from page scripts,
     # so a browser client could not read its settlement receipt, how long to
     # back off, or its remaining free-tier quota (#385).
+    # PAYMENT-REQUIRED and PAYMENT-RESPONSE are the x402 v2 names for the 402
+    # requirements and the settlement receipt. The gateway does not send them
+    # yet (epic #596); they are listed now so browser v2 clients can read them
+    # once it does (#603).
     expose_headers=[
         "X-PAYMENT-RESPONSE", "X-Payment-Mode", "X-Payment-Transaction",
         "Retry-After", "X-RateLimit-Limit", "X-RateLimit-Remaining", "X-RateLimit-Reset",
         "X-Swarm-Reference", "Content-Disposition",
+        "PAYMENT-REQUIRED", "PAYMENT-RESPONSE",
     ],
 )
 logger.info(f"CORS enabled for origins: {cors_origins}")
@@ -293,7 +344,22 @@ app.include_router(stamps_for_owner.router, prefix=f"{settings.API_V1_STR}/stamp
 # Price quotes (#381). No x402 dependency: learning a price must never cost one.
 app.include_router(pricing.router, prefix=f"{settings.API_V1_STR}", tags=["pricing"])
 
-@app.get("/", summary="Health Check", tags=["default"])
+# Shown in OpenAPI (#602): the x402 block, present only when payments are enabled.
+_HEALTH_X402_EXAMPLE = {
+    "status": "ok",
+    "x402": {
+        "enabled": True,
+        "versions": [1],
+        "free_tier": {"enabled": True, "rate_limit_per_minute": 3, "header": "X-Payment-Mode: free"},
+    },
+}
+
+
+@app.get("/", summary="Health Check", tags=["default"], responses={200: {
+    "description": ("Gateway health. `x402.versions` lists the x402 protocol versions a payment is "
+                    "accepted in (only when x402 is enabled). The example shows only some fields."),
+    "content": {"application/json": {"example": _HEALTH_X402_EXAMPLE}},
+}})
 @app.get("/health", summary="Health Check", tags=["default"], include_in_schema=False)
 async def read_root():
     """
@@ -310,11 +376,25 @@ async def read_root():
       `network_availability`), reserve/radius (`storage_radius`, `committed_depth`,
       `reserve_size`, `reserve_size_within_radius`, `pullsync_rate`, `batch_commitment`),
       chain sync (`last_synced_block`, `chain_tip`, `chain_sync_lag_blocks`), plus a
-      `healthy` flag and advisory `warnings`
+      `healthy` flag, `api_reachable` (false when the Bee API answered nothing;
+      `status` is then `degraded`, #589) and advisory `warnings`. When the
+      snapshot is too old to trust, `healthy` is false, `api_reachable` is null
+      (unknown) and a warning says the Bee state is unknown
+    - `snapshot`: the Bee node and wallet fields come from a snapshot refreshed at
+      most every `max_age_seconds`; `age_seconds` is how old this one is, and
+      `warnings` says when refreshes are failing. A failed refresh alone is
+      advisory; once the snapshot is also older than
+      HEALTH_SNAPSHOT_MAX_TRUSTED_AGE_SECONDS it is too old to trust, `status` is
+      `degraded` and paid requests are refused (#589)
+    - `state`: gateway state files, with advisory `warnings` (fixed text) that never
+      change `status`: for example, ownership registry saves are refused because the
+      pre-migration copy cannot be written, so changes are lost on restart
     - `x402` (when payments enabled): wallet status, free tier availability, and warnings
 
     **When x402 payments are enabled**, the response includes:
     - `x402.enabled`: true
+    - `x402.versions`: the x402 protocol versions a payment is accepted in, for
+      example `[1]` (v1, the `X-PAYMENT` header)
     - `x402.free_tier.enabled`: whether free tier access is available
     - `x402.free_tier.rate_limit_per_minute`: requests allowed per minute on free tier
     - `x402.free_tier.header`: the exact header to add for free tier access
@@ -328,7 +408,31 @@ async def read_root():
     4. Upload data: `POST /api/v1/data/?stamp_id=...`
     5. Download data: `GET /api/v1/data/{reference}` (always free, no headers needed)
     """
-    logger.info("Health check endpoint accessed.")
+    logger.debug("Health check endpoint accessed.")
+
+    # The upstream reads (Bee node, Bee wallet and chequebook, Base RPC) come
+    # from a snapshot refreshed at most every HEALTH_SNAPSHOT_TTL_SECONDS, so a
+    # request costs no upstream call (#588). The rest is local and per request.
+    from app.services import health_snapshot
+    snapshot = await health_snapshot.get_snapshot(bool(settings.X402_ENABLED))
+    return build_health_response(snapshot)
+
+
+SNAPSHOT_NOT_READY = "health snapshot not ready yet: the gateway is starting or cannot reach its upstreams"
+SNAPSHOT_TOO_OLD = ("health snapshot too old to trust: its refreshes keep failing; "
+                    "paid requests are refused until it is fresh again")
+BEE_STATE_UNKNOWN = ("Bee node state unknown: the health snapshot is too old to trust "
+                     "(its refreshes keep failing); the other fields are from the last one")
+BEE_SUMMARY_FAILED = "could not summarize the Bee node status; see the gateway log"
+
+
+def build_health_response(snapshot) -> dict:
+    """The /health body from a snapshot of the upstream reads and local state.
+
+    `snapshot` is an app.services.health_snapshot.HealthSnapshot, or None when
+    there is none yet. Every rule that sets `status` is here.
+    """
+    from app.services import health_snapshot
 
     response_data = {
         "status": "ok",
@@ -353,30 +457,88 @@ async def read_root():
         "uptime_seconds": round(time.monotonic() - _STARTED_MONOTONIC, 1),
     }
 
+    # How old the upstream part of this answer is (#588). A failed refresh
+    # alone is advisory. A snapshot too old to trust (its refreshes keep
+    # failing, #589) makes the answer `degraded`: nothing in it is known to
+    # still hold, and paid requests are refused until it is fresh again.
+    snapshot_warnings = []
+    if snapshot is None:
+        snapshot_warnings.append(SNAPSHOT_NOT_READY)
+    else:
+        failure = health_snapshot.last_failure()
+        if failure:
+            snapshot_warnings.append(f"the last {failure}; this answer is "
+                                     f"{round(snapshot.age())} s old")
+        if health_snapshot.too_old(snapshot):
+            snapshot_warnings.append(SNAPSHOT_TOO_OLD)
+            response_data["status"] = "degraded"
+    response_data["snapshot"] = {
+        "age_seconds": None if snapshot is None else round(snapshot.age(), 1),
+        "max_age_seconds": settings.HEALTH_SNAPSHOT_TTL_SECONDS,
+        "warnings": snapshot_warnings,
+    }
+
     # Bee node connectivity/health — surfaces whether the node can actually reach
     # the network (networkAvailability), peer count, mode, reserve, plus node identity,
-    # build version and chain-sync position. Cheap (cached), always included. A node
+    # build version and chain-sync position. Always included. A node
     # with networkAvailability != Available accepts uploads (201) that may not
     # propagate, so flag it here.
-    try:
-        from app.services.swarm_api import get_node_status_summary
-        node = await get_node_status_summary()
+    #
+    # `degraded`, never `critical`, for a Bee node that cannot be reached
+    # (#589): `critical` is for blocking errors, and the SDK reads it as "gateway
+    # down" (#108 kept Bee connectivity out of it). Without a snapshot nothing
+    # is known to be OK, so that is `degraded` too.
+    if snapshot is None:
+        response_data["bee_node"] = {"healthy": False, "api_reachable": None,
+                                     "warnings": [SNAPSHOT_NOT_READY]}
+        response_data["status"] = "degraded"
+    elif snapshot.node is None:
+        # The summary could not be built. bee_node.healthy is still reported:
+        # external probes read it (#586).
+        response_data["bee_node"] = {"healthy": False, "api_reachable": False,
+                                     "warnings": [BEE_SUMMARY_FAILED]}
+        response_data["status"] = "degraded"
+    else:
+        node = snapshot.node
         response_data["bee_node"] = node
-        # Only downgrade on a definitive bad signal (network unreachable -> uploads
-        # won't propagate). A transient inability to query the node, or warmup, is
-        # surfaced via bee_node.warnings but doesn't flip the gateway to degraded.
+        # Downgrade on a definitive bad signal: the node cannot be reached at
+        # all (#589), or it is reached but reports the network unreachable
+        # (uploads won't propagate). Warmup and a node still starting up are
+        # surfaced via bee_node.warnings but don't flip the gateway to degraded.
+        if node.get("api_reachable") is False:
+            response_data["status"] = "degraded"
         if node.get("network_availability") == "Unavailable" and response_data["status"] == "ok":
             response_data["status"] = "degraded"
-    except Exception as e:
-        logger.warning(f"Health: failed to summarize Bee node status: {e}")
+
+    # A snapshot too old to trust says nothing about the Bee node now (#589):
+    # its last bee_node.healthy, possibly true, would otherwise be served for
+    # as long as refreshes keep failing, and external probes read only that
+    # field (#586). A copy: the snapshot and the summary cache are shared.
+    if snapshot is not None and health_snapshot.too_old(snapshot):
+        stale = dict(response_data["bee_node"])
+        stale["healthy"] = False
+        stale["api_reachable"] = None
+        stale["warnings"] = list(stale.get("warnings") or []) + [BEE_STATE_UNKNOWN]
+        response_data["bee_node"] = stale
+        response_data["status"] = "degraded"
+
+    # Gateway state files. A registry that cannot save loses every ownership
+    # change on restart (#558). The warning is advisory and never changes
+    # `status`: anything that treats a non-ok status as unhealthy could restart
+    # the container, and a restart is what loses those changes. The text is
+    # fixed (no path, no exception text); the ERROR log has the details.
+    from app.services.stamp_ownership import stamp_ownership_manager
+    response_data["state"] = {"warnings": stamp_ownership_manager.health_warnings()}
 
     # If x402 is enabled, include wallet status
     if settings.X402_ENABLED:
-        from app.x402.base_balance import check_base_eth_balance
-        from app.x402.preflight import check_preflight_balances
-
-        base_eth = await check_base_eth_balance()
-        gnosis = await check_preflight_balances()
+        if snapshot is not None and snapshot.gnosis is not None:
+            base_eth = snapshot.base_eth or {}
+            gnosis = snapshot.gnosis
+        else:
+            # Not read yet: nothing is known to be OK.
+            base_eth = {}
+            gnosis = {"can_accept": None, "warnings": [SNAPSHOT_NOT_READY], "errors": []}
 
         warnings = []
         errors = []
@@ -387,6 +549,23 @@ async def read_root():
         warnings.extend(gnosis.get("warnings", []))
         errors.extend(gnosis.get("errors", []))
 
+        # Payment state the gateway could not read or write (#553): paid
+        # requests are refused, unpaid, until an operator repairs it.
+        from app.x402.settlement import outcome_unknown
+        from app.x402.idempotency import idempotency_store
+        payment_state_down = False
+        # Public: the code and a short cause only. Paths and exception text
+        # are in the gateway log.
+        cause = outcome_unknown.public_cause()
+        if cause:
+            payment_state_down = True
+            warnings.append(f"PAYMENT_STATE_UNAVAILABLE: {cause}; every paid request gets 503 "
+                            "until it is repaired (details in the gateway log)")
+        idem_cause = idempotency_store.public_cause()
+        if idem_cause:
+            warnings.append(f"IDEMPOTENCY_UNAVAILABLE: {idem_cause}; paid requests with an "
+                            "Idempotency-Key get 503 until it is repaired (details in the gateway log)")
+
         # Determine overall status
         # Never return 503 — the gateway should always be reachable so
         # operators can see what's wrong. Docker healthcheck and reverse
@@ -394,12 +573,17 @@ async def read_root():
         # where the container is marked unhealthy and users see nothing.
         if len(errors) > 0:
             response_data["status"] = "critical"
-        elif not gnosis["can_accept"]:
+        elif not gnosis["can_accept"] or payment_state_down:
+            # can_accept is false when the xBZZ or xDAI balance could not be
+            # read (#589); paid requests are then refused before payment.
             response_data["status"] = "degraded"
 
         # Add x402 details
+        from app.x402.payment_headers import accepted_x402_versions
         response_data["x402"] = {
             "enabled": True,
+            # The x402 protocol versions a payment is accepted in (#602).
+            "versions": list(accepted_x402_versions()),
             "free_tier": {
                 "enabled": settings.X402_FREE_TIER_ENABLED,
                 "rate_limit_per_minute": settings.X402_FREE_TIER_RATE_LIMIT,

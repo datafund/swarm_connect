@@ -24,7 +24,7 @@ into spending it.
 import logging
 import threading
 import time
-from typing import Dict, List, NamedTuple, Optional
+from typing import Dict, List, NamedTuple, Optional, Tuple
 
 from eth_account import Account
 from eth_account.messages import encode_defunct
@@ -100,15 +100,33 @@ def authorize_signed_request(
 # Keyed on the message and the signer rather than the signature bytes, which
 # can be re-encoded into a second valid signature for the same message.
 #
-# A proof is marked used only once it has been granted access, so proofs from
-# non-owners do not fill the used set, and an owner's proof is not spent by a
-# request that was refused anyway.
+# A proof is spent only by an upload that Bee stored (#470). It goes through
+# three steps:
 #
-# The used set lives in memory. That is sufficient because the gateway runs as a
-# single process. A restart empties it, so proofs signed before the process
-# started are refused outright; otherwise one seen just before a restart could
-# be accepted again while still fresh. Running several workers would need a
-# shared store.
+# - reserve_owner_proof, when it grants access. A second request carrying the
+#   same proof is refused while the first is in flight, so the proof still buys
+#   at most one upload. Proofs from non-owners are never reserved, so they do
+#   not fill the set.
+# - confirm_owner_proof, as soon as Bee returns a reference. A failure after
+#   that point (building the response, say) does not give the proof back,
+#   because the upload it paid for has happened.
+# - release_owner_proof, when the request fails before Bee could have stored
+#   anything: a later validation refused it, the payment did not settle, Bee
+#   could not be reached, or Bee answered 4xx. The owner can retry with the
+#   same proof while it is fresh. A Bee 4xx (for example "batch overissued")
+#   can follow a partial store; releasing then never yields a second
+#   successful upload from one proof, but a retry may use some stamp capacity
+#   again. When the outcome at Bee is unknown (timeout,
+#   5xx, cancelled mid-upload) the proof stays spent: failing closed costs the
+#   owner one signature, failing open could give a copied proof a second upload.
+#
+# The set lives in memory. That is sufficient because the gateway runs as a
+# single process. Every entry, reserved or used, expires when the proof's
+# timestamp window ends, after which the proof is refused as stale anyway, so a
+# reservation held by a request that never finished cannot stay stuck. A
+# restart empties the set, so proofs signed before the process started are
+# refused outright; otherwise one seen just before a restart could be accepted
+# again while still fresh. Running several workers would need a shared store.
 #
 # A proof is a bearer credential: it is not bound to the upload's content, so
 # whoever presents it first gets that one upload. It must not be logged or shared.
@@ -120,15 +138,33 @@ class OwnerProofError(Exception):
 
 
 class OwnerProof(NamedTuple):
-    """A verified owner proof, not yet marked used (see consume_owner_proof)."""
+    """A verified owner proof, not yet reserved (see reserve_owner_proof)."""
     signer: str
     key: str        # message|signer: what "used" is recorded against
     expires: float  # unix seconds after which the proof is stale anyway
 
 
-_used_owner_proofs: Dict[str, float] = {}  # message|signer -> expiry (unix seconds)
+class OwnerProofReservation:
+    """One request's hold on a proof. Settled once: confirmed or released."""
+
+    def __init__(self, key: str):
+        self.key = key
+        self.settled = False
+
+
+_RESERVED = "reserved"
+_USED = "used"
+
+# message|signer -> (expiry in unix seconds, state, the reservation holding it)
+_used_owner_proofs: Dict[str, Tuple[float, str, Optional[OwnerProofReservation]]] = {}
 _used_owner_proofs_lock = threading.Lock()
 _process_started_at = int(time.time())
+
+
+def _refusal(state: str) -> OwnerProofError:
+    if state == _RESERVED:
+        return OwnerProofError("owner proof is in use by another request; wait for it or sign a new one")
+    return OwnerProofError("owner proof has already been used; sign a new one")
 
 
 def owner_proof_message(batch_id: str, timestamp: int) -> str:
@@ -140,7 +176,7 @@ def verify_owner_proof(batch_id: str, timestamp: Optional[str], signature: Optio
     """Verify a fresh, unused owner proof for batch_id, without marking it used.
 
     Only proves who is asking; whether that address owns the batch is for the
-    ownership registry to decide. Call consume_owner_proof once access is
+    ownership registry to decide. Call reserve_owner_proof once access is
     granted. Raises OwnerProofError.
     """
     if not timestamp or not signature:
@@ -164,21 +200,62 @@ def verify_owner_proof(batch_id: str, timestamp: Optional[str], signature: Optio
 
     proof = OwnerProof(signer, f"{message}|{signer.lower()}", ts + settings.DEBUG_SIG_MAX_AGE_SECONDS + 1)
     with _used_owner_proofs_lock:
-        if proof.key in _used_owner_proofs:
-            raise OwnerProofError("owner proof has already been used; sign a new one")
+        entry = _used_owner_proofs.get(proof.key)
+        if entry is not None and entry[0] >= time.time():
+            raise _refusal(entry[1])
     return proof
 
 
-def consume_owner_proof(proof: OwnerProof) -> None:
-    """Mark a verified proof used. Raises OwnerProofError if it already was.
+def reserve_owner_proof(proof: OwnerProof) -> OwnerProofReservation:
+    """Hold a verified proof for one request. Raises OwnerProofError if it is
+    already reserved or used.
 
     Check and mark happen under one lock, so two requests racing with the same
-    proof cannot both get through.
+    proof cannot both get through. Settle the result with confirm_owner_proof
+    or release_owner_proof.
     """
     now = time.time()
     with _used_owner_proofs_lock:
-        for k in [k for k, exp in _used_owner_proofs.items() if exp < now]:
+        for k in [k for k, (exp, _, _) in _used_owner_proofs.items() if exp < now]:
             del _used_owner_proofs[k]
-        if proof.key in _used_owner_proofs:
-            raise OwnerProofError("owner proof has already been used; sign a new one")
-        _used_owner_proofs[proof.key] = proof.expires
+        entry = _used_owner_proofs.get(proof.key)
+        if entry is not None:
+            raise _refusal(entry[1])
+        reservation = OwnerProofReservation(proof.key)
+        _used_owner_proofs[proof.key] = (proof.expires, _RESERVED, reservation)
+        return reservation
+
+
+def confirm_owner_proof(reservation: Optional[OwnerProofReservation]) -> None:
+    """Mark a reserved proof used: the upload it granted has happened.
+
+    No-op for None or a reservation that is already settled.
+    """
+    if reservation is None or reservation.settled:
+        return
+    with _used_owner_proofs_lock:
+        reservation.settled = True
+        entry = _used_owner_proofs.get(reservation.key)
+        if entry is not None and entry[2] is reservation:
+            _used_owner_proofs[reservation.key] = (entry[0], _USED, None)
+
+
+def release_owner_proof(reservation: Optional[OwnerProofReservation]) -> None:
+    """Give a reserved proof back: the upload certainly did not happen.
+
+    No-op for None or a reservation that is already settled, so a confirmed
+    proof is never released, and a release cannot drop a hold that another
+    request took after this one was settled.
+    """
+    if reservation is None or reservation.settled:
+        return
+    with _used_owner_proofs_lock:
+        reservation.settled = True
+        entry = _used_owner_proofs.get(reservation.key)
+        if entry is not None and entry[2] is reservation:
+            del _used_owner_proofs[reservation.key]
+
+
+def consume_owner_proof(proof: OwnerProof) -> None:
+    """Reserve and confirm in one step. Raises OwnerProofError if already held."""
+    confirm_owner_proof(reserve_owner_proof(proof))

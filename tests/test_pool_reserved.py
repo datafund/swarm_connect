@@ -12,7 +12,7 @@ import threading
 from datetime import datetime, timezone
 from unittest.mock import AsyncMock, patch
 
-import httpx
+import httpx2
 import pytest
 from fastapi import FastAPI
 
@@ -108,6 +108,9 @@ async def test_replenish_during_a_reservation_does_not_over_buy(tmp_path):
 
 def test_immediate_replenish_counts_reserved_batches(tmp_path):
     mgr = _manager(tmp_path, "a" * 64, "b" * 64)
+    # Synced, so the False below comes from counting the reserved batch and
+    # not from the failed-sync pause (#533).
+    mgr._last_sync_ok = True
     mgr.reserve_stamp("a" * 64)
     with patch.object(mgr, "get_reserve_config", return_value={17: 2}), \
          patch("app.services.stamp_pool.settings") as s, \
@@ -172,7 +175,7 @@ async def test_concurrent_acquires_never_get_the_same_batch(tmp_path, monkeypatc
     monkeypatch.setattr(pool, "settle_payment", slow_settle)
     app = FastAPI()
     app.include_router(pool.router, prefix="/api/v1/pool")
-    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t") as c:
+    async with httpx2.AsyncClient(transport=httpx2.ASGITransport(app=app), base_url="http://t") as c:
         rs = await asyncio.gather(*[c.post("/api/v1/pool/acquire", json={"size": "small"})
                                     for _ in range(3)])
 
@@ -235,7 +238,7 @@ async def _acquire_with_settle(tmp_path, monkeypatch, settle):
     monkeypatch.setattr(pool, "settle_payment", settle)
     app = FastAPI()
     app.include_router(pool.router, prefix="/api/v1/pool")
-    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t") as c:
+    async with httpx2.AsyncClient(transport=httpx2.ASGITransport(app=app), base_url="http://t") as c:
         try:
             return mgr, await c.post("/api/v1/pool/acquire", json={"size": "small"})
         except BaseException as e:  # CancelledError is not an Exception
@@ -286,6 +289,85 @@ async def test_paid_non_delivery_is_logged_as_an_error(tmp_path, monkeypatch, ca
     monkeypatch.setattr(M, "release_reserved_stamp", lambda self, b: None)
     with caplog.at_level("ERROR", logger="app.api.endpoints.pool"):
         _, r = await _acquire_with_settle(tmp_path, monkeypatch, settled)
-    assert r.status_code == 409
+    # Paid and not delivered (#476): not the ordinary lost-race 409, but the
+    # documented refund response, carrying the transaction to cite.
+    assert r.status_code == 500
+    detail = r.json()["detail"]
+    assert detail["code"] == "DELIVERY_FAILED_AFTER_PAYMENT"
+    assert detail["transaction"] == "0xtx"
+    assert detail["x402_status"] == "settled_not_delivered"
+    assert "operator" in detail["message"] and "refund" in detail["message"]
+    assert "another request" not in detail["message"]
     err = [m for m in caplog.messages if "PAID NON-DELIVERY" in m]
     assert err and "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1" in err[0] and "0xtx" in err[0]
+
+
+def _acquire_count(status):
+    from app.services.metrics import pool_acquires_total
+    return pool_acquires_total.labels(size="small", status=status)._value.get()
+
+
+@pytest.mark.asyncio
+async def test_paid_non_delivery_counts_separately_from_a_lost_race(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    async def settled(request):
+        request.state.x402_payer = "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+        request.state.x402_settlement = SimpleNamespace(transaction="0xtx")
+
+    from app.services.stamp_pool import StampPoolManager as M
+    monkeypatch.setattr(M, "release_reserved_stamp", lambda self, b: None)
+    before_paid, before_err = _acquire_count("settled_not_delivered"), _acquire_count("error")
+    await _acquire_with_settle(tmp_path, monkeypatch, settled)
+    assert _acquire_count("settled_not_delivered") == before_paid + 1
+    assert _acquire_count("error") == before_err
+
+
+@pytest.mark.asyncio
+async def test_unpaid_release_failure_is_still_an_ordinary_lost_race(tmp_path, monkeypatch, caplog):
+    async def unpaid(request):
+        return None
+
+    from app.services.stamp_pool import StampPoolManager as M
+    monkeypatch.setattr(M, "release_reserved_stamp", lambda self, b: None)
+    before_paid, before_err = _acquire_count("settled_not_delivered"), _acquire_count("error")
+    with caplog.at_level("ERROR", logger="app.api.endpoints.pool"):
+        _, r = await _acquire_with_settle(tmp_path, monkeypatch, unpaid)
+    assert r.status_code == 409
+    detail = r.json()["detail"]
+    assert "acquired by another request" in detail["message"]
+    assert "code" not in detail
+    assert _acquire_count("error") == before_err + 1
+    assert _acquire_count("settled_not_delivered") == before_paid
+    # Nothing was paid, so nothing is logged as a paid non-delivery.
+    assert not [m for m in caplog.messages if "PAID NON-DELIVERY" in m]
+
+
+@pytest.mark.asyncio
+async def test_release_log_names_the_caller_not_the_proxy(tmp_path, monkeypatch, caplog):
+    """Behind the reverse proxy the TCP peer is the proxy. The batch is reserved
+    for, and its release logged with, the caller's key (get_client_key) (#468)."""
+    from app.api.endpoints import pool
+    from app.core.config import settings
+    monkeypatch.setattr(settings, "STAMP_POOL_ENABLED", True)
+    monkeypatch.setattr(settings, "TRUSTED_PROXY_HOPS", 1)
+    mgr = _manager(tmp_path, "a" * 64)
+    monkeypatch.setattr(pool, "stamp_pool_manager", mgr)
+    monkeypatch.setattr(mgr, "trigger_replenishment_if_needed", lambda d: False)
+    monkeypatch.setattr(pool.stamp_ownership_manager, "register_stamp", lambda **kw: None)
+
+    async def settle(request):
+        return None
+
+    monkeypatch.setattr(pool, "settle_payment", settle)
+    app = FastAPI()
+    app.include_router(pool.router, prefix="/api/v1/pool")
+    transport = httpx2.ASGITransport(app=app, client=("10.0.0.2", 51234))   # the proxy
+    with caplog.at_level("INFO", logger="app.services.stamp_pool"):
+        async with httpx2.AsyncClient(transport=transport, base_url="http://t") as c:
+            r = await c.post("/api/v1/pool/acquire", json={"size": "small"},
+                             headers={"X-Forwarded-For": "2001:db8:1:2::77"})
+    assert r.status_code == 200, r.text
+    released = [m for m in caplog.messages if m.startswith("Released stamp")]
+    assert released and released[-1].endswith("to 2001:db8:1:2::/64"), released
+    assert not any("10.0.0.2" in m for m in released)

@@ -30,10 +30,10 @@ STAMP_ID = "a" * 64
 
 
 def _bee_refusal():
-    import httpx
-    return httpx.HTTPStatusError(
-        "400", request=httpx.Request("POST", "http://bee/stamps"),
-        response=httpx.Response(400, json={"message": "insufficient amount"}))
+    import httpx2
+    return httpx2.HTTPStatusError(
+        "400", request=httpx2.Request("POST", "http://bee/stamps"),
+        response=httpx2.Response(400, json={"message": "insufficient amount"}))
 
 # depth 17 at this price is a fraction of a BZZ; the tests set costs explicitly
 # via the chainstate price where the exact figure matters.
@@ -265,7 +265,7 @@ class TestPurchaseEndpoint:
     def test_an_uncertain_failure_stays_charged(self, tracker, monkeypatch):
         """A timeout after the request was sent may have bought the batch:
         the limits fail closed rather than hand the budget back."""
-        import httpx
+        import httpx2
         monkeypatch.setattr(settings, "X402_MAX_STAMP_BZZ", 0.0)
         monkeypatch.setattr(settings, "STAMP_DAILY_BZZ_PER_CALLER", 10.0)
         with patch("app.services.swarm_api.get_chainstate",
@@ -273,7 +273,7 @@ class TestPurchaseEndpoint:
              patch("app.services.swarm_api.check_sufficient_funds",
                    new=AsyncMock(return_value=FUNDS_OK)), \
              patch("app.services.swarm_api.purchase_postage_stamp",
-                   new=AsyncMock(side_effect=httpx.ReadTimeout("mining"))):
+                   new=AsyncMock(side_effect=httpx2.ReadTimeout("mining"))):
             TestClient(app).post("/api/v1/stamps/", json={"depth": 17, "duration_hours": 24})
         snap = tracker.snapshot()
         assert snap["spent"] != {}
@@ -498,7 +498,7 @@ class TestDayRollover:
         allowed, info = t.check("1.2.3.4", 1.0)
         assert allowed, "the budget did not reset when the day turned"
         assert info["spent_bzz"] == 0
-        assert info["resets_at"].startswith("2099-01-01")
+        assert info["resets_at"] == "2099-01-02T00:00:00Z"
 
     def test_the_reset_is_persisted_not_just_in_memory(self, tmp_path, monkeypatch):
         """Otherwise a restart just after midnight would reload yesterday's
@@ -722,7 +722,7 @@ class TestReservation:
     def test_concurrent_extends_cannot_overrun_the_budget(self, tracker, monkeypatch):
         """The audit PoC, inverted: many parallel extends from one IP."""
         import asyncio
-        import httpx
+        import httpx2
         monkeypatch.setattr(settings, "X402_MAX_STAMP_BZZ", 5.0)
         monkeypatch.setattr(settings, "STAMP_DAILY_BZZ_PER_CALLER", 0.5)
         extended = []
@@ -733,8 +733,8 @@ class TestReservation:
             return stamp_id
 
         async def run():
-            transport = httpx.ASGITransport(app=app, client=("203.0.113.7", 1234))
-            async with httpx.AsyncClient(transport=transport, base_url="http://t") as c:
+            transport = httpx2.ASGITransport(app=app, client=("203.0.113.7", 1234))
+            async with httpx2.AsyncClient(transport=transport, base_url="http://t") as c:
                 return await asyncio.gather(*[
                     c.patch(f"/api/v1/stamps/{STAMP_ID}/extend", json={"duration_hours": 24})
                     for _ in range(20)])
@@ -852,20 +852,20 @@ class TestCeilingOnEveryPath:
 class TestClassification:
     @staticmethod
     def _status(code):
-        import httpx
-        return httpx.HTTPStatusError(str(code), request=httpx.Request("POST", "http://bee/x"),
-                                     response=httpx.Response(code))
+        import httpx2
+        return httpx2.HTTPStatusError(str(code), request=httpx2.Request("POST", "http://bee/x"),
+                                     response=httpx2.Response(code))
 
     def test_what_counts_as_certainly_unspent(self):
         import asyncio
-        import httpx
+        import httpx2
         from fastapi import HTTPException
         from app.services.spend_budget import spend_certainly_did_not_happen as unspent
-        req = httpx.Request("POST", "http://bee/x")
-        released = [HTTPException(status_code=400), httpx.ConnectError("x", request=req),
-                    httpx.ConnectTimeout("x", request=req), self._status(400), self._status(429)]
-        kept = [httpx.ReadTimeout("x", request=req), httpx.WriteTimeout("x", request=req),
-                httpx.RemoteProtocolError("x", request=req), self._status(500), self._status(503),
+        req = httpx2.Request("POST", "http://bee/x")
+        released = [HTTPException(status_code=400), httpx2.ConnectError("x", request=req),
+                    httpx2.ConnectTimeout("x", request=req), self._status(400), self._status(429)]
+        kept = [httpx2.ReadTimeout("x", request=req), httpx2.WriteTimeout("x", request=req),
+                httpx2.RemoteProtocolError("x", request=req), self._status(500), self._status(503),
                 asyncio.CancelledError(), ValueError("?"), RuntimeError("?")]
         assert all(unspent(e) for e in released)
         assert not any(unspent(e) for e in kept)
@@ -936,3 +936,216 @@ class TestUnreadableRecordWithReservations:
         assert r.status_code == 503
         assert r.json()["detail"]["code"] == "SPEND_BUDGET_UNAVAILABLE"
         buy.assert_not_called()
+
+
+class TestFreeCeilingRefusalOffersPaymentOnlyWherePayingHelps:
+    """#535: the free-portion refusal used to say that paid requests still
+    work. That is false with x402 off (no request is ever paid) and on a
+    testnet without X402_ALLOW_TESTNET_PAID_BYPASS (a paid request is charged
+    to the free portion too). The paid-route clause follows the same condition
+    as the pool allowance refusal: X402_ENABLED and paid_bypass_is_honoured()."""
+
+    PAID_CLAUSE = "paid requests still work"
+
+    def _free_ceiling_refusal(self, tracker, monkeypatch, *, x402_enabled, network, override=False):
+        from types import SimpleNamespace
+        from fastapi import HTTPException
+        import app.api.endpoints.stamps as stamps_ep
+
+        monkeypatch.setattr(settings, "X402_ENABLED", x402_enabled)
+        monkeypatch.setattr(settings, "X402_NETWORK", network)
+        monkeypatch.setattr(settings, "X402_ALLOW_TESTNET_PAID_BYPASS", override)
+        monkeypatch.setattr(settings, "X402_MAX_STAMP_BZZ", 0.0)
+        monkeypatch.setattr(settings, "STAMP_DAILY_BZZ_PER_CALLER", UNLIMITED)
+        monkeypatch.setattr(settings, "GATEWAY_DAILY_BZZ_CEILING", 100.0)
+        monkeypatch.setattr(settings, "GATEWAY_DAILY_BZZ_FREE_CEILING", 0.01)
+
+        class _Req:
+            def __init__(self):
+                self.state = SimpleNamespace(x402_mode=None)
+                self.headers = {}
+                self.client = None
+
+        with pytest.raises(HTTPException) as exc:
+            stamps_ep._enforce_spend_limits(_Req(), 0.1, "stamp purchase")
+        assert exc.value.status_code == 503
+        d = exc.value.detail
+        assert d["code"] == "GATEWAY_DAILY_SPEND_CEILING"
+        assert d["resets_at"]
+        assert "free spending" in d["message"]
+        assert f"resets at {d['resets_at']}" in d["message"]
+        return d["message"]
+
+    def test_no_paid_route_when_x402_is_off(self, tracker, monkeypatch):
+        msg = self._free_ceiling_refusal(tracker, monkeypatch, x402_enabled=False, network="base")
+        assert "paid" not in msg.lower(), msg
+
+    def test_no_paid_route_on_a_testnet_without_the_override(self, tracker, monkeypatch):
+        msg = self._free_ceiling_refusal(tracker, monkeypatch, x402_enabled=True,
+                                         network="base-sepolia", override=False)
+        assert "paid" not in msg.lower(), msg
+
+    def test_paid_route_offered_with_x402_on_a_mainnet(self, tracker, monkeypatch):
+        """Control: where paying does bypass the free portion, say so."""
+        msg = self._free_ceiling_refusal(tracker, monkeypatch, x402_enabled=True, network="base")
+        assert self.PAID_CLAUSE in msg, msg
+
+    def test_paid_route_offered_on_a_testnet_with_the_override(self, tracker, monkeypatch):
+        msg = self._free_ceiling_refusal(tracker, monkeypatch, x402_enabled=True,
+                                         network="base-sepolia", override=True)
+        assert self.PAID_CLAUSE in msg, msg
+
+    def test_overall_ceiling_refusal_never_offers_the_paid_route(self, tracker, monkeypatch):
+        """Control: the overall ceiling bounds paid spending too, so even where
+        paying bypasses the free portion, this refusal must not offer it."""
+        from types import SimpleNamespace
+        from fastapi import HTTPException
+        import app.api.endpoints.stamps as stamps_ep
+
+        monkeypatch.setattr(settings, "X402_ENABLED", True)
+        monkeypatch.setattr(settings, "X402_NETWORK", "base")
+        monkeypatch.setattr(settings, "X402_MAX_STAMP_BZZ", 0.0)
+        monkeypatch.setattr(settings, "STAMP_DAILY_BZZ_PER_CALLER", UNLIMITED)
+        monkeypatch.setattr(settings, "GATEWAY_DAILY_BZZ_CEILING", 0.01)
+        monkeypatch.setattr(settings, "GATEWAY_DAILY_BZZ_FREE_CEILING", 100.0)
+
+        req = SimpleNamespace(state=SimpleNamespace(x402_mode=None), headers={}, client=None)
+        with pytest.raises(HTTPException) as exc:
+            stamps_ep._enforce_spend_limits(req, 0.1, "stamp purchase")
+        assert exc.value.status_code == 503
+        d = exc.value.detail
+        assert d["code"] == "GATEWAY_DAILY_SPEND_CEILING"
+        assert d["message"] == f"The gateway has reached its daily spending limit. It resets at {d['resets_at']}."
+        assert "paid" not in d["message"].lower()
+
+
+class TestResetsAtIsParseable:
+    """resets_at used to read "<day>T24:00:00Z", which fromisoformat rejects (#512)."""
+
+    END_OF_YEAR = "2026-12-31"
+    NEXT = "2027-01-01T00:00:00Z"
+
+    @staticmethod
+    def _assert_parseable(value):
+        from datetime import datetime
+        assert datetime.fromisoformat(value.replace("Z", "+00:00")).hour == 0
+
+    @pytest.fixture
+    def tracker(self, tmp_path, monkeypatch):
+        from app.services import spend_budget
+        monkeypatch.setattr(settings, "STAMP_DAILY_BZZ_PER_CALLER", 1.0)
+        monkeypatch.setattr(spend_budget, "_today", lambda: self.END_OF_YEAR)
+        return SpendBudgetTracker(state_file=str(tmp_path / "spend.json"))
+
+    def test_check(self, tracker):
+        _, info = tracker.check("1.2.3.4", 0.5)
+        assert info["resets_at"] == self.NEXT
+        self._assert_parseable(info["resets_at"])
+
+    def test_reserve(self, tracker):
+        _, info = tracker.reserve("1.2.3.4", 0.5)
+        assert info["resets_at"] == self.NEXT
+        self._assert_parseable(info["resets_at"])
+
+    def test_reserve_all_refusal(self, tracker):
+        hold, key, info = tracker.reserve_all([("1.2.3.4", 2.0, 1.0)])
+        assert hold is None and key == "1.2.3.4"
+        assert info["resets_at"] == self.NEXT
+        self._assert_parseable(info["resets_at"])
+
+    def test_reserve_all_refusal_on_an_unreadable_record(self, tmp_path, monkeypatch):
+        from app.services import spend_budget
+        monkeypatch.setattr(spend_budget, "_today", lambda: self.END_OF_YEAR)
+        path = tmp_path / "spend.json"
+        path.write_text("{not json")
+        t = SpendBudgetTracker(state_file=str(path))
+        hold, _, info = t.reserve_all([("1.2.3.4", 0.1, 1.0)])
+        assert hold is None and info["state_unreadable"]
+        assert info["resets_at"] == self.NEXT
+        self._assert_parseable(info["resets_at"])
+
+
+class TestResetsAtInRefusalResponses:
+    """Each spend refusal states resets_at in its body and in its message (#531).
+
+    The tracker tests above pin the value; these pin what a client receives, so
+    a message template cannot bring back an unparseable "T24:00:00Z".
+    """
+
+    END_OF_YEAR = "2026-12-31"
+    NEXT = "2027-01-01T00:00:00Z"
+
+    @pytest.fixture
+    def tracker(self, tmp_path, monkeypatch):
+        from app.services import spend_budget
+        monkeypatch.setattr(spend_budget, "_today", lambda: self.END_OF_YEAR)
+        t = SpendBudgetTracker(state_file=str(tmp_path / "spend.json"))
+        monkeypatch.setattr(spend_budget, "spend_budget_tracker", t)
+        import app.api.endpoints.stamps as stamps_ep
+        monkeypatch.setattr(stamps_ep, "spend_budget_tracker", t)
+        monkeypatch.setattr(settings, "X402_MAX_STAMP_BZZ", 0.0)
+        return t
+
+    def _assert_reset_in(self, detail):
+        from datetime import datetime
+        value = detail["resets_at"]
+        assert datetime.fromisoformat(value.replace("Z", "+00:00")).hour == 0
+        assert value == self.NEXT
+        assert value in detail["message"]
+        assert "T24" not in detail["message"]
+
+    @staticmethod
+    def _purchase():
+        with patch("app.services.swarm_api.get_chainstate",
+                   new=AsyncMock(return_value=CHAINSTATE)), \
+             patch("app.services.swarm_api.check_sufficient_funds",
+                   new=AsyncMock(return_value=FUNDS_OK)), \
+             patch("app.services.swarm_api.purchase_postage_stamp",
+                   new=AsyncMock(return_value=STAMP_ID)) as buy:
+            r = TestClient(app).post("/api/v1/stamps/",
+                                     json={"depth": 17, "duration_hours": 24})
+        return r, buy
+
+    def test_the_daily_budget_refusal_on_purchase(self, tracker, monkeypatch):
+        monkeypatch.setattr(settings, "STAMP_DAILY_BZZ_PER_CALLER", 0.001)
+        tracker.consume("testclient", 0.001)
+        r, buy = self._purchase()
+        assert r.status_code == 429, r.text
+        d = r.json()["detail"]
+        assert d["code"] == "DAILY_SPEND_BUDGET_EXHAUSTED"
+        self._assert_reset_in(d)
+        buy.assert_not_called()
+
+    @pytest.mark.parametrize("ceiling", ["GATEWAY_DAILY_BZZ_CEILING",
+                                         "GATEWAY_DAILY_BZZ_FREE_CEILING"])
+    def test_the_gateway_ceiling_refusal_on_purchase(self, tracker, monkeypatch, ceiling):
+        """The total and the free ceiling build different messages."""
+        monkeypatch.setattr(settings, "STAMP_DAILY_BZZ_PER_CALLER", UNLIMITED)
+        monkeypatch.setattr(settings, "GATEWAY_DAILY_BZZ_CEILING", 100.0)
+        monkeypatch.setattr(settings, "GATEWAY_DAILY_BZZ_FREE_CEILING", 100.0)
+        monkeypatch.setattr(settings, ceiling, 0.000001)
+        r, buy = self._purchase()
+        assert r.status_code == 503, r.text
+        d = r.json()["detail"]
+        assert d["code"] == "GATEWAY_DAILY_SPEND_CEILING"
+        self._assert_reset_in(d)
+        buy.assert_not_called()
+
+    def test_the_gateway_ceiling_refusal_on_for_owner(self, tracker, monkeypatch):
+        from app.api.endpoints import stamps_for_owner as ep
+        monkeypatch.setattr(settings, "STAMP_PURCHASE_FOR_OTHERS_ENABLED", True)
+        monkeypatch.setattr(settings, "STAMP_FOR_OTHERS_REQUIRE_WHITELIST", False)
+        monkeypatch.setattr(settings, "STAMP_FOR_OTHERS_FREE_TIER_ENABLED", True)
+        monkeypatch.setattr(settings, "GATEWAY_DAILY_BZZ_CEILING", 0.000001)
+        chain = ep.gnosis_chain_client
+        with patch("app.services.swarm_api.get_chainstate", new=AsyncMock(return_value=CHAINSTATE)), \
+             patch.object(type(chain), "is_configured", new=property(lambda self: True)), \
+             patch.object(chain, "preflight", new=AsyncMock(return_value={"is_critical": False, "warnings": []})), \
+             patch.object(chain, "create_batch", new=AsyncMock()) as create:
+            r = TestClient(app).post("/api/v1/stamps/for-owner", json={
+                "owner": "0x" + "1" * 40, "depth": 17, "duration_hours": 24})
+        assert r.status_code == 503, r.text
+        d = r.json()["detail"]
+        assert d["code"] == "GATEWAY_DAILY_SPEND_CEILING"
+        self._assert_reset_in(d)
+        create.assert_not_called()
