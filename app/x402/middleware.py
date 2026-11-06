@@ -623,12 +623,22 @@ class X402Middleware(BaseHTTPMiddleware):
                                     headers={"Retry-After": "60"})
             outcome_unknown.mark_asked(auth_key, gen)
             try:
-                from app.x402.settlement import checked_settlement, facilitator_requirements
+                from app.x402.settlement import (checked_settlement, facilitator_requirements,
+                                                 settle_refusal_is_definite)
                 settlement = checked_settlement(await self.facilitator_client.settle(
                     payment=payment_payload,
                     payment_requirements=facilitator_requirements(request),
                 ))
                 failure = None if settlement.success else (settlement.error_reason or "unknown")
+                if failure is not None and not settle_refusal_is_definite(
+                        settlement.error_reason, getattr(settlement, "transaction", None)):
+                    # Not a refusal known to be decided before anything was
+                    # sent (#660, settlement.settle_refusal_is_definite, the
+                    # classifier settle_payment uses too): the unknown-outcome
+                    # path below, exactly as for an exception.
+                    outcome_unknown.release(auth_key)    # an unknown outcome now
+                    failure = f"facilitator reported {failure} (the transaction may have been sent)"
+                    unknown_outcome = True
             except Exception as e:
                 outcome_unknown.release(auth_key)    # an unknown outcome now
                 logger.error(f"x402: Payment settlement failed: {type(e).__name__}: {e}", exc_info=True)
@@ -644,7 +654,15 @@ class X402Middleware(BaseHTTPMiddleware):
             # A definite answer stays in flight until its resolution is written
             # (aresolve releases it): a duplicate in between is "in progress".
             if failure is not None:
-                logger.error(f"x402: settlement failed after delivery on {request.url.path}: {failure}")
+                if unknown_outcome:
+                    # !r: since #660 this can carry a facilitator's multi-line
+                    # text, and the line must stay one line (settle_payment logs
+                    # it the same way). The audit record keeps it as is.
+                    logger.error(f"x402: settlement failed after delivery on {request.url.path}: {failure!r}")
+                else:
+                    # A refusal: the full reason, as it came, is the #576 record
+                    # in the log (tests/test_x402_facilitator_reason.py).
+                    logger.error(f"x402: settlement failed after delivery on {request.url.path}: {failure}")
                 if unknown_outcome:
                     # The facilitator may or may not have moved the money: not
                     # a refusal. Same record as settlement.py uses for it. Not

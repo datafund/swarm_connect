@@ -6,6 +6,13 @@ the RPC URL and quoting the RPC request body. The caller now sees a reason only
 if it is a short machine code; the full text stays in the log and the audit
 record. Driven through the real dependency, settle_payment() and the middleware
 fallback, with a mocked facilitator.
+
+Since #660 a settle answer with free text is no longer a definite refusal: only
+listed pre-broadcast codes are (settlement.settle_refusal_is_definite), and
+that very RPC error is what a facilitator sends when sending the transaction
+failed, possibly after it was broadcast. It is an unknown outcome now, and the
+text is still never shown; the unknown-outcome log line carries it escaped on
+one line (repr), the audit record as it came.
 """
 import logging
 from unittest.mock import AsyncMock
@@ -27,18 +34,25 @@ CODE = "invalid_exact_evm_nonce_already_used"
 PAYER = "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
 
 
-def _assert_hidden(r):
+def _assert_hidden(r, placeholder=True):
     text = r.text
     assert "sepolia.base.org" not in text and "https://" not in text
     assert "Request body" not in text and "eth_sendRawTransaction" not in text
     assert "Missing or invalid parameters" not in text
     # No newline, raw or JSON-escaped, anywhere in the body.
     assert "\n" not in text and "\\n" not in text
-    assert FACILITATOR_REASON_HIDDEN in text
+    if placeholder:
+        assert FACILITATOR_REASON_HIDDEN in text
 
 
 def _logged_in_full(caplog):
     return any(RAW in rec.getMessage() for rec in caplog.records)
+
+
+def _logged_in_full_on_one_line(caplog):
+    """The whole text, escaped by repr, in one log line (#660)."""
+    escaped = RAW.replace("\n", "\\n")
+    return any(escaped in rec.getMessage() and "\n" not in rec.getMessage() for rec in caplog.records)
 
 
 def _audited_in_full():
@@ -52,18 +66,15 @@ def _verify_rejects(reason):
 
 # --- settle before the work (settle_payment) --------------------------------
 
-def test_settle_refusal_hides_free_text_and_logs_it(env, caplog):
+def test_settle_free_text_is_an_unknown_outcome_hidden_and_logged(env, caplog):
     caplog.set_level(logging.WARNING)
     r = _run(_facilitator(refused(RAW)))
-    assert r.status_code == 402
+    assert r.status_code == 502
     detail = r.json()["detail"]
-    assert detail["code"] == "PAYMENT_SETTLEMENT_FAILED"
-    assert detail["reason"] == FACILITATOR_REASON_HIDDEN
-    assert detail["message"] == f"The payment could not be settled ({FACILITATOR_REASON_HIDDEN}). Nothing was delivered."
-    assert detail["error"] == detail["message"]
-    assert detail["accepts"]                           # shape unchanged: still a payable 402
-    _assert_hidden(r)
-    assert _logged_in_full(caplog)
+    assert detail["code"] == "PAYMENT_SETTLEMENT_UNAVAILABLE"
+    assert "reason" not in detail and "accepts" not in detail   # nothing to sign again from
+    _assert_hidden(r, placeholder=False)
+    assert _logged_in_full_on_one_line(caplog)
     assert _audited_in_full()
     assert DELIVERED == []
 
@@ -78,16 +89,15 @@ def test_settle_refusal_shows_a_machine_code(env):
 
 # --- settle after the work (middleware fallback) ----------------------------
 
-def test_fallback_refusal_hides_free_text_and_logs_it(env, caplog):
+def test_fallback_free_text_is_an_unknown_outcome_hidden_and_logged(env, caplog):
     caplog.set_level(logging.WARNING)
     r = _run(_facilitator(refused(RAW)), path="/api/v1/data/manifest")
-    assert r.status_code == 402
+    assert r.status_code == 502
     body = r.json()
-    assert body["code"] == body["detail"]["code"] == "PAYMENT_SETTLEMENT_FAILED"
-    assert body["message"] == f"The payment could not be settled ({FACILITATOR_REASON_HIDDEN})."
-    assert set(body) == {"detail", "code", "message", "x402_status"}   # shape unchanged
-    _assert_hidden(r)
-    assert _logged_in_full(caplog)
+    assert body["code"] == body["detail"]["code"] == "PAYMENT_SETTLEMENT_UNKNOWN"
+    assert set(body) == {"detail", "code", "message", "nonce", "x402_status"}
+    _assert_hidden(r, placeholder=False)
+    assert _logged_in_full_on_one_line(caplog)
     assert _audited_in_full()
 
 
@@ -122,8 +132,13 @@ def test_verify_rejection_shows_a_machine_code(env):
 
 # --- 409 after an unknown outcome: `reason` carries the refusal -------------
 
-def test_outcome_unknown_settle_refusal_hides_free_text(env):
-    fac = _facilitator(RuntimeError("facilitator down"), refused(RAW))
+def test_outcome_unknown_refusal_hides_free_text(env):
+    # The retry refused at verify with free text (#660: a settle answer with
+    # free text is itself an unknown outcome, a 502, so the 409's `reason`
+    # comes from a verify refusal or a listed settle code).
+    fac = _facilitator(RuntimeError("facilitator down"))
+    good = VerifyResponse(isValid=True, payer=PAYER)
+    fac.verify = AsyncMock(side_effect=[good, _verify_rejects(RAW)])
     header = create_valid_payment_header()
     assert _run(fac, header=header).status_code == 502
     r = _run(fac, header=header)
