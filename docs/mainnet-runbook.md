@@ -20,7 +20,7 @@ Do these in order. Rehearse on staging first, with the same settings and a tiny 
 | 6 | **Free tier** | Decide whether it stays on (`X402_FREE_TIER_ENABLED`) and at what rate (`X402_FREE_TIER_RATE_LIMIT`). It is bounded by the free ceiling. |
 | 7 | **Backups** | Install the backup cron (section 4) and test a restore once. |
 | 8 | **Alerts** | Apply the alert rules (`scripts/apply_grafana.py`) and check they reach someone (section 5). |
-| 9 | **Terms** | Terms and refund policy published and linked *(requires the terms PR for #383)*. |
+| 9 | **Alpha notice** | By maintainer decision (2026-11-06, #685) there are no full terms: the [alpha notice](../ALPHA_NOTICE.md) stands in for them (alpha software, no guarantees, refunds should not be expected, spend small amounts, test on staging or the free tier first). Set the GitHub environment variables `TERMS_URL` to its URL on `main` (`https://github.com/datafund/swarm_connect/blob/main/ALPHA_NOTICE.md`) and `SUPPORT_CONTACT` to the feedback contact, in `production` and `staging`; deploy.yml writes both. Check that `GET /` shows them as `terms_url` and `support_contact`. |
 | 10 | **Smoke test** | One real payment of a few cents, end to end: 402 → pay → 2xx, a `payment_settled` and a `payment_delivered` audit line with the same transaction, and the USDC visible at the pay-to address. |
 
 

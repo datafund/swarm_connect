@@ -10,6 +10,7 @@ import logging
 import secrets
 
 from app.x402.settlement import settle_payment
+from app.core.support import report_advice
 from app.x402.openapi_docs import paid_route_openapi
 from app.core.config import settings
 from app.x402.networks import to_v1
@@ -738,7 +739,7 @@ async def _finish_pending_purchase(request: Request, label: str, depth: int, amo
         resolve_idempotent_result(idem, status.HTTP_500_INTERNAL_SERVER_ERROR, json.dumps({
             "code": "DELIVERY_FAILED_AFTER_PAYMENT",
             "message": ("The payment was collected but the batch could not be found on the node. "
-                        "Contact the operator with this transaction for a refund."),
+                        + report_advice("transaction")),
             "transaction": tx,
             "x402_status": "settled_not_delivered",
         }).encode())

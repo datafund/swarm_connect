@@ -736,12 +736,20 @@ class OutcomeUnknownRegistry:
 
 outcome_unknown = OutcomeUnknownRegistry()
 
-OUTCOME_UNKNOWN_ADVICE = (
-    "Do not pay again from this response. Check on-chain whether this authorization's nonce "
-    "was used. If it was, contact the operator with the nonce. If it was not, the facilitator "
-    "may still submit it, so before signing a new payment wait until its validBefore has "
-    "passed, or cancel it on-chain with EIP-3009 cancelAuthorization."
-)
+def outcome_unknown_advice() -> str:
+    """What to do when a payment may have been collected (#686: names SUPPORT_CONTACT).
+
+    Built per call so it follows the settings. With SUPPORT_CONTACT and
+    TERMS_URL empty it is byte-identical to the text before #686, which
+    tests/golden/x402_settle_refusals.json pins.
+    """
+    from app.core.support import notice_sentence, report_nonce_clause
+    return (
+        "Do not pay again from this response. Check on-chain whether this authorization's nonce "
+        f"was used. If it was, {report_nonce_clause()}. If it was not, the facilitator "
+        "may still submit it, so before signing a new payment wait until its validBefore has "
+        "passed, or cancel it on-chain with EIP-3009 cancelAuthorization." + notice_sentence()
+    )
 
 
 OUTCOME_UNKNOWN_HEADERS = {"X-Payment-Mode": "failed", "X-Payment-Status": "settlement_unknown"}
@@ -927,7 +935,7 @@ def settlement_unavailable_detail(request: Request, interrupted: bool = False) -
     return {
         "code": "PAYMENT_SETTLEMENT_UNAVAILABLE",
         "message": ("The payment could not be settled, so nothing was delivered, but it is "
-                    "unknown whether the transfer was collected. " + retry + OUTCOME_UNKNOWN_ADVICE),
+                    "unknown whether the transfer was collected. " + retry + outcome_unknown_advice()),
         "nonce": request_nonce(request),
         "x402_status": "settlement_failed",
     }
@@ -1027,7 +1035,7 @@ def outcome_unknown_refusal(auth_key: Tuple[str, str], reason: Optional[str] = N
                     "answer, so that transfer may already have been collected. "
                     + ("This request's work ran, but its result is withheld and it was not charged. "
                        if work_ran else "This request did nothing and was not charged. ")
-                    + OUTCOME_UNKNOWN_ADVICE),
+                    + outcome_unknown_advice()),
         "nonce": auth_key[1],
         "x402_status": "settlement_unknown",
     }

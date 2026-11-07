@@ -2,11 +2,13 @@
 
 This document describes how to integrate x402 payment support into CLI tools and MCP servers that interact with the Swarm Connect gateway.
 
-> **Data retention.** What you pay for is a stamp with a limited lifetime, not permanent storage. Upload and stamp responses include `expires_at`; after that, data can disappear unless the stamp is extended. See [TERMS.md](../TERMS.md).
+> ⚠️ **Real money.** The hosted gateway at `provenance-gateway.datafund.io` charges real USDC on Base mainnet. The software is alpha: there are no guarantees and refunds should not be expected. Spend small amounts, set a per-payment cap in your client, and test on staging (`provenance-gateway.dev.datafund.io`, see [Testing without real money: staging](#testing-without-real-money-staging)) or the free tier first. See the [alpha notice](../ALPHA_NOTICE.md). Feedback and problem reports: info@datafund.io (a feedback contact, not a refund contact).
+
+> **Data retention.** What you pay for is a stamp with a limited lifetime, not permanent storage. Upload and stamp responses include `expires_at`; after that, data can disappear unless the stamp is extended. See the [alpha notice](../ALPHA_NOTICE.md).
 
 ## Protocol Version
 
-**This gateway implements x402 protocol version 1 (v1).**
+**The gateway accepts x402 v1 and v2 (both hosted gateways).** A self-hosted gateway accepts v1 only unless its operator enables v2 (`X402_PROTOCOL_VERSIONS`); `GET /health` lists the accepted versions under `x402.versions`. v1 is described first, v2 below.
 
 Key v1 characteristics:
 - Uses string network identifiers: `"base-sepolia"`, `"base"` (not CAIP-2 format like `eip155:84532`). This holds also when the operator configured the gateway with the CAIP-2 id: v1 output always carries the v1 name
@@ -16,7 +18,7 @@ Key v1 characteristics:
 
 Clients should check the `x402Version` field in 402 responses to confirm compatibility.
 
-### x402 v2 (opt-in per deployment)
+### x402 v2 (both hosted gateways; opt-in on a self-hosted one)
 
 An operator can also accept x402 v2 (`X402_PROTOCOL_VERSIONS`; `GET /health` lists the accepted versions under `x402.versions`). Then:
 
@@ -140,7 +142,7 @@ price is above the minimum. To learn the price before you upload, call
 `GET /api/v1/pricing?upload_bytes=<body size>&redundancy=<level>`. Read each
 quote's `amount`; its `max_amount_required` is the same value and is deprecated.
 `GET /health` lists the x402 versions the gateway accepts in `x402.versions`
-(`[1]` today).
+(`[1, 2]` on both hosted gateways).
 
 **Before signing, check `network` and `asset`** against the chain you mean to
 pay on, and `payTo` if you know the gateway's address. A client signs whatever
@@ -607,11 +609,22 @@ also pins the payee. A run makes two payments (stamp and upload). `--max-usd`
 run. The curl script never pays, and stops rather than probe a gateway that
 does not answer with a 402.
 
-### Testnet Mode
+### Testing without real money: staging
 
-Use Base Sepolia for integration testing:
+Use the staging gateway, `https://provenance-gateway.dev.datafund.io`, for integration testing:
+- Network `base-sepolia` (`eip155:84532`), test USDC `0x036CbD53842c5426634e7929541eC2318f3dCF7e` (EIP-712 name `"USDC"`)
 - Free testnet USDC from [Circle Faucet](https://faucet.circle.com/)
-- No real money involved
+- No real money involved; x402 v1 and v2, and the same free tier as production
+- It stores on the real Swarm network, and is for integration testing only
+
+### Paying on mainnet (production)
+
+The production gateway, `https://provenance-gateway.datafund.io`, charges real USDC on Base mainnet:
+- Network `base` (`eip155:8453`), USDC `0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913`, EIP-712 domain name `"USD Coin"`, version `"2"` (build the domain from the 402's `extra`, as above)
+- The wallet needs USDC and no ETH: the facilitator pays the gas
+- **Always set a per-payment cap**: `max_value` (x402 Python SDK), `--max-usd` (Python sample) / the `MAX_USD` constant (Node sample), `maxAmount` (the provenance SDK)
+- Optionally pin `payTo` to the gateway's address (`--pay-to` / `PAY_TO` in the samples), so a changed 402 cannot redirect your payment
+- The software is alpha: refunds should not be expected. See the [alpha notice](../ALPHA_NOTICE.md)
 
 ## Retries and Idempotency-Key
 
@@ -630,8 +643,8 @@ What the gateway does with the key (payments with `X-PAYMENT` only; the free tie
 | Same key while the first is still running | `409` `IDEMPOTENCY_KEY_IN_PROGRESS`, `Retry-After: 5`. Not charged; retry with the same key |
 | Same key, different body or query | `422` `IDEMPOTENCY_KEY_REUSED`. Not charged |
 | Key longer than 255 characters or not printable ASCII | `400` `IDEMPOTENCY_KEY_INVALID`. Not charged |
-| First request paid, but failed or was interrupted afterwards (including a gateway restart) | `409` `IDEMPOTENCY_KEY_SETTLED_PENDING` with the `transaction`. Not charged again; contact the operator with that transaction for the result or a refund |
-| The first payment was sent for settlement but no answer came back (facilitator error or timeout, or the request was cut off while waiting) | `409` `IDEMPOTENCY_KEY_SETTLEMENT_UNKNOWN` with the first authorization's `nonce`, for 24 h, also when the retry presents the first `X-PAYMENT`, except that the same `X-PAYMENT` gets `409` `PAYMENT_AUTHORIZATION_OUTCOME_UNKNOWN` instead when the first request's work had already run (`PAYMENT_SETTLEMENT_UNKNOWN`) or the facilitator rejects that authorization at verify. Not charged. The first payment may or may not have been collected, and this key will not complete. Check the `nonce` on-chain; if it was used, contact the operator. If it was not, the facilitator may still submit it later, so before signing a new payment either wait until its `validBefore` has passed or cancel it on-chain with EIP-3009 `cancelAuthorization`. Then pay with a new key |
+| First request paid, but failed or was interrupted afterwards (including a gateway restart) | `409` `IDEMPOTENCY_KEY_SETTLED_PENDING` with the `transaction`. Not charged again; report it, with that transaction, to the gateway's support contact (`support_contact` on `GET /`) |
+| The first payment was sent for settlement but no answer came back (facilitator error or timeout, or the request was cut off while waiting) | `409` `IDEMPOTENCY_KEY_SETTLEMENT_UNKNOWN` with the first authorization's `nonce`, for 24 h, also when the retry presents the first `X-PAYMENT`, except that the same `X-PAYMENT` gets `409` `PAYMENT_AUTHORIZATION_OUTCOME_UNKNOWN` instead when the first request's work had already run (`PAYMENT_SETTLEMENT_UNKNOWN`) or the facilitator rejects that authorization at verify. Not charged. The first payment may or may not have been collected, and this key will not complete. Check the `nonce` on-chain; if it was used, report it, with the nonce, to the gateway's support contact. If it was not, the facilitator may still submit it later, so before signing a new payment either wait until its `validBefore` has passed or cancel it on-chain with EIP-3009 `cancelAuthorization`. Then pay with a new key |
 | First request succeeded, but its response was too large to keep (over 64 KB) | `409` `IDEMPOTENCY_KEY_DELIVERED_NOT_STORED` with the `transaction`. It was delivered and paid once; look the result up through the resource itself |
 | The facilitator refused the first payment, or the request failed before settlement | Nothing stored; a retry is a new, paid attempt |
 | The retry presents the same `X-PAYMENT` that paid for the original | `402`: sign a new payment. Only a new, unused authorization gets the stored result. Not when the original's settlement got no answer: that is the `409` `IDEMPOTENCY_KEY_SETTLEMENT_UNKNOWN` above |
@@ -651,7 +664,7 @@ What to know about the retry's payment:
 
 ## 202 Accepted from a paid stamp purchase
 
-If the Bee node has not confirmed a paid purchase within the gateway's deadline (120 s by default), the gateway, having already collected the payment, answers `202` with `code: PURCHASE_PENDING`, the payment `transaction`, and the batch `label`. The batch is registered to the paying wallet as soon as the node reports it: list `GET /api/v1/stamps/?wallet=<your address>` (any casing; an invalid address is `422`) and look for that label, or retry with the same `Idempotency-Key`, which returns the `201` with the `batchID` once it is found (or, if it is never found within 15 minutes, `500 DELIVERY_FAILED_AFTER_PAYMENT` with the transaction for a refund). Do not pay again. A `202` is not a failure. A `503` with `code: PURCHASE_CAPACITY` means too many purchases are waiting on the node; nothing was charged, retry shortly.
+If the Bee node has not confirmed a paid purchase within the gateway's deadline (120 s by default), the gateway, having already collected the payment, answers `202` with `code: PURCHASE_PENDING`, the payment `transaction`, and the batch `label`. The batch is registered to the paying wallet as soon as the node reports it: list `GET /api/v1/stamps/?wallet=<your address>` (any casing; an invalid address is `422`) and look for that label, or retry with the same `Idempotency-Key`, which returns the `201` with the `batchID` once it is found (or, if it is never found within 15 minutes, `500 DELIVERY_FAILED_AFTER_PAYMENT` with the transaction to report). Do not pay again. A `202` is not a failure. A `503` with `code: PURCHASE_CAPACITY` means too many purchases are waiting on the node; nothing was charged, retry shortly.
 
 ## Payment settlement errors
 
@@ -664,7 +677,7 @@ The gateway settles your payment just before it does the work. If settlement doe
 | `PAYMENT_SETTLEMENT_UNKNOWN` | 502 | **Maybe**: the work ran, then the facilitator gave no answer. The result is withheld | Do not retry the same `X-PAYMENT`: for 24 hours it is answered `409` before any work runs. Check `nonce` on-chain (below), then pay with a new authorization and, if you use one, a new key |
 | `PAYMENT_AUTHORIZATION_OUTCOME_UNKNOWN` | 409 | This request: no. The earlier request with this authorization: **maybe**, and probably yes if the facilitator refused this one | Do not pay from it. Check `detail.nonce` on-chain (below) |
 
-Checking a nonce: look up the USDC contract's `authorizationState(payer, nonce)` (or the payer's USDC transfers). If the nonce was used, the earlier payment was collected: contact the operator with the nonce for the result or a refund, and do not pay again. If it was not used, the facilitator may still submit that authorization, so before signing a new payment either wait until its `validBefore` has passed or cancel it on-chain with EIP-3009 `cancelAuthorization`. With an `Idempotency-Key`, the old key stays taken for 24 hours (`409 IDEMPOTENCY_KEY_SETTLEMENT_UNKNOWN`), so pay again with a new one.
+Checking a nonce: look up the USDC contract's `authorizationState(payer, nonce)` (or the payer's USDC transfers). If the nonce was used, the earlier payment was collected: report it, with the nonce, to the gateway's support contact (`support_contact` on `GET /`), and do not pay again. Refunds should not be expected (alpha software). If it was not used, the facilitator may still submit that authorization, so before signing a new payment either wait until its `validBefore` has passed or cancel it on-chain with EIP-3009 `cancelAuthorization`. With an `Idempotency-Key`, the old key stays taken for 24 hours (`409 IDEMPOTENCY_KEY_SETTLEMENT_UNKNOWN`), so pay again with a new one.
 
 None of the three "maybe" answers is a `402` or carries `accepts`, so an x402 client that pays automatically on `402` does not pay again from them. Keep it that way in your own client: never sign a new payment from a response with `x402_status: settlement_unknown` or the code `PAYMENT_SETTLEMENT_UNAVAILABLE`. A settlement cut off in a particular way (an inner cancellation, on a paid route that settles after its work) is answered `502 PAYMENT_SETTLEMENT_UNKNOWN` like any other unknown outcome. Gateways before the move to Python 3.12 (#617) answered it with the server's generic `500 Internal Server Error` instead (plain text, no `code`). **A `500` without a JSON error code to a paid request can still mean an unknown outcome**, since any unexpected crash after settlement started ends that way: treat it like `PAYMENT_SETTLEMENT_UNKNOWN` and do not pay again until you have checked the nonce.
 
@@ -690,7 +703,7 @@ If the gateway cannot read or write its record of these authorizations, every pa
 | 409 `IDEMPOTENCY_KEY_SETTLEMENT_UNKNOWN` | The first payment's settlement returned no answer | This key cannot complete: it keeps answering `409` for 24 h. Check the nonce as in [Payment settlement errors](#payment-settlement-errors), then pay with a new key |
 | 409 `IDEMPOTENCY_KEY_DELIVERED_NOT_STORED` | The first request succeeded; its response was too large to replay | Look up the result; do not pay again |
 | 422 `IDEMPOTENCY_KEY_REUSED` | Same `Idempotency-Key` for a different request | Use a new key |
-| 409 `IDEMPOTENCY_KEY_SETTLED_PENDING` | The first request was paid but produced no stored result | Contact the operator with the `transaction` |
+| 409 `IDEMPOTENCY_KEY_SETTLED_PENDING` | The first request was paid but produced no stored result | Report it, with the `transaction`, to the gateway's support contact |
 | 503 `IDEMPOTENCY_UNAVAILABLE` | The gateway's idempotency store is unreadable, unwritable or not responding | Retry later; not charged |
 | 503 `PAYMENTS_UNAVAILABLE` | The gateway cannot accept payments right now (its Bee node is unreachable or its wallet cannot be read). Returned instead of the `402` and before any payment is verified | This request was not charged; retry after `Retry-After`, or use the free tier. A retry of an earlier charged request (same `Idempotency-Key` with a stored result, or an authorization whose settlement is in progress or whose work already ran) is not refused by this check, but it is still priced before verification, so while the gateway cannot price (Bee down) it can get `503` "Failed to calculate price" or `BEE_BUSY` instead of its stored result or `409`; retry it later unchanged |
 

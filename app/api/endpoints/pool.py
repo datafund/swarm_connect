@@ -16,6 +16,7 @@ import logging
 from app.x402.settlement import settle_payment
 from app.x402.openapi_docs import paid_route_openapi
 from app.core.config import settings
+from app.core.support import report_advice
 from app.services.stamp_pool import stamp_pool_manager, PoolStampStatus
 from app.services.swarm_api import get_batch_expiry
 from app.services.stamp_ownership import stamp_ownership_manager
@@ -545,7 +546,7 @@ async def acquire_stamp(
                 detail={
                     "code": "DELIVERY_FAILED_AFTER_PAYMENT",
                     "message": ("The payment was collected but the stamp could not be handed over. "
-                                "Contact the operator with this transaction for a refund."),
+                                + report_advice("transaction")),
                     "transaction": tx,
                     "x402_status": "settled_not_delivered",
                 },

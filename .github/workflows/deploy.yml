@@ -157,6 +157,8 @@ jobs:
           X402_XDAI_WARN_THRESHOLD=${{ vars.X402_XDAI_WARN_THRESHOLD || '0.1' }}
           X402_XBZZ_WARN_THRESHOLD=${{ vars.X402_XBZZ_WARN_THRESHOLD || '10.0' }}
           X402_CHEQUEBOOK_WARN_THRESHOLD=${{ vars.X402_CHEQUEBOOK_WARN_THRESHOLD || '4.0' }}
+          TERMS_URL=${{ vars.TERMS_URL || '' }}
+          SUPPORT_CONTACT=${{ vars.SUPPORT_CONTACT || '' }}
           GATEWAY_ENVIRONMENT=development
           EOF
 
@@ -249,6 +251,8 @@ jobs:
           X402_XDAI_WARN_THRESHOLD=${{ vars.X402_XDAI_WARN_THRESHOLD || '0.1' }}
           X402_XBZZ_WARN_THRESHOLD=${{ vars.X402_XBZZ_WARN_THRESHOLD || '10.0' }}
           X402_CHEQUEBOOK_WARN_THRESHOLD=${{ vars.X402_CHEQUEBOOK_WARN_THRESHOLD || '4.0' }}
+          TERMS_URL=${{ vars.TERMS_URL || '' }}
+          SUPPORT_CONTACT=${{ vars.SUPPORT_CONTACT || '' }}
           GATEWAY_ENVIRONMENT=main
           EOF
 

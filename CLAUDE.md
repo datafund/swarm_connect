@@ -134,6 +134,11 @@ Optional environment variables:
 - `RELOAD`: Enable auto-reload (default: `true`)
 - `SSL_KEYFILE`/`SSL_CERTFILE`: For HTTPS development
 
+Alpha notice and feedback contact (#685, #686):
+- `TERMS_URL`: where the alpha notice (`ALPHA_NOTICE.md`) is published; shown on `/` as `terms_url`, linked from `/docs` and from the charged-but-not-delivered messages. By decision it stands in for full terms (default: empty, not shown)
+- `SUPPORT_CONTACT`: feedback and problem-report contact, not a refund channel; shown on `/` as `support_contact` and named in those messages, which say "the gateway operator" when it is empty (default: empty). Messages never promise a refund; with both empty the unknown-outcome advice is byte-identical to before (the settle-refusal golden pins it). Both are written by deploy.yml from GitHub environment variables
+- The `/docs` description (`build_api_description()` in `app/main.py`, #687) says real USDC on a mainnet `X402_NETWORK` and test USDC with no real value on a testnet (`is_testnet_network`)
+
 Stamp propagation:
 - `STAMP_PROPAGATION_SECONDS`: Expected propagation delay after purchase in seconds (default: `120`)
 

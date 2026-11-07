@@ -23,6 +23,8 @@ from app.services.stamp_ownership import stamp_ownership_manager
 from app.x402.dependency import require_x402_payment
 from app.x402.middleware import X402Middleware
 from app.x402.ratelimit import reset_rate_limiter
+from tests.test_alpha_notice import SETTING_CASES as ALPHA_CASES, SETTING_IDS as ALPHA_IDS
+from tests.test_alpha_notice import check_message as check_alpha_message, configure as configure_alpha
 
 PAYER = "0x" + "c3" * 20
 BATCH = "e" * 64
@@ -188,6 +190,21 @@ def test_never_found_records_a_refund_and_a_final_result(env):
     assert retry.status_code == 500
     assert retry.json()["code"] == "DELIVERY_FAILED_AFTER_PAYMENT"
     assert fac.settle.await_count == 1
+
+
+@pytest.mark.parametrize("contact,terms", ALPHA_CASES, ids=ALPHA_IDS)
+def test_never_found_names_the_contact_not_a_refund(env, monkeypatch, contact, terms):
+    """#686: the final answer for a batch never found names the support contact."""
+    app, fac, buy, find = env
+    configure_alpha(monkeypatch, contact, terms)
+    find.side_effect = [None, None]
+    first, retry = _run_pending(app, None, key=f"k-never-{len(contact)}-{len(terms)}")
+    assert retry.status_code == 500
+    body = retry.json()
+    assert set(body) == {"code", "message", "transaction", "x402_status"}
+    assert body["code"] == "DELIVERY_FAILED_AFTER_PAYMENT"
+    assert body["x402_status"] == "settled_not_delivered"
+    check_alpha_message(body["message"], contact, terms)
 
 
 def test_interrupted_background_search_records_a_refund(env):

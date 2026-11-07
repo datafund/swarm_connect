@@ -17,6 +17,8 @@ import pytest
 from fastapi import FastAPI
 
 from app.services.stamp_pool import PoolStamp, PoolStampStatus, StampPoolManager
+from tests.test_alpha_notice import SETTING_CASES as ALPHA_CASES, SETTING_IDS as ALPHA_IDS
+from tests.test_alpha_notice import check_message as check_alpha_message, configure as configure_alpha
 
 
 def _stamp(batch_id, depth=17):
@@ -296,10 +298,33 @@ async def test_paid_non_delivery_is_logged_as_an_error(tmp_path, monkeypatch, ca
     assert detail["code"] == "DELIVERY_FAILED_AFTER_PAYMENT"
     assert detail["transaction"] == "0xtx"
     assert detail["x402_status"] == "settled_not_delivered"
-    assert "operator" in detail["message"] and "refund" in detail["message"]
+    assert "operator" in detail["message"]  # default settings: no SUPPORT_CONTACT
+    assert "refund" not in detail["message"]  # #686: no refund promise
     assert "another request" not in detail["message"]
     err = [m for m in caplog.messages if "PAID NON-DELIVERY" in m]
     assert err and "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1" in err[0] and "0xtx" in err[0]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("contact,terms", ALPHA_CASES, ids=ALPHA_IDS)
+async def test_paid_non_delivery_names_the_contact_not_a_refund(tmp_path, monkeypatch, contact, terms):
+    """#686: the support contact (when set), the alpha notice (when set), no refund promise."""
+    from types import SimpleNamespace
+
+    async def settled(request):
+        request.state.x402_payer = "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+        request.state.x402_settlement = SimpleNamespace(transaction="0xtx")
+
+    from app.services.stamp_pool import StampPoolManager as M
+    monkeypatch.setattr(M, "release_reserved_stamp", lambda self, b: None)
+    configure_alpha(monkeypatch, contact, terms)
+    _, r = await _acquire_with_settle(tmp_path, monkeypatch, settled)
+    assert r.status_code == 500
+    detail = r.json()["detail"]
+    assert set(detail) == {"code", "message", "transaction", "x402_status"}
+    assert detail["code"] == "DELIVERY_FAILED_AFTER_PAYMENT"
+    assert detail["x402_status"] == "settled_not_delivered"
+    check_alpha_message(detail["message"], contact, terms)
 
 
 def _acquire_count(status):

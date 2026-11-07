@@ -3,7 +3,7 @@ from contextlib import asynccontextmanager
 from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from app.core.config import settings
+from app.core.config import is_testnet_network, settings
 from app.core.version import VERSION
 from app.api.endpoints import stamps, data, wallet, pool, notary, chunks, debug, stamps_for_owner, pricing
 from fastapi.encoders import jsonable_encoder
@@ -133,10 +133,45 @@ async def lifespan(app: FastAPI):
     await close_client()
 
 
+# Network labels for the /docs description (#687); other networks show their id.
+_NETWORK_LABELS = {
+    "base": "Base mainnet", "base-mainnet": "Base mainnet", "eip155:8453": "Base mainnet",
+    "base-sepolia": "Base Sepolia", "eip155:84532": "Base Sepolia",
+}
+
+
+def build_api_description() -> str:
+    """The /docs description: alpha, and whether payments here are real money (#687).
+
+    From the configured x402 network: on a mainnet, payments are real USDC;
+    on a test network, test USDC with no real value. Links the alpha notice
+    (TERMS_URL) and the feedback contact (SUPPORT_CONTACT) when they are set.
+    """
+    parts = ["**Alpha software.**"]
+    if settings.X402_ENABLED:
+        network = (settings.X402_NETWORK or "").strip()
+        label = _NETWORK_LABELS.get(network.lower(), network or "an unknown network")
+        if is_testnet_network(network):
+            parts.append(f"Payments on this gateway use {label} test USDC, no real value.")
+        else:
+            parts.append(f"Payments on this gateway are real USDC on {label}; there are no "
+                         "guarantees, and refunds should not be expected. Spend small amounts, "
+                         "set a per-payment cap in your client, and test on the staging gateway "
+                         "or the free tier first.")
+    terms = (settings.TERMS_URL or "").strip()
+    contact = (settings.SUPPORT_CONTACT or "").strip()
+    if terms:
+        parts.append(f"Alpha notice: {terms}")
+    if contact:
+        parts.append(f"Feedback and problem reports: {contact}")
+    return "\n\n".join(parts)
+
+
 app = FastAPI(
     # "(alpha)" marks the API docs page (/docs) and the OpenAPI title as alpha
     # software; the "/" welcome message keeps the plain project name.
     title=f"{settings.PROJECT_NAME} (alpha)",
+    description=build_api_description(),
     version=VERSION,
     openapi_url=f"{settings.API_V1_STR}/openapi.json",  # Standard location for OpenAPI spec
     lifespan=lifespan
@@ -349,6 +384,9 @@ app.include_router(pricing.router, prefix=f"{settings.API_V1_STR}", tags=["prici
 # Shown in OpenAPI (#602): the x402 block, present only when payments are enabled.
 _HEALTH_X402_EXAMPLE = {
     "status": "ok",
+    # Both null when not configured (#686).
+    "terms_url": "https://example.org/alpha-notice",
+    "support_contact": "support@example.org",
     "x402": {
         "enabled": True,
         "versions": [1],
@@ -370,6 +408,9 @@ async def read_root():
     **Response fields**:
     - `status`: "ok" | "degraded" | "critical"
     - `message`: Gateway name
+    - `terms_url`: where the alpha notice is published (`TERMS_URL`), or null
+    - `support_contact`: feedback and problem-report contact (`SUPPORT_CONTACT`),
+      not a refund channel, or null
     - `version`: gateway build
     - `uptime_seconds`: seconds since this process started — a drop means it was
       restarted or redeployed
@@ -444,7 +485,9 @@ def build_health_response(snapshot) -> dict:
         "message": f"Welcome to {settings.PROJECT_NAME}",
         # What a paid request buys, what happens on failure, and that data
         # lives only as long as its stamp (#383).
-        "terms_url": settings.TERMS_URL or None,
+        "terms_url": (settings.TERMS_URL or "").strip() or None,
+        # Feedback and problem reports (#686); not a refund channel.
+        "support_contact": (settings.SUPPORT_CONTACT or "").strip() or None,
         # Build and process age. Both were previously only readable from /metrics,
         # which is not public any more (#188) — and they are the two fields an
         # external checker needs to tell whether the gateway was redeployed or
