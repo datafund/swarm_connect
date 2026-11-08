@@ -567,7 +567,7 @@ class X402Middleware(BaseHTTPMiddleware):
         """
         from app.x402.settlement import (AFTER_WORK, OUTCOME_UNKNOWN_HEADERS,
                                          outcome_unknown, outcome_unknown_refusal, replay_guard,
-                                         request_nonce)
+                                         request_nonce, valid_transaction)
         from app.x402.audit import log_payment_failed, log_payment_settled
 
         settlement = getattr(request.state, "x402_settlement", None)
@@ -587,6 +587,7 @@ class X402Middleware(BaseHTTPMiddleware):
             payment_payload = getattr(request.state, "x402_payment", None)
             payment_requirements = getattr(request.state, "x402_requirements", None)
             unknown_outcome = False
+            unknown_transaction = None
             auth_key = getattr(request.state, "x402_auth_key", None)
             # The Bee call gate must never answer for this request with
             # "nothing was charged" from here on (#588).
@@ -639,6 +640,7 @@ class X402Middleware(BaseHTTPMiddleware):
                     # path below, exactly as for an exception.
                     outcome_unknown.release(auth_key)    # an unknown outcome now
                     failure = f"facilitator reported {failure} (the transaction may have been sent)"
+                    unknown_transaction = valid_transaction(getattr(settlement, "transaction", None))
                     unknown_outcome = True
             except Exception as e:
                 outcome_unknown.release(auth_key)    # an unknown outcome now
@@ -659,7 +661,8 @@ class X402Middleware(BaseHTTPMiddleware):
                     # !r: since #660 this can carry a facilitator's multi-line
                     # text, and the line must stay one line (settle_payment logs
                     # it the same way). The audit record keeps it as is.
-                    logger.error(f"x402: settlement failed after delivery on {request.url.path}: {failure!r}")
+                    tx_note = f" (tx={unknown_transaction})" if unknown_transaction is not None else ""
+                    logger.error(f"x402: settlement failed after delivery on {request.url.path}: {failure!r}{tx_note}")
                 else:
                     # A refusal: the full reason, as it came, is the #576 record
                     # in the log (tests/test_x402_facilitator_reason.py).
@@ -673,7 +676,7 @@ class X402Middleware(BaseHTTPMiddleware):
                     # authorization stays reserved: its nonce may be spent.
                     log_payment_failed(client_ip=client_ip, reason=failure, stage="settle",
                                        wallet_address=payer, nonce=request_nonce(request),
-                                       x402_version=paid_version(request))
+                                       x402_version=paid_version(request), transaction_hash=unknown_transaction)
                     x402_settlements_total.labels(result="error", version=paid_version_label(request)).inc()
                     # The write-ahead entry (AFTER_WORK, on disk) is the record:
                     # the dependency stops any later attempt with it before the
