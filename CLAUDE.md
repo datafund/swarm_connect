@@ -779,6 +779,7 @@ made, something reports success, and nothing happens.
 | `deploy/Caddyfile` | **never automatically** — copy to `/etc/caddy/` and `systemctl reload caddy` | no |
 | `monitoring/alerting/*.json`, dashboards | **never automatically** — run `scripts/apply_grafana.py` | no |
 | `scripts/backup_state.sh`, `scripts/backup_bee_keys.sh`, `scripts/restore_bee_keys.sh` | **never automatically** — install under `/usr/local/sbin` and cron them by hand (`docs/mainnet-runbook.md` §4) | no |
+| `/etc/swarm_connect/backup_s3.env` (S3 copy of the state backups: bucket, endpoint, age recipient, bucket key; #493), `/etc/swarm_connect/bee_keys.env` (keystore backup) | next run of the backup script that reads it; root-only, 0600, parsed rather than sourced (`docs/mainnet-runbook.md` §4) | no — deploys never touch `/etc/swarm_connect/` |
 
 ### `docker restart` does not reload `env_file`
 
