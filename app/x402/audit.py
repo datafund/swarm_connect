@@ -341,17 +341,23 @@ def log_payment_failed(
     request_id: Optional[str] = None,
     nonce: Optional[str] = None,
     x402_version: int = PAID_X402_VERSION,
+    transaction_hash: Optional[str] = None,
 ) -> Optional[str]:
     """Log a payment failure event. `nonce`: the payment authorization's.
-    `x402_version`: the protocol version of the payment (#601)."""
+    `x402_version`: the protocol version of the payment (#601).
+    `transaction_hash`: a validated hash from an unknown settle answer (#667).
+    It identifies a transaction to inspect, not proof of settlement."""
+    data = {
+        "reason": reason,
+        "stage": stage,
+        "nonce": nonce,
+        "x402_version": x402_version,
+    }
+    if transaction_hash is not None:
+        data["transaction_hash"] = transaction_hash
     return log_audit_event(
         event_type=AuditEventType.PAYMENT_FAILED,
-        data={
-            "reason": reason,
-            "stage": stage,
-            "nonce": nonce,
-            "x402_version": x402_version,
-        },
+        data=data,
         client_ip=client_ip,
         wallet_address=wallet_address,
         request_id=request_id

@@ -107,10 +107,12 @@ def _unknown_audit(reason):
     return f"facilitator reported {reason} (the transaction may have been sent)"
 
 
-def _assert_unknown_audited(events, reason, nonce, version):
+def _assert_unknown_audited(events, reason, nonce, version, transaction_hash=None):
     failed = [e for e in events if e["event_type"] == "payment_failed"]
-    assert [e["data"] for e in failed] == [
-        {"reason": _unknown_audit(reason), "stage": "settle", "nonce": nonce, "x402_version": version}]
+    expected = {"reason": _unknown_audit(reason), "stage": "settle", "nonce": nonce, "x402_version": version}
+    if transaction_hash is not None:
+        expected["transaction_hash"] = transaction_hash
+    assert [e["data"] for e in failed] == [expected]
     assert failed[0]["wallet_address"].lower() == PAYER.lower()
     # Not a refusal: no payment_settled record (success false) is written.
     assert [e for e in events if e["event_type"] == "payment_settled"] == []
@@ -371,7 +373,8 @@ def test_settlement_pending_is_an_unknown_outcome(gw, site, version, status, wit
     assert sorted(k for k in r.headers if k != "content-length") == \
         sorted(k for k in reference.headers if k != "content-length")
     assert _moved(before, _counts(version)) == {"error": 1}
-    _assert_unknown_audited(_new_audit(audit), "settlement_pending", nonce_hex("0a"), version)
+    _assert_unknown_audited(_new_audit(audit), "settlement_pending", nonce_hex("0a"), version,
+                            TX_HASH if with_tx else None)
     expected_kind = st.BEFORE_WORK if site == "before_work" else st.AFTER_WORK
     assert st.outcome_unknown.kind(_key(nonce_hex("0a"))) == expected_kind
     # The Idempotency-Key stays taken: a new payment under it is not settled.
@@ -426,7 +429,8 @@ def test_an_answer_outside_the_allowlist_is_an_unknown_outcome(gw, site, version
     assert sorted(k for k in r.headers if k != "content-length") == \
         sorted(k for k in reference.headers if k != "content-length")
     assert _moved(before, _counts(version)) == {"error": 1}
-    _assert_unknown_audited(_new_audit(audit), audited, nonce_hex("0c"), version)
+    _assert_unknown_audited(_new_audit(audit), audited, nonce_hex("0c"), version,
+                            TX_HASH if transaction == TX_HASH else None)
     expected_kind = st.BEFORE_WORK if site == "before_work" else st.AFTER_WORK
     assert st.outcome_unknown.kind(_key(nonce_hex("0c"))) == expected_kind
     fac.settle_status, fac.settle = 200, None
@@ -460,6 +464,53 @@ def test_every_listed_code_without_a_hash_is_a_refusal(gw, site, version, code):
     # The key was freed: a new payment under it is a new, paid attempt.
     fac.settle = None
     assert _send(client, route, {**pay(version, offer, nonce=nonce_hex("10")), **key}).status_code == 200
+
+
+# --------------------------------------------------------------------------
+# Transaction hints in private logs only (#667)
+# --------------------------------------------------------------------------
+
+@pytest.mark.parametrize("site", sorted(SITES))
+@pytest.mark.parametrize("version", VERSIONS)
+@pytest.mark.parametrize("shape", ["valid", "malformed", "missing"])
+def test_unknown_transaction_failed_hash_is_private(gw, caplog, site, version, shape):
+    client, fac = gw("1,2")
+    offer = _offer(client)
+    route = SITES[site]
+    answer = _answer(version, "transaction_failed")
+    invalid_marker = "BAD-TRANSACTION-HASH"
+    if shape == "valid":
+        answer["transaction"] = TX_HASH
+    elif shape == "malformed":
+        answer["transaction"] = f"{TX_HASH}\r\n{invalid_marker}"
+    else:
+        answer.pop("transaction")
+    fac.settle = answer
+    audit = _audit_lines()
+    key = {"Idempotency-Key": f"k-hash-{site}-{version}-{shape}"}
+    r = _send(client, route, {**pay(version, offer, nonce=nonce_hex("11")), **key})
+    assert r.status_code == 502, r.text
+    assert r.headers["X-Payment-Status"] == "settlement_unknown"
+    assert receipt_header(version) not in r.headers and other_receipt_header(version) not in r.headers
+    assert TX_HASH not in r.text and TX_HASH not in repr(r.headers)
+    assert invalid_marker not in r.text and invalid_marker not in repr(r.headers)
+    events = _new_audit(audit)
+    failures = [e["data"] for e in events if e["event_type"] == "payment_failed"]
+    assert len(failures) == 1
+    assert failures[0]["stage"] == "settle"
+    if shape == "valid":
+        assert failures[0]["transaction_hash"] == TX_HASH
+        assert f"tx={TX_HASH}" in caplog.text
+    else:
+        assert "transaction_hash" not in failures[0]
+        assert TX_HASH not in caplog.text and invalid_marker not in caplog.text
+    assert not [e for e in events if e["event_type"] == "payment_settled"]
+    settles = [c["path"] for c in fac.calls].count("settle")
+    fac.settle = None
+    retry = _send(client, route, {**pay(version, offer, nonce=nonce_hex("12")), **key})
+    assert retry.status_code == 409, retry.text
+    assert retry.json()["detail"]["code"] == "IDEMPOTENCY_KEY_SETTLEMENT_UNKNOWN"
+    assert [c["path"] for c in fac.calls].count("settle") == settles
 
 
 # --------------------------------------------------------------------------

@@ -1173,7 +1173,7 @@ async def settle_payment(request: Request) -> None:
                             detail=payment_state_unavailable_detail())
     outcome_unknown.mark_asked(auth_key, gen)
 
-    def unknown_outcome(reason: str) -> HTTPException:
+    def unknown_outcome(reason: str, transaction_hash: Optional[str] = None) -> HTTPException:
         # The outcome is unknown: the facilitator may or may not have submitted
         # the transfer. Deliver nothing. The middleware then releases the
         # reservation, which is safe: a retry with the same authorization is
@@ -1186,7 +1186,7 @@ async def settle_payment(request: Request) -> None:
         outcome_unknown.release(auth_key)    # an unknown outcome now, no longer in flight
         log_payment_failed(client_ip=client_ip, reason=reason,
                            stage="settle", wallet_address=payer, nonce=request_nonce(request),
-                           x402_version=paid_version(request))
+                           x402_version=paid_version(request), transaction_hash=transaction_hash)
         x402_settlements_total.labels(result="error", version=paid_version_label(request)).inc()
         # The write-ahead entry (BEFORE_WORK, on disk) is the record: no write here.
         return HTTPException(status_code=502, detail=settlement_unavailable_detail(request),
@@ -1218,7 +1218,8 @@ async def settle_payment(request: Request) -> None:
         tx = valid_transaction(getattr(result, "transaction", None))
         logger.error(f"x402: settlement before delivery answered {reason!r} (tx={tx}); the "
                      f"transaction may have been sent, outcome unknown")
-        raise unknown_outcome(f"facilitator reported {reason} (the transaction may have been sent)")
+        raise unknown_outcome(f"facilitator reported {reason} (the transaction may have been sent)",
+                              transaction_hash=tx)
 
     if not getattr(result, "success", False):
         settlement_refused(request)
