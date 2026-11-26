@@ -244,19 +244,19 @@ class TestManifestUploadErrors:
 class TestTarHelperFunctions:
     """Test TAR helper functions directly."""
 
-    def test_validate_tar_valid(self):
-        """Test validate_tar with valid TAR."""
-        from app.services.swarm_api import validate_tar
+    def test_inspect_tar_valid(self):
+        """Test inspect_tar with valid TAR."""
+        from app.services.swarm_api import inspect_tar
 
         files = {"file.txt": b"content"}
         tar_bytes = create_tar_archive(files)
 
         # Should not raise
-        validate_tar(tar_bytes)
+        assert inspect_tar(tar_bytes) == 1
 
-    def test_validate_tar_empty(self):
-        """Test validate_tar with empty TAR."""
-        from app.services.swarm_api import validate_tar
+    def test_inspect_tar_empty(self):
+        """Test inspect_tar with empty TAR."""
+        from app.services.swarm_api import inspect_tar
 
         tar_buffer = io.BytesIO()
         with tarfile.open(fileobj=tar_buffer, mode='w') as tar:
@@ -265,18 +265,18 @@ class TestTarHelperFunctions:
         tar_bytes = tar_buffer.read()
 
         with pytest.raises(ValueError, match="no files"):
-            validate_tar(tar_bytes)
+            inspect_tar(tar_bytes)
 
-    def test_validate_tar_invalid(self):
-        """Test validate_tar with invalid data."""
-        from app.services.swarm_api import validate_tar
+    def test_inspect_tar_invalid(self):
+        """Test inspect_tar with invalid data."""
+        from app.services.swarm_api import inspect_tar
 
         with pytest.raises(ValueError, match="Invalid TAR"):
-            validate_tar(b"not a tar")
+            inspect_tar(b"not a tar")
 
     def test_count_tar_files(self):
-        """Test count_tar_files function."""
-        from app.services.swarm_api import count_tar_files
+        """Test the file count inspect_tar returns."""
+        from app.services.swarm_api import inspect_tar
 
         files = {
             "file1.txt": b"content1",
@@ -285,11 +285,11 @@ class TestTarHelperFunctions:
         }
         tar_bytes = create_tar_archive(files)
 
-        assert count_tar_files(tar_bytes) == 3
+        assert inspect_tar(tar_bytes) == 3
 
     def test_count_tar_files_with_dirs(self):
-        """Test count_tar_files excludes directories."""
-        from app.services.swarm_api import count_tar_files
+        """Test inspect_tar's count excludes directories."""
+        from app.services.swarm_api import inspect_tar
 
         tar_buffer = io.BytesIO()
         with tarfile.open(fileobj=tar_buffer, mode='w') as tar:
@@ -308,7 +308,7 @@ class TestTarHelperFunctions:
         tar_bytes = tar_buffer.read()
 
         # Should count only the file, not the directory
-        assert count_tar_files(tar_bytes) == 1
+        assert inspect_tar(tar_bytes) == 1
 
 
 class TestEdgeCases:
@@ -376,11 +376,16 @@ class TestEdgeCases:
 
 
 class TestCompressedTar:
-    """Test handling of compressed TAR archives."""
+    """Compressed TAR archives are refused before payment (#694).
+
+    They used to be accepted here only because Bee was mocked: Bee reads a
+    collection as a plain tar and does not decompress it, and unpacking one
+    before payment let a tiny archive exhaust the gateway's memory.
+    """
 
     @patch('app.api.endpoints.data.upload_collection_to_swarm')
     def test_gzip_compressed_tar(self, mock_upload):
-        """Test upload of gzip-compressed TAR (.tar.gz)."""
+        """A gzip-compressed TAR (.tar.gz) is refused with TAR_COMPRESSED."""
         mock_upload.return_value = "gzip_ref"
 
         files = {"file.txt": b"content"}
@@ -401,11 +406,13 @@ class TestCompressedTar:
             files={"file": ("files.tar.gz", io.BytesIO(tar_bytes), "application/gzip")}
         )
 
-        assert response.status_code == 200
+        assert response.status_code == 400
+        assert response.json()["code"] == "TAR_COMPRESSED"
+        mock_upload.assert_not_called()
 
     @patch('app.api.endpoints.data.upload_collection_to_swarm')
     def test_bz2_compressed_tar(self, mock_upload):
-        """Test upload of bz2-compressed TAR (.tar.bz2)."""
+        """A bz2-compressed TAR (.tar.bz2) is refused with TAR_COMPRESSED."""
         mock_upload.return_value = "bz2_ref"
 
         files = {"file.txt": b"content"}
@@ -426,4 +433,6 @@ class TestCompressedTar:
             files={"file": ("files.tar.bz2", io.BytesIO(tar_bytes), "application/x-bzip2")}
         )
 
-        assert response.status_code == 200
+        assert response.status_code == 400
+        assert response.json()["code"] == "TAR_COMPRESSED"
+        mock_upload.assert_not_called()

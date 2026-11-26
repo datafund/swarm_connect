@@ -25,14 +25,15 @@ from app.services.swarm_api import (
     DownloadTooLargeError,
     get_batch_expiry,
     upload_collection_to_swarm,
-    validate_tar,
-    count_tar_files,
+    inspect_tar,
+    TarRefused,
     validate_stamp_for_upload,
     check_upload_failure_reason,
     StampValidationError,
     REDUNDANCY_LEVELS
 )
 from app.core.config import settings
+from app.core.io_lane import IOLane
 from app.services.http_client import exc_text
 from app.services.stamp_ownership import stamp_ownership_manager
 from app.services.signed_auth import (
@@ -55,6 +56,11 @@ from app.services.metrics import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Manifest TAR parsing runs on its own two threads (#694), not the default
+# executor: a burst of uploads then waits its turn instead of taking every
+# worker thread, and at most two parses compete with the event loop for the GIL.
+_tar_lane = IOLane(2, "manifest-tar-parse")
 
 # Slack allowed on Content-Length to cover the multipart envelope that wraps an
 # uploaded file. 8 KB is far more than a boundary plus part headers need, and
@@ -774,7 +780,14 @@ async def upload_manifest(
     **Requirements**:
     - Upload as **multipart/form-data** with a `file` field containing a TAR archive
     - Valid `stamp_id` query parameter required
+    - TAR must be **uncompressed** (`tar -cf`). A gzip, bzip2, xz or zstd archive
+      gets 400 `TAR_COMPRESSED`; Bee stores a plain tar only.
     - TAR must contain at least one file
+    - At most `MANIFEST_MAX_MEMBERS` entries (default 10,000, directories
+      included: 400 `TAR_TOO_MANY_ENTRIES`), each path at most
+      `MANIFEST_MAX_PATH_BYTES` bytes (default 1024: `TAR_PATH_TOO_LONG`) and
+      `MANIFEST_MAX_PATH_DEPTH` levels (default 64: `TAR_PATH_TOO_DEEP`)
+    - An archive refused for any of these is refused before payment and not charged
     - Optional `validate_stamp` parameter (defaults to false)
     - Optional `deferred` parameter (defaults to false)
     - Optional `include_timing` parameter (defaults to false)
@@ -807,8 +820,8 @@ async def upload_manifest(
     When enabled, includes timing breakdown in response and Server-Timing header:
     - `stamp_validate_ms`: Time validating stamp (only if validate_stamp=true)
     - `file_read_ms`: Time reading uploaded file
-    - `tar_validate_ms`: Time validating TAR archive
-    - `tar_count_ms`: Time counting files in TAR
+    - `tar_validate_ms`: Time validating the TAR archive and counting its files
+    - `tar_count_ms`: Always 0; files are counted in the validation pass
     - `bee_upload_ms`: Time uploading to Bee node
     - `total_ms`: Total request processing time
     - `file_count`: Number of files in the TAR archive
@@ -957,18 +970,20 @@ async def upload_manifest(
                 }
             )
 
-        # Validate TAR archive
+        # Validate the TAR archive and count its files in one streaming pass,
+        # off the event loop (#694): parsing a large archive on the loop held
+        # every other request, /health included, until it finished. Still
+        # before settle_payment, so a refused archive is never charged.
         tar_validate_start = time.perf_counter()
         try:
-            validate_tar(tar_bytes)
-        except ValueError as e:
-            raise HTTPException(status_code=400, detail=str(e))
+            file_count = await asyncio.wrap_future(_tar_lane.submit(inspect_tar, tar_bytes))
+        except TarRefused as e:
+            if e.code is None:
+                raise HTTPException(status_code=e.status, detail=e.message)
+            raise HTTPException(status_code=e.status, detail={"code": e.code, "message": e.message})
         tar_validate_ms = (time.perf_counter() - tar_validate_start) * 1000
-
-        # Count files for response
-        tar_count_start = time.perf_counter()
-        file_count = count_tar_files(tar_bytes)
-        tar_count_ms = (time.perf_counter() - tar_count_start) * 1000
+        # Counted in the same pass; the field stays for existing clients.
+        tar_count_ms = 0.0
 
         # Upload to Swarm as collection
         bee_start = time.perf_counter()

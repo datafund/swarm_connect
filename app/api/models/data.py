@@ -16,8 +16,8 @@ class UploadTiming(BaseModel):
 
 class ManifestUploadTiming(UploadTiming):
     """Extended timing information for manifest/TAR uploads."""
-    tar_validate_ms: float = Field(..., description="Time spent validating TAR archive (ms)")
-    tar_count_ms: float = Field(..., description="Time spent counting files in TAR (ms)")
+    tar_validate_ms: float = Field(..., description="Time spent validating the TAR archive and counting its files (ms)")
+    tar_count_ms: float = Field(..., description="Always 0: files are counted in the validation pass (kept for existing clients)")
     file_count: int = Field(..., description="Number of files in the TAR archive")
     ms_per_file: float = Field(..., description="Average milliseconds per file (total_ms / file_count)")
     files_per_second: float = Field(..., description="Upload throughput (file_count / total_seconds)")

@@ -1453,43 +1453,114 @@ async def check_sufficient_funds(required_plur: int) -> Dict[str, Any]:
     }
 
 
-def validate_tar(tar_bytes: bytes) -> None:
-    """
-    Validates that the provided bytes are a valid TAR archive with at least one file.
-
-    Args:
-        tar_bytes: The TAR archive data as bytes
-
-    Raises:
-        ValueError: If the TAR is invalid, corrupt, or contains no files
-    """
-    import tarfile
-    import io
-
-    try:
-        with tarfile.open(fileobj=io.BytesIO(tar_bytes), mode='r:*') as tar:
-            has_files = any(member.isfile() for member in tar.getmembers())
-            if not has_files:
-                raise ValueError("TAR archive contains no files")
-    except tarfile.TarError as e:
-        raise ValueError(f"Invalid TAR archive: {e}")
+# Leading bytes of the compressed formats tarfile's 'r:*' used to unpack. Only
+# consulted after the archive failed to parse as a plain tar, so a plain tar
+# whose first file happens to be called "BZh..." is never mistaken for one.
+_COMPRESSED_MAGIC = (
+    (b"\x1f\x8b", "gzip"),
+    (b"BZh", "bzip2"),
+    (b"\xfd7zXZ\x00", "xz"),
+    (b"\x28\xb5\x2f\xfd", "zstd"),
+)
 
 
-def count_tar_files(tar_bytes: bytes) -> int:
-    """
-    Counts the number of files in a TAR archive.
+class TarRefused(ValueError):
+    """The manifest archive was refused. `code` is None for the two refusals
+    that predate #694, which keep their plain-text `detail`."""
 
-    Args:
-        tar_bytes: The TAR archive data as bytes
+    def __init__(self, message: str, code: Optional[str] = None, status: int = 400):
+        super().__init__(message)
+        self.message = message
+        self.code = code
+        self.status = status
+
+
+def inspect_tar(
+    tar_bytes: bytes,
+    max_members: Optional[int] = None,
+    max_path_bytes: Optional[int] = None,
+    max_path_depth: Optional[int] = None,
+) -> int:
+    """Validate a manifest TAR archive in one streaming pass and count its files.
+
+    Only an uncompressed tar is accepted (#694). With tarfile's 'r:*' a small
+    gzip or xz archive could unpack to millions of entries, and getmembers()
+    held them all: a 300 KB upload took the gateway down before payment. Bee's
+    collection upload reads the body with Go's archive/tar and does not
+    decompress it, so a compressed archive is not a collection Bee can read. Entries are read one at a time with next(), and the pass
+    stops at the first one over a limit. Entry data is never read.
+
+    Synchronous and CPU-bound: call it off the event loop.
 
     Returns:
-        The number of files in the archive
-    """
-    import tarfile
-    import io
+        The number of regular files in the archive.
 
-    with tarfile.open(fileobj=io.BytesIO(tar_bytes), mode='r:*') as tar:
-        return sum(1 for member in tar.getmembers() if member.isfile())
+    Raises:
+        TarRefused: compressed, not a tar, no files, or over a limit.
+    """
+    import io
+    import tarfile
+
+    if max_members is None:
+        max_members = settings.MANIFEST_MAX_MEMBERS
+    if max_path_bytes is None:
+        max_path_bytes = settings.MANIFEST_MAX_PATH_BYTES
+    if max_path_depth is None:
+        max_path_depth = settings.MANIFEST_MAX_PATH_DEPTH
+
+    members = 0
+    files = 0
+    content_bytes = 0
+    try:
+        # 'r:' is a plain tar only; it never decompresses.
+        with tarfile.open(fileobj=io.BytesIO(tar_bytes), mode="r:") as tar:
+            while True:
+                member = tar.next()
+                if member is None:
+                    break
+                members += 1
+                if members > max_members:
+                    raise TarRefused(
+                        f"TAR archive has more than {max_members} entries.",
+                        code="TAR_TOO_MANY_ENTRIES",
+                    )
+                path_bytes = len(member.name.encode("utf-8", "surrogateescape"))
+                if path_bytes > max_path_bytes:
+                    raise TarRefused(
+                        f"A TAR entry path is longer than {max_path_bytes} bytes.",
+                        code="TAR_PATH_TOO_LONG",
+                    )
+                depth = len([p for p in member.name.split("/") if p])
+                if depth > max_path_depth:
+                    raise TarRefused(
+                        f"A TAR entry path is deeper than {max_path_depth} levels.",
+                        code="TAR_PATH_TOO_DEEP",
+                    )
+                if member.isfile():
+                    files += 1
+                    # A plain tar holds its content, so the sizes can only add
+                    # up to more than the upload for sparse entries, which
+                    # declare data they do not carry.
+                    content_bytes += member.size
+                    if content_bytes > len(tar_bytes):
+                        raise TarRefused(
+                            "TAR entries declare more content than the archive holds "
+                            "(sparse entries are not supported).",
+                            code="TAR_CONTENT_TOO_LARGE",
+                        )
+    except tarfile.TarError as e:
+        if members == 0:
+            for magic, kind in _COMPRESSED_MAGIC:
+                if tar_bytes.startswith(magic):
+                    raise TarRefused(
+                        f"Compressed TAR archives ({kind}) are not accepted. "
+                        "Upload an uncompressed tar (tar -cf).",
+                        code="TAR_COMPRESSED",
+                    ) from None
+        raise TarRefused(f"Invalid TAR archive: {e}") from None
+    if files == 0:
+        raise TarRefused("TAR archive contains no files")
+    return files
 
 
 async def upload_collection_to_swarm(

@@ -121,11 +121,9 @@ class TestManifestUploadTiming:
         return tar_buffer.getvalue()
 
     @patch('app.api.endpoints.data.upload_collection_to_swarm')
-    @patch('app.api.endpoints.data.validate_tar')
-    @patch('app.api.endpoints.data.count_tar_files')
-    def test_manifest_without_timing_by_default(self, mock_count, mock_validate, mock_upload):
+    @patch('app.api.endpoints.data.inspect_tar')
+    def test_manifest_without_timing_by_default(self, mock_count, mock_upload):
         """Test that timing is not included by default in manifest uploads."""
-        mock_validate.return_value = None
         mock_count.return_value = 3
         mock_upload.return_value = "manifest123reference"
 
@@ -142,11 +140,9 @@ class TestManifestUploadTiming:
         assert data["timing"] is None
 
     @patch('app.api.endpoints.data.upload_collection_to_swarm')
-    @patch('app.api.endpoints.data.validate_tar')
-    @patch('app.api.endpoints.data.count_tar_files')
-    def test_manifest_with_timing_enabled(self, mock_count, mock_validate, mock_upload):
+    @patch('app.api.endpoints.data.inspect_tar')
+    def test_manifest_with_timing_enabled(self, mock_count, mock_upload):
         """Test that timing is included when include_timing=true."""
-        mock_validate.return_value = None
         mock_count.return_value = 3
         mock_upload.return_value = "manifest123reference"
 
@@ -174,11 +170,9 @@ class TestManifestUploadTiming:
         assert "files_per_second" in timing
 
     @patch('app.api.endpoints.data.upload_collection_to_swarm')
-    @patch('app.api.endpoints.data.validate_tar')
-    @patch('app.api.endpoints.data.count_tar_files')
-    def test_manifest_timing_derived_metrics(self, mock_count, mock_validate, mock_upload):
+    @patch('app.api.endpoints.data.inspect_tar')
+    def test_manifest_timing_derived_metrics(self, mock_count, mock_upload):
         """Test that derived metrics (ms_per_file, files_per_second) are calculated correctly."""
-        mock_validate.return_value = None
         mock_count.return_value = 5
         mock_upload.return_value = "manifest123reference"
 
@@ -202,11 +196,9 @@ class TestManifestUploadTiming:
         assert abs(timing["ms_per_file"] - expected_ms_per_file) < 0.01
 
     @patch('app.api.endpoints.data.upload_collection_to_swarm')
-    @patch('app.api.endpoints.data.validate_tar')
-    @patch('app.api.endpoints.data.count_tar_files')
-    def test_manifest_server_timing_header(self, mock_count, mock_validate, mock_upload):
+    @patch('app.api.endpoints.data.inspect_tar')
+    def test_manifest_server_timing_header(self, mock_count, mock_upload):
         """Test Server-Timing header in manifest uploads."""
-        mock_validate.return_value = None
         mock_count.return_value = 3
         mock_upload.return_value = "manifest123reference"
 
@@ -230,13 +222,11 @@ class TestManifestUploadTiming:
         assert "files-per-second" in server_timing
 
     @patch('app.api.endpoints.data.upload_collection_to_swarm')
-    @patch('app.api.endpoints.data.validate_tar')
-    @patch('app.api.endpoints.data.count_tar_files')
+    @patch('app.api.endpoints.data.inspect_tar')
     @patch('app.api.endpoints.data.validate_stamp_for_upload')
-    def test_manifest_timing_with_stamp_validation(self, mock_stamp, mock_count, mock_validate, mock_upload):
+    def test_manifest_timing_with_stamp_validation(self, mock_stamp, mock_count, mock_upload):
         """Test manifest timing includes stamp validation when enabled."""
         mock_stamp.return_value = None
-        mock_validate.return_value = None
         mock_count.return_value = 3
         mock_upload.return_value = "manifest123reference"
 

@@ -718,7 +718,7 @@ The W3C Server-Timing header is visible in browser DevTools Network tab for easy
 #### `POST /api/v1/data/manifest?stamp_id={id}&validate_stamp={bool}&deferred={bool}&include_timing={bool}&redundancy={level}`
 Upload multiple files as a TAR archive collection/manifest.
 - **Performance**: 15x faster than individual uploads (50 files in ~500ms vs ~14s)
-- **Request**: Multipart form-data with TAR archive file
+- **Request**: Multipart form-data with an **uncompressed** TAR archive file (`tar -cf`). A gzip, bzip2, xz or zstd archive gets 400 `TAR_COMPRESSED`: Bee stores a plain tar only. Limits (#694): at most `MANIFEST_MAX_MEMBERS` entries (default 10,000, directories included; 400 `TAR_TOO_MANY_ENTRIES`), each path at most `MANIFEST_MAX_PATH_BYTES` bytes (default 1024; `TAR_PATH_TOO_LONG`) and `MANIFEST_MAX_PATH_DEPTH` levels (default 64; `TAR_PATH_TOO_DEEP`). A refused archive is refused before payment and not charged.
 - **validate_stamp**: Optional (default: false) - Pre-validate stamp before upload
 - **deferred**: Optional (default: false) - Use deferred upload mode (see table above)
 - **include_timing**: Optional (default: false) - Include timing breakdown in response
@@ -761,7 +761,7 @@ curl -X POST "http://localhost:8000/api/v1/data/manifest?stamp_id=YOUR_STAMP_ID&
     "stamp_validate_ms": null,
     "file_read_ms": 0.35,
     "tar_validate_ms": 1.22,
-    "tar_count_ms": 0.89,
+    "tar_count_ms": 0.0,
     "bee_upload_ms": 487.15,
     "total_ms": 489.92,
     "file_count": 50,
