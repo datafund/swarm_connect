@@ -138,9 +138,8 @@ class TestManifestUploadSizeLimit:
         assert body["detail"]["code"] == "FILE_TOO_LARGE"
 
     @patch('app.api.endpoints.data.upload_collection_to_swarm', return_value="ref456")
-    @patch('app.api.endpoints.data.count_tar_files', return_value=1)
-    @patch('app.api.endpoints.data.validate_tar')
-    def test_manifest_within_limit_succeeds(self, mock_validate, mock_count, mock_upload):
+    @patch('app.api.endpoints.data.inspect_tar', return_value=1)
+    def test_manifest_within_limit_succeeds(self, mock_count, mock_upload):
         """TAR file within size limit should be accepted."""
         data = b"x" * 1024
         response = client.post(
@@ -151,11 +150,9 @@ class TestManifestUploadSizeLimit:
 
 
     @patch('app.api.endpoints.data.upload_collection_to_swarm', return_value="ref456")
-    @patch('app.api.endpoints.data.count_tar_files', return_value=1)
-    @patch('app.api.endpoints.data.validate_tar')
+    @patch('app.api.endpoints.data.inspect_tar', return_value=1)
     @patch('app.api.endpoints.data.settings')
-    def test_manifest_at_exact_limit_succeeds(self, mock_settings, mock_validate,
-                                              mock_count, mock_upload):
+    def test_manifest_at_exact_limit_succeeds(self, mock_settings, mock_count, mock_upload):
         """The manifest endpoint carried the same defect as the data endpoint.
 
         Both compare the request's Content-Length — which covers the multipart
@@ -173,11 +170,9 @@ class TestManifestUploadSizeLimit:
         assert response.status_code == 200, response.text
 
     @patch('app.api.endpoints.data.upload_collection_to_swarm', return_value="ref456")
-    @patch('app.api.endpoints.data.count_tar_files', return_value=1)
-    @patch('app.api.endpoints.data.validate_tar')
+    @patch('app.api.endpoints.data.inspect_tar', return_value=1)
     @patch('app.api.endpoints.data.settings')
-    def test_manifest_one_byte_over_is_still_rejected(self, mock_settings, mock_validate,
-                                                      mock_count, mock_upload):
+    def test_manifest_one_byte_over_is_still_rejected(self, mock_settings, mock_count, mock_upload):
         """The envelope allowance must not become slack in the limit."""
         mock_settings.MAX_UPLOAD_SIZE_MB = 2
         data = b"x" * (2 * 1024 * 1024 + 1)

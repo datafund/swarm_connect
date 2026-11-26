@@ -312,11 +312,10 @@ class TestManifestUploadCounter:
     """Tests that manifest upload operations increment counters."""
 
     @patch("app.api.endpoints.data.upload_collection_to_swarm", new_callable=AsyncMock)
-    @patch("app.api.endpoints.data.count_tar_files")
-    @patch("app.api.endpoints.data.validate_tar")
+    @patch("app.api.endpoints.data.inspect_tar")
     @patch("app.api.endpoints.data.stamp_ownership_manager")
     def test_manifest_upload_increments_counter(
-        self, mock_ownership, mock_validate, mock_count, mock_upload
+        self, mock_ownership, mock_count, mock_upload
     ):
         """Successful manifest upload increments gateway_uploads_total."""
         import io
@@ -324,7 +323,6 @@ class TestManifestUploadCounter:
         from app.services.metrics import uploads_total
 
         mock_upload.return_value = "ab" * 32
-        mock_validate.return_value = None
         mock_count.return_value = 3
         mock_ownership.check_access.return_value = (True, "ok")
 

@@ -205,9 +205,8 @@ class TestManifestEndpointDeferredParameter:
     """Tests for deferred parameter in manifest upload endpoint."""
 
     @patch('app.api.endpoints.data.upload_collection_to_swarm', new_callable=AsyncMock)
-    @patch('app.api.endpoints.data.validate_tar')
-    @patch('app.api.endpoints.data.count_tar_files')
-    def test_manifest_default_deferred_false(self, mock_count, mock_validate, mock_upload):
+    @patch('app.api.endpoints.data.inspect_tar')
+    def test_manifest_default_deferred_false(self, mock_count, mock_upload):
         """Test that manifest endpoint defaults to deferred=false."""
         from fastapi.testclient import TestClient
         from app.main import app
@@ -222,7 +221,6 @@ class TestManifestEndpointDeferredParameter:
             tar.addfile(info, io.BytesIO(data))
         tar_bytes = tar_buffer.getvalue()
 
-        mock_validate.return_value = None
         mock_count.return_value = 1
         mock_upload.return_value = "abc123reference"
 
@@ -239,9 +237,8 @@ class TestManifestEndpointDeferredParameter:
         assert call_kwargs.get('deferred') is False
 
     @patch('app.api.endpoints.data.upload_collection_to_swarm', new_callable=AsyncMock)
-    @patch('app.api.endpoints.data.validate_tar')
-    @patch('app.api.endpoints.data.count_tar_files')
-    def test_manifest_deferred_true(self, mock_count, mock_validate, mock_upload):
+    @patch('app.api.endpoints.data.inspect_tar')
+    def test_manifest_deferred_true(self, mock_count, mock_upload):
         """Test that manifest endpoint passes deferred=true when specified."""
         from fastapi.testclient import TestClient
         from app.main import app
@@ -256,7 +253,6 @@ class TestManifestEndpointDeferredParameter:
             tar.addfile(info, io.BytesIO(data))
         tar_bytes = tar_buffer.getvalue()
 
-        mock_validate.return_value = None
         mock_count.return_value = 1
         mock_upload.return_value = "abc123reference"
 

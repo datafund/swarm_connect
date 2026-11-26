@@ -1453,43 +1453,191 @@ async def check_sufficient_funds(required_plur: int) -> Dict[str, Any]:
     }
 
 
-def validate_tar(tar_bytes: bytes) -> None:
-    """
-    Validates that the provided bytes are a valid TAR archive with at least one file.
+# Leading bytes of the compressed formats tarfile's 'r:*' used to unpack. Only
+# consulted after the archive failed to parse as a plain tar, so a plain tar
+# whose first file happens to be called "BZh..." is never mistaken for one.
+_COMPRESSED_MAGIC = (
+    (b"\x1f\x8b", "gzip"),
+    (b"BZh", "bzip2"),
+    (b"\xfd7zXZ\x00", "xz"),
+    (b"\x28\xb5\x2f\xfd", "zstd"),
+)
 
-    Args:
-        tar_bytes: The TAR archive data as bytes
 
-    Raises:
-        ValueError: If the TAR is invalid, corrupt, or contains no files
-    """
+class TarRefused(ValueError):
+    """The manifest archive was refused. `code` is None for the two refusals
+    that predate #694, which keep their plain-text `detail`."""
+
+    def __init__(self, message: str, code: Optional[str] = None, status: int = 400):
+        super().__init__(message)
+        self.message = message
+        self.code = code
+        self.status = status
+
+
+# Extension headers allowed in front of one entry. GNU tar writes at most two
+# (a long name and a long link name), a PAX writer one.
+_MAX_EXTENSION_HEADERS_PER_ENTRY = 4
+# One global PAX header of at most this many bytes is accepted per archive.
+# git archive writes one (52 bytes, the commit id); GNU tar, bsdtar and
+# Python's tarfile write none unless asked to.
+_MAX_GLOBAL_HEADER_BYTES = 512
+
+
+def _bounded_tarinfo(max_extended_header_bytes: int):
+    """A TarInfo subclass that refuses what tarfile would otherwise read
+    without a bound (#694). Its methods are tarfile's own hooks for each
+    header type (CPython 3.12): _proc_member dispatches, _proc_pax reads PAX
+    extended ('x', Solaris 'X') and global ('g') headers, _proc_gnulong reads
+    GNU long names and long link names ('L', 'K'), _proc_sparse and the
+    _proc_gnusparse_* methods read sparse maps.
+
+    tarfile copies a global PAX header into every later entry, so its cost
+    multiplies by the entry count: only one is accepted, of at most
+    _MAX_GLOBAL_HEADER_BYTES. One class per call, so the counters belong to
+    one archive."""
     import tarfile
-    import io
 
-    try:
-        with tarfile.open(fileobj=io.BytesIO(tar_bytes), mode='r:*') as tar:
-            has_files = any(member.isfile() for member in tar.getmembers())
-            if not has_files:
-                raise ValueError("TAR archive contains no files")
-    except tarfile.TarError as e:
-        raise ValueError(f"Invalid TAR archive: {e}")
+    extension_types = (tarfile.XHDTYPE, tarfile.SOLARIS_XHDTYPE, tarfile.XGLTYPE,
+                       tarfile.GNUTYPE_LONGNAME, tarfile.GNUTYPE_LONGLINK)
+
+    def refuse(message):
+        raise TarRefused(message, code="TAR_EXTENDED_HEADER_REFUSED")
+
+    class BoundedTarInfo(tarfile.TarInfo):
+        chain = 0          # extension headers read since the last complete entry
+        global_headers = 0
+
+        def _proc_member(self, tarfile_):
+            if self.type in extension_types:
+                if self.type == tarfile.XGLTYPE:
+                    BoundedTarInfo.global_headers += 1
+                    if (BoundedTarInfo.global_headers > 1
+                            or self.size > _MAX_GLOBAL_HEADER_BYTES):
+                        refuse(f"A TAR archive may carry one global PAX header of at most "
+                               f"{_MAX_GLOBAL_HEADER_BYTES} bytes.")
+                if self.size > max_extended_header_bytes:
+                    refuse(f"A TAR extended header is larger than "
+                           f"{max_extended_header_bytes} bytes.")
+                BoundedTarInfo.chain += 1
+                if BoundedTarInfo.chain > _MAX_EXTENSION_HEADERS_PER_ENTRY:
+                    refuse(f"A TAR entry has more than "
+                           f"{_MAX_EXTENSION_HEADERS_PER_ENTRY} extended headers.")
+            return super()._proc_member(tarfile_)
+
+        def _proc_sparse(self, tarfile_):
+            refuse("Sparse TAR entries are not accepted.")
+
+        def _proc_gnusparse_00(self, *args):
+            refuse("Sparse TAR entries are not accepted.")
+
+        def _proc_gnusparse_01(self, *args):
+            refuse("Sparse TAR entries are not accepted.")
+
+        def _proc_gnusparse_10(self, *args):
+            refuse("Sparse TAR entries are not accepted.")
+
+    return BoundedTarInfo
 
 
-def count_tar_files(tar_bytes: bytes) -> int:
-    """
-    Counts the number of files in a TAR archive.
+def inspect_tar(
+    tar_bytes: bytes,
+    max_members: Optional[int] = None,
+    max_path_bytes: Optional[int] = None,
+    max_path_depth: Optional[int] = None,
+    max_extended_header_bytes: Optional[int] = None,
+) -> int:
+    """Validate a manifest TAR archive in one streaming pass and count its files.
 
-    Args:
-        tar_bytes: The TAR archive data as bytes
+    Only an uncompressed tar is accepted (#694). With tarfile's 'r:*' a small
+    gzip or xz archive could unpack to millions of entries, and getmembers()
+    held them all: a 300 KB upload took the gateway down before payment. Bee's
+    collection upload reads the body with Go's archive/tar and does not
+    decompress it, so a compressed archive is not a collection Bee can read.
+
+    Entries are read one at a time with next(), nothing is kept between them
+    (tarfile's member list is cleared), and the pass stops at the first one
+    over a limit. Entry data is never read. Extension headers are bounded by
+    _bounded_tarinfo: no global PAX header, no sparse entries, each extended
+    header at most max_extended_header_bytes, at most a few per entry.
+
+    Synchronous and CPU-bound: call it off the event loop.
 
     Returns:
-        The number of files in the archive
-    """
-    import tarfile
-    import io
+        The number of regular files in the archive.
 
-    with tarfile.open(fileobj=io.BytesIO(tar_bytes), mode='r:*') as tar:
-        return sum(1 for member in tar.getmembers() if member.isfile())
+    Raises:
+        TarRefused: compressed, not a tar, no files, a refused extension
+            header, or over a limit.
+    """
+    import io
+    import tarfile
+
+    if max_members is None:
+        max_members = settings.MANIFEST_MAX_MEMBERS
+    if max_path_bytes is None:
+        max_path_bytes = settings.MANIFEST_MAX_PATH_BYTES
+    if max_path_depth is None:
+        max_path_depth = settings.MANIFEST_MAX_PATH_DEPTH
+    if max_extended_header_bytes is None:
+        max_extended_header_bytes = settings.MANIFEST_MAX_EXTENDED_HEADER_BYTES
+    bounded = _bounded_tarinfo(max_extended_header_bytes)
+
+    members = 0
+    files = 0
+    content_bytes = 0
+    try:
+        # 'r:' is a plain tar only; it never decompresses.
+        with tarfile.open(fileobj=io.BytesIO(tar_bytes), mode="r:", tarinfo=bounded) as tar:
+            while True:
+                member = tar.next()
+                # next() keeps every entry in tar.members; nothing here needs them.
+                tar.members.clear()
+                bounded.chain = 0
+                if member is None:
+                    break
+                members += 1
+                if members > max_members:
+                    raise TarRefused(
+                        f"TAR archive has more than {max_members} entries.",
+                        code="TAR_TOO_MANY_ENTRIES",
+                    )
+                path_bytes = len(member.name.encode("utf-8", "surrogateescape"))
+                if path_bytes > max_path_bytes:
+                    raise TarRefused(
+                        f"A TAR entry path is longer than {max_path_bytes} bytes.",
+                        code="TAR_PATH_TOO_LONG",
+                    )
+                depth = len([p for p in member.name.split("/") if p])
+                if depth > max_path_depth:
+                    raise TarRefused(
+                        f"A TAR entry path is deeper than {max_path_depth} levels.",
+                        code="TAR_PATH_TOO_DEEP",
+                    )
+                if member.isfile():
+                    files += 1
+                    # A plain tar holds its content, so the sizes can only add
+                    # up to more than the upload when a header declares a size
+                    # the archive does not carry (a PAX "size" record, say).
+                    content_bytes += member.size
+                    if content_bytes > len(tar_bytes):
+                        raise TarRefused(
+                            "TAR entries declare more content than the archive holds.",
+                            code="TAR_CONTENT_TOO_LARGE",
+                        )
+    except tarfile.TarError as e:
+        if members == 0:
+            for magic, kind in _COMPRESSED_MAGIC:
+                if tar_bytes.startswith(magic):
+                    raise TarRefused(
+                        f"Compressed TAR archives ({kind}) are not accepted. "
+                        "Upload an uncompressed tar (tar -cf).",
+                        code="TAR_COMPRESSED",
+                    ) from None
+        raise TarRefused(f"Invalid TAR archive: {e}") from None
+    if files == 0:
+        raise TarRefused("TAR archive contains no files")
+    return files
 
 
 async def upload_collection_to_swarm(

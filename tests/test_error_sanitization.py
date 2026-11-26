@@ -144,9 +144,8 @@ class TestManifestUploadErrorSanitization:
 
     @patch('app.api.endpoints.data.check_upload_failure_reason', return_value=None)
     @patch('app.api.endpoints.data.upload_collection_to_swarm')
-    @patch('app.api.endpoints.data.count_tar_files', return_value=1)
-    @patch('app.api.endpoints.data.validate_tar')
-    def test_manifest_connection_error_sanitized(self, mock_validate, mock_count, mock_upload, mock_failure):
+    @patch('app.api.endpoints.data.inspect_tar', return_value=1)
+    def test_manifest_connection_error_sanitized(self, mock_count, mock_upload, mock_failure):
         """Manifest upload errors should not expose Bee node URL."""
         mock_upload.side_effect = httpx2.ConnectError(
             "HTTPSConnectionPool(host='bee.secret.net', port=1633): Max retries"
