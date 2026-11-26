@@ -179,22 +179,152 @@ class TestEntryLimits:
         r = post(plain_tar(["/".join(["d"] * 64)]))
         assert r.status_code == 200, r.text
 
-    def test_sparse_entries_declaring_more_than_the_upload_are_refused(self, bee):
+    def test_a_declared_size_larger_than_the_upload_is_refused(self, bee):
         upload, _ = bee
-        # A GNU sparse entry declares its full size while carrying almost no
-        # data, so a plain tar's sizes can exceed the upload only this way.
-        info = tarfile.TarInfo("sparse.bin")
-        info.type = tarfile.GNUTYPE_SPARSE
-        info.size = 0
-        header = bytearray(info.tobuf(format=tarfile.GNU_FORMAT))
-        # realsize field of the old GNU header (offset 483, 12 octal bytes):
-        header[483:495] = b"%011o\0" % (1 << 30)
-        header[148:156] = b"        "
-        header[148:156] = b"%06o\0 " % sum(header)
-        r = post(bytes(header) + END_OF_ARCHIVE)
+        # A PAX "size" record overrides the header's size, so an entry can
+        # declare content the archive does not carry.
+        buf = io.BytesIO()
+        with tarfile.open(fileobj=buf, mode="w", format=tarfile.PAX_FORMAT) as tar:
+            info = tarfile.TarInfo("big.bin")
+            info.size = 1
+            info.pax_headers = {"size": str(1 << 30)}
+            tar.addfile(info, io.BytesIO(b"x"))
+        r = post(buf.getvalue())
         assert r.status_code == 400, r.text
         assert code_of(r) == "TAR_CONTENT_TOO_LARGE"
         upload.assert_not_called()
+
+
+def _pax_records(n, prefix="k"):
+    """n distinct short PAX records."""
+    out = bytearray()
+    for i in range(n):
+        body = f" {prefix}{i}=v\n".encode()
+        length = len(body) + 1
+        while len(str(length)) + len(body) != length:
+            length = len(str(length)) + len(body)
+        out += str(length).encode() + body
+    return bytes(out)
+
+
+def _extension(typeflag, payload, name="././@x"):
+    info = tarfile.TarInfo(name)
+    info.type = typeflag
+    info.size = len(payload)
+    return info.tobuf(format=tarfile.USTAR_FORMAT) + payload + b"\0" * (-len(payload) % 512)
+
+
+class TestExtensionHeaders:
+    """PAX and GNU extension headers are bounded (#694, review round 1).
+
+    tarfile copies a global PAX header into every later entry, so its cost
+    multiplies by the entry count; an uncompressed archive of under 2 MB was
+    enough to exhaust a 512 MB gateway. Extended headers are capped in size
+    and number, and only one small global header is accepted."""
+
+    def test_a_large_global_pax_header_is_refused_fast_and_in_bounded_memory(self, bee):
+        upload, settle = bee
+        data = (_extension(tarfile.XGLTYPE, _pax_records(10_000))
+                + many_empty_entries(200))
+        tracemalloc.start()
+        try:
+            tracemalloc.reset_peak()
+            start = time.perf_counter()
+            r = post(data)
+            elapsed = time.perf_counter() - start
+            _, peak = tracemalloc.get_traced_memory()
+        finally:
+            tracemalloc.stop()
+        assert r.status_code == 400, r.text
+        assert code_of(r) == "TAR_EXTENDED_HEADER_REFUSED"
+        assert peak < 10 * 1024 * 1024, f"peak {peak} bytes"
+        assert elapsed < 2.0, f"{elapsed:.2f} s"
+        upload.assert_not_called()
+        settle.assert_not_called()
+
+    def test_a_second_global_pax_header_is_refused(self, bee):
+        upload, _ = bee
+        small = _extension(tarfile.XGLTYPE, _pax_records(2))
+        r = post(small + plain_tar(["a.txt"])[:512 * 2] + small + plain_tar(["index.html"]))
+        assert r.status_code == 400, r.text
+        assert code_of(r) == "TAR_EXTENDED_HEADER_REFUSED"
+        upload.assert_not_called()
+
+    def test_an_oversized_per_file_pax_header_is_refused(self, bee):
+        upload, settle = bee
+        buf = io.BytesIO()
+        with tarfile.open(fileobj=buf, mode="w", format=tarfile.PAX_FORMAT) as tar:
+            info = tarfile.TarInfo("index.html")
+            info.size = 1
+            info.pax_headers = {"comment": "x" * (70 * 1024)}
+            tar.addfile(info, io.BytesIO(b"x"))
+        r = post(buf.getvalue())
+        assert r.status_code == 400, r.text
+        assert code_of(r) == "TAR_EXTENDED_HEADER_REFUSED"
+        upload.assert_not_called()
+        settle.assert_not_called()
+
+    def test_an_oversized_gnu_long_name_is_refused(self, bee):
+        upload, _ = bee
+        buf = io.BytesIO()
+        with tarfile.open(fileobj=buf, mode="w", format=tarfile.GNU_FORMAT) as tar:
+            info = tarfile.TarInfo("d/" + "n" * (70 * 1024))
+            info.size = 1
+            tar.addfile(info, io.BytesIO(b"x"))
+        r = post(buf.getvalue())
+        assert r.status_code == 400, r.text
+        assert code_of(r) == "TAR_EXTENDED_HEADER_REFUSED"
+        upload.assert_not_called()
+
+    def test_too_many_extension_headers_in_front_of_one_entry_are_refused(self, bee):
+        upload, _ = bee
+        one = _extension(tarfile.XHDTYPE, _pax_records(1))
+        r = post(one * 5 + plain_tar(["index.html"]))
+        assert r.status_code == 400, r.text
+        assert code_of(r) == "TAR_EXTENDED_HEADER_REFUSED"
+        upload.assert_not_called()
+
+    def test_sparse_entries_are_refused(self, bee):
+        upload, _ = bee
+        info = tarfile.TarInfo("sparse.bin")
+        info.type = tarfile.GNUTYPE_SPARSE
+        info.size = 0
+        r = post(info.tobuf(format=tarfile.GNU_FORMAT) + END_OF_ARCHIVE)
+        assert r.status_code == 400, r.text
+        assert code_of(r) == "TAR_EXTENDED_HEADER_REFUSED"
+        upload.assert_not_called()
+
+    def test_ordinary_pax_and_gnu_archives_are_accepted(self, bee):
+        upload, _ = bee
+        long_unicode = "données/" + "é" * 200 + "/index.html"   # needs a PAX path record
+        long_ascii = "assets/" + "n" * 300 + ".js"                 # needs a GNU long name
+        for fmt, name in ((tarfile.PAX_FORMAT, long_unicode), (tarfile.GNU_FORMAT, long_ascii)):
+            buf = io.BytesIO()
+            with tarfile.open(fileobj=buf, mode="w", format=fmt) as tar:
+                for n in (name, "index.html"):
+                    info = tarfile.TarInfo(n)
+                    info.size = 2
+                    tar.addfile(info, io.BytesIO(b"ok"))
+            r = post(buf.getvalue())
+            assert r.status_code == 200, (fmt, r.text)
+            assert r.json()["file_count"] == 2
+        assert upload.call_count == 2
+
+    def test_a_small_global_header_like_git_archive_writes_is_accepted(self, bee):
+        upload, _ = bee
+        buf = io.BytesIO()
+        # git archive starts every tar with a 52-byte global header (the commit id).
+        with tarfile.open(fileobj=buf, mode="w", format=tarfile.PAX_FORMAT,
+                          pax_headers={"comment": "a" * 40}) as tar:
+            info = tarfile.TarInfo("index.html")
+            info.size = 2
+            tar.addfile(info, io.BytesIO(b"ok"))
+        data = buf.getvalue()
+        assert data[156:157] == tarfile.XGLTYPE
+        r = post(data)
+        assert r.status_code == 200, r.text
+        assert r.json()["file_count"] == 1
+        upload.assert_called_once()
 
 
 class TestLegitimateManifests:

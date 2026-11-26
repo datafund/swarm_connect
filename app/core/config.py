@@ -390,6 +390,9 @@ class Settings(BaseSettings):
     MANIFEST_MAX_MEMBERS: int = Field(10_000, ge=1)       # entries of any type
     MANIFEST_MAX_PATH_BYTES: int = Field(1024, ge=1)      # one entry's path, UTF-8
     MANIFEST_MAX_PATH_DEPTH: int = Field(64, ge=1)        # path components
+    # One PAX extended header or GNU long name/link header, in bytes. Global PAX
+    # headers and sparse entries are refused whatever their size.
+    MANIFEST_MAX_EXTENDED_HEADER_BYTES: int = Field(64 * 1024, ge=512)
     # Total time allowed for fetching one download from Bee. httpx2 timeouts
     # apply per read, so a slow trickle could otherwise hold the request open.
     DOWNLOAD_TIMEOUT_SECONDS: int = Field(120, ge=1)

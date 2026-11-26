@@ -787,6 +787,10 @@ async def upload_manifest(
       included: 400 `TAR_TOO_MANY_ENTRIES`), each path at most
       `MANIFEST_MAX_PATH_BYTES` bytes (default 1024: `TAR_PATH_TOO_LONG`) and
       `MANIFEST_MAX_PATH_DEPTH` levels (default 64: `TAR_PATH_TOO_DEEP`)
+    - Each PAX extended header and GNU long name at most
+      `MANIFEST_MAX_EXTENDED_HEADER_BYTES` (default 65536), at most four in front
+      of one entry, at most one global PAX header of at most 512 bytes, and no
+      sparse entries (400 `TAR_EXTENDED_HEADER_REFUSED`)
     - An archive refused for any of these is refused before payment and not charged
     - Optional `validate_stamp` parameter (defaults to false)
     - Optional `deferred` parameter (defaults to false)
