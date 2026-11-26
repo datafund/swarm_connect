@@ -402,3 +402,47 @@ class TestEventLoopStaysResponsive:
         assert len(answered_during) >= 3, (probes, parse)
         assert worst < 0.75, f"/health took {worst:.2f} s during the parse"
         assert all(status == 200 for *_, status in probes)
+
+
+class TestTarfileHooksStillExist:
+    """inspect_tar's limits ride on private tarfile names (CPython 3.12). If a
+    Python upgrade renames one, the override is silently never called and the
+    limit is gone, so this fails loudly instead."""
+
+    HOOKS = ("_proc_member", "_proc_sparse",
+             "_proc_gnusparse_00", "_proc_gnusparse_01", "_proc_gnusparse_10")
+
+    def test_the_overridden_hooks_exist_on_tarinfo(self):
+        missing = [h for h in self.HOOKS if not callable(getattr(tarfile.TarInfo, h, None))]
+        assert not missing, f"tarfile.TarInfo no longer has {missing}; re-check _bounded_tarinfo"
+
+    def test_the_bounded_class_overrides_every_hook(self):
+        from app.services.swarm_api import _bounded_tarinfo
+        bounded = _bounded_tarinfo(1024)
+        for h in self.HOOKS:
+            assert h in vars(bounded), f"_bounded_tarinfo does not override {h}"
+
+    def test_tarfile_keeps_read_entries_in_a_members_list(self):
+        # inspect_tar clears tar.members after each next(); that only bounds
+        # memory while this is the list tarfile appends to.
+        with tarfile.open(fileobj=io.BytesIO(plain_tar(["a.txt", "b.txt"])), mode="r:") as tar:
+            assert isinstance(tar.members, list)
+            first = tar.next()
+            tar.next()
+            assert tar.members[0] is first and len(tar.members) == 2
+            tar.members.clear()
+            assert tar.next() is None
+
+    def test_canary_the_override_is_actually_called(self):
+        from app.services.swarm_api import TarRefused, inspect_tar
+        buf = io.BytesIO()
+        with tarfile.open(fileobj=buf, mode="w", format=tarfile.PAX_FORMAT) as tar:
+            info = tarfile.TarInfo("index.html")
+            info.size = 2
+            info.pax_headers = {"comment": "x" * 2048}   # a PAX header of about 2 KiB
+            tar.addfile(info, io.BytesIO(b"ok"))
+        data = buf.getvalue()
+        assert inspect_tar(data) == 1                      # under the default cap
+        with pytest.raises(TarRefused) as refused:
+            inspect_tar(data, max_extended_header_bytes=1024)
+        assert refused.value.code == "TAR_EXTENDED_HEADER_REFUSED"
