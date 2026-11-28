@@ -143,9 +143,10 @@ class TestOrdinaryCases:
         monkeypatch.setattr(settings, "TRUSTED_PROXY_HOPS", 1)
         assert get_client_ip(_request({"X-Forwarded-For": f" {FORGED} , , {CLIENT} "})) == CLIENT
 
-    def test_real_ip_is_used_when_forwarded_for_is_absent(self, monkeypatch):
+    def test_real_ip_is_ignored_when_forwarded_for_is_absent(self, monkeypatch):
+        """X-Real-IP is caller-written when nothing in front sets it (#697)."""
         monkeypatch.setattr(settings, "TRUSTED_PROXY_HOPS", 1)
-        assert get_client_ip(_request({"X-Real-IP": CLIENT})) == CLIENT
+        assert get_client_ip(_request({"X-Real-IP": CLIENT}, peer="192.0.2.7")) == "192.0.2.7"
 
     def test_forwarded_for_wins_over_real_ip(self, monkeypatch):
         monkeypatch.setattr(settings, "TRUSTED_PROXY_HOPS", 1)

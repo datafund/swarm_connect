@@ -124,11 +124,12 @@ class TestGetClientIP:
         request.client = None
         assert get_client_ip(request) == "70.41.3.18"
 
-    def test_real_ip_header(self):
+    def test_real_ip_header_is_ignored(self):
+        """X-Real-IP is not read (#697): without a peer the caller is unknown."""
         request = MagicMock(spec=Request)
         request.headers = {"X-Real-IP": "203.0.113.50"}
         request.client = None
-        assert get_client_ip(request) == "203.0.113.50"
+        assert get_client_ip(request) == "unknown"
 
     def test_direct_connection(self):
         request = MagicMock(spec=Request)
