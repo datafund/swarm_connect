@@ -31,6 +31,18 @@ Billing is governed by the global `X402_ENABLED`:
 
 These compose independently of the stamp/data x402 free tier (`X402_FREE_TIER_*`).
 
+### Rate limiting and body size
+
+The global per-IP limit (`RATE_LIMIT_PER_MINUTE` + `RATE_LIMIT_BURST`, default 60 + 10 a minute) applies to chunk uploads, with one exception: with x402 on, an upload to `POST /api/v1/chunks/` (that exact path) that presents an `X-Bandwidth-Credit-Token` whose balance is at least its declared `Content-Length` (at least 1 byte when it declares none), and is not on the free path, is not counted when it is billed. Prepaid credit bounds those. The check is two in-memory lookups; it neither debits nor reads the body (#696).
+
+Each such upload takes a slot in a separate per-IP budget, the same size as the global limit, before it runs; when no slot is free it gets `429` without reaching Bee. A billed upload gives its slot back once it is answered. One that ends without being billed (refused, for example a malformed stamp, or not accepted by Bee, `502`), or that fails or is cut off, keeps it for the rest of the window. The budget is separate from the address's budget for other requests. Because the slot is taken before the upload runs, concurrent requests cannot go over it.
+
+The trade-off: one address can have at most that many credit-token uploads in flight at once (70 at the defaults). Uploads beyond that get `429` even when they would have been billed; retry them after `Retry-After`, or keep fewer uploads in flight.
+
+Everything else counts against the global limit: no token, an unknown or rotated token, a balance too low for the declared length, and every free-path upload (`X-Payment-Mode: free`). A free-path client is therefore held to the global per-IP rate, about 70 chunks a minute at the defaults (roughly 290 KB a minute of 4104-byte chunks), as well as its daily byte quota. With x402 off every chunk upload counts.
+
+The handler does not buffer the body past the limit plus one part (below). A `Content-Length` over `CHUNK_UPLOAD_MAX_BYTES_PER_REQUEST` is refused with `413 CHUNK_TOO_LARGE` before any of the body is read. Without a `Content-Length` (chunked transfer encoding), the body is read as the server delivers it and reading stops at the first part that takes the total over the limit, so the gateway holds at most the limit plus that one part. The part size is the ASGI server's choice, not the gateway's. Uvicorn, with either of its HTTP parsers (httptools, which the lock file installs and uvicorn picks by default, or h11), hands over everything it has buffered since the previous read and stops reading from the socket once that buffer passes 64 KiB (`HIGH_WATER_LIMIT`), so with uvicorn one part is at most 64 KiB plus one socket read. That bound is per in-flight request, on top of whatever the server itself buffers per connection. The size check comes before any credit debit or free-quota use.
+
 ### How billing works
 
 - A chunk upload carries **no per-request payment**. Only the top-up does.
@@ -115,10 +127,11 @@ Default is **non-deferred** (direct upload). The gateway does not verify your st
 |--------|--------|---------|
 | 404 | — | Feature disabled (`CHUNK_UPLOAD_ENABLED=false`). |
 | 400 | `MISSING_STAMP` / `INVALID_STAMP` / `EMPTY_CHUNK` | Bad/absent stamp header or empty body. |
-| 413 | `CHUNK_TOO_LARGE` | Body exceeds `CHUNK_UPLOAD_MAX_BYTES_PER_REQUEST`. |
+| 413 | `CHUNK_TOO_LARGE` | Body exceeds `CHUNK_UPLOAD_MAX_BYTES_PER_REQUEST` (refused from `Content-Length` before the body is read). |
 | 402 | `CREDIT_REQUIRED` / `INVALID_CREDIT_TOKEN` / `INSUFFICIENT_CREDIT` | Missing/unknown/rotated token, or balance too low — top up. |
 
 **Rotating the token.** Tokens do not expire. If one may have leaked, `POST /api/v1/chunks/token/rotate` with the current token in `X-Bandwidth-Credit-Token` returns a new one and revokes the old one immediately. If someone else rotated it first (your token now gets `INVALID_CREDIT_TOKEN`), top up with `POST /api/v1/chunks/credit?mb=N&rotate_token=true`: the payment proves you control the wallet, and you get a fresh token that nobody else has. A plain top-up returns the account's *current* token.
 | 402 | `FREE_TIER_DISABLED` | Free mode requested but disabled. |
 | 429 | `FREE_QUOTA_EXCEEDED` | Daily free quota exhausted — top up for more. |
+| 429 | `RATE_LIMIT_EXCEEDED` | Global per-IP rate limit. Applies to every chunk upload that does not present a credit token with enough balance, the free path included, and to credit-token uploads when one address has the limit's worth in flight or ended unbilled in the window. Wait `Retry-After` seconds. |
 | 502 | — | Bee rejected the chunk (often an invalid stamp) or is unavailable; any debit is refunded. |

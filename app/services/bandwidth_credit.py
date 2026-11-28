@@ -29,6 +29,10 @@ logger = logging.getLogger(__name__)
 
 BYTES_PER_MB = 1_000_000  # 1 MB = 10^6 bytes, matching the API documentation
 
+# Header a client presents its credit token in. Here so the endpoint and the
+# rate limiter, which exempts credit-funded uploads (#696), read the same one.
+CREDIT_TOKEN_HEADER = "X-Bandwidth-Credit-Token"
+
 
 def parse_topup_mb(raw) -> Optional[int]:
     """Parse the `mb` top-up parameter, strictly and in exactly one way.

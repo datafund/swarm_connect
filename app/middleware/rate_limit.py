@@ -25,10 +25,27 @@ EXEMPT_PATHS = {"/", "/health", "/docs", "/redoc", "/openapi.json", "/metrics",
 
 # Pre-stamped chunk forwarding. Each request carries one ~4 KB chunk, so a
 # per-request limit sized for API calls throttles it to a few hundred KB a
-# minute. When x402 billing is on, every chunk is already paid per byte (prepaid
-# credit or the per-IP free daily quota), which bounds it; with billing off the
-# global limit still applies.
-CHUNK_UPLOAD_PATH = f"{settings.API_V1_STR}/chunks"
+# minute. A chunk upload that spends prepaid bandwidth credit is bounded by that
+# credit instead, so it is exempt (#696). Only such uploads are: the exemption
+# used to cover every POST here when x402 was on, before the endpoint had
+# checked anything, so requests with no token, a bad token or the free path
+# were not limited at all.
+#
+# The exemption is from the per-request count, not from every limit. Each
+# exempted upload reserves a slot under its own key (the global limit's size)
+# before it runs, and is refused with 429 when there is none. Once answered,
+# a billed upload gives its slot back: the endpoint sets
+# request.state.chunk_billed only after the forward succeeded, so a refused or
+# refunded upload, an exception or a cancellation keeps it. So a funded token
+# cannot drive unlimited Bee calls with stamps Bee rejects, even concurrently.
+# The cost: one address can have at most the limit's worth of credit-token
+# uploads in flight at once.
+#
+# Only the route's exact path: other spellings (no trailing slash, which only
+# redirects, or extra slashes, which are 404) are not the upload route.
+CHUNK_UPLOAD_PATH = f"{settings.API_V1_STR}/chunks/"
+CHUNK_BILLED_STATE = "chunk_billed"
+_UNBILLED_CHUNK_KEY_SUFFIX = "|unbilled-chunk-uploads"
 
 
 def _is_exempt_path(path: str) -> bool:
@@ -36,12 +53,38 @@ def _is_exempt_path(path: str) -> bool:
     return path in EXEMPT_PATHS
 
 
-def _is_billed_chunk_upload(request: Request) -> bool:
-    return (
+def _declared_length(request: Request) -> int:
+    """The body length the request declares, or 0 when it declares none."""
+    try:
+        return max(0, int(request.headers.get("content-length") or 0))
+    except ValueError:
+        return 0
+
+
+def _is_credit_funded_chunk_upload(request: Request) -> bool:
+    """Whether this is a chunk upload that prepaid credit will pay for.
+
+    True only with x402 on, for POST /chunks/ outside the free path, when the
+    credit token resolves to an account holding at least the declared body
+    length (at least one byte without a Content-Length). Two in-memory lookups:
+    nothing is debited and the body is not read. The endpoint still validates
+    and debits; the slot an exempted upload reserves is kept unless it ends
+    billed (see above).
+    """
+    if not (
         settings.X402_ENABLED
         and request.method == "POST"
-        and request.url.path.rstrip("/") == CHUNK_UPLOAD_PATH
-    )
+        and request.url.path == CHUNK_UPLOAD_PATH
+    ):
+        return False
+    from app.x402.middleware import is_free_tier_opt_in
+    if is_free_tier_opt_in(request):
+        return False
+    from app.services.bandwidth_credit import CREDIT_TOKEN_HEADER, bandwidth_credit_manager
+    address = bandwidth_credit_manager.resolve_token(request.headers.get(CREDIT_TOKEN_HEADER) or "")
+    if not address:
+        return False
+    return bandwidth_credit_manager.balance(address) >= max(_declared_length(request), 1)
 
 
 class SlidingWindowCounter:
@@ -59,6 +102,14 @@ class SlidingWindowCounter:
         Returns:
             Tuple of (allowed: bool, stats: dict with remaining, reset_at, limit)
         """
+        entry, stats = self.reserve(key, limit, window_seconds)
+        return entry is not None, stats
+
+    def reserve(self, key: str, limit: int, window_seconds: int = 60) -> Tuple[Optional[float], dict]:
+        """is_allowed that also returns the entry it added, for release().
+
+        Returns (entry, stats); entry is None when the request is refused.
+        """
         now = time.monotonic()
         cutoff = now - window_seconds
 
@@ -75,7 +126,7 @@ class SlidingWindowCounter:
                     "limit": limit,
                     "reset_after": int(window_seconds - (now - self._windows[key][0]) if self._windows[key] else window_seconds),
                 }
-                return True, stats
+                return now, stats
             else:
                 oldest = self._windows[key][0] if self._windows[key] else now
                 retry_after = int(oldest + window_seconds - now) + 1
@@ -84,7 +135,22 @@ class SlidingWindowCounter:
                     "limit": limit,
                     "retry_after": max(1, retry_after),
                 }
-                return False, stats
+                return None, stats
+
+    def release(self, key: str, entry: float) -> None:
+        """Remove exactly the entry reserve() returned, if it is still there.
+
+        Matched by identity, not value, so another request's entry with the
+        same timestamp is never the one removed.
+        """
+        with self._lock:
+            window = self._windows.get(key)
+            if not window:
+                return
+            for i, t in enumerate(window):
+                if t is entry:
+                    del window[i]
+                    return
 
     def cleanup_stale(self, max_age: float = 300):
         """Remove entries for IPs that haven't made requests recently."""
@@ -134,7 +200,7 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
             return await call_next(request)
 
         # Skip exempt paths
-        if _is_exempt_path(request.url.path) or _is_billed_chunk_upload(request):
+        if _is_exempt_path(request.url.path):
             return await call_next(request)
 
         # Periodic cleanup of stale entries
@@ -147,28 +213,13 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         limit = settings.RATE_LIMIT_PER_MINUTE + settings.RATE_LIMIT_BURST
         key = client_key(client_ip)
 
+        if _is_credit_funded_chunk_upload(request):
+            return await self._credit_funded_chunk_upload(request, call_next, client_ip, key, limit)
+
         allowed, stats = self._counter.is_allowed(key, limit)
 
         if not allowed:
-            rate_limit_hits_total.inc()
-            retry_after = stats.get("retry_after", 60)
-            logger.warning(f"Rate limit exceeded for {client_ip}: {request.method} {request.url.path}")
-            return JSONResponse(
-                status_code=429,
-                content={
-                    "error": "Rate limit exceeded",
-                    "detail": f"Too many requests. Try again in {retry_after} seconds.",
-                    "retry_after": retry_after,
-                    # Same top-level code/message as every other error (#381).
-                    "code": "RATE_LIMIT_EXCEEDED",
-                    "message": f"Too many requests. Try again in {retry_after} seconds.",
-                },
-                headers={
-                    "Retry-After": str(retry_after),
-                    "X-RateLimit-Limit": str(stats["limit"]),
-                    "X-RateLimit-Remaining": "0",
-                }
-            )
+            return _too_many(request, client_ip, stats)
 
         response = await call_next(request)
 
@@ -179,3 +230,39 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         response.headers.setdefault("X-RateLimit-Remaining", str(stats["remaining"]))
 
         return response
+
+    async def _credit_funded_chunk_upload(self, request, call_next, client_ip, key, limit):
+        """Reserve a slot under the upload key first; give it back once billed."""
+        unbilled_key = key + _UNBILLED_CHUNK_KEY_SUFFIX
+        entry, stats = self._counter.reserve(unbilled_key, limit)
+        if entry is None:
+            return _too_many(request, client_ip, stats)
+        try:
+            return await call_next(request)
+        finally:
+            # Only a billed upload releases it. Anything else (a refusal, a
+            # refunded Bee failure, an exception, a cancellation) stays counted.
+            if getattr(request.state, CHUNK_BILLED_STATE, False):
+                self._counter.release(unbilled_key, entry)
+
+
+def _too_many(request: Request, client_ip: str, stats: dict) -> JSONResponse:
+    rate_limit_hits_total.inc()
+    retry_after = stats.get("retry_after", 60)
+    logger.warning(f"Rate limit exceeded for {client_ip}: {request.method} {request.url.path}")
+    return JSONResponse(
+        status_code=429,
+        content={
+            "error": "Rate limit exceeded",
+            "detail": f"Too many requests. Try again in {retry_after} seconds.",
+            "retry_after": retry_after,
+            # Same top-level code/message as every other error (#381).
+            "code": "RATE_LIMIT_EXCEEDED",
+            "message": f"Too many requests. Try again in {retry_after} seconds.",
+        },
+        headers={
+            "Retry-After": str(retry_after),
+            "X-RateLimit-Limit": str(stats["limit"]),
+            "X-RateLimit-Remaining": "0",
+        }
+    )
