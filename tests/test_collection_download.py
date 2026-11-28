@@ -50,10 +50,12 @@ def _tar(entries):
 class StubBee:
     """Serves `files` ({path: (body, content_type)}) of one collection REF."""
 
-    def __init__(self, files=None, index=None, status=None):
+    def __init__(self, files=None, index=None, status=None, disposition=None):
         self.files = files or {}
         self.index = index
         self.status = status
+        # path -> raw Content-Disposition bytes, instead of Bee's usual one
+        self.disposition = disposition or {}
         self.requests = []
 
     def handler(self, request):
@@ -77,7 +79,8 @@ class StubBee:
         body, ctype = self.files[path]
         # Bee sends the file name as raw UTF-8 (measured).
         name = path.rsplit("/", 1)[-1]
-        headers = [(b"content-disposition", f'inline; filename="{name}"'.encode("utf-8"))]
+        headers = [(b"content-disposition",
+                    self.disposition.get(path, f'inline; filename="{name}"'.encode("utf-8")))]
         if ctype is not None:
             headers.append((b"content-type", ctype.encode()))
         return httpx2.Response(200, content=body, headers=headers)
@@ -173,6 +176,40 @@ class TestPathDownload:
         assert bee.requests[0].url.raw_path.decode() == f"/bzz/{REF}/j%C3%A9.txt"
         assert r.headers["content-disposition"] == "attachment; filename=\"j_.txt\"; filename*=UTF-8''j%C3%A9.txt"
 
+    def test_quote_in_a_name_is_replaced_in_the_fallback(self):
+        bee = StubBee({'a"b.txt': (b"Q", "text/plain")})
+        r = _get(bee, f"/api/v1/data/{REF}/a%22b.txt")
+        assert r.status_code == 200, r.text
+        assert r.headers["content-disposition"] == "attachment; filename=\"a_b.txt\"; filename*=UTF-8''a%22b.txt"
+
+    def test_quote_and_backslash_are_replaced_in_the_fallback(self):
+        # A backslash cannot come through the route (PATH_INVALID), but Bee's
+        # own file name can carry one.
+        from app.api.endpoints.data import _attachment
+        assert _attachment('a"b\\c.txt') == "attachment; filename=\"a_b_c.txt\"; filename*=UTF-8''a%22b%5Cc.txt"
+
+    @pytest.mark.parametrize("bee_name", [b"x/y.txt", b"x\x01y.txt", b"x\x7fy.txt", b""])
+    def test_an_unusable_bee_name_falls_back_to_the_path(self, bee_name):
+        bee = StubBee(FILES, disposition={"assets/a.txt": b'inline; filename="' + bee_name + b'"'})
+        r = _get(bee, f"/api/v1/data/{REF}/assets/a.txt")
+        assert r.status_code == 200
+        assert r.headers["content-disposition"] == 'attachment; filename="a.txt"'
+
+    def test_bee_utf8_name_is_encoded_exactly(self):
+        # A directory request: Bee names the index document it served.
+        bee = StubBee({"sub/\u00edndex.html": (b"i", "text/html")}, index="\u00edndex.html")
+        r = _get(bee, f"/api/v1/data/{REF}/sub/")
+        assert r.status_code == 200
+        assert r.headers["content-disposition"] == "attachment; filename=\"_ndex.html\"; filename*=UTF-8''%C3%ADndex.html"
+
+    def test_bee_name_that_looks_like_mojibake_is_kept(self):
+        # A file really named "\u00c3\u00a9.txt": httpx2 decodes Bee's UTF-8 bytes, and
+        # decoding them a second time would turn it into "\u00e9.txt".
+        bee = StubBee({"sub/\u00c3\u00a9.txt": (b"m", "text/plain")}, index="\u00c3\u00a9.txt")
+        r = _get(bee, f"/api/v1/data/{REF}/sub/")
+        assert r.status_code == 200
+        assert r.headers["content-disposition"].endswith("filename*=UTF-8''%C3%83%C2%A9.txt")
+
     def test_uppercase_reference_is_sent_lowercase(self):
         bee = StubBee(FILES)
         r = _get(bee, f"/api/v1/data/{REF.upper()}/assets/a.txt")
@@ -260,17 +297,15 @@ class TestPathValidation:
         assert bee.requests == []
         assert downloads_total.labels(status="error")._value.get() == before + 1
 
-    @pytest.mark.parametrize("path", ["a%0ab", "a%0db", "%0a"])
-    def test_newline_never_reaches_bee(self, path):
-        # Starlette's route patterns use '.' and '$', so a decoded newline either
-        # matches no route (404) or, alone at the end, is dropped and the
-        # request becomes the root download. A newline never reaches Bee.
+    @pytest.mark.parametrize("path", ["a%0ab", "a%0db", "%0a", "a/%0d%0a", "%0a/b", "a%0a"])
+    def test_cr_and_lf_are_path_invalid(self, path):
+        # The route's convertor matches newlines (Starlette's `path` stops at
+        # them), so CR and LF reach _path_segments and get PATH_INVALID.
         bee = StubBee(FILES, index="index.html")
-        _raw_get(bee, f"/api/v1/data/{REF}/{path}")
-        for q in bee.requests:
-            raw = q.url.raw_path.decode().lower()
-            assert "\n" not in raw and "\r" not in raw and "%0a" not in raw and "%0d" not in raw
-            assert raw == f"/bzz/{REF}"
+        status, body = _raw_get(bee, f"/api/v1/data/{REF}/{path}")
+        assert status == 400, (path, status, body)
+        assert body["code"] == "PATH_INVALID"
+        assert bee.requests == []
 
     def test_a_single_encoded_slash_is_a_separator(self):
         # uvicorn decodes %2F before routing, so a%2Fb is the path a/b: it stays
@@ -486,6 +521,14 @@ class TestIndexDocumentOnUpload:
         ("index_document", "", "INDEX_DOCUMENT_INVALID"),
         ("index_document", "hé.html", "INDEX_DOCUMENT_INVALID"),     # in the tar, not ASCII
         ("error_document", "hé.html", "ERROR_DOCUMENT_INVALID"),     # in the tar, not ASCII
+        # In the tar too: only the header rule refuses them (h11 would refuse
+        # the header after settle_payment).
+        ("index_document", " index.html", "INDEX_DOCUMENT_INVALID"),
+        ("index_document", "index.html ", "INDEX_DOCUMENT_INVALID"),
+        ("index_document", "in\tdex.html", "INDEX_DOCUMENT_INVALID"),
+        ("error_document", " index.html", "ERROR_DOCUMENT_INVALID"),
+        ("error_document", "index.html ", "ERROR_DOCUMENT_INVALID"),
+        ("error_document", "in\tdex.html", "ERROR_DOCUMENT_INVALID"),
         ("index_document", "sub/a", "INDEX_DOCUMENT_INVALID"),        # exists; Bee refuses a slash
         ("error_document", "nope.html", "ERROR_DOCUMENT_INVALID"),
         ("error_document", "a/./b", "ERROR_DOCUMENT_INVALID"),
@@ -497,10 +540,92 @@ class TestIndexDocumentOnUpload:
         # hé.html is a regular file at the root: only the ASCII rule refuses it
         # (a non-ASCII header would fail in httpx2 after settle_payment).
         tar_bytes = _tar([("index.html", b"x"), ("sub/", None), ("sub/a", b"a"),
-                          ("link.html", "->index.html"), ("hé.html", b"h")])
+                          ("link.html", "->index.html"), ("hé.html", b"h"),
+                          (" index.html", b"s"), ("index.html ", b"s"), ("in\tdex.html", b"t")])
         with patch("app.api.endpoints.data.settle_payment") as settle:
             r = _upload(bee, tar_bytes, f"&{param}={q(value)}")
         assert r.status_code == 400, r.text
         assert r.json()["code"] == code
         settle.assert_not_called()
         assert [q for q in bee.requests if q.method == "POST"] == []
+
+
+class TestDocumentNamesReachBeeUnchanged:
+    """Every name the pre-payment check accepts must go out as a header the
+    gateway's real HTTP stack (httpx2, httpcore2, h11) sends unchanged; a name
+    it cannot send fails after settle_payment. A real socket server stands in
+    for Bee, so nothing here is mocked between the gateway and the wire."""
+
+    ACCEPTED = ["index.html", "a b.html", "~x.html", "x~!$&'()*+,;=@[]^`{|}.html",
+                '"q".html', "%41.html", "x" * 200]
+
+    @pytest.fixture
+    def bee_server(self):
+        import json
+        import threading
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+        received = []
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_POST(self):
+                self.rfile.read(int(self.headers.get("content-length", 0)))
+                received.append((self.headers.get("Swarm-Index-Document"),
+                                 self.headers.get("Swarm-Error-Document")))
+                body = json.dumps({"reference": REF}).encode()
+                self.send_response(201)
+                self.send_header("content-type", "application/json")
+                self.send_header("content-length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *args):
+                pass
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True)
+        thread.start()
+        yield f"http://127.0.0.1:{server.server_address[1]}/", received
+        server.shutdown()
+        server.server_close()
+
+    def _send(self, url, index_document, error_document=None):
+        import asyncio
+        from app.services.http_client import _new_client
+
+        async def go():
+            client, _ = _new_client()
+            try:
+                with patch("app.services.swarm_api.get_client", return_value=client):
+                    return await swarm_api.upload_collection_to_swarm(
+                        _tar([("a", b"a")]), STAMP, index_document=index_document,
+                        error_document=error_document)
+            finally:
+                await client.aclose()
+
+        with patch.object(settings, "SWARM_BEE_API_URL", url):
+            return asyncio.run(go())
+
+    @pytest.mark.parametrize("name", ACCEPTED)
+    def test_accepted_names_pass_the_check_and_arrive_exactly(self, bee_server, name):
+        from app.api.endpoints.data import _document_path
+        _document_path(name, single_segment=True)       # accepted as index_document
+        _document_path("e/" + name)                      # and nested as error_document
+        url, received = bee_server
+        assert self._send(url, name, "e/" + name) == REF
+        assert received == [(name, "e/" + name)]
+
+    @pytest.mark.parametrize("name", [" index.html", "index.html "])
+    def test_refused_names_are_ones_the_client_cannot_send_unchanged(self, bee_server, name):
+        # Why the space rule exists: h11 refuses these or they reach Bee
+        # altered. (A tab or DEL does go out unchanged; those are refused only
+        # because the rule is printable ASCII, the same set as file names.)
+        from app.api.endpoints.data import _document_path
+        with pytest.raises(ValueError):
+            _document_path(name)
+        url, received = bee_server
+        try:
+            self._send(url, name)
+        except Exception:
+            return
+        assert received[0][0] != name

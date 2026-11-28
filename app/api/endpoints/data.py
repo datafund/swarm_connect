@@ -9,6 +9,7 @@ import time
 from urllib.parse import quote, unquote
 from fastapi import APIRouter, Header, HTTPException, Path, Query, Request, File, UploadFile
 from fastapi.responses import Response
+from starlette.convertors import PathConvertor, register_url_convertor
 import httpx2
 
 from app.x402.settlement import settle_payment
@@ -74,6 +75,17 @@ _tar_lane = IOLane(2, "manifest-tar-parse")
 MULTIPART_ENVELOPE_ALLOWANCE = 8 * 1024
 
 router = APIRouter()
+
+
+class _AnyPathConvertor(PathConvertor):
+    """Starlette's `path` convertor is `.*`, which stops at a newline: a path
+    with an encoded CR or LF then matched no route (404), or, at the very end,
+    was dropped and became the root download. This one matches every
+    character, so _path_segments refuses control characters with 400 (#700)."""
+    regex = r"[\s\S]*"
+
+
+register_url_convertor("anypath", _AnyPathConvertor())
 
 
 def _build_server_timing_header(timing_dict: dict) -> str:
@@ -209,7 +221,9 @@ def _path_segments(path: str) -> list[str]:
 # A Content-Type Bee sends is passed through only when it is a plain
 # type/subtype with optional parameters; anything else becomes octet-stream.
 _MEDIA_TYPE = re.compile(r"^[A-Za-z0-9!#$&^_.+-]+/[A-Za-z0-9!#$&^_.+-]+(\s*;[\x20-\x7e]*)?$")
-_BEE_FILENAME = re.compile(r'filename="([^"]*)"')
+# Bee 2.8.1 sends `inline; filename="<name>"` and nothing after it; up to the
+# last quote, so a name with a quote in it is read whole.
+_BEE_FILENAME = re.compile(r'filename="(.*)"\s*$')
 
 
 def _collection_content_type(bee_value: Optional[str]) -> str:
@@ -222,13 +236,10 @@ def _collection_filename(bee_disposition: Optional[str], segments: list[str]) ->
     served), else the last path segment."""
     match = _BEE_FILENAME.search(bee_disposition or "")
     if match:
+        # Bee sends the name as raw UTF-8, which httpx2 decodes as UTF-8
+        # (it falls back to latin-1 only for bytes that are not UTF-8, which a
+        # second decode could not repair).
         name = match.group(1)
-        try:
-            # httpx2 decodes a header it cannot read as ASCII or UTF-8 as
-            # latin-1; Bee sends the name as UTF-8.
-            name = name.encode("latin-1").decode("utf-8")
-        except (UnicodeEncodeError, UnicodeDecodeError):
-            pass
         if name and "/" not in name and not _CONTROL_CHARS.search(name):
             return name
     return segments[-1]
@@ -244,20 +255,28 @@ def _attachment(filename: str) -> str:
     return value
 
 
+# A name that h11 sends unchanged as a header value: printable ASCII, no
+# leading or trailing space (h11 strips or refuses those).
+_HEADER_SAFE_NAME = re.compile(r"^[\x21-\x7e](?:[\x20-\x7e]*[\x21-\x7e])?$")
+
 # Set as the collection's index document when the archive has it at its root.
 ROOT_INDEX_DOCUMENT = "index.html"
 
 
 def _document_path(value: str, single_segment: bool = False) -> list[str]:
     """Check an index_document / error_document name. It goes to Bee in a
-    header, so it must be printable ASCII; otherwise the rules of a download
-    path, without a trailing slash.
+    header, so every character must be printable ASCII (0x20-0x7E) and it may
+    not start or end with a space: the HTTP client refuses anything else when
+    it sends the header (h11 LocalProtocolError, or UnicodeEncodeError), which
+    happens after settle_payment. Otherwise the rules of a download path,
+    without a trailing slash.
 
     Bee appends the index document to every directory it serves, and refuses
     an upload whose index document has a slash (Bee 2.8.1 answers 500 "could
     not store directory", measured), so an index document is one name."""
-    if not value.isascii():
-        raise ValueError("the path must be plain ASCII.")
+    if not _HEADER_SAFE_NAME.match(value):
+        raise ValueError("the path must be printable ASCII (no tab or control character, "
+                         "no leading or trailing space).")
     if value.endswith("/"):
         raise ValueError("the path must name a file, not a directory.")
     segments = _path_segments(value)
@@ -847,7 +866,7 @@ async def download_data_json(
         raise HTTPException(status_code=500, detail="Internal server error during download")
 
 
-@router.get("/{reference}/{path:path}")
+@router.get("/{reference}/{path:anypath}")
 async def download_collection_path(
     reference: str = Path(..., description="Swarm reference of the collection (manifest)", pattern=r"^[a-fA-F0-9]{64,128}$"),
     path: str = Path(..., description="Path of a file inside the collection, as it was in the uploaded TAR archive"),
@@ -1039,7 +1058,8 @@ async def upload_manifest(
       the archive's root (no `/`; Bee looks for that name in every directory).
       `error_document=<path>` names a regular file anywhere in the archive that
       Bee serves, with status 200, for any path the collection does not have.
-      Both in plain ASCII without `.`/`..` or empty segments, or the upload gets
+      Both in printable ASCII (0x20-0x7E, no leading or trailing space) without
+      `.`/`..` or empty segments, or the upload gets
       400 `INDEX_DOCUMENT_INVALID` / `ERROR_DOCUMENT_INVALID` before payment
       (not charged).
 

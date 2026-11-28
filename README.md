@@ -726,7 +726,7 @@ Upload multiple files as a TAR archive collection/manifest.
 - **redundancy**: Optional (default: 2) - Erasure coding level (0-4) - see redundancy table above
 - **index_document**: Optional - name of a regular file at the archive's root that `GET /api/v1/data/{reference}` returns (Bee also serves that name for every directory, so `docs/` returns `docs/<name>`). No `/` in it. Default: `index.html` when the archive has one at its root.
 - **error_document**: Optional - path of a regular file in the archive that Bee returns, with status 200, for any path the collection does not have.
-- An `index_document` or `error_document` that is not a regular file in the archive gets 400 `INDEX_DOCUMENT_INVALID` / `ERROR_DOCUMENT_INVALID` before payment (not charged).
+- An `index_document` or `error_document` that is not a regular file in the archive, or is not printable ASCII (0x20-0x7E, no leading or trailing space; it goes to Bee in a header), gets 400 `INDEX_DOCUMENT_INVALID` / `ERROR_DOCUMENT_INVALID` before payment (not charged).
 - **Reference change**: an archive with `index.html` at its root (`index.html` or `./index.html`) now gets `index.html` as its index document, so it gets a different reference than the same archive uploaded before #700. An archive without a root `index.html` gets the same reference as before.
 - **Response**: `{"reference": "manifest-hash...", "file_count": 50, "message": "Collection uploaded successfully", "timing": null}`
 
