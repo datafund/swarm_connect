@@ -14,11 +14,14 @@ from pathlib import Path
 
 import yaml
 
+from tests import deploy_env_steps
+
 REPO = Path(__file__).resolve().parent.parent
-DEPLOY_YML = REPO / ".github" / "workflows" / "deploy.yml"
 COMPOSE_YML = REPO / "docker-compose.yml"
 
-LINE = "X402_PROTOCOL_VERSIONS=${{ vars.X402_PROTOCOL_VERSIONS || '1' }}"
+# The step's env: entry. The value reaches the script only through env:, and
+# the script writes NAME=$NAME for every name in its settings list (#654).
+EXPRESSION = "${{ vars.X402_PROTOCOL_VERSIONS || '1' }}"
 
 # env-file step name -> (env file it writes, compose service that reads it)
 ENVIRONMENTS = {
@@ -28,46 +31,31 @@ ENVIRONMENTS = {
 
 
 def _steps():
-    workflow = yaml.safe_load(DEPLOY_YML.read_text())
-    steps = {}
-    for job in workflow["jobs"].values():
-        for step in job.get("steps", []):
-            if "name" in step:
-                steps[step["name"]] = step
-    return steps
-
-
-def _heredoc(run, env_file):
-    m = re.search(r"cat > " + re.escape(env_file) + r" << 'EOF'\n(.*?)\nEOF\n", run, re.S)
-    assert m, f"no heredoc writing {env_file}"
-    return m.group(1)
-
-
-def _render(body, variables):
-    """Render the `${{ vars.NAME || 'default' }}` expressions the way Actions does."""
-    def sub(m):
-        value = variables.get(m.group(1), "")
-        return value if value else m.group(2)
-    return re.sub(r"\$\{\{ vars\.(\w+) \|\| '([^']*)' \}\}", sub, body)
+    return deploy_env_steps.steps()
 
 
 def test_both_environments_write_the_setting_with_default_1():
     steps = _steps()
-    for name, (env_file, _service) in ENVIRONMENTS.items():
-        body = _heredoc(steps[name]["run"], env_file)
-        lines = [line.strip() for line in body.splitlines()]
-        assert lines.count(LINE) == 1, name
-        assert sum(1 for line in lines if line.startswith("X402_PROTOCOL_VERSIONS=")) == 1, name
+    for name in ENVIRONMENTS:
+        step = steps[name]
+        assert step["env"]["X402_PROTOCOL_VERSIONS"] == EXPRESSION, name
+        assert deploy_env_steps.written_names(step).count("X402_PROTOCOL_VERSIONS") == 1, name
+        assert not any(line.startswith("X402_PROTOCOL_VERSIONS=")
+                       for line in deploy_env_steps.spec_lines(step)), name
 
 
-def test_an_unset_or_empty_variable_renders_1_and_a_set_one_is_kept():
+def test_an_unset_or_empty_variable_renders_1_and_a_set_one_is_kept(tmp_path):
     steps = _steps()
-    for name, (env_file, _service) in ENVIRONMENTS.items():
-        body = _heredoc(steps[name]["run"], env_file)
-        for variables, expected in (({}, "1"), ({"X402_PROTOCOL_VERSIONS": ""}, "1"),
-                                    ({"X402_PROTOCOL_VERSIONS": "1,2"}, "1,2")):
-            rendered = [line.strip() for line in _render(body, variables).splitlines()]
-            assert f"X402_PROTOCOL_VERSIONS={expected}" in rendered, (name, variables)
+    for name in ENVIRONMENTS:
+        for i, (variables, expected) in enumerate((({}, "1"), ({"X402_PROTOCOL_VERSIONS": ""}, "1"),
+                                                   ({"X402_PROTOCOL_VERSIONS": "1,2"}, "1,2"))):
+            run_dir = tmp_path / f"{name.split()[-1]}-{i}"
+            run_dir.mkdir()
+            proc, env_file = deploy_env_steps.run_step(steps[name], variables, run_dir)
+            assert proc.returncode == 0, proc.stdout + proc.stderr
+            lines = env_file.read_text().splitlines()
+            assert [line for line in lines if line.startswith("X402_PROTOCOL_VERSIONS=")] == \
+                [f"X402_PROTOCOL_VERSIONS={expected}"], (name, variables)
 
 
 def test_the_deploy_check_reads_the_env_file_the_setting_is_written_to():
