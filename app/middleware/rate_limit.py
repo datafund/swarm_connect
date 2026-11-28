@@ -68,7 +68,8 @@ def _is_credit_funded_chunk_upload(request: Request) -> bool:
     credit token resolves to an account holding at least the declared body
     length (at least one byte without a Content-Length). Two in-memory lookups:
     nothing is debited and the body is not read. The endpoint still validates
-    and debits; one that ends unbilled is counted afterwards (see above).
+    and debits; the slot an exempted upload reserves is kept unless it ends
+    billed (see above).
     """
     if not (
         settings.X402_ENABLED

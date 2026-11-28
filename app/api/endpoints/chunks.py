@@ -448,8 +448,9 @@ async def upload_chunk(
         )
 
     # Billed for good: the debit or quota use stands, with no refund to come.
-    # The rate limiter counts an exempted upload afterwards only when this is
-    # unset, so refusals and refunded Bee failures are counted (#696).
+    # The rate limiter gives back the slot it reserved for an exempted upload
+    # only when this is set; refusals, refunded Bee failures, errors and
+    # cancellations keep it (#696).
     if bytes_charged is not None:
         request.state.chunk_billed = True
 
