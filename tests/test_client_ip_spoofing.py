@@ -36,6 +36,9 @@ SPOOFS = {
     "x-forwarded-for-bad-ipv6": [{"X-Forwarded-For": f"2001:db8::zz{i}"} for i in range(SENT)],
     "x-forwarded-for-bracketed-ipv6": [{"X-Forwarded-For": f"[2001:db8:{i}::1]"} for i in range(SENT)],
     "x-forwarded-for-out-of-range": [{"X-Forwarded-For": f"999.0.2.{i}"} for i in range(SENT)],
+    "x-forwarded-for-zone-id": [{"X-Forwarded-For": f"2001:db8::1%zone{i}"} for i in range(SENT)],
+    "x-forwarded-for-long-zone-id": [{"X-Forwarded-For": "2001:db8::1%" + str(i) * 4000} for i in range(SENT)],
+    "x-forwarded-for-long-garbage": [{"X-Forwarded-For": str(i) * 6000} for i in range(SENT)],
 }
 
 
@@ -168,6 +171,27 @@ def test_free_tier_groups_an_ipv6_64_behind_the_proxy(free_tier):
     assert _free_posts(PROXY, [{"X-Forwarded-For": "2001:db8:9:a::1"}]) == [201]
 
 
+@pytest.mark.parametrize("headers", [
+    {},
+    {"X-Forwarded-For": "unknown"},
+    {"X-Real-IP": "unknown"},
+    {"X-Forwarded-For": "garbage"},
+    {"X-Real-IP": "192.0.2.99"},
+], ids=["none", "xff-unknown", "xri-unknown", "xff-garbage", "xri-address"])
+def test_free_tier_limits_peerless_callers_as_one_shared_caller(free_tier, headers):
+    """No peer and no usable header: one shared bucket, limited, end to end.
+    The x402 limiter used to skip this key entirely."""
+    codes = _free_posts(None, [headers] * SENT)
+    assert codes == [201] * LIMIT + [429] * (SENT - LIMIT), codes
+
+
+def test_peerless_callers_share_the_bucket_whatever_they_send(free_tier):
+    """Different forged values with no peer are the same caller."""
+    forms = [{}, {"X-Forwarded-For": "unknown"}, {"X-Real-IP": "192.0.2.98"},
+             {"X-Forwarded-For": "garbage"}, {"X-Real-IP": "unknown"}, {}]
+    assert _free_posts(None, forms) == [201] * LIMIT + [429] * (SENT - LIMIT)
+
+
 def test_a_peerless_caller_is_limited_not_exempt():
     """No peer and no usable header is one shared caller, limited like any
     other (the x402 limiter used to skip it)."""
@@ -191,6 +215,41 @@ class TestOnlyAddressesBecomeKeys:
                                        "_hidden", "192.0.2.5 192.0.2.6"])
     def test_an_invalid_entry_falls_back_to_the_peer(self, value):
         assert get_client_ip(_request({"X-Forwarded-For": value}, peer="192.0.2.10")) == "192.0.2.10"
+
+    @pytest.mark.parametrize("value", ["fe80::1%eth0", "2001:db8::1%1", "2001:db8::1%zone",
+                                       "::ffff:192.0.2.1%x",
+                                       pytest.param("2001:db8::1%" + "z" * 5000, id="long-zone-id")])
+    def test_an_ipv6_zone_id_falls_back_to_the_peer(self, value):
+        assert get_client_ip(_request({"X-Forwarded-For": value}, peer="192.0.2.10")) == "192.0.2.10"
+
+    def test_a_long_zone_id_is_not_logged_in_full(self, caplog):
+        value = "2001:db8::1%" + "z" * 5000
+        with caplog.at_level("WARNING", logger="app.core.client_ip"):
+            get_client_ip(_request({"X-Forwarded-For": value}, peer="192.0.2.10"))
+        assert caplog.records and all(len(r.getMessage()) < 300 for r in caplog.records)
+
+    @pytest.mark.parametrize("value", ["192.0.2.1", "::ffff:192.0.2.1", "0:0:0:0:0:ffff:c000:201",
+                                       "::FFFF:192.0.2.1"])
+    def test_ipv4_mapped_forms_share_the_ipv4_key(self, value):
+        r = _request({"X-Forwarded-For": value}, peer="192.0.2.250")
+        assert get_client_key(r) == "192.0.2.1"
+
+    def test_a_very_long_header_still_finds_the_proxy_entry(self):
+        prefix = ", ".join(f"garbage-{i}" for i in range(2000))
+        r = _request({"X-Forwarded-For": f"{prefix}, 192.0.2.20"}, peer="192.0.2.1")
+        assert get_client_ip(r) == "192.0.2.20"
+
+    def test_a_very_long_invalid_entry_falls_back_to_the_peer(self):
+        r = _request({"X-Forwarded-For": "x" * 20000}, peer="192.0.2.10")
+        assert get_client_ip(r) == "192.0.2.10"
+
+    def test_an_invalid_chosen_entry_with_a_valid_one_right_of_it_falls_back(self, monkeypatch):
+        """hops=2: the chosen entry is invalid and the proxy's entry is valid.
+        The valid one is the proxy's address, not the caller's, so neither may
+        be used."""
+        monkeypatch.setattr(settings, "TRUSTED_PROXY_HOPS", 2)
+        r = _request({"X-Forwarded-For": "192.0.2.30, unknown, 192.0.2.2"}, peer="192.0.2.1")
+        assert get_client_ip(r) == "192.0.2.1"
 
     def test_x_real_ip_is_never_read(self):
         r = _request({"X-Real-IP": "192.0.2.99"}, peer="192.0.2.10")

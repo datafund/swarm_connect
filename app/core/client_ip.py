@@ -70,6 +70,11 @@ UNKNOWN = "unknown"
 def _peer(request: Request) -> str:
     """The direct TCP peer — never forgeable, but it is the proxy when behind one.
 
+    Not forgeable only because uvicorn's own proxy-header handling is off
+    (`--no-proxy-headers` in the Dockerfile, `proxy_headers=False` in run.py).
+    With it on, uvicorn replaces a loopback peer with the X-Forwarded-For value,
+    unchecked, before this code runs (#697).
+
     Used as it is, address or not (a test client's peer is "testclient"). The
     UNKNOWN key exists only for a connection with no peer at all, and every
     limit keyed on the caller limits it as one shared caller (#697).
@@ -82,14 +87,20 @@ def _peer(request: Request) -> str:
 def _valid_ip(value: str) -> Optional[str]:
     """The value as a normalised IP address, or None if it is not one.
 
-    Header entries are caller-written text. Anything that is not an address —
-    "unknown", an obfuscated identifier, an address with a port, garbage — must
-    not become a limit key, or every distinct string is a fresh budget (#697).
+    Header entries are caller-written text. Anything that is not a plain
+    address — "unknown", an obfuscated identifier, an address with a port, an
+    IPv6 address with a zone id, garbage — must not become a limit key, or every
+    distinct string is a fresh budget (#697).
     """
     try:
-        return str(ipaddress.ip_address(value.strip()))
+        addr = ipaddress.ip_address(value.strip())
     except ValueError:
         return None
+    # An IPv6 zone id ("fe80::1%eth0") is free text of any length that would
+    # otherwise reach logs and audit records; a client address never has one.
+    if getattr(addr, "scope_id", None) is not None:
+        return None
+    return str(addr)
 
 
 def _forwarded_for(headers) -> str:
