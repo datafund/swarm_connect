@@ -81,9 +81,10 @@ class RateLimiter:
             - requests_made: Number of requests in current window
             - limit: The configured rate limit
         """
-        if not client_ip or client_ip == "unknown":
-            # Don't rate limit unknown IPs (they'll fail other checks)
-            return (False, 0, self.requests_per_minute)
+        # A caller with no address is limited as one shared caller, like every
+        # other per-caller limit, rather than not at all: skipping it let a
+        # spoofed "unknown" through without limit (#697).
+        client_ip = client_ip or "unknown"
 
         now = time.time()
         window_start = now - self._window_seconds

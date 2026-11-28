@@ -1,9 +1,11 @@
 # app/core/client_ip.py
 """Identify the calling client, for limits that are keyed on who is calling.
 
-Three controls key on this value: the global per-IP rate limit, the x402
-free-tier rate limit, and the daily spend budget (#102). A caller who can change
-the value at will is not limited by any of them.
+Every per-caller limit keys on this value: the global per-IP rate limit, the
+x402 free-tier rate limit, the daily spend budget (#102), the pool's per-address
+allowance, the chunk free-tier byte quota, and the top-caller tracker (the list
+in CLAUDE.md, "Caller identity"). A caller who can change the value at will is
+not limited by any of them.
 
 ## Why the previous approach was a trap rather than a bug
 
@@ -44,7 +46,18 @@ nobody here controls:
 
 A forged chain cannot reach past the hop count, because entries to the right of
 the client are added by infrastructure we control.
+
+## Only addresses become keys (#697)
+
+Without a proxy in front, the header is whatever the caller sent. Two forms
+got past limits: `X-Real-IP`, read whenever `X-Forwarded-For` was absent,
+passed every limit (a fresh key per request); the literal value "unknown"
+passed the x402 free-tier limit, which skipped it (the global limit, spend
+budget and pool already treated it as one caller). Now X-Real-IP is not read, every
+X-Forwarded-For entry we rely on must parse as an IP address or the direct peer
+is used, and "unknown" (no peer at all) is limited as one shared caller.
 """
+import ipaddress
 import logging
 from typing import Optional
 
@@ -58,10 +71,52 @@ UNKNOWN = "unknown"
 
 
 def _peer(request: Request) -> str:
-    """The direct TCP peer — never forgeable, but it is the proxy when behind one."""
+    """The direct TCP peer — never forgeable, but it is the proxy when behind one.
+
+    Not forgeable only because uvicorn's own proxy-header handling is off
+    (`--no-proxy-headers` in the Dockerfile, `proxy_headers=False` in run.py).
+    With it on, uvicorn replaces the peer with the X-Forwarded-For value,
+    unchecked, before this code runs, whenever the peer is in
+    FORWARDED_ALLOW_IPS (loopback by default) (#697).
+
+    Used as it is, address or not (a test client's peer is "testclient"). The
+    UNKNOWN key exists only for a connection with no peer at all, and every
+    limit keyed on the caller limits it as one shared caller (#697).
+    """
     if request.client and request.client.host:
         return request.client.host
     return UNKNOWN
+
+
+def _valid_ip(value: str) -> Optional[str]:
+    """The value as a normalised IP address, or None if it is not one.
+
+    Header entries are caller-written text. Anything that is not a plain
+    address — "unknown", an obfuscated identifier, an address with a port, an
+    IPv6 address with a zone id, garbage — must not become a limit key, or every
+    distinct string is a fresh budget (#697).
+    """
+    try:
+        addr = ipaddress.ip_address(value.strip())
+    except ValueError:
+        return None
+    # An IPv6 zone id ("fe80::1%eth0") is free text of any length that would
+    # otherwise reach logs and audit records; a client address never has one.
+    if getattr(addr, "scope_id", None) is not None:
+        return None
+    return str(addr)
+
+
+def _forwarded_for(headers) -> str:
+    """Every X-Forwarded-For line, joined as one list (RFC 9110 5.3).
+
+    Reading only the first line would let a caller's own line win over the one
+    a proxy adds as a separate field.
+    """
+    getlist = getattr(headers, "getlist", None)
+    if getlist is not None:
+        return ",".join(getlist("X-Forwarded-For"))
+    return headers.get("X-Forwarded-For") or ""
 
 
 def get_client_ip(request: Request) -> str:
@@ -70,6 +125,10 @@ def get_client_ip(request: Request) -> str:
     Reads `TRUSTED_PROXY_HOPS`: the number of proxies between the internet and
     the application. 0 means the application is directly exposed, in which case
     forwarding headers are ignored entirely rather than half-trusted.
+
+    Only X-Forwarded-For is read. X-Real-IP is not (#697): the hosted proxy does
+    not set it, and when X-Forwarded-For was absent it handed the caller a key
+    of their own choosing.
     """
     hops = settings.TRUSTED_PROXY_HOPS
 
@@ -78,30 +137,34 @@ def get_client_ip(request: Request) -> str:
     if hops <= 0:
         return _peer(request)
 
-    forwarded_for = request.headers.get("X-Forwarded-For")
-    if forwarded_for:
-        parts = [p.strip() for p in forwarded_for.split(",") if p.strip()]
-        if parts:
-            index = len(parts) - hops
-            if index >= 0:
-                return parts[index]
-            # Fewer entries than configured hops: the header disagrees with the
-            # deployment. Falling back to the peer is the safe direction — it may
-            # group callers together behind a proxy, which over-limits, rather
-            # than trusting a value that is short by a hop, which under-limits.
+    parts = [p.strip() for p in _forwarded_for(request.headers).split(",") if p.strip()]
+    if parts:
+        index = len(parts) - hops
+        if index >= 0:
+            # The chosen entry and everything to its right were written by
+            # proxies we run, so all of them must be addresses. One that is not
+            # means the header is not what the deployment produces; the peer
+            # is the safe answer, as for a short chain below (#697).
+            trusted = [_valid_ip(p) for p in parts[index:]]
+            if all(trusted):
+                return trusted[0]
             logger.warning(
-                "X-Forwarded-For has %d entries but TRUSTED_PROXY_HOPS is %d; "
-                "using the direct peer instead. Check the setting against the "
-                "actual number of proxies.",
-                len(parts), hops,
+                "X-Forwarded-For entry %r is not an IP address; using the "
+                "direct peer instead.",
+                parts[index:][trusted.index(None)][:64],
             )
             return _peer(request)
-
-    # Single-valued alternative set by some proxies. Equally forgeable, so it is
-    # read only where a proxy is expected to be setting it.
-    real_ip = request.headers.get("X-Real-IP")
-    if real_ip and real_ip.strip():
-        return real_ip.strip()
+        # Fewer entries than configured hops: the header disagrees with the
+        # deployment. Falling back to the peer is the safe direction — it may
+        # group callers together behind a proxy, which over-limits, rather
+        # than trusting a value that is short by a hop, which under-limits.
+        logger.warning(
+            "X-Forwarded-For has %d entries but TRUSTED_PROXY_HOPS is %d; "
+            "using the direct peer instead. Check the setting against the "
+            "actual number of proxies.",
+            len(parts), hops,
+        )
+        return _peer(request)
 
     return _peer(request)
 
@@ -113,7 +176,6 @@ def client_key(ip: str) -> str:
     lets one client present billions of fresh ones. IPv6 addresses are grouped
     by their /64; IPv4 addresses are used as they are.
     """
-    import ipaddress
     try:
         addr = ipaddress.ip_address(ip)
     except ValueError:

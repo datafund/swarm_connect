@@ -508,13 +508,18 @@ class Settings(BaseSettings):
     # locate the caller in X-Forwarded-For. See app/core/client_ip.py.
     #
     # 1 is correct for the standard deployment: Caddy terminates TLS and
-    # forwards to the gateway on loopback. Raise it if a CDN or load balancer is
+    # forwards to the gateway's port published on host loopback (inside the
+    # container the peer is then believed to be the Docker bridge address; not
+    # measured on the hosts). Raise it if a CDN or load balancer is
     # added in front, and set it to 0 if the application is exposed directly, in
     # which case forwarding headers are ignored rather than half-trusted.
     #
-    # Getting this too HIGH groups callers together, which over-limits and is
-    # visible as complaints. Too LOW lets a caller pick their own identity, which
-    # under-limits and is visible as nothing at all.
+    # Too LOW (fewer than the real number of proxies) reads an address one of
+    # our own proxies added, so every caller behind it shares one budget, which
+    # over-limits and is visible as complaints. Too HIGH reads an entry further
+    # left, which the caller wrote, so a caller who sends the header picks their
+    # own identity, which under-limits and is visible as nothing at all. A
+    # header with fewer entries than the setting falls back to the direct peer.
     TRUSTED_PROXY_HOPS: int = 1
 
     RATE_LIMIT_ENABLED: bool = True  # Enable global rate limiting

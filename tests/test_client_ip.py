@@ -1,8 +1,9 @@
 """Identifying the caller, for limits that are keyed on who is calling.
 
-Three controls depend on this: the global per-IP rate limit, the x402 free-tier
-rate limit, and the daily spend budget (#102). A caller who can choose this value
-is not limited by any of them.
+Every per-caller limit depends on this (the list in CLAUDE.md, "Caller
+identity"), among them the global per-IP rate limit, the x402 free-tier rate
+limit and the daily spend budget (#102). A caller who can choose this value is
+not limited by any of them.
 
 The previous implementation took the FIRST entry of `X-Forwarded-For`, which is
 the one furthest from us and is caller-supplied if any proxy in the chain appends
@@ -113,11 +114,14 @@ class TestDirectExposure:
 
 
 class TestMisconfiguration:
-    """Getting the setting wrong should fail in the safe direction.
+    """Getting the setting wrong should fail in the safe direction where it can.
 
-    Too high groups callers together, which over-limits and shows up as
-    complaints. Too low lets a caller choose their own identity, which
-    under-limits and shows up as nothing.
+    Too low reads an address our own proxy added, so callers behind it are
+    grouped together, which over-limits and shows up as complaints. Too high
+    reads an entry further left, which the caller wrote, so a caller sending
+    enough entries chooses their own identity, which under-limits and shows up
+    as nothing. What the code can catch is a header with fewer entries than
+    the setting: that falls back to the direct peer, as tested here.
     """
 
     def test_a_chain_shorter_than_the_hop_count_falls_back_to_the_peer(self, monkeypatch):
@@ -143,9 +147,10 @@ class TestOrdinaryCases:
         monkeypatch.setattr(settings, "TRUSTED_PROXY_HOPS", 1)
         assert get_client_ip(_request({"X-Forwarded-For": f" {FORGED} , , {CLIENT} "})) == CLIENT
 
-    def test_real_ip_is_used_when_forwarded_for_is_absent(self, monkeypatch):
+    def test_real_ip_is_ignored_when_forwarded_for_is_absent(self, monkeypatch):
+        """X-Real-IP is caller-written when nothing in front sets it (#697)."""
         monkeypatch.setattr(settings, "TRUSTED_PROXY_HOPS", 1)
-        assert get_client_ip(_request({"X-Real-IP": CLIENT})) == CLIENT
+        assert get_client_ip(_request({"X-Real-IP": CLIENT}, peer="192.0.2.7")) == "192.0.2.7"
 
     def test_forwarded_for_wins_over_real_ip(self, monkeypatch):
         monkeypatch.setattr(settings, "TRUSTED_PROXY_HOPS", 1)

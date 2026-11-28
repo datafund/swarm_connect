@@ -31,11 +31,30 @@
 	#
 	# The gateway counts back from the RIGHT of that header by
 	# TRUSTED_PROXY_HOPS (default 1), so it is correct whether Caddy replaces
-	# the header or appends to it. IF YOU ADD A PROXY OR CDN IN FRONT OF THIS
-	# ONE, raise TRUSTED_PROXY_HOPS to match, or the gateway will read the new
-	# proxy's address as the caller and every request will share one budget.
-	# Lowering it below the real number of hops is worse: the caller then gets
-	# to pick their own identity by sending the header themselves.
+	# the header or appends to it.
+	#
+	# As configured here (no trusted_proxies), Caddy REPLACES the header with
+	# one entry: the address of whatever connected to it. That has two
+	# consequences:
+	#
+	# - TRUSTED_PROXY_HOPS above 1 makes every header shorter than the hop
+	#   count, so every request falls back to the direct TCP peer (Caddy, or
+	#   the Docker bridge address in front of the container, believed but not
+	#   measured on the hosts) and all callers share one bucket: over-limiting,
+	#   not a bypass. A caller
+	#   can choose their own identity with a value that is too high only when
+	#   the outermost proxy appends to a header the caller sent, for example a
+	#   Caddy with trusted_proxies covering a front proxy that appends.
+	# - IF YOU ADD A PROXY OR CDN IN FRONT OF THIS ONE, raising
+	#   TRUSTED_PROXY_HOPS is not enough on its own: Caddy would still discard
+	#   the front proxy's header and write only the front proxy's address, so
+	#   every request would share one budget. Also add
+	#   `trusted_proxies <front proxy range>` to the reverse_proxy block below
+	#   (or `trusted_proxies static <range>` under the global `servers`
+	#   option), so Caddy appends instead, and only for that proxy's range.
+	#   Then set TRUSTED_PROXY_HOPS to the number of proxies, here 2.
+	# Each entry the gateway relies on must be a bare IP address (no port), or
+	# it uses the direct peer instead; X-Real-IP is not read at all (#697).
 	# Prometheus metrics are NOT public (#188). The endpoint exposed 146 series to
 	# anyone who asked: wallet addresses, BZZ and xDAI balances, gateway version,
 	# which features are enabled, and request volumes — a funding position, in

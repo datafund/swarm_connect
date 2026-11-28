@@ -102,16 +102,23 @@ class TestRateLimiter:
         assert is_limited is False
         assert count == 1  # Counter reset
 
-    def test_unknown_ip_not_limited(self):
-        """Unknown/invalid IPs are not rate limited."""
+    def test_unknown_ip_is_limited_as_one_shared_caller(self):
+        """A caller with no address is limited, not exempt (#697).
+
+        Skipping "unknown" let a caller who sent X-Forwarded-For: unknown past
+        the free-tier limit; an empty key is the same caller.
+        """
         limiter = RateLimiter(requests_per_minute=1)
 
         is_limited, count, _ = limiter.is_rate_limited("unknown")
         assert is_limited is False
-        assert count == 0
+        assert count == 1
+
+        is_limited, _, _ = limiter.is_rate_limited("unknown")
+        assert is_limited is True
 
         is_limited, _, _ = limiter.is_rate_limited("")
-        assert is_limited is False
+        assert is_limited is True, "an empty key shares the unknown bucket"
 
     def test_get_client_stats_new_ip(self):
         """Get stats for a new IP."""

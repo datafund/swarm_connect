@@ -16,7 +16,7 @@ once. The stub's counters are reset first.
 Local example:
 
     python -m tests.tools.bee_stub --port 18633 --latency 0.05 &
-    SWARM_BEE_API_URL=http://127.0.0.1:18633/ uvicorn app.main:app --port 8000 &
+    SWARM_BEE_API_URL=http://127.0.0.1:18633/ uvicorn app.main:app --port 8000 --no-proxy-headers &
     python scripts/flood_replay.py --url http://localhost:8000 \
         --bee-stats http://127.0.0.1:18633/__stats
 
