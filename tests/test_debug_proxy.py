@@ -125,6 +125,8 @@ BYPASSES = [
     "topology/%00",
     "topology/%09",
     "topology/%0a",
+    "topology%0A",                    # LF at the end: Starlette's `path` stops there
+    "topology%0Ax",                   # LF inside a segment
     "topology/%7f",
     "topology//x",
     "%2ftopology",                    # leading empty segment
@@ -249,3 +251,20 @@ def test_unsigned_bypass_still_401(client, path):
     r, bee = _proxy(client, path, headers={})
     assert r.status_code == 401
     bee.get.assert_not_called()
+
+
+@pytest.mark.parametrize("path,shown", [("accounting/x", "accounting"), ("keys/a/b", "keys"),
+                                        ("topology/x", "topology/x")])
+def test_path_not_allowed_message_names_unknown_top(client, path, shown):
+    r, bee = _proxy(client, path)
+    assert r.status_code == 403
+    assert r.json()["detail"]["message"] == f"'{shown}' is not a permitted debug path"
+    bee.get.assert_not_called()
+
+
+def test_hex64_matcher_is_whole_string():
+    from app.api.endpoints.debug import HEX64, _route_matches
+    assert _route_matches(["stamps", BATCH], ("stamps", HEX64))
+    assert _route_matches(["stamps", BATCH.upper()], ("stamps", HEX64))
+    for bad in (BATCH + "\n", BATCH + "0", BATCH[:-1], "\n" + BATCH, BATCH[:-1] + "g", ""):
+        assert not _route_matches(["stamps", bad], ("stamps", HEX64)), repr(bad)

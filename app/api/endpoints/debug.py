@@ -44,7 +44,7 @@ router = APIRouter()
 
 # A 64-hex-character Bee id: BatchID or SwarmAddress in Bee's OpenAPI.
 HEX64 = object()
-_HEX64_RE = re.compile(r"^[A-Fa-f0-9]{64}$")
+_HEX64_RE = re.compile(r"[A-Fa-f0-9]{64}")  # used with fullmatch: no trailing newline
 
 # Every GET Bee 2.8.1 defines under the diagnostic endpoints (openapi/Swarm.yaml),
 # and nothing else. None of them takes a query parameter. Bee has no GET
@@ -72,7 +72,7 @@ def _refuse(code: str, message: str, **extra) -> HTTPException:
 def _route_matches(segments: list[str], route: tuple) -> bool:
     if len(segments) != len(route):
         return False
-    return all(_HEX64_RE.match(seg) if part is HEX64 else seg == part
+    return all(_HEX64_RE.fullmatch(seg) if part is HEX64 else seg == part
                for seg, part in zip(segments, route))
 
 
