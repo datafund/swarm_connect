@@ -48,6 +48,10 @@ from app.services.swarm_api import PLUR_PER_BZZ  # noqa: F401
 #     this left, since it would be reported pending for want of time.
 # Worst case 30 + 120 s, plus the preflight reads.
 SIGNER_LOCK_TIMEOUT_SECONDS = 30
+# The read-only signer check before a payment is settled (#692): the connect
+# check and two nonce reads. web3's HTTP timeout is 30 s per call, so unbounded
+# it could take about 90 s; past this, the request is refused unpaid.
+SIGNER_CHECK_TIMEOUT_SECONDS = 10
 RECEIPT_TIMEOUT_SECONDS = 120
 MIN_CREATE_BATCH_WAIT_SECONDS = 30
 
@@ -111,9 +115,19 @@ class GnosisChainError(Exception):
 class SignerBusy(GnosisChainError):
     """The signer cannot take a new transaction now; nothing was sent (#368).
 
-    Either another request holds it past SIGNER_LOCK_TIMEOUT_SECONDS, or a
-    transaction it sent earlier is still unconfirmed. A GnosisChainError,
-    because nothing was spent and nothing may be charged.
+    Either another request holds it (past SIGNER_LOCK_TIMEOUT_SECONDS, or at
+    all for check_signer_available), or a transaction it sent earlier is still
+    unconfirmed. A GnosisChainError, because no BZZ was spent. Whether the
+    caller was charged is a separate question: raised after the x402 payment
+    settled, the caller has paid for nothing (#692).
+    """
+
+
+class SignerStateUnavailable(GnosisChainError):
+    """check_signer_available could not read the signer's state (#692).
+
+    The RPC failed or the check ran past SIGNER_CHECK_TIMEOUT_SECONDS. Nothing
+    was sent.
     """
 
 
@@ -152,6 +166,21 @@ def _hex(tx_hash: Any) -> str:
         return "0x" + bytes(tx_hash).hex()
     h = tx_hash.hex() if hasattr(tx_hash, "hex") else str(tx_hash)
     return h if h.startswith("0x") else "0x" + h
+
+
+def _refuse_if_unconfirmed(w3, acct) -> None:
+    """Raise SignerBusy if a transaction from the signer is still unconfirmed.
+
+    Its `pending` nonce is then above `latest`. Read-only. Used inside the
+    signer lock by createBatch and, before a payment settles, by
+    check_signer_available (#692).
+    """
+    latest = w3.eth.get_transaction_count(acct.address, "latest")
+    pending = w3.eth.get_transaction_count(acct.address, "pending")
+    if pending > latest:
+        logger.error(f"for-owner signer has {pending - latest} unconfirmed transaction(s) "
+                     f"from nonce {latest}; refusing new batches until they confirm")
+        raise SignerBusy(f"signer has an unconfirmed transaction (nonce {latest})")
 
 
 class GnosisChainClient:
@@ -255,12 +284,7 @@ class GnosisChainClient:
             # request would time out behind it too, and each be answered 202
             # and charged for a batch that may never mine. Refuse instead, with
             # nothing sent, until it confirms or is replaced.
-            latest = w3.eth.get_transaction_count(acct.address, "latest")
-            pending = w3.eth.get_transaction_count(acct.address, "pending")
-            if pending > latest:
-                logger.error(f"for-owner signer has {pending - latest} unconfirmed transaction(s) "
-                             f"from nonce {latest}; refusing new batches until they confirm")
-                raise SignerBusy(f"signer has an unconfirmed transaction (nonce {latest})")
+            _refuse_if_unconfirmed(w3, acct)
 
             deadline = time.monotonic() + RECEIPT_TIMEOUT_SECONDS
             try:
@@ -316,6 +340,36 @@ class GnosisChainClient:
                                            timeout=max(deadline - time.monotonic(), 1))
             logger.info(f"for-owner signer allowance topped up from {allowance} to {target} PLUR "
                         f"(tx {_hex(receipt.transactionHash)})")
+
+    def _check_unconfirmed_sync(self) -> None:
+        w3, acct = self._connect()
+        _refuse_if_unconfirmed(w3, acct)
+
+    async def check_signer_available(self) -> None:
+        """Refuse now what createBatch would refuse, before the caller pays (#692).
+
+        Raises SignerBusy if another request holds the signer lock or an
+        earlier transaction is unconfirmed, and SignerStateUnavailable if the
+        state cannot be read within SIGNER_CHECK_TIMEOUT_SECONDS. Read-only and
+        non-blocking: it takes no lock, and the RPC reads run in a thread.
+
+        A snapshot: the signer can become busy right after it. createBatch
+        checks again under the lock, and the endpoint answers that race as a
+        paid non-delivery.
+        """
+        if self._signer_lock.locked():
+            raise SignerBusy("signer is busy with another request")
+        try:
+            await asyncio.wait_for(asyncio.to_thread(self._check_unconfirmed_sync),
+                                   timeout=SIGNER_CHECK_TIMEOUT_SECONDS)
+        except SignerBusy:
+            raise
+        except asyncio.TimeoutError as e:
+            # The thread may still finish its reads; it changes nothing.
+            raise SignerStateUnavailable(
+                f"signer state not read within {SIGNER_CHECK_TIMEOUT_SECONDS} s") from e
+        except Exception as e:
+            raise SignerStateUnavailable(f"could not read signer state: {e}") from e
 
     async def create_batch(self, owner: str, initial_balance_per_chunk: int, depth: int,
                            bucket_depth: int = BUCKET_DEPTH, immutable: bool = False,

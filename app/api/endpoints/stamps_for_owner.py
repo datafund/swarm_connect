@@ -24,6 +24,7 @@ from app.x402.openapi_docs import paid_route_openapi
 from app.api.models.stamp import StampForOwnerRequest, StampForOwnerResponse
 from app.core.config import settings
 from app.services import metrics, swarm_api
+from app.core.support import report_advice
 from app.services.gnosis_chain import (
     GnosisChainError,
     SignerBusy,
@@ -39,6 +40,34 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 from app.services.swarm_api import PLUR_PER_BZZ  # noqa: F401
+
+# How long a caller refused before payment waits: a batch holds the signer for
+# up to 30 s queueing + 120 s receipts, and a stuck transaction longer.
+SIGNER_RETRY_AFTER_SECONDS = "60"
+
+
+def _paid_not_delivered(request: Request, why: str) -> HTTPException:
+    """The caller's payment settled and no batch was created (#692).
+
+    The pool's convention for a paid non-delivery (pool.py): the refund
+    response with the transaction to cite, and its own count. The x402
+    middleware adds the rest, as for any non-2xx after settlement: the
+    payment_failed audit event (stage delivery_after_settlement), the
+    settled_not_delivered settlement count and the X-Payment-Status header.
+    The Idempotency-Key entry stays settled, so a retry with the key is told
+    the same and is not charged.
+    """
+    tx = getattr(getattr(request.state, "x402_settlement", None), "transaction", None) or "unknown"
+    logger.error(f"for-owner: PAID NON-DELIVERY: {why} after settlement "
+                 f"(payer={getattr(request.state, 'x402_payer', None)}, tx={tx})")
+    metrics.for_owner_batches_total.labels(status="settled_not_delivered").inc()
+    return HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail={
+        "code": "DELIVERY_FAILED_AFTER_PAYMENT",
+        "message": ("The payment was collected but the batch could not be created. "
+                    + report_advice("transaction")),
+        "transaction": tx,
+        "x402_status": "settled_not_delivered",
+    })
 
 
 @router.post(
@@ -156,17 +185,57 @@ async def create_batch_for_owner(body: StampForOwnerRequest, request: Request) -
             "message": f"A daily spending limit is reached. It resets at {ceiling['resets_at']}.",
             "resets_at": ceiling["resets_at"]})
 
+    # --- the signer, checked before the caller pays (#692) ---
+    # createBatch refuses a busy signer with nothing sent. Checked here too,
+    # so that the usual case is refused before settlement and costs the
+    # caller nothing. Read-only; the RPC reads run off the event loop.
+    try:
+        await gnosis_chain_client.check_signer_available()
+    except SignerBusy as e:
+        spend_budget_tracker.release_hold(hold)
+        metrics.for_owner_batches_total.labels(status="busy").inc()
+        logger.warning(f"for-owner: refused before payment, {e}")
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                            headers={"Retry-After": SIGNER_RETRY_AFTER_SECONDS}, detail={
+            "code": "SIGNER_BUSY",
+            "message": f"The gateway signer is busy ({e}). Nothing was sent and you were not charged; retry later."})
+    except GnosisChainError as e:
+        # SignerStateUnavailable, or any other chain-client failure: the
+        # state is unknown, so nothing is sent and nothing is settled.
+        spend_budget_tracker.release_hold(hold)
+        metrics.for_owner_batches_total.labels(status="error").inc()
+        logger.error(f"for-owner: could not check the signer before payment: {e}")
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                            headers={"Retry-After": SIGNER_RETRY_AFTER_SECONDS}, detail={
+            "code": "SIGNER_STATE_UNAVAILABLE",
+            "message": ("The gateway could not read its signer's state. "
+                        "Nothing was sent and you were not charged; retry later.")})
+    except BaseException:
+        # Interrupted (cancelled): nothing sent, nothing settled.
+        spend_budget_tracker.release_hold(hold)
+        raise
+
+    # --- x402 settlement, immediately before the irreversible step ---
+    try:
+        await settle_payment(request)
+    except BaseException:
+        # Refused, outcome unknown, or interrupted: whatever happened to the
+        # payment, createBatch never ran, so no BZZ was spent.
+        spend_budget_tracker.release_hold(hold)
+        raise
+    # A no-op settle (free tier, x402 off) collected nothing.
+    settled = getattr(request.state, "x402_settlement", None) is not None
+
     # --- on-chain createBatch(owner=...) ---
     pending = False
     try:
-        await settle_payment(request)
         result = await gnosis_chain_client.create_batch(owner, amount, depth, immutable=body.immutable)
     except TransactionPending as e:
         # Broadcast, but no receipt in time (#368). This used to surface as an
         # error, which told the caller they were not charged, while the
         # transaction could still mine and spend our BZZ. The outcome is
-        # unknown, so it is reported as unknown: 202 with the tx hash. Being a
-        # 2xx, the payment is settled, the same fail-closed rule as the spend
+        # unknown, so it is reported as unknown: 202 with the tx hash. The
+        # payment stays settled, the same fail-closed rule as the spend
         # limits: money is only given back when the spend certainly did not
         # happen, and here it most likely did.
         pending = True
@@ -174,21 +243,30 @@ async def create_batch_for_owner(body: StampForOwnerRequest, request: Request) -
         metrics.for_owner_batches_total.labels(status="pending").inc()
         logger.warning(f"for-owner: createBatch {e.tx_hash} not confirmed in time; reported as pending")
     except SignerBusy as e:
-        # Nothing was sent, so nothing is charged: a 5xx is not settled.
+        # The signer became busy after the check above (a race). Nothing was
+        # sent, so no BZZ moved; but a settled payment stands (#692).
+        spend_budget_tracker.release_hold(hold)
+        if settled:
+            raise _paid_not_delivered(request, f"signer busy ({e})")
         metrics.for_owner_batches_total.labels(status="busy").inc()
         logger.warning(f"for-owner: refused, {e}")
-        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail={
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                            headers={"Retry-After": SIGNER_RETRY_AFTER_SECONDS}, detail={
             "code": "SIGNER_BUSY",
             "message": f"The gateway signer is busy ({e}). Nothing was sent and you were not charged; retry later."})
     except GnosisChainError as e:
         # Raised for a connection that was never made or a transaction that
-        # reverted: no BZZ moved. A receipt timeout is not a GnosisChainError
-        # (web3 raises TimeExhausted) and keeps the hold: it may still mine.
+        # reverted: no BZZ moved, so the hold is given back. The caller's
+        # payment is another matter: settled, it stands (#692). A receipt
+        # timeout is not a GnosisChainError (web3 raises TimeExhausted) and
+        # keeps the hold: it may still mine.
         spend_budget_tracker.release_hold(hold)
-        metrics.for_owner_batches_total.labels(status="error").inc()
-        logger.error(f"for-owner: createBatch failed: {e}")
         # The exception text is RPC and contract internals (#104, #380); it is
-        # logged above for the operator and not returned to the caller.
+        # logged for the operator and not returned to the caller.
+        logger.error(f"for-owner: createBatch failed: {e}")
+        if settled:
+            raise _paid_not_delivered(request, "createBatch failed")
+        metrics.for_owner_batches_total.labels(status="error").inc()
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail={
             "code": "CREATE_BATCH_FAILED",
             "message": "The batch could not be created on chain. Try again later."})
