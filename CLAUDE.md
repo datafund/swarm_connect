@@ -145,7 +145,7 @@ Stamp propagation:
 Security settings:
 - `MAX_UPLOAD_SIZE_MB`: Maximum file upload size in megabytes (default: `10`)
 - `MAX_JSON_BODY_BYTES`: Maximum JSON request body size in bytes (default: `1048576` / 1 MB)
-- `MAX_JSON_DEPTH`: Maximum JSON nesting depth (default: `20`)
+- `MAX_JSON_DEPTH`: Maximum JSON nesting depth of a JSON request body (default: `20`). Multipart uploads are not covered; a `sign=notary` document has its own limit, `NOTARY_MAX_JSON_DEPTH`
 - `RATE_LIMIT_ENABLED`: Enable per-IP rate limiting (default: `true`)
 - `RATE_LIMIT_PER_MINUTE`: Requests per minute per IP (default: `60`)
 - `RATE_LIMIT_BURST`: Extra burst capacity above per-minute limit (default: `10`)
@@ -170,6 +170,7 @@ Monitoring:
 Notary signing (optional):
 - `NOTARY_ENABLED`: Enable notary signing feature (default: `false`)
 - `NOTARY_PRIVATE_KEY`: Hex-encoded Ethereum private key for signing (64 characters, no 0x prefix). Generate with `python scripts/generate_notary_key.py`
+- `NOTARY_MAX_JSON_DEPTH`: Deepest nesting of objects and arrays accepted in a `sign=notary` document (default: `64`; 1 to 1000, else startup fails). Checked on the bytes before parsing by `app/core/json_depth.py` (shared with the body-limit middleware), so a deeper document gets `400 JSON_TOO_DEEP` before payment instead of a `RecursionError` 500 (#695). A `RecursionError` while parsing or re-encoding the document is answered the same way, as a fallback. Note: eth_account's py_ecc raises the interpreter's recursion limit to 100000 at import, process-wide
 
 CORS (browser access):
 - `CORS_ALLOWED_ORIGINS`: Allowed origins, `*` for all or comma-separated list (default: `*`)

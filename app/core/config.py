@@ -372,6 +372,14 @@ class Settings(BaseSettings):
     # This provides proof that a document existed at a specific time, signed by the gateway.
     NOTARY_ENABLED: bool = False  # Master switch for notary signing feature
     NOTARY_PRIVATE_KEY: Optional[str] = None  # Hex-encoded private key for signing (without 0x prefix)
+    # Deepest nesting of objects and arrays accepted in a document sent with
+    # sign=notary (#695). Separate from MAX_JSON_DEPTH (20, for JSON request
+    # bodies): notary documents are user content and can nest further. The
+    # upper bound keeps signing within Python's recursion limit: the signed
+    # document is re-encoded with json.dumps(indent=2), whose pure-Python
+    # encoder recurses once per level. A RecursionError there is answered
+    # 400 JSON_TOO_DEEP as well, never 500.
+    NOTARY_MAX_JSON_DEPTH: int = Field(64, ge=1, le=1000)
 
     # === Stamp Propagation Timing ===
     STAMP_PROPAGATION_SECONDS: int = 120  # Expected propagation delay after purchase (~2 minutes)

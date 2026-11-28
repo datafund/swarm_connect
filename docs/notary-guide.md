@@ -139,12 +139,14 @@ file: <your JSON document>
 **Request requirements:**
 - Document must be valid JSON
 - Must have a `data` field at the root level
+- Objects and arrays nested at most `NOTARY_MAX_JSON_DEPTH` levels deep (default 64; the document's own root object counts as level 1)
 - `signatures` field is optional (existing signatures are preserved)
 
 **Error responses:**
 - `400 NOTARY_NOT_ENABLED`: Set `NOTARY_ENABLED=true` on the gateway
 - `400 NOTARY_NOT_CONFIGURED`: Gateway missing `NOTARY_PRIVATE_KEY`
 - `400 INVALID_DOCUMENT_FORMAT`: Document missing `data` field or invalid JSON
+- `400 JSON_TOO_DEEP`: Document nested deeper than `NOTARY_MAX_JSON_DEPTH` levels
 - `400 INVALID_SIGN_OPTION`: Use `sign=notary`
 
 ### Document Structure Specification
@@ -307,6 +309,7 @@ Always handle these error codes:
 | `NOTARY_NOT_ENABLED` | 400 | Gateway has `NOTARY_ENABLED=false` |
 | `NOTARY_NOT_CONFIGURED` | 400 | Gateway missing `NOTARY_PRIVATE_KEY` |
 | `INVALID_DOCUMENT_FORMAT` | 400 | Document invalid JSON or missing `data` field |
+| `JSON_TOO_DEEP` | 400 | Document nested deeper than `NOTARY_MAX_JSON_DEPTH` levels. Refused before payment, so nothing is charged |
 | `INVALID_SIGN_OPTION` | 400 | `sign` parameter not "notary" |
 
 ---
@@ -319,6 +322,7 @@ Always handle these error codes:
 |----------|----------|---------|-------------|
 | `NOTARY_ENABLED` | No | `false` | Master switch for notary feature |
 | `NOTARY_PRIVATE_KEY` | Yes (if enabled) | - | Hex-encoded Ethereum private key |
+| `NOTARY_MAX_JSON_DEPTH` | No | `64` | Deepest nesting of objects and arrays accepted in a signed document (1 to 1000, checked at startup). Separate from `MAX_JSON_DEPTH`, which limits JSON request bodies |
 
 **Example `.env` configuration:**
 ```bash
