@@ -618,6 +618,8 @@ Query in Grafana Explore, or use the two dashboard panels:
 {job="swarm_connect/gateway"} |= "connection"
 ```
 
+Reading a replaced container's logs during an incident: docs/mainnet-runbook.md section 3, "Reading the gateway's logs after a deploy (#661)".
+
 **Log delivery alerts (#672).** The log pipeline fails without affecting metrics, so two warning rules watch it. **Gateway logs dropped** reads Alloy's own counter `loki_write_dropped_entries_total{job="swarm_connect/alloy"}` (exported with `prometheus.exporter.self`; only it and `loki_write_sent_entries_total` are kept, `up` is dropped, and loki.write's `host` label, the Loki hostname, is moved to `loki_host`). **Gateway logs missing in Loki** is a Loki-datasource rule: `absent_over_time` of `{job="swarm_connect/gateway"}` over 15 minutes per environment. In #661 a token without `logs:write` made Loki answer 401 `invalid scope requested` and Alloy drop every batch, unnoticed. Operator steps: docs/mainnet-runbook.md section 5.
 
 **Credentials** (stored in GitHub secrets, injected at deploy):

@@ -138,6 +138,32 @@ def test_runbook_readme_and_claude_md_name_both_alerts():
             assert title in text, (doc, title)
 
 
+LOG_PROCEDURE = "Reading the gateway's logs after a deploy (#661)"
+
+
+def test_runbook_section_3_has_the_log_reading_procedure():
+    """#661: the procedure to read a replaced container's logs is in section 3,
+    and CLAUDE.md points at it by its heading."""
+    with open(os.path.join(REPO_ROOT, "docs/mainnet-runbook.md")) as f:
+        runbook = f.read()
+    section = runbook.split("\n## 3.")[1].split("\n## 4.")[0]
+    section_5 = runbook.split("\n## 5.")[1].split("\n## 6.")[0]
+    # The procedure itself, and the pointer to it in section 3's opening paragraph.
+    opening = section.split("\n\n")[1]
+    assert f'see "{LOG_PROCEDURE}" at the end of this section' in opening
+    assert "\n### " + LOG_PROCEDURE + "\n" in section
+    procedure = section.split("### " + LOG_PROCEDURE)[1]
+    for needed in ('{job="swarm_connect/gateway", environment="main"', "docker logs", MISSING,
+                   '("Log delivery alerts (#672)" in section 5)', '("Which deploy adds the probe" in section 5)'):
+        assert needed in procedure, needed
+    # The section 5 anchors the procedure cites, and the pointer back to it.
+    assert "\n### Log delivery alerts (#672)\n" in section_5
+    assert "**Which deploy adds the probe.**" in section_5
+    assert f'see "{LOG_PROCEDURE}" in section 3' in section_5
+    with open(os.path.join(REPO_ROOT, "CLAUDE.md")) as f:
+        assert LOG_PROCEDURE in f.read()
+
+
 def test_apply_grafana_dry_run_lists_both_rules():
     result = subprocess.run(
         [sys.executable, "scripts/apply_grafana.py", "--dry-run", "--only", "alerts"],
