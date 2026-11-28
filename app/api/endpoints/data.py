@@ -6,6 +6,7 @@ import json
 import logging
 import re
 import time
+import unicodedata
 from urllib.parse import quote, unquote
 from fastapi import APIRouter, Header, HTTPException, Path, Query, Request, File, UploadFile
 from fastapi.responses import Response
@@ -231,18 +232,54 @@ def _collection_content_type(bee_value: Optional[str]) -> str:
     return value if _MEDIA_TYPE.match(value) else "application/octet-stream"
 
 
+# Characters a download name may not carry: controls (Cc), format characters
+# such as the bidi overrides U+202E and U+200F (Cf), line and paragraph
+# separators (Zl, Zp). A browser shows or saves such a name misleadingly
+# ("evil\u202Etxt.exe" reads as "evilexe.txt").
+_UNSAFE_NAME_CATEGORIES = frozenset({"Cc", "Cf", "Zl", "Zp"})
+
+
+def _is_safe_download_name(name: str) -> bool:
+    """Whether `name` can be offered as the saved file's name: one plain
+    name, no path separator of any OS, not `.` or `..`, no unsafe character,
+    and no leading or trailing space and no trailing dot (Windows drops those,
+    so the saved name would differ from the one shown). A leading dot is kept:
+    `.env` is an ordinary name."""
+    # "." and ".." also end with a dot, so the trailing-dot rule below covers
+    # them; named here so the rule stays complete if that one is relaxed.
+    if not name or name in (".", ".."):
+        return False
+    if "/" in name or "\\" in name:
+        return False
+    if name != name.strip() or name.endswith("."):
+        return False
+    return not any(unicodedata.category(c) in _UNSAFE_NAME_CATEGORIES for c in name)
+
+
+def _safe_segment_name(segment: str) -> str:
+    """The last path segment as a download name. The path rules already
+    refuse separators, controls and dot segments; a format character (a bidi
+    override) or a trailing space or dot can still be in a valid file name of
+    the collection, so those are replaced rather than refused, and the file
+    stays downloadable."""
+    name = "".join("_" if unicodedata.category(c) in _UNSAFE_NAME_CATEGORIES or c in "/\\" else c
+                   for c in segment).strip().rstrip(".").strip()
+    return name if _is_safe_download_name(name) else "download"
+
+
 def _collection_filename(bee_disposition: Optional[str], segments: list[str]) -> str:
     """Bee's own file name (it names the index document a directory request
-    served), else the last path segment."""
+    served) when it is a safe download name, else the last path segment made
+    safe."""
     match = _BEE_FILENAME.search(bee_disposition or "")
     if match:
         # Bee sends the name as raw UTF-8, which httpx2 decodes as UTF-8
         # (it falls back to latin-1 only for bytes that are not UTF-8, which a
         # second decode could not repair).
         name = match.group(1)
-        if name and "/" not in name and not _CONTROL_CHARS.search(name):
+        if _is_safe_download_name(name):
             return name
-    return segments[-1]
+    return _safe_segment_name(segments[-1])
 
 
 def _attachment(filename: str) -> str:
@@ -279,6 +316,11 @@ def _document_path(value: str, single_segment: bool = False) -> list[str]:
                          "no leading or trailing space).")
     if value.endswith("/"):
         raise ValueError("the path must name a file, not a directory.")
+    if any("/" in unquote(segment) for segment in value.split("/")):
+        # The name goes to Bee in a header as it is, not as a URL; a %2F in it
+        # would be ambiguous between a file name and a directory separator.
+        raise ValueError("the name may not contain a percent-encoded slash (%2F); "
+                         "give the file's path as it is in the archive.")
     segments = _path_segments(value)
     if single_segment and len(segments) > 1:
         raise ValueError("the index document must be a file at the root of the archive, without a '/'.")

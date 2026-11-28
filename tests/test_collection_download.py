@@ -10,7 +10,7 @@ tests/test_collection_bee_roundtrip.py (opt-in).
 import io
 import tarfile
 from unittest.mock import patch
-from urllib.parse import unquote
+from urllib.parse import quote, unquote
 
 import httpx2
 import pytest
@@ -188,12 +188,45 @@ class TestPathDownload:
         from app.api.endpoints.data import _attachment
         assert _attachment('a"b\\c.txt') == "attachment; filename=\"a_b_c.txt\"; filename*=UTF-8''a%22b%5Cc.txt"
 
-    @pytest.mark.parametrize("bee_name", [b"x/y.txt", b"x\x01y.txt", b"x\x7fy.txt", b""])
+    @pytest.mark.parametrize("bee_name", [
+        b"x/y.txt", b"x\x01y.txt", b"x\x7fy.txt", b"",
+        b"..\\..\\evil.exe", b"x\\y.txt", b".", b"..",
+        "evil\u202etxt.exe".encode(), "a\u200fb.txt".encode(), "a\ufeffb.txt".encode(),
+        "a\u2028b.txt".encode(), "a\u2029b.txt".encode(), "a\x85b.txt".encode(),
+        b" a.txt", b"a.txt ", b"a.txt.", b"a.txt..",
+    ])
     def test_an_unusable_bee_name_falls_back_to_the_path(self, bee_name):
         bee = StubBee(FILES, disposition={"assets/a.txt": b'inline; filename="' + bee_name + b'"'})
         r = _get(bee, f"/api/v1/data/{REF}/assets/a.txt")
         assert r.status_code == 200
         assert r.headers["content-disposition"] == 'attachment; filename="a.txt"'
+
+    @pytest.mark.parametrize("name", [".env", "a b.txt", "\u00edndex.html", "a..b.txt"])
+    def test_a_safe_bee_name_is_kept(self, name):
+        bee = StubBee(FILES, disposition={"assets/a.txt": f'inline; filename="{name}"'.encode()})
+        r = _get(bee, f"/api/v1/data/{REF}/assets/a.txt")
+        assert r.status_code == 200
+        assert "filename*=UTF-8''" + quote(name, safe="") in r.headers["content-disposition"] \
+            or r.headers["content-disposition"] == f'attachment; filename="{name}"'
+
+    @pytest.mark.parametrize("segment,expected", [
+        ("evil%E2%80%AEtxt.exe", "evil_txt.exe"),        # U+202E in a valid file name
+        ("a%E2%80%8Fb.txt", "a_b.txt"),                   # U+200F
+        ("a.txt%20", "a.txt"),                            # trailing space
+        ("a.txt.", "a.txt"),                              # trailing dot
+        ("%E2%80%AE", "_"),                               # only the override
+        ("..%20", "download"),                            # nothing left after the trim
+    ])
+    def test_the_path_fallback_is_made_safe_too(self, segment, expected):
+        raw = unquote(segment)
+        # Bee names the file the same unsafe way, so only the fallback decides.
+        bee = StubBee({raw: (b"x", "text/plain")},
+                      disposition={raw: f'inline; filename="{raw}"'.encode()})
+        r = _get(bee, f"/api/v1/data/{REF}/{segment}")
+        assert r.status_code == 200, r.text
+        cd = r.headers["content-disposition"]
+        assert cd.startswith(f'attachment; filename="{expected}"'), cd
+        assert "%E2%80%AE" not in cd and "%E2%80%8F" not in cd
 
     def test_bee_utf8_name_is_encoded_exactly(self):
         # A directory request: Bee names the index document it served.
@@ -529,6 +562,8 @@ class TestIndexDocumentOnUpload:
         ("error_document", " index.html", "ERROR_DOCUMENT_INVALID"),
         ("error_document", "index.html ", "ERROR_DOCUMENT_INVALID"),
         ("error_document", "in\tdex.html", "ERROR_DOCUMENT_INVALID"),
+        ("index_document", "a%2Fb", "INDEX_DOCUMENT_INVALID"),
+        ("error_document", "e/a%2Fb", "ERROR_DOCUMENT_INVALID"),
         ("index_document", "sub/a", "INDEX_DOCUMENT_INVALID"),        # exists; Bee refuses a slash
         ("error_document", "nope.html", "ERROR_DOCUMENT_INVALID"),
         ("error_document", "a/./b", "ERROR_DOCUMENT_INVALID"),
@@ -546,6 +581,9 @@ class TestIndexDocumentOnUpload:
             r = _upload(bee, tar_bytes, f"&{param}={q(value)}")
         assert r.status_code == 400, r.text
         assert r.json()["code"] == code
+        if "%2F" in value:
+            assert "percent-encoded slash (%2F)" in r.json()["message"]
+            assert "%252F" not in r.json()["message"]
         settle.assert_not_called()
         assert [q for q in bee.requests if q.method == "POST"] == []
 
