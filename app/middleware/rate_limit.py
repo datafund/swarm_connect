@@ -25,9 +25,11 @@ EXEMPT_PATHS = {"/", "/health", "/docs", "/redoc", "/openapi.json", "/metrics",
 
 # Pre-stamped chunk forwarding. Each request carries one ~4 KB chunk, so a
 # per-request limit sized for API calls throttles it to a few hundred KB a
-# minute. When x402 billing is on, every chunk is already paid per byte (prepaid
-# credit or the per-IP free daily quota), which bounds it; with billing off the
-# global limit still applies.
+# minute. A chunk upload that spends prepaid bandwidth credit is bounded by that
+# credit instead, so it is exempt (#696). Only such uploads are: the exemption
+# used to cover every POST here when x402 was on, before the endpoint had
+# checked anything, so requests with no token, a bad token or the free path
+# were not limited at all.
 CHUNK_UPLOAD_PATH = f"{settings.API_V1_STR}/chunks"
 
 
@@ -36,12 +38,38 @@ def _is_exempt_path(path: str) -> bool:
     return path in EXEMPT_PATHS
 
 
-def _is_billed_chunk_upload(request: Request) -> bool:
-    return (
+def _declared_length(request: Request) -> int:
+    """The body length the request declares, or 0 when it declares none."""
+    try:
+        return max(0, int(request.headers.get("content-length") or 0))
+    except ValueError:
+        return 0
+
+
+def _is_credit_funded_chunk_upload(request: Request) -> bool:
+    """Whether this is a chunk upload that prepaid credit will pay for.
+
+    True only with x402 on, for POST /chunks/ outside the free path, when the
+    credit token resolves to an account holding at least the declared body
+    length (at least one byte without a Content-Length). Two in-memory lookups:
+    nothing is debited and the body is not read. The endpoint still validates
+    and debits; a request that passes here and is refused there was exempt
+    anyway (a documented residual of #696).
+    """
+    if not (
         settings.X402_ENABLED
         and request.method == "POST"
         and request.url.path.rstrip("/") == CHUNK_UPLOAD_PATH
-    )
+    ):
+        return False
+    from app.x402.middleware import is_free_tier_opt_in
+    if is_free_tier_opt_in(request):
+        return False
+    from app.services.bandwidth_credit import CREDIT_TOKEN_HEADER, bandwidth_credit_manager
+    address = bandwidth_credit_manager.resolve_token(request.headers.get(CREDIT_TOKEN_HEADER) or "")
+    if not address:
+        return False
+    return bandwidth_credit_manager.balance(address) >= max(_declared_length(request), 1)
 
 
 class SlidingWindowCounter:
@@ -134,7 +162,7 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
             return await call_next(request)
 
         # Skip exempt paths
-        if _is_exempt_path(request.url.path) or _is_billed_chunk_upload(request):
+        if _is_exempt_path(request.url.path) or _is_credit_funded_chunk_upload(request):
             return await call_next(request)
 
         # Periodic cleanup of stale entries
