@@ -135,6 +135,7 @@ class TestSignDocument:
         with patch.object(type(service), 'is_available', property(lambda s: True)):
             with patch('app.services.provenance.settings') as mock_settings:
                 mock_settings.NOTARY_ENABLED = True
+                mock_settings.NOTARY_MAX_JSON_DEPTH = 64
                 result = service.sign_document(raw)
 
         assert isinstance(result, SignedDocument)
@@ -152,6 +153,7 @@ class TestSignDocument:
         with patch.object(type(service), 'is_available', property(lambda s: True)):
             with patch('app.services.provenance.settings') as mock_settings:
                 mock_settings.NOTARY_ENABLED = True
+                mock_settings.NOTARY_MAX_JSON_DEPTH = 64
                 result = service.sign_document(raw)
 
         assert len(result.signatures) == 2
@@ -166,6 +168,7 @@ class TestSignDocument:
         with patch.object(type(service), 'is_available', property(lambda s: True)):
             with patch('app.services.provenance.settings') as mock_settings:
                 mock_settings.NOTARY_ENABLED = True
+                mock_settings.NOTARY_MAX_JSON_DEPTH = 64
                 result = service.sign_document(raw)
 
         sig = result.signatures[0]
@@ -189,6 +192,7 @@ class TestSignDocument:
         with patch.object(type(service), 'is_available', property(lambda s: True)):
             with patch('app.services.provenance.settings') as mock_settings:
                 mock_settings.NOTARY_ENABLED = True
+                mock_settings.NOTARY_MAX_JSON_DEPTH = 64
                 result = service.sign_document(raw, custom_time)
 
         sig = result.signatures[0]
@@ -203,6 +207,7 @@ class TestSignDocument:
         with patch.object(type(service), 'is_available', property(lambda s: True)):
             with patch('app.services.provenance.settings') as mock_settings:
                 mock_settings.NOTARY_ENABLED = True
+                mock_settings.NOTARY_MAX_JSON_DEPTH = 64
                 result = service.sign_document(raw)
 
         # Should parse without error
@@ -221,6 +226,7 @@ class TestSignDocument:
 
         with patch('app.services.provenance.settings') as mock_settings:
             mock_settings.NOTARY_ENABLED = False
+            mock_settings.NOTARY_MAX_JSON_DEPTH = 64
             with pytest.raises(NotaryNotEnabledError):
                 service.sign_document(raw)
 
@@ -235,6 +241,7 @@ class TestSignDocument:
 
         with patch('app.services.provenance.settings') as mock_settings:
             mock_settings.NOTARY_ENABLED = True
+            mock_settings.NOTARY_MAX_JSON_DEPTH = 64
             with pytest.raises(NotConfiguredError):
                 service.sign_document(raw)
 
@@ -245,6 +252,7 @@ class TestSignDocument:
 
         with patch('app.services.provenance.settings') as mock_settings:
             mock_settings.NOTARY_ENABLED = True
+            mock_settings.NOTARY_MAX_JSON_DEPTH = 64
             with pytest.raises(DocumentValidationError):
                 service.sign_document(raw)
 
@@ -267,6 +275,7 @@ class TestVerifyNotarySignature:
 
         with patch('app.services.provenance.settings') as mock_settings:
             mock_settings.NOTARY_ENABLED = True
+            mock_settings.NOTARY_MAX_JSON_DEPTH = 64
             signed = service.sign_document(raw)
 
         # Get the signer address from the signed document
@@ -289,6 +298,7 @@ class TestVerifyNotarySignature:
 
         with patch('app.services.provenance.settings') as mock_settings:
             mock_settings.NOTARY_ENABLED = True
+            mock_settings.NOTARY_MAX_JSON_DEPTH = 64
             signed = service.sign_document(raw)
 
         wrong_address = "0x" + "b" * 40
@@ -308,6 +318,7 @@ class TestVerifyNotarySignature:
 
         with patch('app.services.provenance.settings') as mock_settings:
             mock_settings.NOTARY_ENABLED = True
+            mock_settings.NOTARY_MAX_JSON_DEPTH = 64
             signed = service.sign_document(raw)
 
         # Get the signer address from the signed document
@@ -363,6 +374,7 @@ class TestProvenanceServiceProperties:
 
         with patch('app.services.provenance.settings') as mock_settings:
             mock_settings.NOTARY_ENABLED = True
+            mock_settings.NOTARY_MAX_JSON_DEPTH = 64
             assert service.is_available is True
 
     def test_is_available_false_when_disabled(self):
@@ -373,6 +385,7 @@ class TestProvenanceServiceProperties:
 
         with patch('app.services.provenance.settings') as mock_settings:
             mock_settings.NOTARY_ENABLED = False
+            mock_settings.NOTARY_MAX_JSON_DEPTH = 64
             assert service.is_available is False
 
     def test_is_available_false_when_not_configured(self):
@@ -383,6 +396,7 @@ class TestProvenanceServiceProperties:
 
         with patch('app.services.provenance.settings') as mock_settings:
             mock_settings.NOTARY_ENABLED = True
+            mock_settings.NOTARY_MAX_JSON_DEPTH = 64
             assert service.is_available is False
 
     def test_notary_address_when_configured(self):

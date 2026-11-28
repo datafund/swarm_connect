@@ -120,6 +120,7 @@ jobs:
           STAMP_OWNERSHIP_FILE=${{ vars.STAMP_OWNERSHIP_FILE || 'data/stamp_owners.json' }}
           NOTARY_ENABLED=${{ vars.NOTARY_ENABLED || 'false' }}
           NOTARY_PRIVATE_KEY=${{ secrets.NOTARY_PRIVATE_KEY || '' }}
+          NOTARY_MAX_JSON_DEPTH=${{ vars.NOTARY_MAX_JSON_DEPTH || '64' }}
           CORS_ALLOWED_ORIGINS=${{ vars.CORS_ALLOWED_ORIGINS || '*' }}
           CORS_ALLOW_CREDENTIALS=${{ vars.CORS_ALLOW_CREDENTIALS || 'false' }}
           MAX_UPLOAD_SIZE_MB=${{ vars.MAX_UPLOAD_SIZE_MB || '10' }}
@@ -214,6 +215,7 @@ jobs:
           STAMP_OWNERSHIP_FILE=${{ vars.STAMP_OWNERSHIP_FILE || 'data/stamp_owners.json' }}
           NOTARY_ENABLED=${{ vars.NOTARY_ENABLED || 'false' }}
           NOTARY_PRIVATE_KEY=${{ secrets.NOTARY_PRIVATE_KEY || '' }}
+          NOTARY_MAX_JSON_DEPTH=${{ vars.NOTARY_MAX_JSON_DEPTH || '64' }}
           CORS_ALLOWED_ORIGINS=${{ vars.CORS_ALLOWED_ORIGINS || '*' }}
           CORS_ALLOW_CREDENTIALS=${{ vars.CORS_ALLOW_CREDENTIALS || 'false' }}
           MAX_UPLOAD_SIZE_MB=${{ vars.MAX_UPLOAD_SIZE_MB || '10' }}

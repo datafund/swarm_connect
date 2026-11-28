@@ -56,6 +56,7 @@ from app.services.spend_budget import spend_certainly_did_not_happen
 from app.services.provenance import (
     get_provenance_service,
     DocumentValidationError,
+    DocumentTooDeepError,
     NotaryNotEnabledError
 )
 from app.services.signing import NotConfiguredError
@@ -675,6 +676,19 @@ async def upload_data(
                         "code": "NOTARY_NOT_CONFIGURED",
                         "message": str(e),
                         "suggestion": "Set NOTARY_PRIVATE_KEY to configure the notary signing key"
+                    }
+                )
+            except DocumentTooDeepError as e:
+                # Before settle_payment, so a refused document is never
+                # charged (#695).
+                notary_signatures_total.labels(status="error").inc()
+                raise HTTPException(
+                    status_code=400,
+                    detail={
+                        "code": "JSON_TOO_DEEP",
+                        "message": str(e),
+                        "suggestion": "Flatten the document: nest objects and arrays "
+                                      f"at most {settings.NOTARY_MAX_JSON_DEPTH} levels deep"
                     }
                 )
             except DocumentValidationError as e:

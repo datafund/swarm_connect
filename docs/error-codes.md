@@ -94,7 +94,7 @@ and problem reports, not a refund channel.
 | `ACCESS_BLOCKED` | 403 | The operator has blocked this address. Applied before any other handling, so it is the one refusal that says nothing about the request itself. IPv6 is matched by its `/64` and IPv4-mapped IPv6 by the IPv4 address, so switching addresses within one allocation does not evade it. | Nothing the caller can change. Contact the operator if you believe it is wrong. |
 | `VALIDATION_ERROR` | 422 | The request body, query or path failed validation. `detail` is the list of field errors. | Fix the fields named in `detail`. Do not retry unchanged. |
 | `BODY_TOO_LARGE` | 413 | A JSON body is over the gateway's JSON size limit. | Send a smaller body. File uploads use multipart, which this limit does not apply to. |
-| `JSON_TOO_DEEP` | 400 | A JSON body is nested too deeply. | Flatten the body. |
+| `JSON_TOO_DEEP` | 400 | A JSON body is nested deeper than `MAX_JSON_DEPTH`. Also returned for a `sign=notary` upload whose document is nested deeper than `NOTARY_MAX_JSON_DEPTH` (see [Uploads](#uploads)); that refusal comes before payment, so nothing is charged. | Flatten the body or document. |
 | `BEE_BUSY` | 503 | The gateway is already making as many calls to its Bee node as it allows at once (#588), and this request's own Bee call got no slot within a short wait. Also returned up front for a request to a paid route that carries a payment header (`X-PAYMENT`, or x402 v2's `PAYMENT-SIGNATURE`) when no slot is free. Either way, **nothing was charged** and nothing was sent to Bee that could change anything: a request that carries a payment, whose settlement has started, or that has already sent Bee a state-changing call (a purchase, a top-up, an upload; anything but GET and HEAD), whatever that call's outcome, is never given this answer and keeps its own, with its payment headers and code. `Retry-After` says how long to wait (default 5 s). | Wait `Retry-After` seconds, then retry. |
 | `RATE_LIMIT_EXCEEDED` | 429 | Too many requests from this client (global limiter). `retry_after` and the `Retry-After` header say how long to wait. | Wait `retry_after` seconds, then retry. |
 | `HTTP_<status>` | any | The endpoint raised no specific code. This includes the free-tier limit on stamps and uploads (`HTTP_429`, with `detail.payment_info`). | Act on the status: 4xx means fix the request, 429 means wait or pay, 502/503 means retry later. |
@@ -206,6 +206,7 @@ the route answers the same `404`, and a Bee outage there is a `502`.
 | `NOTARY_NOT_ENABLED` | 400 | `sign=notary` was requested, but the notary is off. | Upload without `sign`. |
 | `NOTARY_NOT_CONFIGURED` | 400 | `sign=notary` was requested, but the notary has no key. | Upload without `sign`, or ask the operator. |
 | `INVALID_DOCUMENT_FORMAT` | 400 | `sign=notary` needs a JSON document in the expected shape. | Fix the document (see [notary-guide.md](notary-guide.md)). |
+| `JSON_TOO_DEEP` | 400 | `sign=notary` document nests objects and arrays deeper than `NOTARY_MAX_JSON_DEPTH` (default 64). Checked before payment, so nothing is charged. | Flatten the document. |
 | `INVALID_SIGN_OPTION` | 400 | `sign` has an unknown value. | Use `sign=notary`, or leave it out. |
 
 ## Stamp problems on upload

@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 from app.core.config import settings
+from app.core.json_depth import json_depth_within
 from app.services.signing import (
     SigningService,
     SigningServiceError,
@@ -29,6 +30,16 @@ class ProvenanceError(Exception):
 class DocumentValidationError(ProvenanceError):
     """Raised when document validation fails."""
     pass
+
+
+class DocumentTooDeepError(DocumentValidationError):
+    """Raised when a document nests objects and arrays too deeply (#695)."""
+
+    def __init__(self, max_depth: int):
+        super().__init__(
+            f"Document nests objects and arrays too deeply. "
+            f"Maximum depth is {max_depth} levels."
+        )
 
 
 class NotaryNotEnabledError(ProvenanceError):
@@ -116,6 +127,15 @@ class ProvenanceService:
         Raises:
             DocumentValidationError: If document is invalid
         """
+        # Refuse a deeply nested document before parsing it: json.loads
+        # recurses once per level and raises RecursionError at a depth that
+        # depends on the interpreter, which answered 500 (#695). The bytes
+        # can be checked before decoding: UTF-8 never puts a bracket, quote
+        # or backslash byte inside a multi-byte character.
+        max_depth = settings.NOTARY_MAX_JSON_DEPTH
+        if not json_depth_within(raw_content, max_depth):
+            raise DocumentTooDeepError(max_depth)
+
         # Parse JSON
         try:
             content_str = raw_content.decode('utf-8')
@@ -124,6 +144,9 @@ class ProvenanceService:
             raise DocumentValidationError(f"Document must be valid UTF-8: {e}")
         except json.JSONDecodeError as e:
             raise DocumentValidationError(f"Document must be valid JSON: {e}")
+        except RecursionError:
+            # Fallback only: the check above should already have refused it.
+            raise DocumentTooDeepError(max_depth)
 
         # Check for required "data" field
         if not isinstance(document, dict):
@@ -178,7 +201,12 @@ class ProvenanceService:
         document, data_value = self.validate_document(raw_content)
 
         # Serialize the data field for signing (canonical JSON)
-        data_bytes = json.dumps(data_value, sort_keys=True, separators=(',', ':')).encode('utf-8')
+        try:
+            data_bytes = json.dumps(data_value, sort_keys=True, separators=(',', ':')).encode('utf-8')
+        except RecursionError:
+            # Fallback, as in validate_document: the depth limit keeps this
+            # far from the recursion limit (#695).
+            raise DocumentTooDeepError(settings.NOTARY_MAX_JSON_DEPTH)
 
         # Sign the data
         data_hash, timestamp_iso, signature, signer = self._signing_service.sign_with_timestamp(
@@ -204,8 +232,12 @@ class ProvenanceService:
         output_document = document.copy()
         output_document["signatures"] = existing_signatures + [notary_signature]
 
-        # Serialize to JSON
-        output_json = json.dumps(output_document, indent=2)
+        # Serialize to JSON. With indent, json.dumps uses the pure-Python
+        # encoder, which recurses once per level: the same fallback (#695).
+        try:
+            output_json = json.dumps(output_document, indent=2)
+        except RecursionError:
+            raise DocumentTooDeepError(settings.NOTARY_MAX_JSON_DEPTH)
 
         logger.info(f"Signed document with hash {data_hash[:16]}... at {timestamp_iso}")
 
