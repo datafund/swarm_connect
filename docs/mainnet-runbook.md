@@ -115,7 +115,7 @@ sudo caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile && sudo sy
 
 ## 3. Refunds and reconciliation
 
-The audit log is `data/x402_audit.jsonl` on the persistent volume (`/opt/swarm_connect_data/` on the host). Loki also receives the gateway's log lines.
+The audit log is `data/x402_audit.jsonl` on the persistent volume (`/opt/swarm_connect_data/` on the host). Loki also receives the gateway's log lines; to read them after a deploy, see "Reading the gateway's logs after a deploy (#661)" at the end of this section.
 
 | Situation | What the log shows | Action |
 |---|---|---|
@@ -146,6 +146,43 @@ Refunds are manual USDC transfers from the pay-to wallet to the payer address in
 **Payment state warnings in `/health`.** While the gateway cannot read or write `x402_settlement_unknown.json`, `/health` reports `status: degraded` and an `x402.warnings` entry starting `PAYMENT_STATE_UNAVAILABLE`, and every paid request gets `503 PAYMENT_STATE_UNAVAILABLE` (free tier unaffected). The warning names only the file and whether it is unreadable or unwritable; the full path, the error and any `.corrupt-<ts>` copy are in the log line (ERROR). Unreadable: repair it as below, then restart. Write failure (disk full, permissions on the data directory), also detected at startup by a test write: fix the cause; the gateway retries on the next paid request and resumes by itself, and the warning disappears. **Do not restart or redeploy before that:** entries recorded while writes failed exist only in memory and a restart loses them. Fix the cause, confirm the warning has cleared (a successful write), and only then restart. The gateway writes an entry before every settlement (write-ahead) and refuses to settle when it cannot, and removes it, also on disk, as soon as the facilitator answers definitely. So an entry left on disk after a restart is a real unknown outcome (one that got no answer, or a settlement cut off by a kill or crash), with one rare exception: a write-ahead whose request was cancelled or timed out before the facilitator was asked, and whose removal (a background write) had not finished when the process stopped or crashed. On a route that settles after its work (`after_work`), that entry refuses even the same-`X-PAYMENT` retry for 24 hours with `409 PAYMENT_AUTHORIZATION_OUTCOME_UNKNOWN`; the nonce check then shows it unused, and the client signs a new payment after `validBefore` or a `cancelAuthorization`. (Telling such an entry apart after a restart would need a further write per paid request, made before the facilitator is called; not done.) That entry only makes a refusal of that authorization a 409 instead of a 402, with no charge either way; match on the nonce as above and it shows no transfer. The idempotency store has the same kind of exception: a "settling" record whose write timed out (the client got `503 PAYMENT_STATE_UNAVAILABLE`, nothing settled) can land on disk after a crash that lost its removal; that key then answers `409 IDEMPOTENCY_KEY_SETTLEMENT_UNKNOWN` for 24 hours with nothing charged, and the nonce shows unused. A graceful restart leaves none behind for settled or refused payments. While the file cannot be written, a write is retried at most every 5 seconds (by paid requests or `/health` probes), so a failing disk is not hammered. An `x402.warnings` entry starting `IDEMPOTENCY_UNAVAILABLE` means the same for `x402_idempotency.json` (cause `unreadable`, `unwritable` or `unresponsive`), which refuses only keyed paid requests, so the status stays `ok`. Its writes run off the request path on their own I/O threads (separate from the settlement-unknown registry's), bounded by the same timeout: a write that fails or hangs refuses keyed paid requests only (`503 IDEMPOTENCY_UNAVAILABLE`), unkeyed paid requests keep working and the `/health` status stays `ok`; the gateway retries or probes in the background at most every 5 seconds. Writes of the whole file are coalesced: a burst of changes during a write costs one more write.
 
 **Hung disk under the payment state.** Symptoms: paid requests get `503 PAYMENT_STATE_UNAVAILABLE`, the first ones about 5 seconds late (`X402_SETTLEMENT_STATE_WRITE_TIMEOUT_SECONDS`), later ones at once; `/health` reports `status: degraded` with `PAYMENT_STATE_UNAVAILABLE: x402_settlement_unknown.json is unresponsive`; the log has an ERROR "settlement-state disk I/O is not responding". Cause: writes to the data volume do not return (a stuck network or block device, a frozen filesystem); the gateway writes a record before every settlement and will not settle without it. No payment was settled for these requests. (A **full** disk is different: writes fail at once with ENOSPC, and the cause shown is `unwritable`, as described above.) Recovery: fix the storage. The first write that completes clears the warning and paid requests resume by themselves; while no write is pending the gateway probes with a write at most every 5 seconds, so the warning also clears with no paid traffic. Paid requests are refused at once while the oldest pending write is older than the timeout. A process that is stopped while a write hangs still exits (the writer threads do not hold it), and the hung write never landed, so nothing is lost. It may leave a temporary `.tmp-*.json` file next to `x402_settlement_unknown.json` in the data directory; it is incomplete and safe to delete. `X402_SETTLEMENT_STATE_WRITE_TIMEOUT_SECONDS` (default 5) must be greater than 0 and at most 60; any other value, including `nan` or `inf`, stops the gateway at startup.
+
+### Reading the gateway's logs after a deploy (#661)
+
+A deploy or a config change replaces the gateway container, and `docker logs` shows only the new container. The earlier lines are in Grafana Cloud Loki, which receives everything the two gateway containers write.
+
+**Where they are.** The stream is `{job="swarm_connect/gateway"}`, with these labels (set in `monitoring/alloy/config.alloy`):
+
+- `environment`: `main` (production) or `development` (staging).
+- `container`: the compose service name, `provenance_gateway` or `provenance_gateway_dev`. It is not the container id, so the replaced container's lines are in the same stream as the new one. Find them by time.
+- `host`: the deploy host, from `HOST_LABEL`.
+- `level`: `DEBUG`, `INFO`, `WARNING`, `ERROR` or `CRITICAL`, taken from the start of the line. A line that does not start with a level, such as a traceback continuation, has no `level` label.
+
+Loki indexes only these labels. Any other search, such as a transaction hash, is a filter that Loki applies at query time. Loki keeps lines for the retention set in Grafana Cloud. This repository does not pin it (the 14 days in `CLAUDE.md` are for metrics).
+
+**How to read them.** In Grafana, open Explore, choose the Loki data source, and set the time range to the incident window. Start with one environment's warnings and errors:
+
+```
+{job="swarm_connect/gateway", environment="main", level=~"WARNING|ERROR|CRITICAL"}
+```
+
+To follow one payment or batch, filter on the transaction hash (the `tx=` field), the `nonce` or the batch id from the audit log. `|=` is case-sensitive, and `|~ "(?i)..."` ignores case:
+
+```
+{job="swarm_connect/gateway", environment="main"} |= "<tx hash>"
+{job="swarm_connect/gateway", environment="main"} |~ "(?i)<batch id>"
+```
+
+To see everything around a moment, including traceback lines, narrow the time range to a few minutes and drop the `level` filter: `{job="swarm_connect/gateway", environment="main"}`. On a single line, **Show context** shows the lines just before and after it. The dashboard `datafund.grafana.net/d/gateway-overview` has the same data in **Recent Errors and Warnings** (WARNING and above) and **Log Volume by Level**, filtered by its Environment selector.
+
+**What is not in Loki.**
+
+- Lines that Alloy had not read, or dropped, before the container was replaced. They are gone with the container. While the container still runs, read them with `docker logs` on the host before the next deploy.
+- Lines from before 2026-11-06. Log shipping was in the config from 2026-09-17, but Loki refused every push until the token got `logs:write` on 2026-11-06. This comes from the maintainer's comment on #661, not from a file in this repository.
+- Logs of the Bee nodes, Alloy and the reverse proxy. Alloy ships only the two gateway containers.
+- The x402 audit log. It is `x402_audit.jsonl` on the persistent volume (the start of this section) and survives container replacement.
+
+**If a query returns nothing**, check the environment and the time range first. Then check whether **Gateway logs dropped** or **Gateway logs missing in Loki** fired ("Log delivery alerts (#672)" in section 5). Both environments share one Alloy, which runs the config of the branch deployed last ("Which deploy adds the probe" in section 5).
 
 ## 4. Backups and restore
 

@@ -138,6 +138,20 @@ def test_runbook_readme_and_claude_md_name_both_alerts():
             assert title in text, (doc, title)
 
 
+LOG_PROCEDURE = "Reading the gateway's logs after a deploy (#661)"
+
+
+def test_runbook_section_3_has_the_log_reading_procedure():
+    """#661: the procedure to read a replaced container's logs is in section 3,
+    and CLAUDE.md points at it by its heading."""
+    with open(os.path.join(REPO_ROOT, "docs/mainnet-runbook.md")) as f:
+        section = f.read().split("\n## 3.")[1].split("\n## 4.")[0]
+    for needed in ("### " + LOG_PROCEDURE, '{job="swarm_connect/gateway", environment="main"', "docker logs", MISSING):
+        assert needed in section, needed
+    with open(os.path.join(REPO_ROOT, "CLAUDE.md")) as f:
+        assert LOG_PROCEDURE in f.read()
+
+
 def test_apply_grafana_dry_run_lists_both_rules():
     result = subprocess.run(
         [sys.executable, "scripts/apply_grafana.py", "--dry-run", "--only", "alerts"],
