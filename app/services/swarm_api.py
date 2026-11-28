@@ -5,8 +5,8 @@ import time
 import httpx2
 import logging
 import sys
-from typing import List, Dict, Any, Optional
-from urllib.parse import urljoin
+from typing import Iterable, List, Dict, Any, NamedTuple, Optional, Tuple
+from urllib.parse import quote, urljoin
 
 from app.core.config import settings
 from app.services.http_client import exc_text, get_client
@@ -886,6 +886,64 @@ class DownloadTooLargeError(Exception):
         self.limit_bytes = limit_bytes
 
 
+class CollectionPathNotFound(FileNotFoundError):
+    """Bee found the collection but no file at the requested path (#700).
+
+    Bee answers 404 `path address not found` only when it could read the
+    manifest and the path is not in it. Every other 404 (a reference that does
+    not exist, or one that is not a collection) stays a plain FileNotFoundError.
+    """
+
+
+async def _fetch_bzz(api_url: str, reference: str) -> Tuple[bytes, "httpx2.Headers"]:
+    """GET a bzz URL with the download size limit and deadline.
+
+    Streams the body and stops once it exceeds MAX_DOWNLOAD_SIZE_MB, so an
+    arbitrarily large reference cannot be pulled into memory (#353). One
+    deadline (DOWNLOAD_TIMEOUT_SECONDS) covers the whole transfer.
+
+    Returns the body and Bee's response headers.
+    """
+    limit = settings.MAX_DOWNLOAD_SIZE_MB * 1024 * 1024
+
+    async def fetch() -> Tuple[bytes, "httpx2.Headers"]:
+        client = get_client()
+        # identity: the limit must apply to the bytes held in memory, and a
+        # compressed response would be inflated chunk by chunk before counting.
+        async with client.stream("GET", api_url, timeout=60,
+                                 headers={"Accept-Encoding": "identity"}) as response:
+            if response.status_code == 404:
+                # Bee's 404 body is small JSON; read at most a little of it.
+                text = b""
+                async for chunk in response.aiter_bytes():
+                    text += chunk
+                    if len(text) > 4096:
+                        break
+                if b"path address not found" in text:
+                    raise CollectionPathNotFound(f"No file at that path in collection {reference}")
+                raise FileNotFoundError(f"Data not found on Swarm at reference {reference}")
+            response.raise_for_status()
+
+            declared = response.headers.get("content-length")
+            if declared and declared.isdigit() and int(declared) > limit:
+                raise DownloadTooLargeError(limit)
+
+            body = bytearray()
+            async for chunk in response.aiter_bytes():
+                if len(body) + len(chunk) > limit:
+                    raise DownloadTooLargeError(limit)
+                body += chunk
+            return bytes(body), response.headers
+
+    try:
+        # One deadline for the whole transfer: httpx2 timeouts apply per read.
+        return await asyncio.wait_for(fetch(), timeout=settings.DOWNLOAD_TIMEOUT_SECONDS)
+    except httpx2.HTTPError as e:
+        _record_bee_error("download")
+        logger.error(f"Error downloading data from Swarm API ({api_url}): {exc_text(e)}")
+        raise
+
+
 async def download_data_from_swarm(reference: str) -> bytes:
     """
     Downloads data from the Swarm network using a reference hash.
@@ -905,39 +963,41 @@ async def download_data_from_swarm(reference: str) -> bytes:
         DownloadTooLargeError: If the content exceeds the download limit
     """
     api_url = urljoin(str(settings.SWARM_BEE_API_URL), f"bzz/{reference.lower()}")
-    limit = settings.MAX_DOWNLOAD_SIZE_MB * 1024 * 1024
+    content, _ = await _fetch_bzz(api_url, reference)
+    logger.info(f"Successfully downloaded {len(content)} bytes from Swarm reference: {reference}")
+    return content
 
-    async def fetch() -> bytes:
-        client = get_client()
-        # identity: the limit must apply to the bytes held in memory, and a
-        # compressed response would be inflated chunk by chunk before counting.
-        async with client.stream("GET", api_url, timeout=60,
-                                 headers={"Accept-Encoding": "identity"}) as response:
-            if response.status_code == 404:
-                raise FileNotFoundError(f"Data not found on Swarm at reference {reference}")
-            response.raise_for_status()
 
-            declared = response.headers.get("content-length")
-            if declared and declared.isdigit() and int(declared) > limit:
-                raise DownloadTooLargeError(limit)
+class CollectionFile(NamedTuple):
+    content: bytes
+    content_type: Optional[str]          # Bee's Content-Type, as sent (may be empty)
+    content_disposition: Optional[str]   # Bee's Content-Disposition, as sent
 
-            body = bytearray()
-            async for chunk in response.aiter_bytes():
-                if len(body) + len(chunk) > limit:
-                    raise DownloadTooLargeError(limit)
-                body += chunk
-            return bytes(body)
 
-    try:
-        # One deadline for the whole transfer: httpx2 timeouts apply per read.
-        content = await asyncio.wait_for(fetch(), timeout=settings.DOWNLOAD_TIMEOUT_SECONDS)
-        logger.info(f"Successfully downloaded {len(content)} bytes from Swarm reference: {reference}")
-        return content
+async def download_collection_file(reference: str, segments: List[str],
+                                   directory: bool = False) -> CollectionFile:
+    """Download one file of a collection: Bee's `bzz/{reference}/{path}` (#700).
 
-    except httpx2.HTTPError as e:
-        _record_bee_error("download")
-        logger.error(f"Error downloading data from Swarm API ({api_url}): {exc_text(e)}")
-        raise
+    `segments` are the path's segments, already validated by the caller; each
+    is percent-encoded here, so a name with spaces, `#`, `?` or `%` reaches Bee
+    as that name. `directory=True` keeps a trailing slash, which makes Bee
+    serve that directory's index document (measured on Bee 2.8.1: Bee applies
+    the collection's index document to every directory).
+
+    Same size limit and deadline as download_data_from_swarm.
+
+    Raises:
+        CollectionPathNotFound: the collection has no file at that path
+        FileNotFoundError: any other 404 (unknown reference, not a collection)
+        DownloadTooLargeError, httpx2.HTTPError, asyncio.TimeoutError
+    """
+    path = "/".join(quote(s, safe="") for s in segments)
+    if directory:
+        path += "/"
+    api_url = urljoin(str(settings.SWARM_BEE_API_URL), f"bzz/{reference.lower()}/{path}")
+    content, headers = await _fetch_bzz(api_url, reference)
+    logger.info(f"Downloaded {len(content)} bytes from collection {reference}")
+    return CollectionFile(content, headers.get("content-type"), headers.get("content-disposition"))
 
 
 # Short cache so frequent /health calls don't hammer the Bee node.
@@ -1540,13 +1600,36 @@ def _bounded_tarinfo(max_extended_header_bytes: int):
     return BoundedTarInfo
 
 
+class TarSummary(NamedTuple):
+    """What inspect_tar learned in its one pass."""
+    file_count: int
+    # The `wanted` paths that name a regular file in the archive.
+    found: frozenset = frozenset()
+
+
+def collection_path(member_name: str) -> str:
+    """The path Bee stores a tar entry under in a collection.
+
+    Bee 2.8.1 cleans each entry name like Go's filepath.Clean, so
+    `./index.html` and `a//b/../index.html` are stored as `index.html`
+    (measured, #700). An entry whose name starts with `/` keeps it, and Bee
+    serves no path for it (measured), so it never matches a wanted name.
+    """
+    import posixpath
+    cleaned = posixpath.normpath(member_name)
+    if cleaned.startswith("//"):
+        cleaned = "/" + cleaned.lstrip("/")
+    return cleaned
+
+
 def inspect_tar(
     tar_bytes: bytes,
     max_members: Optional[int] = None,
     max_path_bytes: Optional[int] = None,
     max_path_depth: Optional[int] = None,
     max_extended_header_bytes: Optional[int] = None,
-) -> int:
+    wanted: Iterable[str] = (),
+) -> TarSummary:
     """Validate a manifest TAR archive in one streaming pass and count its files.
 
     Only an uncompressed tar is accepted (#694). With tarfile's 'r:*' a small
@@ -1561,10 +1644,14 @@ def inspect_tar(
     _bounded_tarinfo: no global PAX header, no sparse entries, each extended
     header at most max_extended_header_bytes, at most a few per entry.
 
+    `wanted` are collection paths (index and error documents, #700) to look
+    for: the result's `found` holds those that name a regular file, the only
+    kind Bee stores. Only the wanted set is kept, never the member names.
+
     Synchronous and CPU-bound: call it off the event loop.
 
     Returns:
-        The number of regular files in the archive.
+        TarSummary: the number of regular files, and the wanted paths found.
 
     Raises:
         TarRefused: compressed, not a tar, no files, a refused extension
@@ -1582,6 +1669,8 @@ def inspect_tar(
     if max_extended_header_bytes is None:
         max_extended_header_bytes = settings.MANIFEST_MAX_EXTENDED_HEADER_BYTES
     bounded = _bounded_tarinfo(max_extended_header_bytes)
+    wanted = frozenset(wanted)
+    found = set()
 
     members = 0
     files = 0
@@ -1616,6 +1705,10 @@ def inspect_tar(
                     )
                 if member.isfile():
                     files += 1
+                    if wanted:
+                        name = collection_path(member.name)
+                        if name in wanted:
+                            found.add(name)
                     # A plain tar holds its content, so the sizes can only add
                     # up to more than the upload when a header declares a size
                     # the archive does not carry (a PAX "size" record, say).
@@ -1637,14 +1730,16 @@ def inspect_tar(
         raise TarRefused(f"Invalid TAR archive: {e}") from None
     if files == 0:
         raise TarRefused("TAR archive contains no files")
-    return files
+    return TarSummary(files, frozenset(found))
 
 
 async def upload_collection_to_swarm(
     tar_data: bytes,
     stamp_id: str,
     deferred: bool = False,
-    redundancy_level: Optional[int] = None
+    redundancy_level: Optional[int] = None,
+    index_document: Optional[str] = None,
+    error_document: Optional[str] = None,
 ) -> str:
     """
     Uploads a TAR archive as a collection/manifest to the Swarm network.
@@ -1660,6 +1755,10 @@ async def upload_collection_to_swarm(
                   upload mode (chunks uploaded directly to network, ensuring immediate availability).
         redundancy_level: Erasure coding level (0-4). If None, uses DEFAULT_REDUNDANCY_LEVEL (2).
                          0=none, 1=medium, 2=strong, 3=insane, 4=paranoid
+        index_document: Sent as Swarm-Index-Document when set (#700): Bee serves
+                        it for the collection root and for every directory.
+        error_document: Sent as Swarm-Error-Document when set: Bee serves it,
+                        with status 200, for a path the collection lacks.
 
     Returns:
         The Swarm manifest reference hash
@@ -1680,6 +1779,10 @@ async def upload_collection_to_swarm(
         "Swarm-Redundancy-Level": str(effective_redundancy),
         "Swarm-Deferred-Upload": str(deferred).lower()
     }
+    if index_document:
+        headers["Swarm-Index-Document"] = index_document
+    if error_document:
+        headers["Swarm-Error-Document"] = error_document
 
     try:
         # Use longer timeout for collections (may contain many files)

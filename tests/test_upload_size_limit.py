@@ -3,6 +3,7 @@
 Tests for file upload size limit (Issue #100).
 Ensures uploads exceeding MAX_UPLOAD_SIZE_MB are rejected with 413.
 """
+from app.services.swarm_api import TarSummary
 import io
 import pytest
 from unittest.mock import patch, MagicMock
@@ -138,7 +139,7 @@ class TestManifestUploadSizeLimit:
         assert body["detail"]["code"] == "FILE_TOO_LARGE"
 
     @patch('app.api.endpoints.data.upload_collection_to_swarm', return_value="ref456")
-    @patch('app.api.endpoints.data.inspect_tar', return_value=1)
+    @patch('app.api.endpoints.data.inspect_tar', return_value=TarSummary(1))
     def test_manifest_within_limit_succeeds(self, mock_count, mock_upload):
         """TAR file within size limit should be accepted."""
         data = b"x" * 1024
@@ -150,7 +151,7 @@ class TestManifestUploadSizeLimit:
 
 
     @patch('app.api.endpoints.data.upload_collection_to_swarm', return_value="ref456")
-    @patch('app.api.endpoints.data.inspect_tar', return_value=1)
+    @patch('app.api.endpoints.data.inspect_tar', return_value=TarSummary(1))
     @patch('app.api.endpoints.data.settings')
     def test_manifest_at_exact_limit_succeeds(self, mock_settings, mock_count, mock_upload):
         """The manifest endpoint carried the same defect as the data endpoint.
@@ -170,7 +171,7 @@ class TestManifestUploadSizeLimit:
         assert response.status_code == 200, response.text
 
     @patch('app.api.endpoints.data.upload_collection_to_swarm', return_value="ref456")
-    @patch('app.api.endpoints.data.inspect_tar', return_value=1)
+    @patch('app.api.endpoints.data.inspect_tar', return_value=TarSummary(1))
     @patch('app.api.endpoints.data.settings')
     def test_manifest_one_byte_over_is_still_rejected(self, mock_settings, mock_count, mock_upload):
         """The envelope allowance must not become slack in the limit."""

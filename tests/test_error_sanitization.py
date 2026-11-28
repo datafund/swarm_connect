@@ -3,6 +3,7 @@
 Tests for error response sanitization (Issue #104).
 Ensures internal details (paths, URLs, exception messages) are not leaked in HTTP responses.
 """
+from app.services.swarm_api import TarSummary
 import io
 import pytest
 import httpx2
@@ -144,7 +145,7 @@ class TestManifestUploadErrorSanitization:
 
     @patch('app.api.endpoints.data.check_upload_failure_reason', return_value=None)
     @patch('app.api.endpoints.data.upload_collection_to_swarm')
-    @patch('app.api.endpoints.data.inspect_tar', return_value=1)
+    @patch('app.api.endpoints.data.inspect_tar', return_value=TarSummary(1))
     def test_manifest_connection_error_sanitized(self, mock_count, mock_upload, mock_failure):
         """Manifest upload errors should not expose Bee node URL."""
         mock_upload.side_effect = httpx2.ConnectError(

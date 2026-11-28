@@ -1,5 +1,6 @@
 # tests/test_deferred_upload.py
 """Tests for deferred upload mode functionality."""
+from app.services.swarm_api import TarSummary
 import pytest
 from unittest.mock import patch, MagicMock, AsyncMock
 import io
@@ -221,7 +222,7 @@ class TestManifestEndpointDeferredParameter:
             tar.addfile(info, io.BytesIO(data))
         tar_bytes = tar_buffer.getvalue()
 
-        mock_count.return_value = 1
+        mock_count.return_value = TarSummary(1)
         mock_upload.return_value = "abc123reference"
 
         client = TestClient(app)
@@ -253,7 +254,7 @@ class TestManifestEndpointDeferredParameter:
             tar.addfile(info, io.BytesIO(data))
         tar_bytes = tar_buffer.getvalue()
 
-        mock_count.return_value = 1
+        mock_count.return_value = TarSummary(1)
         mock_upload.return_value = "abc123reference"
 
         client = TestClient(app)

@@ -2,6 +2,7 @@
 """
 Tests for Prometheus metrics endpoint and custom metrics (Issue #180-#183).
 """
+from app.services.swarm_api import TarSummary
 import os
 import pytest
 from unittest.mock import patch, AsyncMock, MagicMock
@@ -323,7 +324,7 @@ class TestManifestUploadCounter:
         from app.services.metrics import uploads_total
 
         mock_upload.return_value = "ab" * 32
-        mock_count.return_value = 3
+        mock_count.return_value = TarSummary(3)
         mock_ownership.check_access.return_value = (True, "ok")
 
         # Create a valid tar archive

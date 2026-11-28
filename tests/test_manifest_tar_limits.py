@@ -442,7 +442,7 @@ class TestTarfileHooksStillExist:
             info.pax_headers = {"comment": "x" * 2048}   # a PAX header of about 2 KiB
             tar.addfile(info, io.BytesIO(b"ok"))
         data = buf.getvalue()
-        assert inspect_tar(data) == 1                      # under the default cap
+        assert inspect_tar(data).file_count == 1                      # under the default cap
         with pytest.raises(TarRefused) as refused:
             inspect_tar(data, max_extended_header_bytes=1024)
         assert refused.value.code == "TAR_EXTENDED_HEADER_REFUSED"

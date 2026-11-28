@@ -452,7 +452,8 @@ async def read_root():
     2. Add header `X-Payment-Mode: free` to all POST requests
     3. Acquire a stamp: `POST /api/v1/pool/acquire`
     4. Upload data: `POST /api/v1/data/?stamp_id=...`
-    5. Download data: `GET /api/v1/data/{reference}` (always free, no headers needed)
+    5. Download data: `GET /api/v1/data/{reference}` (always free, no headers needed);
+       a file of a collection: `GET /api/v1/data/{reference}/{path}`
     """
     logger.debug("Health check endpoint accessed.")
 

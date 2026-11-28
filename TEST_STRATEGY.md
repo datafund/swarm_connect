@@ -146,6 +146,32 @@ RUN_LIVE_TESTS=1 pytest tests/test_integration_gateway.py -v -s          # stagi
 RUN_LIVE_TESTS=1 GATEWAY_URL=http://localhost:8000 pytest ... -v -s      # a local gateway
 ```
 
+`tests/test_collection_bee_roundtrip.py`, the collection round trip (#700), is
+opt-in on `RUN_BEE_COLLECTION_TEST=1`. It uploads tars through the gateway app (in
+process) to a real Bee node and downloads every file back by its path, the root
+with and without `index.html`, a directory index and an error document. It needs a
+Bee API URL and a usable postage batch; uploads are deferred, so one node without
+peers works. A local Bee 2.8.1 (arm64; `bee dev` no longer exists in 2.8.1):
+
+1. Run `ethersphere/bee-factory-blockchain:v2.8.1-arm64` (anvil) on a Docker
+   network with the alias `anvil`. Load its chain: send `anvil_loadState` with
+   the `state` value from `/anvil-state.json` in the image, then `evm_setTime`
+   (now) and `anvil_mine`.
+2. Copy `/home/bee/.bee` out of `ethersphere/bee-factory-queen:v2.8.1-arm64`, and
+   run `ethersphere/bee:2.8.1` on the same network with that directory mounted
+   and the queen image's command flags (`docker inspect` shows them; add
+   `--data-dir`). Publish the API port on `127.0.0.1` only, on a port nothing else
+   uses.
+3. Buy a depth-17 batch (`POST /stamps/10000000000/17`) and wait until
+   `GET /stamps/<id>` shows `usable: true`.
+
+```bash
+RUN_BEE_COLLECTION_TEST=1 BEE_COLLECTION_TEST_URL=http://127.0.0.1:<port>/ \
+  BEE_COLLECTION_TEST_STAMP=<batch id> pytest tests/test_collection_bee_roundtrip.py -s
+```
+
+Remove the containers afterwards.
+
 `tests/test_bee_keys_drill.py`, the Bee keystore restore drill (#494), is opt-in
 on its own switch, `RUN_BEE_DRILL=1`. It needs a local Docker daemon and the `age`
 CLI. It uses only a throwaway identity, runs every Bee container with `--network
