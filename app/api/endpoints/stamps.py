@@ -837,7 +837,7 @@ async def _finish_pending_purchase(request: Request, label: str, depth: int, amo
                 swarm_api.get_chainstate(), _LATE_EXPIRY_PRICE_TIMEOUT_SECONDS))["currentPrice"])
             expires_at = expiry_from_amount(amount, price)
         except Exception as e:
-            logger.warning(f"No expiry for late-delivered batch {batch_id[:16]}: {e!r}")
+            logger.warning(f"No expiry for late-delivered batch {batch_id[:16]}: {exc_text(e)}")
         finally:
             body = StampPurchaseResponse(batchID=batch_id, message="Postage stamp purchased successfully",
                                          expires_at=expires_at)

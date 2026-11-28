@@ -167,3 +167,65 @@ def test_bee_refusal_of_a_paid_purchase_logs_no_bee_text(env, monkeypatch, caplo
     lines = [m for m in _messages(caplog) if "Bee refused a paid purchase" in m]
     assert len(lines) == 1 and lines[0].endswith("): HTTPStatusError: HTTP 400")
     _assert_clean(lines)
+
+
+def test_late_delivery_expiry_read_logs_no_bee_text(env, caplog):  # noqa: F811
+    """The price read for a late-delivered batch's expiry is a Bee call; it
+    logged repr(e), which holds the reason phrase and the URL with its query."""
+    from app.services import swarm_api
+    from tests.test_paid_purchase_lost_response import BATCH
+    app, fac, buy, find = env
+    late = {"now": False}
+    chainstate = {"currentPrice": "24000", "minimumValidityBlocks": 17280, "block": 180000}
+
+    async def get_chainstate(*args, **kwargs):
+        if late["now"]:
+            raise _status_error(503)
+        return chainstate
+
+    async def slow_buy(**kwargs):
+        await asyncio.sleep(0.2)
+        late["now"] = True
+        return BATCH
+
+    buy.side_effect = slow_buy
+    with patch.object(settings, "SWARM_STAMP_PURCHASE_TIMEOUT_SECONDS", 0.05), \
+            patch("app.services.swarm_api.get_chainstate", new=get_chainstate), \
+            caplog.at_level(logging.WARNING):
+        first, retry = _run_pending(app, None, key="k-late-expiry-logged")
+    assert first.status_code == 202 and retry.status_code == 201
+    assert retry.json()["expires_at"] is None
+    lines = [m for m in _messages(caplog) if "No expiry for late-delivered batch" in m]
+    assert len(lines) == 1 and lines[0].endswith(": HTTPStatusError: HTTP 503"), lines
+    _assert_clean(lines)
+    assert swarm_api.get_chainstate is not get_chainstate  # the patch is undone
+
+
+def test_pool_allowance_refusal_price_failure_logs_no_bee_text(monkeypatch, tmp_path, caplog):
+    """Pricing the 402 for a spent pool allowance reads Bee's chainstate; when
+    that fails the 429 is answered and the failure logged without Bee's text."""
+    from tests.test_pool_allowance_refusal_metric import APP, _acquire
+    from app.api.models.stamp import SIZE_PRESETS
+    from app.services import pool_allowance
+    from app.services.pool_allowance import PoolAllowanceTracker
+    import app.api.endpoints.pool as pool_ep
+    monkeypatch.setattr(settings, "STAMP_POOL_ENABLED", True)
+    monkeypatch.setattr(settings, "X402_ENABLED", True)
+    monkeypatch.setattr(settings, "X402_NETWORK", "base-sepolia")
+    monkeypatch.setattr(settings, "X402_ALLOW_TESTNET_PAID_BYPASS", True)  # so the 402 is offered
+    monkeypatch.setattr(settings, "X402_PAY_TO_ADDRESS", "0x" + "ab" * 20)
+    monkeypatch.setattr(settings, "POOL_DAILY_ALLOWANCES", f"{APP}=0")
+    monkeypatch.setattr(settings, "POOL_DEFAULT_DAILY_ALLOWANCE", 0)
+    tracker = PoolAllowanceTracker(state_file=str(tmp_path / "a.json"))
+    monkeypatch.setattr(pool_allowance, "pool_allowance_tracker", tracker)
+    monkeypatch.setattr(pool_ep, "pool_allowance_tracker", tracker)
+    monkeypatch.setattr(pool_ep.stamp_pool_manager, "get_available_stamp",
+                        lambda d: type("S", (), {"depth": SIZE_PRESETS["small"]})())
+    with patch("app.services.swarm_api.get_chainstate", new=AsyncMock(side_effect=_status_error(503))), \
+            caplog.at_level(logging.WARNING):
+        resp = _acquire({"Origin": APP})
+    assert resp.status_code == 429, resp.text
+    lines = [m for m in _messages(caplog) if "Could not price the allowance refusal" in m]
+    assert lines == ["Could not price the allowance refusal, answering 429: HTTPStatusError: HTTP 503"], \
+        _messages(caplog)
+    _assert_clean(lines)
