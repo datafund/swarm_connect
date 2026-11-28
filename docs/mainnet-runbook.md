@@ -158,9 +158,9 @@ A deploy or a config change replaces the gateway container, and `docker logs` sh
 - `host`: the deploy host, from `HOST_LABEL`. When `HOST_LABEL` is unset, the label is empty or absent (`config.alloy` sets it to the empty value), so a `host=` filter matches nothing from that host.
 - `level`: `DEBUG`, `INFO`, `WARNING`, `ERROR` or `CRITICAL`, taken from the start of the line. A line that does not start with a level, such as a traceback continuation, has no `level` label.
 
-Loki indexes only these labels. Any other search, such as a transaction hash, is a filter that Loki applies at query time. Loki keeps lines for the retention set in Grafana Cloud. This repository does not pin it (the 14 days in `CLAUDE.md` are for metrics).
+Loki indexes only `job` and these labels. Any other search, such as a transaction hash, is a filter that Loki applies at query time. Loki keeps lines for the retention set in Grafana Cloud. This repository does not pin it (the 14 days in `CLAUDE.md` are for metrics), and recording the configured value is tracked in #726.
 
-**How to read them.** In Grafana, open Explore, choose the Loki data source, and set the time range to the incident window. Start with one environment's warnings and errors:
+**How to read them.** The steps in this part, Explore, **Show context** and the `|=` and `|~` filters, are Grafana and LogQL behaviour, not gateway configuration. In Grafana, open Explore, choose the Loki data source, and set the time range to the incident window. Start with one environment's warnings and errors:
 
 ```
 {job="swarm_connect/gateway", environment="main", level=~"WARNING|ERROR|CRITICAL"}
@@ -173,7 +173,7 @@ To follow one payment or batch, filter on the transaction hash (the `tx=` field 
 {job="swarm_connect/gateway", environment="main"} |~ "(?i)<batch id>"
 ```
 
-To see everything around a moment, including traceback lines, narrow the time range to a few minutes and drop the `level` filter: `{job="swarm_connect/gateway", environment="main"}`. On a single line, **Show context** shows the lines just before and after it. The dashboard `datafund.grafana.net/d/gateway-overview` has two log panels, both filtered by its Environment selector. **Recent Errors and Warnings** shows the lines at WARNING and above, with the same query as the first example. **Log Volume by Level** shows their rate per level, not the lines.
+To see everything around a moment, including traceback lines, narrow the time range to a few minutes and drop the `level` filter: `{job="swarm_connect/gateway", environment="main"}`. On a single line, **Show context** shows the lines just before and after it. The dashboard `datafund.grafana.net/d/gateway-overview` has two log panels, both filtered by its Environment selector. **Recent Errors and Warnings** shows the lines at WARNING and above, with the same query as the first example, but with the Environment selector in place of `environment="main"`. **Log Volume by Level** shows the rate of all lines per level, INFO and lines without a level included, not the lines themselves.
 
 **What is not in Loki.**
 
