@@ -6,8 +6,6 @@ comparing its length with CHUNK_UPLOAD_MAX_BYTES_PER_REQUEST. These tests drive
 the production app over raw ASGI with a receive callable that counts what it
 hands out, so they see exactly how much of the body the app pulled in.
 """
-import asyncio
-import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -15,6 +13,7 @@ import pytest
 from app.main import app
 from app.services.bandwidth_credit import BandwidthCreditManager
 from app.services.bandwidth_free_tier import BandwidthFreeTierTracker
+from tests.asgi_body import CountingBody, call
 
 VALID_STAMP = "a" * 226
 CAP = 4104
@@ -32,51 +31,12 @@ def _settings(x402=False):
     return ms
 
 
-class _Body:
-    """An ASGI receive that serves `total` bytes in `piece`-sized messages and
-    counts how many bytes the app actually asked for."""
-
-    def __init__(self, total, piece, refuse=False):
-        self.total = total
-        self.piece = piece
-        self.refuse = refuse
-        self.sent = 0
-        self.calls = 0
-
-    async def __call__(self):
-        self.calls += 1
-        if self.refuse:
-            raise AssertionError("the body was read")
-        if self.sent >= self.total:
-            # The app reads past the end only when it waits for a disconnect.
-            await asyncio.sleep(3600)
-        n = min(self.piece, self.total - self.sent)
-        self.sent += n
-        return {"type": "http.request", "body": b"x" * n,
-                "more_body": self.sent < self.total}
+def _Body(total, piece, refuse=False):
+    return CountingBody(total, piece, refuse=refuse)
 
 
 def _call(receive, headers):
-    scope = {
-        "type": "http", "asgi": {"version": "3.0"}, "http_version": "1.1",
-        "method": "POST", "scheme": "http", "path": "/api/v1/chunks/",
-        "raw_path": b"/api/v1/chunks/", "root_path": "", "query_string": b"",
-        "headers": [(k.lower().encode(), v.encode()) for k, v in headers.items()],
-        "client": ("127.0.0.1", 50000), "server": ("testserver", 80),
-    }
-    out = {"status": None, "body": b""}
-
-    async def send(message):
-        if message["type"] == "http.response.start":
-            out["status"] = message["status"]
-        elif message["type"] == "http.response.body":
-            out["body"] += message.get("body", b"")
-
-    async def run():
-        await asyncio.wait_for(app(scope, receive, send), timeout=10)
-
-    asyncio.run(run())
-    return out["status"], json.loads(out["body"] or b"null")
+    return call(app, "/api/v1/chunks/", receive, headers)
 
 
 def _code(body):
@@ -181,3 +141,17 @@ def test_refused_body_uses_no_free_quota(headers):
                                                  "X-Payment-Mode": "free", **headers})
     assert (status, _code(body)) == (413, "CHUNK_TOO_LARGE")
     assert tracker._usage == {}
+
+
+@pytest.mark.parametrize("content_type", ["application/json", "text/json", "application/x+json"])
+def test_json_content_type_does_not_send_a_chunk_through_the_json_read(content_type):
+    """BodyLimitMiddleware skipped the chunk path only without a Content-Type,
+    so a JSON one with chunked encoding was read in full first (#696)."""
+    piece = 1000
+    receive = _Body(20_000_000, piece)
+    with patch("app.api.endpoints.chunks.settings", _settings()):
+        status, body = _call(receive, {"Swarm-Postage-Stamp": VALID_STAMP,
+                                       "Content-Type": content_type,
+                                       "Transfer-Encoding": "chunked"})
+    assert (status, _code(body)) == (413, "CHUNK_TOO_LARGE")
+    assert CAP < receive.sent <= CAP + piece

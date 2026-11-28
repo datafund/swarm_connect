@@ -447,6 +447,12 @@ async def upload_chunk(
             detail="Invalid response from Swarm API. Please try again.",
         )
 
+    # Billed for good: the debit or quota use stands, with no refund to come.
+    # The rate limiter counts an exempted upload afterwards only when this is
+    # unset, so refusals and refunded Bee failures are counted (#696).
+    if bytes_charged is not None:
+        request.state.chunk_billed = True
+
     chunk_uploads_total.labels(status="success", mode=mode).inc()
     chunk_upload_bytes_total.inc(chunk_len)
 

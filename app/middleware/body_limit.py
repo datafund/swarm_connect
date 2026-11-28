@@ -70,6 +70,28 @@ def _check_nesting_depth(data: bytes, max_depth: int) -> bool:
     return True
 
 
+# The chunk upload route, with and without its trailing slash (the latter only
+# redirects). Exact paths: other spellings are not the route.
+_CHUNK_UPLOAD_PATHS = {f"{settings.API_V1_STR}/chunks", f"{settings.API_V1_STR}/chunks/"}
+
+
+async def _read_capped(request: Request, max_bytes: int):
+    """The request body, or None as soon as it is over max_bytes.
+
+    Reading stops at the first message that takes the total over the limit, so
+    at most max_bytes plus that message is held. A body within the limit is
+    stored as `request._body`, which is what `request.body()` does: the
+    BaseHTTPMiddleware request replays it to the route from there.
+    """
+    body = bytearray()
+    async for part in request.stream():
+        body += part
+        if len(body) > max_bytes:
+            return None
+    request._body = bytes(body)
+    return request._body
+
+
 class BodyLimitMiddleware(BaseHTTPMiddleware):
     """
     Middleware to limit request body size and JSON nesting depth.
@@ -80,6 +102,12 @@ class BodyLimitMiddleware(BaseHTTPMiddleware):
     """
 
     async def dispatch(self, request: Request, call_next):
+        # Raw chunk uploads read their own body with their own, much smaller,
+        # cap (#696). Skipped whatever the Content-Type: a JSON one used to send
+        # a chunk upload through the read below.
+        if request.url.path in _CHUNK_UPLOAD_PATHS:
+            return await call_next(request)
+
         content_type = (request.headers.get("content-type") or "").lower()
 
         # JSON bodies, including +json types and requests with no Content-Type
@@ -89,13 +117,7 @@ class BodyLimitMiddleware(BaseHTTPMiddleware):
         is_json = "json" in content_type
         if content_type and not is_json:
             return await call_next(request)
-        if not content_type and (
-            request.method in ("GET", "HEAD", "OPTIONS", "DELETE")
-            # Raw chunk uploads are binary and often sent without a
-            # Content-Type; a depth scan would misread random bytes as nested
-            # JSON. The route reads the body itself with its own size limit.
-            or request.url.path.rstrip("/") == f"{settings.API_V1_STR}/chunks"
-        ):
+        if not content_type and request.method in ("GET", "HEAD", "OPTIONS", "DELETE"):
             return await call_next(request)
 
         max_bytes = settings.MAX_JSON_BODY_BYTES
@@ -118,13 +140,13 @@ class BodyLimitMiddleware(BaseHTTPMiddleware):
             except ValueError:
                 pass
 
-        # Read body for actual size and depth check
-        body = await request.body()
+        # Read body for actual size and depth check, stopping once it is over
+        # the limit: request.body() read all of it first, so a chunked body
+        # with no Content-Length was buffered whatever its size (#696).
+        body = await _read_capped(request, max_bytes)
 
-        if len(body) > max_bytes:
-            logger.warning(
-                f"JSON body rejected: {len(body)} bytes exceeds limit of {max_bytes} bytes"
-            )
+        if body is None:
+            logger.warning(f"JSON body rejected: over the limit of {max_bytes} bytes")
             return JSONResponse(
                 status_code=413,
                 content=_error("BODY_TOO_LARGE", f"Request body too large. "
