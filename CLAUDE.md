@@ -87,7 +87,7 @@ python -m pytest tests/test_manifest_upload.py -v
 - Outbound requests carry `User-Agent: python-httpx2/<version>`
 - TLS: httpx2 does not use certifi. On Linux (the image) it verifies against OpenSSL's default CA file, the OS bundle from `ca-certificates` (`/etc/ssl/certs/ca-certificates.crt`); `truststore` (the OS store) only on macOS and Windows. `SSL_CERT_FILE`/`SSL_CERT_DIR` override it. `image.yml` checks the bundle and httpx2's loaded CAs inside the built image, offline. It also runs three offline handshakes there: a local TLS server with a fresh self-signed certificate must be refused by default httpx2, accepted by a client that trusts that certificate, and refused for another host name
 - Its transport counts `PoolTimeout`s and in-flight requests, and replaces the client when the pool is stuck (#587, see Environment Configuration)
-- `exc_text(e)` gives `Type: message`, or just the type when the message is empty (httpx2 timeouts), for error log lines
+- `exc_text(e)` gives `Type: message`, or just the type when the message is empty (httpx2 timeouts), for error log lines. It leaves out text the server controls (#659): an `HTTPStatusError` gives `HTTPStatusError: HTTP <status>` (its `str()` holds the reason phrase and the full URL with its query, which can carry an RPC or price-feed key), and a `ProtocolError` or `DecodingError` gives only its type ("illegal status line: <server bytes>"), except httpcore2's fixed "Server disconnected" messages. Log a Bee or RPC error with `exc_text(e)`, not `{e}`. Tests: `tests/test_exc_text_server_text.py`
 - Its transport is wrapped by the Bee call gate (`app/services/bee_gate.py`, #588), which caps Bee calls in flight; see Environment Configuration
 
 **Swarm Integration (`app/services/swarm_api.py`)**:

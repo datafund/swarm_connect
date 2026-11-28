@@ -760,8 +760,8 @@ async def _finish_pending_purchase(request: Request, label: str, depth: int, amo
                 in_flight = False
             except httpx2.HTTPError as e:
                 if not _outcome_unknown(e):
-                    # The full text, which _bee_error_detail leaves out (#549).
-                    logger.error(f"Bee refused a paid purchase (label {label}, tx {tx}): {e}")
+                    # Type and status only: the log reaches the public deploy log (#659).
+                    logger.error(f"Bee refused a paid purchase (label {label}, tx {tx}): {exc_text(e)}")
                     # A definite 4xx spent nothing: give the hold back now rather
                     # than keep it until midnight (#468). Any other answer may
                     # have spent, so it stays charged and is counted as uncertain.
@@ -953,7 +953,7 @@ async def purchase_stamp(
                     start_block = swarm_api.coerce_int((await swarm_api.get_chainstate()).get("block"), -1)
                     start_block = start_block if start_block >= 0 else None
                 except Exception as e:
-                    logger.warning(f"No chain block before a paid purchase: {e}")
+                    logger.warning(f"No chain block before a paid purchase: {exc_text(e)}")
 
             # Collect the payment immediately before the purchase: every check
             # above can refuse the request, and a refusal must not cost anything.

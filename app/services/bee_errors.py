@@ -4,8 +4,9 @@
 httpx2's HTTPStatusError text names the request URL, which is the internal Bee
 API address (or an RPC endpoint, which can carry an API key). Responses that
 anyone can read -- /health, /pool/status, stamp purchase and extend errors --
-name a failure by its HTTP status or exception class instead, and the full
-text goes to the log.
+name a failure by its HTTP status or exception class instead. The log gets
+http_client.exc_text(), which also leaves the URL and the reason phrase out
+of an HTTPStatusError, because the log reaches the public deploy log (#659).
 
 Bee's own message is still worth showing ("out of funds"), but it is response
 text: a proxy's error page or a Go network error can quote a URL, an IP, a
