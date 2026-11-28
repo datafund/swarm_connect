@@ -68,6 +68,23 @@ def test_a_percent_encoded_configured_secret_is_redacted(monkeypatch):
     assert msg == "HTTP Request: POST /v2/<secret> 200"
 
 
+@pytest.mark.parametrize("secret", [
+    'Key"1234abcXYZ{}|^`',  # httpx2 keeps "|" and "^" in a path but encodes the rest
+    "Key1234abcXYZ" + "".join(c for c in "!\"$&'()*+,;:<=>@[\\]^`{|}~"),
+    "Key1234abcXYZ\u00e9\u65e5",  # non-ASCII, UTF-8 percent-encoded
+])
+def test_a_configured_secret_is_redacted_as_httpx2_encodes_it(monkeypatch, secret):
+    url = "https://rpc.example/v2/" + secret
+    monkeypatch.setattr(settings, "BASE_RPC_URL", url)
+    rec = _request_record(url)
+    raw = httpx2.URL(url).raw_path.decode("ascii")
+    assert raw != "/v2/" + secret  # the premise: httpx2 percent-encodes part of it
+    http_log.Httpx2RequestLogFilter().filter(rec)
+    msg = rec.getMessage()
+    assert "1234abcXYZ" not in msg, (raw, msg)
+    assert msg == "HTTP Request: POST /v2/<secret> 200", (raw, msg)
+
+
 def test_unconfigured_paths_pass_unchanged(monkeypatch):
     monkeypatch.setattr(settings, "BASE_RPC_URL", f"https://rpc.example/v2/{PLANTED}")
     ref = "ab12" * 16

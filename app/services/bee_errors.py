@@ -581,9 +581,11 @@ def without_addresses(text: str) -> str:
     return best.translate(_FINAL)
 
 
-# Characters a URL path keeps unencoded besides letters, digits and "-._~"
-# (RFC 3986 sub-delims, ":" and "@"): how httpx2 may write a secret in a path.
-_PATH_SAFE = "!$&'()*+,;=:@"
+# The printable ASCII characters httpx2 leaves unencoded in a URL path: all
+# but space, '"', "#", "<", ">", "?", "`", "{" and "}" (the WHATWG path
+# percent-encode set, httpx2._urlparse.PATH_SAFE). A configured secret is
+# matched in the form httpx2 writes it, and fully encoded as well.
+_PATH_SAFE = "".join(chr(i) for i in range(0x21, 0x7F) if chr(i) not in '"#<>?`{}')
 
 
 @functools.lru_cache(maxsize=8)

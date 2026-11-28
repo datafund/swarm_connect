@@ -18,9 +18,11 @@ A secret in the path of a configured URL (an RPC provider's /v2/<KEY>) is
 replaced with <secret> by bee_errors.without_secrets() (#659), which matches
 the secrets bee_errors collects from SWARM_BEE_API_URL, GNOSIS_RPC_URL,
 BASE_RPC_URL, X402_FACILITATOR_URL and X402_BZZ_PRICE_FEED_URL, in any letter
-case and percent-encoded. A key of one letter case only ("abcdefghijklmnop")
-is not collected there, so it is not replaced either. If the redaction fails,
-the path is logged as /<redacted>; the filter never raises.
+case and percent-encoded the way httpx2 writes a path. Two kinds of key are
+not collected there, so they are not replaced either: a segment without a
+run of 8 or more letters and digits ("/v2/aB3d5f7"), and a key of one letter
+case only ("abcdefghijklmnop"). If the redaction fails, the path is logged
+as /<redacted>; the filter never raises.
 
 httpcore2 traces at DEBUG only, which the gateway never enables. Should
 someone turn DEBUG on, two kinds of its lines are rewritten: the
