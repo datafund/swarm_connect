@@ -96,7 +96,7 @@ and problem reports, not a refund channel.
 | `BODY_TOO_LARGE` | 413 | A JSON body is over the gateway's JSON size limit. | Send a smaller body. File uploads use multipart, which this limit does not apply to. |
 | `JSON_TOO_DEEP` | 400 | A JSON body is nested too deeply. | Flatten the body. |
 | `BEE_BUSY` | 503 | The gateway is already making as many calls to its Bee node as it allows at once (#588), and this request's own Bee call got no slot within a short wait. Also returned up front for a request to a paid route that carries a payment header (`X-PAYMENT`, or x402 v2's `PAYMENT-SIGNATURE`) when no slot is free. Either way, **nothing was charged** and nothing was sent to Bee that could change anything: a request that carries a payment, whose settlement has started, or that has already sent Bee a state-changing call (a purchase, a top-up, an upload; anything but GET and HEAD), whatever that call's outcome, is never given this answer and keeps its own, with its payment headers and code. `Retry-After` says how long to wait (default 5 s). | Wait `Retry-After` seconds, then retry. |
-| `RATE_LIMIT_EXCEEDED` | 429 | Too many requests from this client (global limiter). `retry_after` and the `Retry-After` header say how long to wait. | Wait `retry_after` seconds, then retry. |
+| `RATE_LIMIT_EXCEEDED` | 429 | Too many requests from this client (global limiter). `retry_after` and the `Retry-After` header say how long to wait. Chunk uploads count too, unless they present a credit token whose balance covers the chunk (#696). | Wait `retry_after` seconds, then retry. |
 | `HTTP_<status>` | any | The endpoint raised no specific code. This includes the free-tier limit on stamps and uploads (`HTTP_429`, with `detail.payment_info`). | Act on the status: 4xx means fix the request, 429 means wait or pay, 502/503 means retry later. |
 
 ## Payments and pricing
@@ -235,7 +235,7 @@ These come back as 400 when an upload fails because of its stamp, either from
 | `MISSING_STAMP` | 400 | The `Swarm-Postage-Stamp` header is missing. | Send the marshaled stamp for the chunk. |
 | `INVALID_STAMP` | 400 | `Swarm-Postage-Stamp` is not a 113-byte hex-encoded marshaled stamp. | Fix the encoding. |
 | `EMPTY_CHUNK` | 400 | The chunk body is empty. | Send the chunk bytes. |
-| `CHUNK_TOO_LARGE` | 413 | The chunk is over the maximum chunk size. | Chunks are at most 4096 bytes of payload plus the span. |
+| `CHUNK_TOO_LARGE` | 413 | The chunk is over the maximum chunk size (`CHUNK_UPLOAD_MAX_BYTES_PER_REQUEST`). A declared `Content-Length` over the limit is refused before the body is read; without one, reading stops at the first part of the body that takes it over the limit. Nothing is debited from credit or the free quota. | Chunks are at most 4096 bytes of payload plus the span. |
 
 ## Diagnostics
 
