@@ -72,8 +72,9 @@ def _peer(request: Request) -> str:
 
     Not forgeable only because uvicorn's own proxy-header handling is off
     (`--no-proxy-headers` in the Dockerfile, `proxy_headers=False` in run.py).
-    With it on, uvicorn replaces a loopback peer with the X-Forwarded-For value,
-    unchecked, before this code runs (#697).
+    With it on, uvicorn replaces the peer with the X-Forwarded-For value,
+    unchecked, before this code runs, whenever the peer is in
+    FORWARDED_ALLOW_IPS (loopback by default) (#697).
 
     Used as it is, address or not (a test client's peer is "testclient"). The
     UNKNOWN key exists only for a connection with no peer at all, and every
