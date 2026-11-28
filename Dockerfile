@@ -56,5 +56,7 @@ RUN groupadd --system --gid 10001 app \
     && chown app:app /app/data /app/logs
 USER app
 
-# Command to run the application
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--no-server-header", "--timeout-graceful-shutdown", "10"]
+# Command to run the application. --no-proxy-headers: uvicorn would otherwise
+# replace the client address from X-Forwarded-For, unchecked, whenever the peer
+# is loopback; app/core/client_ip.py is the only reader of that header (#697).
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--no-server-header", "--no-proxy-headers", "--timeout-graceful-shutdown", "10"]
