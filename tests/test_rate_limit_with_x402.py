@@ -398,3 +398,101 @@ def test_production_app_counts_funded_uploads_that_end_unbilled(tmp_path):
                              capture_output=True, text=True, timeout=60)
         lines = out.stdout.strip().splitlines()
         assert lines[-len(expected):] == expected, out.stdout + out.stderr[-2000:]
+
+
+# --------------------------------------------------------------------------- #
+# Concurrent credit-token uploads: the slot is reserved before the request runs
+# (#696 review round 2). Checking first and counting afterwards let every
+# request already in flight through, however many there were.
+# --------------------------------------------------------------------------- #
+def _real_upload_app(monkeypatch, ledger, forward, per_minute=2):
+    """The real chunk router behind the real limiter, with Bee replaced by `forward`."""
+    import app.api.endpoints.chunks as chunks
+    settings = _composed(monkeypatch, per_minute=per_minute)
+    monkeypatch.setattr(settings, "CHUNK_UPLOAD_ENABLED", True)
+    monkeypatch.setattr(chunks, "bandwidth_credit_manager", ledger)
+    monkeypatch.setattr(chunks, "upload_chunk_to_swarm", forward)
+    app = FastAPI()
+    app.include_router(chunks.router, prefix="/api/v1/chunks")
+    app.add_middleware(RateLimitMiddleware, counter=SlidingWindowCounter())
+    return app
+
+
+def _concurrent_posts(app, n, headers):
+    import asyncio
+    import httpx2
+
+    async def run():
+        transport = httpx2.ASGITransport(app=app)
+        async with httpx2.AsyncClient(transport=transport, base_url="http://testserver") as c:
+            rs = await asyncio.gather(*(c.post("/api/v1/chunks/", content=b"x" * 4104, headers=headers)
+                                        for _ in range(n)))
+        return sorted(r.status_code for r in rs)
+
+    return asyncio.run(run())
+
+
+def _slow_forward(fail, calls):
+    import asyncio
+    import httpx2
+
+    async def forward(chunk, stamp, deferred=False):
+        calls.append(1)
+        await asyncio.sleep(0.5)
+        if fail:
+            raise httpx2.HTTPError("stamp rejected")
+        return "ab" * 32
+
+    return forward
+
+
+def test_concurrent_unbilled_uploads_reach_bee_at_most_the_limit(monkeypatch, ledger):
+    calls = []
+    token = _funded_token(ledger)
+    app = _real_upload_app(monkeypatch, ledger, _slow_forward(fail=True, calls=calls))
+    codes = _concurrent_posts(app, 30, {"Swarm-Postage-Stamp": "a" * 226,
+                                        "X-Bandwidth-Credit-Token": token})
+    assert codes == [429] * 28 + [502] * 2
+    assert len(calls) == 2
+    assert ledger.balance("0xfunded") == 1_000_000
+
+
+def test_sequential_billed_uploads_release_their_slot(monkeypatch, ledger):
+    calls = []
+    token = _funded_token(ledger)
+
+    async def forward(chunk, stamp, deferred=False):
+        calls.append(1)
+        return "ab" * 32
+
+    from fastapi.testclient import TestClient as TC
+    client = TC(_real_upload_app(monkeypatch, ledger, forward))
+    h = {"Swarm-Postage-Stamp": "a" * 226, "X-Bandwidth-Credit-Token": token}
+    codes = [client.post("/api/v1/chunks/", content=b"x" * 4104, headers=h).status_code
+             for _ in range(10)]
+    assert codes == [201] * 10
+    assert len(calls) == 10
+    assert ledger.balance("0xfunded") == 1_000_000 - 10 * 4104
+
+
+def test_concurrent_billed_uploads_are_capped_at_the_limit_in_flight(monkeypatch, ledger):
+    """The trade-off of reserving first: one address can have at most the
+    limit's worth of credit-token uploads in flight at once."""
+    calls = []
+    token = _funded_token(ledger)
+    app = _real_upload_app(monkeypatch, ledger, _slow_forward(fail=False, calls=calls))
+    codes = _concurrent_posts(app, 10, {"Swarm-Postage-Stamp": "a" * 226,
+                                        "X-Bandwidth-Credit-Token": token})
+    assert codes == [201] * 2 + [429] * 8
+    assert len(calls) == 2
+
+
+def test_release_removes_only_the_reserved_entry():
+    counter = SlidingWindowCounter()
+    first, _ = counter.reserve("k", 3)
+    second, _ = counter.reserve("k", 3)
+    counter.release("k", first)
+    counter.release("k", first)  # a second release of the same entry is a no-op
+    counter.release("k", second + 0.0)  # an equal timestamp that is not the entry
+    assert counter._windows["k"] == [second]
+    assert counter._windows["k"][0] is second
