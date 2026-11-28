@@ -28,6 +28,7 @@ from fastapi import APIRouter, HTTPException, Query
 from starlette.requests import Request
 
 from app.core.config import settings
+from app.services.http_client import exc_text
 
 logger = logging.getLogger(__name__)
 
@@ -185,7 +186,7 @@ async def get_pricing(
         if int(chainstate.get("currentPrice", 0)) <= 0:
             raise ValueError("chainstate has no usable currentPrice")
     except Exception as e:
-        logger.error(f"Pricing: failed to read the chain price: {e}")
+        logger.error(f"Pricing: failed to read the chain price: {exc_text(e)}")
         raise HTTPException(
             status_code=503,
             detail={

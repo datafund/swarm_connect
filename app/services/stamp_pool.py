@@ -1428,7 +1428,7 @@ class StampPoolManager:
             self._errors = results["errors"]
 
         except Exception as e:
-            logger.error(f"Pool check failed: {e}")
+            logger.error(f"Pool check failed: {exc_text(e)}")
             error_msg = f"Pool check failed: {error_cause(e)}; see the gateway log for details."
             results["errors"].append(error_msg)
             self._errors = [error_msg]
@@ -1831,7 +1831,7 @@ class StampPoolManager:
                         stamp_data = next((s for s in stamps if s.get("batchID") == batch_id), None)
                     except Exception as e:
                         stamp_data = None
-                        logger.warning(f"Could not list stamps after buying {batch_id[:16]}...: {e}")
+                        logger.warning(f"Could not list stamps after buying {batch_id[:16]}...: {exc_text(e)}")
                     if stamp_data:
                         ttl = coerce_int(stamp_data.get("batchTTL"), ttl)
                     else:
@@ -1904,7 +1904,7 @@ class StampPoolManager:
                 if stamp and stamp.get("usable"):
                     return True
             except Exception as e:
-                logger.warning(f"Error checking stamp usability: {e}")
+                logger.warning(f"Error checking stamp usability: {exc_text(e)}")
 
             await asyncio.sleep(5)  # Check every 5 seconds
 
@@ -2186,7 +2186,7 @@ class StampPoolManager:
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                logger.error(f"Error in stamp pool background task: {e}")
+                logger.error(f"Error in stamp pool background task: {exc_text(e)}")
                 # Continue running despite errors
 
 

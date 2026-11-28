@@ -6,7 +6,7 @@ the address they dialled or the host they failed to resolve. /health x402
 warnings, stamp purchase and extend errors, and /pool/status used to copy such
 text into the response. Each response now names the failure by HTTP status or
 exception class, and Bee's own message keeps its wording with the addresses
-replaced. The full text is still logged for the operator.
+replaced. The log names an HTTPStatusError by its status as well (#659).
 
 All hosts and addresses here are made up (bee.internal, 10.0.0.1, 192.0.2.x,
 fd00::/8).
@@ -102,7 +102,8 @@ class TestHealthWarningsHideBeeAddress:
         assert all("HTTP 503" in w for w in fetch), fetch
         # The 'Failed to fetch' prefix still triggers the reachability hints.
         assert any("Bee node may be unreachable" in w for w in warnings), warnings
-        assert BEE in logged, "the log must keep the full text"
+        # The log names the status, not the URL: it reaches the public deploy log (#659).
+        assert BEE not in logged and "HTTP 503" in logged, logged
 
     @pytest.mark.parametrize("exc, name", [
         (_connect_error("wallet"), "ConnectError"),
@@ -141,7 +142,10 @@ class TestBaseBalanceWarningHidesRpcUrl:
         assert "base-rpc.internal" not in result["warning"]
         assert "not-a-real-key" not in result["warning"]
         assert "HTTP 401" in result["warning"], result["warning"]
-        assert "not-a-real-key" in " ".join(str(c) for c in log.error.call_args_list)
+        # Nor does the log: it reaches the public deploy log (#659).
+        logged = " ".join(str(c) for c in log.error.call_args_list)
+        assert "not-a-real-key" not in logged and "base-rpc.internal" not in logged, logged
+        assert "HTTP 401" in logged, logged
 
 
 # --------------------------------------------------------------------------- #

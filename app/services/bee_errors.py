@@ -4,8 +4,9 @@
 httpx2's HTTPStatusError text names the request URL, which is the internal Bee
 API address (or an RPC endpoint, which can carry an API key). Responses that
 anyone can read -- /health, /pool/status, stamp purchase and extend errors --
-name a failure by its HTTP status or exception class instead, and the full
-text goes to the log.
+name a failure by its HTTP status or exception class instead. The log gets
+http_client.exc_text(), which also leaves the URL and the reason phrase out
+of an HTTPStatusError, because the log reaches the public deploy log (#659).
 
 Bee's own message is still worth showing ("out of funds"), but it is response
 text: a proxy's error page or a Go network error can quote a URL, an IP, a
@@ -57,6 +58,7 @@ without_addresses() replaces, in this order:
    Routes and names such as "facilitator", "Transaction", "mainnet-v2" and
    "gnosis-mainnet" are not collected, and neither is a key of one letter
    case only ("abcdefghijklmnop"), which cannot be told from a word.
+   A percent-encoded path segment is collected both decoded and as written.
 2. URLs with a scheme -> <url>.
 3. libp2p multiaddrs: the address after /ip4/ or /ip6/ -> <address>, the
    name after /dns/, /dns4/, /dns6/ or /dnsaddr/ -> <host>, and a /tcp/ or
@@ -168,7 +170,7 @@ import functools
 import ipaddress
 import re
 from typing import Optional
-from urllib.parse import parse_qsl, unquote, urlsplit
+from urllib.parse import parse_qsl, quote, unquote, urlsplit
 
 from app.core.config import settings
 
@@ -299,10 +301,22 @@ def _looks_secret(value):
 
 
 def _configured():
-    """(hosts, secrets) of the configured URLs, read now."""
+    """(hosts, secrets) of the configured URLs, read now.
+
+    The settings are read on every call; the parsing is cached by their
+    values, because the outbound request log line calls this per request.
+    """
+    values = tuple(getattr(settings, name, None) for name in _HOST_SETTINGS)
+    try:
+        return _configured_from(values)
+    except TypeError:  # a value that cannot be hashed: parse it uncached
+        return _configured_from.__wrapped__(values)
+
+
+@functools.lru_cache(maxsize=8)
+def _configured_from(values):
     hosts, secrets = set(), set()
-    for name in _HOST_SETTINGS:
-        value = getattr(settings, name, None)
+    for value in values:
         if not value or not str(value).strip():
             continue
         try:
@@ -312,10 +326,14 @@ def _configured():
             continue
         if host:
             hosts.add(host.lower().strip("[]"))
-        for segment in parts.path.split("/"):
-            segment = unquote(segment)
+        for written in parts.path.split("/"):
+            segment = unquote(written)
             if _looks_secret(segment):
                 secrets.add(segment)
+                if written != segment:
+                    # Also as written: httpx2 keeps existing %xx escapes in a
+                    # path, so "Key%7C1234abcXYZ^" is sent and logged that way.
+                    secrets.add(written)
         for _, query_value in parse_qsl(parts.query, keep_blank_values=False):
             if _looks_secret(query_value):
                 secrets.add(query_value)
@@ -566,6 +584,39 @@ def without_addresses(text: str) -> str:
             candidates.append(decoded_scrubbed)
     best = min(candidates, key=_residue)  # min keeps the first of equals
     return best.translate(_FINAL)
+
+
+# The printable ASCII characters httpx2 leaves unencoded in a URL path: all
+# but space, '"', "#", "<", ">", "?", "`", "{" and "}" (the WHATWG path
+# percent-encode set, httpx2._urlparse.PATH_SAFE). A configured secret is
+# matched in the form httpx2 writes it, and fully encoded as well. "%" is in
+# the set, so a secret kept as written in the configured URL keeps its
+# existing escapes, as httpx2 does.
+_PATH_SAFE = "".join(chr(i) for i in range(0x21, 0x7F) if chr(i) not in '"#<>?`{}')
+
+
+@functools.lru_cache(maxsize=8)
+def _secrets_re(secrets):
+    forms = set()
+    for secret in secrets:
+        forms.update((secret, quote(secret, safe=""), quote(secret, safe=_PATH_SAFE)))
+    names = "|".join(re.escape(f) for f in sorted(forms, key=lambda f: (-len(f), f)))
+    return re.compile(rf"(?<![A-Za-z0-9])(?:{names})(?![A-Za-z0-9])", re.IGNORECASE)
+
+
+def without_secrets(text: str) -> str:
+    """Replace only the secrets of the configured URLs with <secret> (#659).
+
+    The secrets are those of step 1 of without_addresses(), matched the same
+    way (whole tokens, any letter case), and also in their percent-encoded
+    forms, so a key in a URL path is found as httpx2 writes it. Nothing else
+    is replaced and nothing is decoded: this is for log lines written on
+    every outbound request, such as app/core/http_log.py's request line.
+    """
+    _, secrets = _configured()
+    if not secrets:
+        return text
+    return _secrets_re(secrets).sub("<secret>", text)
 
 
 # Bee's text is scrubbed at this length, then cut for the response. The

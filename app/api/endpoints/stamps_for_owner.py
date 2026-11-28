@@ -24,6 +24,7 @@ from app.x402.openapi_docs import paid_route_openapi
 from app.api.models.stamp import StampForOwnerRequest, StampForOwnerResponse
 from app.core.config import settings
 from app.services import metrics, swarm_api
+from app.services.http_client import exc_text
 from app.core.support import report_advice
 from app.services.gnosis_chain import (
     GnosisChainError,
@@ -118,7 +119,7 @@ async def create_batch_for_owner(body: StampForOwnerRequest, request: Request) -
         chainstate = await swarm_api.get_chainstate()
         current_price = int(chainstate["currentPrice"])
     except Exception as e:
-        logger.error(f"for-owner: failed to read chainstate: {e}")
+        logger.error(f"for-owner: failed to read chainstate: {exc_text(e)}")
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY,
                             detail="Could not read current price from the Bee node.")
 

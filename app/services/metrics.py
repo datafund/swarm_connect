@@ -15,6 +15,7 @@ from prometheus_client import Counter, Gauge, Info
 
 from app.api.models.stamp import SIZE_PRESETS
 from app.core.config import settings
+from app.services.http_client import exc_text
 
 logger = logging.getLogger(__name__)
 
@@ -855,7 +856,7 @@ async def update_node_stamp_metrics():
             node_min_ttl if node_min_ttl < float("inf") else 0
         )
     except Exception as e:
-        logger.debug(f"Metrics: failed to get node-owned stamp info: {e}")
+        logger.debug(f"Metrics: failed to get node-owned stamp info: {exc_text(e)}")
 
 
 # None means never fetched. NOT 0.0: the throttle below compares against
@@ -917,7 +918,7 @@ async def _update_bzz_rates() -> None:
             raise ValueError(f"no usable positive 'usd' value in the feed response ({price!r})")
     except Exception as e:
         _price_feed_failures += 1
-        logger.warning(f"BZZ price feed read failed ({_price_feed_failures} in a row): {e}")
+        logger.warning(f"BZZ price feed read failed ({_price_feed_failures} in a row): {exc_text(e)}")
         if _price_feed_failures >= PRICE_FEED_MAX_FAILURES:
             bzz_usd_rate_market.set(0)
         return
@@ -973,7 +974,7 @@ async def update_balance_metrics() -> None:
                 apply(result)
         except Exception as e:
             ok = False
-            logger.debug(f"Metrics: failed to get the {check} balance: {e}")
+            logger.debug(f"Metrics: failed to get the {check} balance: {exc_text(e)}")
         record_balance_check(check, ok)
         if not ok:
             all_fetched = False
@@ -1018,7 +1019,7 @@ async def _poll_balances():
             try:
                 await _update_bzz_rates()
             except Exception as e:
-                logger.debug(f"Metrics: BZZ rate update failed: {e}")
+                logger.debug(f"Metrics: BZZ rate update failed: {exc_text(e)}")
             # Update uptime
             if _start_time is not None:
                 uptime_seconds.set(time.monotonic() - _start_time)
@@ -1045,7 +1046,7 @@ async def _poll_balances():
                 else:
                     stamp_min_ttl_seconds.set(0)
             except Exception as e:
-                logger.debug(f"Metrics: failed to get stamp info: {e}")
+                logger.debug(f"Metrics: failed to get stamp info: {exc_text(e)}")
 
             await update_node_stamp_metrics()
 
@@ -1080,7 +1081,7 @@ async def _poll_balances():
                     else:
                         pool_stamp_min_ttl_seconds.set(0)
                 except Exception as e:
-                    logger.debug(f"Metrics: failed to get pool status: {e}")
+                    logger.debug(f"Metrics: failed to get pool status: {exc_text(e)}")
 
             # Bandwidth credit ledger (chunk forwarding feature)
             if settings.CHUNK_UPLOAD_ENABLED:
@@ -1126,10 +1127,10 @@ async def _poll_balances():
                         # Nothing to read: no signer, so no check to report.
                         _forget_balance_check("gnosis_signer")
                 except Exception as e:
-                    logger.debug(f"Metrics: failed to get Gnosis signer balances: {e}")
+                    logger.debug(f"Metrics: failed to get Gnosis signer balances: {exc_text(e)}")
 
         except Exception as e:
-            logger.warning(f"Metrics background poll error: {e}")
+            logger.warning(f"Metrics background poll error: {exc_text(e)}")
 
         await asyncio.sleep(settings.METRICS_BALANCE_POLL_SECONDS)
 

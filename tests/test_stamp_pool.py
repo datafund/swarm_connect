@@ -2988,8 +2988,9 @@ class TestPoolStatusHidesBeeAddress:
     /pool/status has no authentication. httpx2's HTTPStatusError text names the
     request URL ("Server error '503 Service Unavailable' for url '...'"), so
     copying str(e) into errors published the Bee node's address. The entry
-    there carries the HTTP status or the exception class; the full text goes
-    to the log only, as #482 did for the state-file path.
+    there carries the HTTP status or the exception class. The log line names
+    an HTTPStatusError by its status too (#659); other errors keep their text
+    there.
     """
 
     BEE = "http://bee.internal.example:1633"
@@ -3037,9 +3038,9 @@ class TestPoolStatusHidesBeeAddress:
         sync_errors = [e for e in errors if e.startswith("Sync error")]
         assert len(sync_errors) == 1, errors
         assert "HTTP 503" in sync_errors[0], sync_errors
-        # The full text, URL included, is still in the log for the operator.
+        # The log names the status, not the URL: it reaches the public deploy log (#659).
         logged = " ".join(str(c) for c in log.error.call_args_list)
-        assert self.BEE in logged, logged
+        assert self.BEE not in logged and "HTTP 503" in logged, logged
 
     @pytest.mark.asyncio
     async def test_bee_sync_connect_error_names_the_class(self, state_file):

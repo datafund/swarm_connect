@@ -17,6 +17,7 @@ from app.x402.settlement import settle_payment
 from app.x402.openapi_docs import paid_route_openapi
 from app.core.config import settings
 from app.core.support import report_advice
+from app.services.http_client import exc_text
 from app.services.stamp_pool import stamp_pool_manager, PoolStampStatus
 from app.services.swarm_api import get_batch_expiry
 from app.services.stamp_ownership import stamp_ownership_manager
@@ -276,7 +277,7 @@ async def _refuse_allowance(
                 **detail,
             }
         except Exception as e:
-            logger.warning("Could not price the allowance refusal, answering 429: %s", e)
+            logger.warning("Could not price the allowance refusal, answering 429: %s", exc_text(e))
         else:
             count_pool_allowance_refusal(size, scope, "402")
             raise HTTPException(status_code=status.HTTP_402_PAYMENT_REQUIRED, detail=payment_required)

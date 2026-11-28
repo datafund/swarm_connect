@@ -22,6 +22,7 @@ from app.services.metrics import (
     chunk_upload_bytes_total,
     chunk_uploads_total,
 )
+from app.services.http_client import exc_text
 from app.services.swarm_api import upload_chunk_to_swarm
 from app.x402.audit import AuditEventType, log_audit_event
 from app.x402.middleware import get_client_ip
@@ -408,7 +409,7 @@ async def upload_chunk(
             free_tier_tracker.refund(free_ip, chunk_len)
         chunk_uploads_total.labels(status="error", mode=mode).inc()
         if isinstance(e, httpx2.HTTPError):
-            logger.error(f"Failed to forward chunk to Swarm API: {e}")
+            logger.error(f"Failed to forward chunk to Swarm API: {exc_text(e)}")
             raise HTTPException(
                 status_code=status.HTTP_502_BAD_GATEWAY,
                 detail="Could not forward the chunk. The Bee node may be unavailable or the stamp invalid.",

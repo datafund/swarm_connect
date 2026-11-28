@@ -56,14 +56,37 @@ RETIRE_EXTRA_SECONDS = 60.0
 PROBE_TIMEOUT_SECONDS = 5.0
 
 
+# httpcore2's own RemoteProtocolError messages, which carry no server bytes.
+# Any other protocol error text quotes what the server sent (#659).
+_FIXED_PROTOCOL_MESSAGES = frozenset({
+    "Server disconnected without sending a response.",
+    "Server disconnected",
+})
+
+
 def exc_text(e: BaseException) -> str:
     """The exception for a log line: its type, then its message if it has one.
 
     str() of an httpx2 timeout (PoolTimeout, ReadTimeout, ...) is empty, which
     left log lines such as "Error fetching wallet info ...: " during #587.
+
+    httpx2 errors that quote the server are shortened (#659), because the
+    container log reaches the public deploy log:
+    - HTTPStatusError gives "HTTPStatusError: HTTP <status>". Its str() holds
+      the server's reason phrase and the full request URL, query included,
+      which can carry an RPC or price-feed key.
+    - ProtocolError (RemoteProtocolError, LocalProtocolError) and
+      DecodingError give only the type ("illegal status line: <server
+      bytes>"), except httpcore2's fixed "Server disconnected" messages.
+    Every other exception keeps its message.
     """
-    message = str(e)
     name = type(e).__name__
+    if isinstance(e, httpx2.HTTPStatusError):
+        status = getattr(getattr(e, "response", None), "status_code", None)
+        return f"{name}: HTTP {status}" if status is not None else name
+    message = str(e)
+    if isinstance(e, (httpx2.ProtocolError, httpx2.DecodingError)) and message not in _FIXED_PROTOCOL_MESSAGES:
+        return name
     return f"{name}: {message}" if message else name
 
 
