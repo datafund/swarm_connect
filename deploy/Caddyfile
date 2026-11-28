@@ -36,6 +36,8 @@
 	# proxy's address as the caller and every request will share one budget.
 	# Lowering it below the real number of hops is worse: the caller then gets
 	# to pick their own identity by sending the header themselves.
+	# Each entry the gateway relies on must be a bare IP address (no port), or
+	# it uses the direct peer instead; X-Real-IP is not read at all (#697).
 	# Prometheus metrics are NOT public (#188). The endpoint exposed 146 series to
 	# anyone who asked: wallet addresses, BZZ and xDAI balances, gateway version,
 	# which features are enabled, and request volumes — a funding position, in
