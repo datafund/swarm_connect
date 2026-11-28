@@ -168,7 +168,7 @@ import functools
 import ipaddress
 import re
 from typing import Optional
-from urllib.parse import parse_qsl, unquote, urlsplit
+from urllib.parse import parse_qsl, quote, unquote, urlsplit
 
 from app.core.config import settings
 
@@ -299,10 +299,22 @@ def _looks_secret(value):
 
 
 def _configured():
-    """(hosts, secrets) of the configured URLs, read now."""
+    """(hosts, secrets) of the configured URLs, read now.
+
+    The settings are read on every call; the parsing is cached by their
+    values, because the outbound request log line calls this per request.
+    """
+    values = tuple(getattr(settings, name, None) for name in _HOST_SETTINGS)
+    try:
+        return _configured_from(values)
+    except TypeError:  # a value that cannot be hashed: parse it uncached
+        return _configured_from.__wrapped__(values)
+
+
+@functools.lru_cache(maxsize=8)
+def _configured_from(values):
     hosts, secrets = set(), set()
-    for name in _HOST_SETTINGS:
-        value = getattr(settings, name, None)
+    for value in values:
         if not value or not str(value).strip():
             continue
         try:
@@ -566,6 +578,35 @@ def without_addresses(text: str) -> str:
             candidates.append(decoded_scrubbed)
     best = min(candidates, key=_residue)  # min keeps the first of equals
     return best.translate(_FINAL)
+
+
+# Characters a URL path keeps unencoded besides letters, digits and "-._~"
+# (RFC 3986 sub-delims, ":" and "@"): how httpx2 may write a secret in a path.
+_PATH_SAFE = "!$&'()*+,;=:@"
+
+
+@functools.lru_cache(maxsize=8)
+def _secrets_re(secrets):
+    forms = set()
+    for secret in secrets:
+        forms.update((secret, quote(secret, safe=""), quote(secret, safe=_PATH_SAFE)))
+    names = "|".join(re.escape(f) for f in sorted(forms, key=lambda f: (-len(f), f)))
+    return re.compile(rf"(?<![A-Za-z0-9])(?:{names})(?![A-Za-z0-9])", re.IGNORECASE)
+
+
+def without_secrets(text: str) -> str:
+    """Replace only the secrets of the configured URLs with <secret> (#659).
+
+    The secrets are those of step 1 of without_addresses(), matched the same
+    way (whole tokens, any letter case), and also in their percent-encoded
+    forms, so a key in a URL path is found as httpx2 writes it. Nothing else
+    is replaced and nothing is decoded: this is for log lines written on
+    every outbound request, such as app/core/http_log.py's request line.
+    """
+    _, secrets = _configured()
+    if not secrets:
+        return text
+    return _secrets_re(secrets).sub("<secret>", text)
 
 
 # Bee's text is scrubbed at this length, then cut for the response. The
