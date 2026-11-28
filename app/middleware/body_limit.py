@@ -18,6 +18,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import JSONResponse
 
 from app.core.config import settings
+from app.core.json_depth import json_depth_within
 
 logger = logging.getLogger(__name__)
 
@@ -31,43 +32,12 @@ def _error(code: str, message: str) -> dict:
 
 def _check_nesting_depth(data: bytes, max_depth: int) -> bool:
     """
-    Fast O(n) check for JSON nesting depth.
+    True if the JSON nesting depth is within limit, False if exceeded.
 
-    Scans for { and [ characters while tracking string/escape state
-    so that bracket characters inside JSON strings are ignored.
-
-    Returns True if depth is within limit, False if exceeded.
+    Brackets inside JSON strings are ignored. The check itself is shared with
+    the notary document check (#695), see app/core/json_depth.py.
     """
-    depth = 0
-    in_string = False
-    escape = False
-
-    for byte in data:
-        if escape:
-            escape = False
-            continue
-
-        char = byte  # int in Python 3
-
-        if char == 0x5C and in_string:  # backslash
-            escape = True
-            continue
-
-        if char == 0x22:  # double quote
-            in_string = not in_string
-            continue
-
-        if in_string:
-            continue
-
-        if char == 0x7B or char == 0x5B:  # { or [
-            depth += 1
-            if depth > max_depth:
-                return False
-        elif char == 0x7D or char == 0x5D:  # } or ]
-            depth -= 1
-
-    return True
+    return json_depth_within(data, max_depth)
 
 
 class BodyLimitMiddleware(BaseHTTPMiddleware):
