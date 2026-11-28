@@ -9,6 +9,7 @@ import asyncio
 import base64
 import json
 import secrets
+import types
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx2
@@ -615,10 +616,37 @@ def test_background_bee_5xx_keeps_the_hold(env, monkeypatch):
     assert uncertain() - before == pytest.approx(_gateway_spent())
 
 
+def _freeze_swarm_api_clock(monkeypatch, at):
+    """Make every datetime.now() that swarm_api reads return `at` (#658).
+
+    Only swarm_api's own `datetime` name is replaced, by a copy of the real
+    module whose datetime class has a fixed now(); everything else in the
+    module is the real one.
+    """
+    real = swarm_api.datetime
+
+    class Frozen(real.datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return at.astimezone(tz) if tz is not None else at.replace(tzinfo=None)
+
+    clock = types.ModuleType(real.__name__)
+    clock.__dict__.update(vars(real))
+    clock.datetime = Frozen
+    monkeypatch.setattr(swarm_api, "datetime", clock)
+
+
 def test_late_201_carries_expires_at(env, monkeypatch):
     """The 201 a keyed retry gets after a late delivery has expires_at, as the 201
-    answered in time does: estimated from the amount at today's price."""
+    answered in time does: estimated from the amount at today's price.
+
+    The gateway and the test each compute the expiry from the current time, so
+    the clock is frozen: otherwise the two differ when a second boundary falls
+    between them (#658). The instant is just before a boundary on purpose.
+    """
     app, fac, buy, find = env
+    _freeze_swarm_api_clock(monkeypatch, swarm_api.datetime.datetime(
+        2026, 11, 6, 12, 0, 41, 999999, tzinfo=swarm_api.datetime.timezone.utc))
     monkeypatch.setattr(settings, "SWARM_STAMP_PURCHASE_TIMEOUT_SECONDS", 0.05)
     buy.side_effect = _slow_bee(BATCH)
     first, retry = _run_pending(app, None, key="k-late-expiry")
@@ -626,6 +654,7 @@ def test_late_201_carries_expires_at(env, monkeypatch):
     amount = int(first.json()["amount"])
     assert retry.json()["expires_at"] == swarm_api.expiry_from_amount(amount, 24000)
     assert retry.json()["expires_at"] is not None
+    assert retry.json()["expires_at"].startswith("2026-11-07T")     # read the frozen clock
 
 
 # --- round 2: every pending outcome settles the hold once (#468) ----------------
