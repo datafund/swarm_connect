@@ -95,3 +95,14 @@ def test_depth_check_still_applies_to_a_chunked_body():
     deep = b"[" * depth + b"]" * depth
     status, body = call(_echo_app(), "/echo", _serve(deep, 7), CHUNKED_JSON)
     assert (status, body["code"]) == (400, "JSON_TOO_DEEP")
+
+
+def test_chunked_body_with_no_content_type_is_capped():
+    """FastAPI parses a body without a Content-Type as JSON, so it gets the
+    same capped read as a JSON one (#354, #696)."""
+    limit = settings.MAX_JSON_BODY_BYTES
+    receive = CountingBody(20_000_000, PIECE)
+    status, body = call(app, "/api/v1/stamps/", receive, {"Transfer-Encoding": "chunked"})
+    assert status == 413
+    assert body["code"] == "BODY_TOO_LARGE"
+    assert limit < receive.sent <= limit + PIECE

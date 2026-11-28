@@ -155,3 +155,48 @@ def test_json_content_type_does_not_send_a_chunk_through_the_json_read(content_t
                                        "Transfer-Encoding": "chunked"})
     assert (status, _code(body)) == (413, "CHUNK_TOO_LARGE")
     assert CAP < receive.sent <= CAP + piece
+
+
+def test_malformed_content_length_does_not_lift_the_cap():
+    """A Content-Length that is not a number is ignored, and the streamed read
+    still stops at the first message over the cap.
+
+    Uvicorn refuses such a request with 400 before the app sees it; this covers
+    the app's own handling. Over raw ASGI the metrics instrumentator then
+    raises ValueError on int("abc") after the response has been sent, so the
+    exception is tolerated here only once the whole 413 is out.
+    """
+    import asyncio
+    import json as _json
+    from app.main import app as gateway
+
+    piece = 1000
+    receive = _Body(12_000_000, piece)
+    out = {"status": None, "body": b"", "done": False}
+
+    async def send(message):
+        if message["type"] == "http.response.start":
+            out["status"] = message["status"]
+        elif message["type"] == "http.response.body":
+            out["body"] += message.get("body", b"")
+            out["done"] = not message.get("more_body", False)
+
+    scope = {
+        "type": "http", "asgi": {"version": "3.0"}, "http_version": "1.1",
+        "method": "POST", "scheme": "http", "path": "/api/v1/chunks/",
+        "raw_path": b"/api/v1/chunks/", "root_path": "", "query_string": b"",
+        "headers": [(b"swarm-postage-stamp", VALID_STAMP.encode()), (b"content-length", b"abc")],
+        "client": ("127.0.0.1", 50000), "server": ("testserver", 80),
+    }
+
+    async def run():
+        try:
+            await asyncio.wait_for(gateway(scope, receive, send), timeout=10)
+        except ValueError:
+            assert out["done"], "raised before the response was complete"
+
+    with patch("app.api.endpoints.chunks.settings", _settings()):
+        asyncio.run(run())
+    assert out["status"] == 413
+    assert _code(_json.loads(out["body"])) == "CHUNK_TOO_LARGE"
+    assert CAP < receive.sent <= CAP + piece
