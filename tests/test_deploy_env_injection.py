@@ -69,6 +69,33 @@ def test_env_keys_match_the_written_names_in_order(step_name):
         m = EXPRESSION.fullmatch(str(value))
         assert m and m.group(2) == name, (name, value)
         assert re.fullmatch(r"[A-Z][A-Z0-9_]*", name), name
+        assert not _reserved(name), name
+
+
+# The step reads each setting with ${!NAME}, and each name is also an env:
+# key. A setting named like a bash or runner variable would break the step
+# (PATH, IFS, LC_ALL, which the script sets) or write the shell's own value
+# (PWD, RANDOM, UID, ...) instead of the GitHub variable.
+RESERVED_NAMES = {
+    "PATH", "HOME", "IFS", "PWD", "OLDPWD", "SHELL", "SHELLOPTS", "SECONDS", "RANDOM",
+    "LINENO", "UID", "EUID", "PPID", "LC_ALL", "LC_CTYPE", "LANG", "ENV", "OPTIND",
+    "OPTARG", "PS4", "TMPDIR", "USER", "CI",
+}
+RESERVED_PREFIXES = ("BASH", "GITHUB_", "RUNNER_", "ACTIONS_", "LC_")
+
+
+def _reserved(name):
+    return name in RESERVED_NAMES or name.startswith(RESERVED_PREFIXES)
+
+
+def test_reserved_names_are_caught():
+    for name in ("PATH", "HOME", "IFS", "PWD", "OLDPWD", "SHELL", "SECONDS", "RANDOM",
+                 "LINENO", "UID", "EUID", "PPID", "LC_ALL", "LANG", "BASH_ENV", "BASHOPTS",
+                 "GITHUB_TOKEN", "RUNNER_TEMP", "ACTIONS_STEP_DEBUG", "CI"):
+        assert _reserved(name), name
+    for name in ("X402_ENABLED", "CI_MODE", "PATH_PREFIX", "HOME_URL", "GATEWAY_DAILY_BZZ_CEILING",
+                 "TRUSTED_PROXY_HOPS", "SUPPORT_CONTACT"):
+        assert not _reserved(name), name
 
 
 @pytest.mark.parametrize("step_name", STEP_NAMES)
