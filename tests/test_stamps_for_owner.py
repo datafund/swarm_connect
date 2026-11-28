@@ -40,6 +40,7 @@ def env():
 
     gc.create_batch = AsyncMock(side_effect=_cb)
     gc.preflight = AsyncMock(return_value={"is_critical": False, "warnings": []})
+    gc.check_signer_available = AsyncMock(return_value=None)  # the signer is idle (#692)
     with patch("app.services.swarm_api.get_chainstate", AsyncMock(return_value={"currentPrice": "100000"})), \
          patch("app.api.endpoints.stamps_for_owner.gnosis_chain_client", gc), \
          patch("app.api.endpoints.stamps_for_owner.record_purchase") as rp, \
@@ -117,14 +118,44 @@ def test_confirmed_batch_reports_confirmed(client, env):
 
 
 def test_signer_busy_returns_503_and_is_not_a_success(client, env):
-    """Nothing was sent; a 5xx is not settled by the x402 middleware."""
+    """Unpaid (x402 off here), so nothing was collected: 503 SIGNER_BUSY.
+
+    A paid request that meets a busy signer after its payment settled is
+    answered DELIVERY_FAILED_AFTER_PAYMENT instead (tests/test_for_owner_paid_failures.py, #692).
+    """
     from app.services.gnosis_chain import SignerBusy
     env["gc"].create_batch = AsyncMock(side_effect=SignerBusy("signer has an unconfirmed transaction (nonce 7)"))
     with patch("app.api.endpoints.stamps_for_owner.settings", _settings()):
         r = client.post("/api/v1/stamps/for-owner", json={"owner": OWNER, "size": "small"})
     assert r.status_code == 503
     assert r.json()["detail"]["code"] == "SIGNER_BUSY"
+    assert r.headers["Retry-After"] == "60"
     env["own"].register_stamp.assert_not_called()
+
+
+def test_signer_busy_before_payment_sends_nothing(client, env):
+    """The check before settlement refuses what createBatch would refuse (#692)."""
+    from app.services.gnosis_chain import SignerBusy
+    env["gc"].check_signer_available = AsyncMock(side_effect=SignerBusy("signer is busy with another request"))
+    with patch("app.api.endpoints.stamps_for_owner.settings", _settings()):
+        r = client.post("/api/v1/stamps/for-owner", json={"owner": OWNER, "size": "small"})
+    assert r.status_code == 503
+    assert r.json()["detail"]["code"] == "SIGNER_BUSY"
+    assert r.headers["Retry-After"] == "60"
+    env["gc"].create_batch.assert_not_called()
+
+
+def test_unreadable_signer_state_before_payment_sends_nothing(client, env):
+    from app.services.gnosis_chain import SignerStateUnavailable
+    env["gc"].check_signer_available = AsyncMock(
+        side_effect=SignerStateUnavailable("could not read signer state: rpc https://secret-rpc.example/k"))
+    with patch("app.api.endpoints.stamps_for_owner.settings", _settings()):
+        r = client.post("/api/v1/stamps/for-owner", json={"owner": OWNER, "size": "small"})
+    assert r.status_code == 503
+    assert r.json()["detail"]["code"] == "SIGNER_STATE_UNAVAILABLE"
+    assert r.headers["Retry-After"] == "60"
+    assert "secret-rpc" not in r.text
+    env["gc"].create_batch.assert_not_called()
 
 
 def test_chain_failure_does_not_return_rpc_internals(client, env):

@@ -33,6 +33,8 @@ EXPECTED_SERIES = (
     + [f'gateway_uploads_total{{status="{s}"}}' for s in ("success", "error")]
     + [f'gateway_downloads_total{{status="{s}"}}' for s in ("success", "error", "too_large")]
     + [f'gateway_notary_signatures_total{{status="{s}"}}' for s in ("success", "error")]
+    # Paid buy-batch-for-owner with no batch created (#692)
+    + ['gateway_for_owner_batches_total{status="settled_not_delivered"}']
     # Shared HTTP client pool (#587)
     + ["gateway_bee_http_pool_timeouts_total"]
     + [f'gateway_bee_http_client_replacements_total{{result="{r}"}}'

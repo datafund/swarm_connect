@@ -112,6 +112,7 @@ def test_ipv6_rotation_shares_one_for_owner_budget(monkeypatch, tmp_path):
                    new=AsyncMock(return_value={"currentPrice": "24000"})), \
              patch.object(type(chain), "is_configured", new=property(lambda self: True)), \
              patch.object(chain, "preflight", new=AsyncMock(return_value={"is_critical": False, "warnings": []})), \
+             patch.object(chain, "check_signer_available", new=AsyncMock(return_value=None)), \
              patch.object(chain, "create_batch", new=AsyncMock(side_effect=create)), \
              patch.object(ep, "record_purchase"), patch.object(ep, "stamp_ownership_manager"):
             codes.append(TestClient(app).post(

@@ -42,6 +42,7 @@ def env():
 
     gc.create_batch = AsyncMock(side_effect=_cb)
     gc.preflight = AsyncMock(return_value={"is_critical": False, "warnings": []})
+    gc.check_signer_available = AsyncMock(return_value=None)  # the signer is idle (#692)
     with patch("app.services.swarm_api.get_chainstate", AsyncMock(return_value={"currentPrice": "100000"})), \
          patch("app.api.endpoints.stamps_for_owner.gnosis_chain_client", gc), \
          patch("app.api.endpoints.stamps_for_owner.record_purchase"), \

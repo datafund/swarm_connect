@@ -55,11 +55,29 @@ Look up `txHash` on Gnosis before retrying; a retry creates a second batch. The 
 recorded in the ownership registry either way; if it never mines, the record stays (it
 refers to no batch, and nothing removes it today).
 
-Response `503` `SIGNER_BUSY`: nothing was sent and nothing is charged. Either another
-request held the signer for more than 30 s, or an earlier transaction from the signer is
-still unconfirmed. The gateway refuses new batches until that transaction confirms, rather
-than queue them behind it. If it never confirms (for example, its fee is too low), an
-operator must replace or cancel it from the signer wallet.
+Response `503` `SIGNER_BUSY` (with `Retry-After`): nothing was sent and nothing is
+charged. Either another request is using the signer, or an earlier transaction from the
+signer is still unconfirmed. The gateway checks this before it settles the payment, and
+refuses new batches until that transaction confirms, rather than queue them behind it. If it
+never confirms (for example, its fee is too low), an operator must replace or cancel it from
+the signer wallet.
+
+Response `503` `SIGNER_STATE_UNAVAILABLE` (with `Retry-After`): the gateway could not read
+its signer's state before payment (RPC error, or no answer within 10 s). Nothing was sent
+and nothing is charged.
+
+Response `500` `DELIVERY_FAILED_AFTER_PAYMENT` (`x402_status: "settled_not_delivered"`,
+`transaction`, under `detail`): the payment settled, and then no batch was created. Either
+the signer became busy between the check and createBatch, or createBatch failed (no
+connection, or a reverted transaction). You paid and got nothing: report it with the
+transaction, as for the pool. A retry with the same `Idempotency-Key` gets
+`409 IDEMPOTENCY_KEY_SETTLED_PENDING` with the same transaction and is not charged again.
+Without payment (free tier, or x402 off) the same failures answer `503 SIGNER_BUSY` and
+`502 CREATE_BATCH_FAILED`.
+
+The gateway's daily spend hold for the batch is given back whenever no BZZ was spent:
+every refusal above, a refused or failed settlement, and a failed createBatch. Only a
+receipt timeout (`202`, may still mine) keeps it.
 
 Concurrency: the gateway sends one transaction sequence at a time from its signer
 (nonce → `approve` → `createBatch` → receipt), and keeps a standing BZZ allowance of
@@ -125,11 +143,12 @@ so it never burns gas on a call that would revert. Warn thresholds
 
 | Metric | Meaning |
 |--------|---------|
-| `gateway_for_owner_batches_total{status}` | attempts by outcome (`success`, `pending`, `busy`, `error`, `insufficient_funds`, `payment_required`) |
+| `gateway_for_owner_batches_total{status}` | attempts by outcome (`success`, `pending`, `busy`, `error`, `insufficient_funds`, `payment_required`, `ceiling`, `settled_not_delivered`). `settled_not_delivered` means the caller paid and no batch was created. It exists at 0 from startup. |
 | `gateway_for_owner_bzz_spent_total` | cumulative PLUR spent creating batches |
 | `gateway_gnosis_signer_xbzz_balance` | signer wallet xBZZ (BZZ) — alert when low |
 | `gateway_gnosis_signer_xdai_balance` | signer wallet xDAI — alert when low |
 
 `gateway_info` exposes `stamp_purchase_for_others_enabled`. Recommended alerts: signer
 xDAI below the critical threshold, and `for_owner_batches_total{status="insufficient_funds"}`
-increasing (means clients are being turned away — top up).
+increasing (means clients are being turned away — top up). Also alert on
+`for_owner_batches_total{status="settled_not_delivered"}` increasing: each one is a caller who paid for nothing.

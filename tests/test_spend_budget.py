@@ -840,6 +840,7 @@ class TestCeilingOnEveryPath:
         with patch("app.services.swarm_api.get_chainstate", new=AsyncMock(return_value=CHAINSTATE)), \
              patch.object(type(chain), "is_configured", new=property(lambda self: True)), \
              patch.object(chain, "preflight", new=AsyncMock(return_value={"is_critical": False, "warnings": []})), \
+             patch.object(chain, "check_signer_available", new=AsyncMock(return_value=None)), \
              patch.object(chain, "create_batch", new=AsyncMock()) as create:
             r = TestClient(app).post("/api/v1/stamps/for-owner", json={
                 "owner": "0x" + "1" * 40, "depth": 17, "duration_hours": 24})
@@ -873,7 +874,7 @@ class TestClassification:
 
 
 class TestForOwnerRelease:
-    def _call(self, monkeypatch, error):
+    def _call(self, monkeypatch, error, check_error=None):
         from app.api.endpoints import stamps_for_owner as ep
         monkeypatch.setattr(settings, "STAMP_PURCHASE_FOR_OTHERS_ENABLED", True)
         monkeypatch.setattr(settings, "STAMP_FOR_OTHERS_REQUIRE_WHITELIST", False)
@@ -883,6 +884,7 @@ class TestForOwnerRelease:
         with patch("app.services.swarm_api.get_chainstate", new=AsyncMock(return_value=CHAINSTATE)), \
              patch.object(type(chain), "is_configured", new=property(lambda self: True)), \
              patch.object(chain, "preflight", new=AsyncMock(return_value={"is_critical": False, "warnings": []})), \
+             patch.object(chain, "check_signer_available", new=AsyncMock(side_effect=check_error)), \
              patch.object(chain, "create_batch", new=AsyncMock(side_effect=error)):
             return TestClient(app, raise_server_exceptions=False).post("/api/v1/stamps/for-owner", json={
                 "owner": "0x" + "1" * 40, "depth": 17, "duration_hours": 24})
@@ -890,6 +892,20 @@ class TestForOwnerRelease:
     def test_a_gnosis_error_gives_the_hold_back(self, tracker, monkeypatch):
         from app.services.gnosis_chain import GnosisChainError
         assert self._call(monkeypatch, GnosisChainError("reverted")).status_code == 502
+        assert tracker.snapshot()["gateway_spent"] == 0.0
+
+    def test_a_busy_signer_gives_the_hold_back(self, tracker, monkeypatch):
+        """SignerBusy sends nothing, so no BZZ moved (#692). The hold used to
+        stay on the day's counter until midnight."""
+        from app.services.gnosis_chain import SignerBusy
+        assert self._call(monkeypatch, SignerBusy("busy")).status_code == 503
+        assert tracker.snapshot()["gateway_spent"] == 0.0
+
+    def test_a_busy_signer_before_payment_gives_the_hold_back(self, tracker, monkeypatch):
+        from app.services.gnosis_chain import SignerBusy, SignerStateUnavailable
+        assert self._call(monkeypatch, None, check_error=SignerBusy("busy")).status_code == 503
+        assert tracker.snapshot()["gateway_spent"] == 0.0
+        assert self._call(monkeypatch, None, check_error=SignerStateUnavailable("rpc")).status_code == 503
         assert tracker.snapshot()["gateway_spent"] == 0.0
 
     def test_an_uncertain_error_keeps_the_hold(self, tracker, monkeypatch):
@@ -1141,6 +1157,7 @@ class TestResetsAtInRefusalResponses:
         with patch("app.services.swarm_api.get_chainstate", new=AsyncMock(return_value=CHAINSTATE)), \
              patch.object(type(chain), "is_configured", new=property(lambda self: True)), \
              patch.object(chain, "preflight", new=AsyncMock(return_value={"is_critical": False, "warnings": []})), \
+             patch.object(chain, "check_signer_available", new=AsyncMock(return_value=None)), \
              patch.object(chain, "create_batch", new=AsyncMock()) as create:
             r = TestClient(app).post("/api/v1/stamps/for-owner", json={
                 "owner": "0x" + "1" * 40, "depth": 17, "duration_hours": 24})

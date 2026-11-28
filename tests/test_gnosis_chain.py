@@ -332,6 +332,69 @@ def test_signer_lock_wait_is_bounded():
     assert chain.sent == []
 
 
+# --------------------------------------------------------------------------- #
+# check_signer_available: the read-only check before a payment settles (#692)
+# --------------------------------------------------------------------------- #
+def test_signer_check_refuses_a_held_lock_without_any_rpc_call():
+    c = GnosisChainClient(rpc_url="x", private_key=KEY, chain_id=100)
+    c._signer_lock.acquire()  # another request is creating a batch
+    try:
+        with patch.object(GnosisChainClient, "_connect") as connect:
+            with pytest.raises(SignerBusy, match="busy"):
+                asyncio.run(c.check_signer_available())
+        connect.assert_not_called()
+    finally:
+        c._signer_lock.release()
+
+
+def test_signer_check_refuses_an_unconfirmed_transaction_and_sends_nothing():
+    chain = _Chain(allowance=10**30)
+    chain.sent = [0]  # one transaction sent, none mined: pending 1 > latest 0
+    c = GnosisChainClient(rpc_url="x", private_key=KEY, chain_id=100)
+    with patch.object(GnosisChainClient, "_connect", return_value=(chain.w3, chain.acct)):
+        with pytest.raises(SignerBusy, match="unconfirmed"):
+            asyncio.run(c.check_signer_available())
+    assert chain.sent == [0]
+    assert not c._signer_lock.locked()  # the check takes no lock
+
+
+def test_signer_check_passes_an_idle_signer():
+    chain = _Chain(allowance=10**30)
+    chain.sent, chain.mined = [0, 1], 2
+    c = GnosisChainClient(rpc_url="x", private_key=KEY, chain_id=100)
+    with patch.object(GnosisChainClient, "_connect", return_value=(chain.w3, chain.acct)):
+        asyncio.run(c.check_signer_available())
+    assert chain.sent == [0, 1]
+
+
+def test_signer_check_reports_an_unreadable_state():
+    c = GnosisChainClient(rpc_url="x", private_key=KEY, chain_id=100)
+    with patch.object(GnosisChainClient, "_connect", side_effect=GnosisChainError("cannot connect")):
+        with pytest.raises(gnosis_chain.SignerStateUnavailable):
+            asyncio.run(c.check_signer_available())
+    chain = _Chain()
+    chain.w3.eth.get_transaction_count.side_effect = OSError("rpc down")
+    with patch.object(GnosisChainClient, "_connect", return_value=(chain.w3, chain.acct)):
+        with pytest.raises(gnosis_chain.SignerStateUnavailable):
+            asyncio.run(c.check_signer_available())
+
+
+def test_signer_check_is_bounded_in_time():
+    chain = _Chain()
+    chain.w3.eth.get_transaction_count.side_effect = lambda addr, block: time.sleep(0.5) or 0
+    c = GnosisChainClient(rpc_url="x", private_key=KEY, chain_id=100)
+    with patch.object(gnosis_chain, "SIGNER_CHECK_TIMEOUT_SECONDS", 0.05), \
+         patch.object(GnosisChainClient, "_connect", return_value=(chain.w3, chain.acct)):
+        async def timed():
+            start = time.monotonic()
+            with pytest.raises(gnosis_chain.SignerStateUnavailable, match="not read within"):
+                await c.check_signer_available()
+            return time.monotonic() - start
+        # Measured inside the loop: asyncio.run itself then waits for the
+        # worker thread to finish its read before it returns.
+        assert asyncio.run(timed()) < 0.4
+
+
 def test_receipt_waits_share_one_budget():
     """approve + createBatch together wait at most RECEIPT_TIMEOUT_SECONDS."""
     c = GnosisChainClient(rpc_url="x", private_key=KEY, chain_id=100)

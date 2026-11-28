@@ -813,6 +813,9 @@ bandwidth_credit_bytes_total = Gauge(
 for_owner_batches_total = Counter(
     "gateway_for_owner_batches_total", "createBatch-for-owner attempts", ["status"]
 )
+# Paid, no batch created: the caller paid for nothing (#692). Created at 0, like the
+# pool's settled_not_delivered series, so a rate over it sees the first one.
+for_owner_batches_total.labels(status="settled_not_delivered")
 for_owner_bzz_spent_total = Counter(
     "gateway_for_owner_bzz_spent_total", "Total PLUR spent creating batches for owners"
 )
