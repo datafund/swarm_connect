@@ -113,11 +113,14 @@ class TestDirectExposure:
 
 
 class TestMisconfiguration:
-    """Getting the setting wrong should fail in the safe direction.
+    """Getting the setting wrong should fail in the safe direction where it can.
 
-    Too high groups callers together, which over-limits and shows up as
-    complaints. Too low lets a caller choose their own identity, which
-    under-limits and shows up as nothing.
+    Too low reads an address our own proxy added, so callers behind it are
+    grouped together, which over-limits and shows up as complaints. Too high
+    reads an entry further left, which the caller wrote, so a caller sending
+    enough entries chooses their own identity, which under-limits and shows up
+    as nothing. What the code can catch is a header with fewer entries than
+    the setting: that falls back to the direct peer, as tested here.
     """
 
     def test_a_chain_shorter_than_the_hop_count_falls_back_to_the_peer(self, monkeypatch):

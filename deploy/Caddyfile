@@ -34,8 +34,10 @@
 	# the header or appends to it. IF YOU ADD A PROXY OR CDN IN FRONT OF THIS
 	# ONE, raise TRUSTED_PROXY_HOPS to match, or the gateway will read the new
 	# proxy's address as the caller and every request will share one budget.
-	# Lowering it below the real number of hops is worse: the caller then gets
-	# to pick their own identity by sending the header themselves.
+	# Setting it ABOVE the real number of hops is worse: the gateway then reads
+	# an entry further left, which the caller wrote, so a caller who sends the
+	# header themselves picks their own identity. (A header with fewer entries
+	# than the setting falls back to the direct peer.)
 	# Each entry the gateway relies on must be a bare IP address (no port), or
 	# it uses the direct peer instead; X-Real-IP is not read at all (#697).
 	# Prometheus metrics are NOT public (#188). The endpoint exposed 146 series to
