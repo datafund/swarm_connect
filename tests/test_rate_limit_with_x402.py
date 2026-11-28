@@ -219,7 +219,7 @@ def _billing_app(billed_codes):
     return TestClient(app)
 
 
-def test_unbilled_funded_uploads_are_counted_afterwards(monkeypatch, ledger):
+def test_unbilled_funded_uploads_keep_their_slot(monkeypatch, ledger):
     _composed(monkeypatch, per_minute=2)
     token = _funded_token(ledger)
     client = _billing_app([502, 400, 201])
@@ -496,3 +496,69 @@ def test_release_removes_only_the_reserved_entry():
     counter.release("k", second + 0.0)  # an equal timestamp that is not the entry
     assert counter._windows["k"] == [second]
     assert counter._windows["k"][0] is second
+
+
+def _failing_app(fail):
+    """A stub upload route whose first two requests fail via `fail` and whose
+    later ones are billed."""
+    from fastapi import Request
+    app = FastAPI()
+    seen = []
+
+    @app.post("/api/v1/chunks/")
+    async def chunk(request: Request):
+        seen.append(1)
+        if len(seen) <= 2:
+            await fail()
+        request.state.chunk_billed = True
+        return {"ok": True}
+
+    app.add_middleware(RateLimitMiddleware, counter=SlidingWindowCounter())
+    return app
+
+
+def test_handler_exception_keeps_the_reserved_slot(monkeypatch, ledger):
+    """A non-HTTP exception is not billed: the slot stays taken."""
+    _composed(monkeypatch, per_minute=2)
+    token = _funded_token(ledger)
+
+    async def boom():
+        raise RuntimeError("handler failed")
+
+    client = TestClient(_failing_app(boom), raise_server_exceptions=False)
+    h = {"X-Bandwidth-Credit-Token": token}
+    codes = [client.post("/api/v1/chunks/", content=b"x", headers=h).status_code for _ in range(3)]
+    assert codes == [500, 500, 429]
+
+
+def test_cancelled_request_keeps_the_reserved_slot(monkeypatch, ledger):
+    """A request cut off in flight (client gone, server shutting down) is not
+    billed: the slot stays taken."""
+    import asyncio
+    from tests.asgi_body import call
+    _composed(monkeypatch, per_minute=2)
+    token = _funded_token(ledger)
+
+    async def hang():
+        await asyncio.sleep(3600)
+
+    app = _failing_app(hang)
+    h = {"X-Bandwidth-Credit-Token": token, "Content-Length": "1"}
+
+    def body():
+        sent = []
+
+        async def receive():
+            if sent:
+                await asyncio.sleep(3600)
+            sent.append(1)
+            return {"type": "http.request", "body": b"x", "more_body": False}
+        return receive
+
+    for _ in range(2):
+        # call() cancels the app when its timeout expires.
+        with pytest.raises((asyncio.TimeoutError, TimeoutError)):
+            call(app, "/api/v1/chunks/", body(), h, timeout=0.3)
+    status, payload = call(app, "/api/v1/chunks/", body(), h)
+    assert status == 429
+    assert payload["code"] == "RATE_LIMIT_EXCEEDED"
