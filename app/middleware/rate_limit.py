@@ -31,14 +31,15 @@ EXEMPT_PATHS = {"/", "/health", "/docs", "/redoc", "/openapi.json", "/metrics",
 # checked anything, so requests with no token, a bad token or the free path
 # were not limited at all.
 #
-# The exemption is from the per-request count, not from every limit: an
-# exempted upload that ends without a debit standing (the endpoint sets
+# The exemption is from the per-request count, not from every limit. Each
+# exempted upload reserves a slot under its own key (the global limit's size)
+# before it runs, and is refused with 429 when there is none. Once answered,
+# a billed upload gives its slot back: the endpoint sets
 # request.state.chunk_billed only after the forward succeeded, so a refused or
-# refunded upload leaves it unset) is recorded under its own key afterwards,
-# and exempted uploads are refused once that key is at the limit. So a funded
-# token cannot drive unlimited Bee calls with stamps Bee rejects. The check
-# comes before the request and the count after it, so concurrent requests can
-# overshoot the limit by the number in flight when it is reached.
+# refunded upload, an exception or a cancellation keeps it. So a funded token
+# cannot drive unlimited Bee calls with stamps Bee rejects, even concurrently.
+# The cost: one address can have at most the limit's worth of credit-token
+# uploads in flight at once.
 #
 # Only the route's exact path: other spellings (no trailing slash, which only
 # redirects, or extra slashes, which are 404) are not the upload route.
@@ -100,6 +101,14 @@ class SlidingWindowCounter:
         Returns:
             Tuple of (allowed: bool, stats: dict with remaining, reset_at, limit)
         """
+        entry, stats = self.reserve(key, limit, window_seconds)
+        return entry is not None, stats
+
+    def reserve(self, key: str, limit: int, window_seconds: int = 60) -> Tuple[Optional[float], dict]:
+        """is_allowed that also returns the entry it added, for release().
+
+        Returns (entry, stats); entry is None when the request is refused.
+        """
         now = time.monotonic()
         cutoff = now - window_seconds
 
@@ -116,7 +125,7 @@ class SlidingWindowCounter:
                     "limit": limit,
                     "reset_after": int(window_seconds - (now - self._windows[key][0]) if self._windows[key] else window_seconds),
                 }
-                return True, stats
+                return now, stats
             else:
                 oldest = self._windows[key][0] if self._windows[key] else now
                 retry_after = int(oldest + window_seconds - now) + 1
@@ -125,27 +134,22 @@ class SlidingWindowCounter:
                     "limit": limit,
                     "retry_after": max(1, retry_after),
                 }
-                return False, stats
+                return None, stats
 
-    def is_full(self, key: str, limit: int, window_seconds: int = 60) -> Tuple[bool, dict]:
-        """Whether `key` is at the limit, without counting a request.
+    def release(self, key: str, entry: float) -> None:
+        """Remove exactly the entry reserve() returned, if it is still there.
 
-        Returns the same stats as is_allowed. Used with record() for requests
-        that are counted only after they are answered.
+        Matched by identity, not value, so another request's entry with the
+        same timestamp is never the one removed.
         """
-        now = time.monotonic()
-        cutoff = now - window_seconds
         with self._lock:
-            self._windows[key] = [t for t in self._windows[key] if t > cutoff]
-            if len(self._windows[key]) < limit:
-                return False, {"remaining": limit - len(self._windows[key]), "limit": limit}
-            retry_after = int(self._windows[key][0] + window_seconds - now) + 1
-            return True, {"remaining": 0, "limit": limit, "retry_after": max(1, retry_after)}
-
-    def record(self, key: str) -> None:
-        """Count one request against `key` without checking the limit."""
-        with self._lock:
-            self._windows[key].append(time.monotonic())
+            window = self._windows.get(key)
+            if not window:
+                return
+            for i, t in enumerate(window):
+                if t is entry:
+                    del window[i]
+                    return
 
     def cleanup_stale(self, max_age: float = 300):
         """Remove entries for IPs that haven't made requests recently."""
@@ -227,16 +231,18 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         return response
 
     async def _credit_funded_chunk_upload(self, request, call_next, client_ip, key, limit):
-        """Not counted when billed; counted afterwards under its own key when not."""
+        """Reserve a slot under the upload key first; give it back once billed."""
         unbilled_key = key + _UNBILLED_CHUNK_KEY_SUFFIX
-        full, stats = self._counter.is_full(unbilled_key, limit)
-        if full:
+        entry, stats = self._counter.reserve(unbilled_key, limit)
+        if entry is None:
             return _too_many(request, client_ip, stats)
         try:
             return await call_next(request)
         finally:
-            if not getattr(request.state, CHUNK_BILLED_STATE, False):
-                self._counter.record(unbilled_key)
+            # Only a billed upload releases it. Anything else (a refusal, a
+            # refunded Bee failure, an exception, a cancellation) stays counted.
+            if getattr(request.state, CHUNK_BILLED_STATE, False):
+                self._counter.release(unbilled_key, entry)
 
 
 def _too_many(request: Request, client_ip: str, stats: dict) -> JSONResponse:
