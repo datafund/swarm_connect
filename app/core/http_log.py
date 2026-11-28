@@ -22,7 +22,9 @@ case and percent-encoded the way httpx2 writes a path. Two kinds of key are
 not collected there, so they are not replaced either: a segment without a
 run of 8 or more letters and digits ("/v2/aB3d5f7"), and a key of one letter
 case only ("abcdefghijklmnop"). If the redaction fails, the path is logged
-as /<redacted>; the filter never raises.
+as /<redacted>. A request-line record whose arguments have an unexpected
+shape is logged as "HTTP Request: (unreadable request line)". The filter
+never raises.
 
 httpcore2 traces at DEBUG only, which the gateway never enables. Should
 someone turn DEBUG on, two kinds of its lines are rewritten: the
@@ -49,6 +51,8 @@ _HTTPCORE2_LOGGERS = ("httpcore2.http11", "httpcore2.http2", "httpcore2.connecti
 
 # Logged instead of the path when the secret redaction fails.
 REDACTED_PATH = "/<redacted>"
+# Logged instead of an httpx2 request line whose arguments have an unexpected shape.
+UNREADABLE_REQUEST_LINE = "HTTP Request: (unreadable request line)"
 
 
 def _safe_path(url) -> str:
@@ -71,11 +75,25 @@ class Httpx2RequestLogFilter(logging.Filter):
     """Rewrites httpx2's request line; passes every other record unchanged."""
 
     def filter(self, record: logging.LogRecord) -> bool:
-        if record.msg == _HTTPX2_REQUEST_MSG and isinstance(record.args, tuple) and len(record.args) == 5:
+        try:
+            if not (isinstance(record.msg, str) and record.msg == _HTTPX2_REQUEST_MSG):
+                return True
+        except Exception:
+            return True
+        # httpx2's request line. Its arguments hold the server's reason phrase,
+        # so a record of an unexpected shape is not passed on as it is.
+        try:
+            if not (isinstance(record.args, tuple) and len(record.args) == 5):
+                raise ValueError("unexpected arguments")
             method, url, _version, status, _reason = record.args
             method = method if isinstance(method, str) and method.isalpha() and len(method) <= 16 else "?"
-            record.msg = "HTTP Request: %s %s %d"
-            record.args = (method, _safe_path(url), int(status))
+            args = (method, _safe_path(url), int(status))
+        except Exception:
+            record.msg = UNREADABLE_REQUEST_LINE
+            record.args = ()
+            return True
+        record.msg = "HTTP Request: %s %s %d"
+        record.args = args
         return True
 
 

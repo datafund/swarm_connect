@@ -85,12 +85,47 @@ def test_a_configured_secret_is_redacted_as_httpx2_encodes_it(monkeypatch, secre
     assert msg == "HTTP Request: POST /v2/<secret> 200", (raw, msg)
 
 
+@pytest.mark.parametrize("written", [
+    "Key%7C1234abcXYZ^",      # an escape httpx2 keeps, and "^" it leaves unencoded
+    "Key%201234abcXYZ{x}",    # an escape it keeps, and "{" "}" it encodes
+    "key%7c1234ABCxyz|",      # a lowercase escape, kept as written
+])
+def test_a_partly_encoded_configured_secret_is_redacted(monkeypatch, written):
+    """The configured URL's segment as written, not decoded: httpx2 keeps its
+    existing %xx escapes and encodes only what its path set requires."""
+    url = "https://rpc.example/v2/" + written
+    monkeypatch.setattr(settings, "BASE_RPC_URL", url)
+    raw = httpx2.URL(url).raw_path.decode("ascii")
+    rec = _request_record(url)
+    http_log.Httpx2RequestLogFilter().filter(rec)
+    msg = rec.getMessage()
+    assert "1234" not in msg, (raw, msg)
+    assert msg == "HTTP Request: POST /v2/<secret> 200", (raw, msg)
+
+
 def test_unconfigured_paths_pass_unchanged(monkeypatch):
     monkeypatch.setattr(settings, "BASE_RPC_URL", f"https://rpc.example/v2/{PLANTED}")
     ref = "ab12" * 16
     rec = _request_record(f"{BEE_URL}/bytes/{ref}")
     http_log.Httpx2RequestLogFilter().filter(rec)
     assert rec.getMessage() == f"HTTP Request: POST /bytes/{ref} 200"
+
+
+@pytest.mark.parametrize("args", [
+    ("GET", httpx2.URL("http://h/x"), "HTTP/1.1", "not-a-status", MARKER),  # int(status) fails
+    ("GET", httpx2.URL("http://h/x"), "HTTP/1.1", None, MARKER),
+    (object(), object(), object(), object(), MARKER),
+    ("GET", httpx2.URL("http://h/x"), "HTTP/1.1", 200),                    # four, not five
+    {"m": "GET", "u": "x", "v": "1.1", "s": 200, "r": MARKER},              # a mapping
+])
+def test_a_malformed_request_record_never_raises_and_leaks_nothing(args):
+    rec = logging.LogRecord("httpx2", logging.INFO, __file__, 1, 'HTTP Request: %s %s "%s %d %s"',
+                            (), None)
+    rec.args = args
+    assert http_log.Httpx2RequestLogFilter().filter(rec) is True
+    msg = rec.getMessage()
+    assert MARKER not in msg
+    assert msg == "HTTP Request: (unreadable request line)"
 
 
 def test_path_redaction_failure_never_raises(monkeypatch):

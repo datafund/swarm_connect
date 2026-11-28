@@ -58,6 +58,7 @@ without_addresses() replaces, in this order:
    Routes and names such as "facilitator", "Transaction", "mainnet-v2" and
    "gnosis-mainnet" are not collected, and neither is a key of one letter
    case only ("abcdefghijklmnop"), which cannot be told from a word.
+   A percent-encoded path segment is collected both decoded and as written.
 2. URLs with a scheme -> <url>.
 3. libp2p multiaddrs: the address after /ip4/ or /ip6/ -> <address>, the
    name after /dns/, /dns4/, /dns6/ or /dnsaddr/ -> <host>, and a /tcp/ or
@@ -325,10 +326,14 @@ def _configured_from(values):
             continue
         if host:
             hosts.add(host.lower().strip("[]"))
-        for segment in parts.path.split("/"):
-            segment = unquote(segment)
+        for written in parts.path.split("/"):
+            segment = unquote(written)
             if _looks_secret(segment):
                 secrets.add(segment)
+                if written != segment:
+                    # Also as written: httpx2 keeps existing %xx escapes in a
+                    # path, so "Key%7C1234abcXYZ^" is sent and logged that way.
+                    secrets.add(written)
         for _, query_value in parse_qsl(parts.query, keep_blank_values=False):
             if _looks_secret(query_value):
                 secrets.add(query_value)
@@ -584,7 +589,9 @@ def without_addresses(text: str) -> str:
 # The printable ASCII characters httpx2 leaves unencoded in a URL path: all
 # but space, '"', "#", "<", ">", "?", "`", "{" and "}" (the WHATWG path
 # percent-encode set, httpx2._urlparse.PATH_SAFE). A configured secret is
-# matched in the form httpx2 writes it, and fully encoded as well.
+# matched in the form httpx2 writes it, and fully encoded as well. "%" is in
+# the set, so a secret kept as written in the configured URL keeps its
+# existing escapes, as httpx2 does.
 _PATH_SAFE = "".join(chr(i) for i in range(0x21, 0x7F) if chr(i) not in '"#<>?`{}')
 
 
