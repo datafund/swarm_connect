@@ -155,7 +155,7 @@ A deploy or a config change replaces the gateway container, and `docker logs` sh
 
 - `environment`: `main` (production) or `development` (staging).
 - `container`: the compose service name, `provenance_gateway` or `provenance_gateway_dev`. It is not the container id, so the replaced container's lines are in the same stream as the new one. Find them by time.
-- `host`: the deploy host, from `HOST_LABEL`.
+- `host`: the deploy host, from `HOST_LABEL`. When `HOST_LABEL` is unset, the label is empty or absent (`config.alloy` sets it to the empty value), so a `host=` filter matches nothing from that host.
 - `level`: `DEBUG`, `INFO`, `WARNING`, `ERROR` or `CRITICAL`, taken from the start of the line. A line that does not start with a level, such as a traceback continuation, has no `level` label.
 
 Loki indexes only these labels. Any other search, such as a transaction hash, is a filter that Loki applies at query time. Loki keeps lines for the retention set in Grafana Cloud. This repository does not pin it (the 14 days in `CLAUDE.md` are for metrics).
@@ -166,14 +166,14 @@ Loki indexes only these labels. Any other search, such as a transaction hash, is
 {job="swarm_connect/gateway", environment="main", level=~"WARNING|ERROR|CRITICAL"}
 ```
 
-To follow one payment or batch, filter on the transaction hash (the `tx=` field), the `nonce` or the batch id from the audit log. `|=` is case-sensitive, and `|~ "(?i)..."` ignores case:
+To follow one payment or batch, filter on the transaction hash (the `tx=` field in the settlement log lines) or the batch id. The authorization `nonce` is not in any gateway log line. It is only in the audit log records described above. `|=` is case-sensitive, and `|~ "(?i)..."` ignores case:
 
 ```
 {job="swarm_connect/gateway", environment="main"} |= "<tx hash>"
 {job="swarm_connect/gateway", environment="main"} |~ "(?i)<batch id>"
 ```
 
-To see everything around a moment, including traceback lines, narrow the time range to a few minutes and drop the `level` filter: `{job="swarm_connect/gateway", environment="main"}`. On a single line, **Show context** shows the lines just before and after it. The dashboard `datafund.grafana.net/d/gateway-overview` has the same data in **Recent Errors and Warnings** (WARNING and above) and **Log Volume by Level**, filtered by its Environment selector.
+To see everything around a moment, including traceback lines, narrow the time range to a few minutes and drop the `level` filter: `{job="swarm_connect/gateway", environment="main"}`. On a single line, **Show context** shows the lines just before and after it. The dashboard `datafund.grafana.net/d/gateway-overview` has two log panels, both filtered by its Environment selector. **Recent Errors and Warnings** shows the lines at WARNING and above, with the same query as the first example. **Log Volume by Level** shows their rate per level, not the lines.
 
 **What is not in Loki.**
 
@@ -476,6 +476,8 @@ The two payment state files are rewritten as paid requests go through. While a w
 ### Log delivery alerts (#672)
 
 The gateway's logs go to Grafana Cloud Loki through Alloy, on a pipeline separate from the metrics. When it breaks, every other alert stays quiet. In #661 the token lacked `logs:write` and the logs of an unknown period were lost.
+
+To read the logs themselves, including those of a replaced container, see "Reading the gateway's logs after a deploy (#661)" in section 3.
 
 | Alert | Meaning | First action |
 |---|---|---|
