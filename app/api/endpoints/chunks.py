@@ -12,7 +12,7 @@ from app.x402.openapi_docs import paid_route_openapi
 from app.api.models.chunk import ChunkUploadResponse, CreditTopUpResponse, TokenRotationResponse
 from app.core.config import settings
 from app.services.bandwidth_credit import (
-    BYTES_PER_MB, bandwidth_credit_manager, invalid_topup_mb_detail, parse_topup_mb,
+    BYTES_PER_MB, CREDIT_TOKEN_HEADER, bandwidth_credit_manager, invalid_topup_mb_detail, parse_topup_mb,
     valid_topup_mb,
 )
 from app.services.bandwidth_free_tier import free_tier_tracker
@@ -34,8 +34,8 @@ router = APIRouter()
 MARSHALED_STAMP_HEX_LEN = 226
 _HEX_RE = re.compile(r"^[A-Fa-f0-9]+\Z")
 
-# Header the client uses to present its prepaid bandwidth credit token.
-CREDIT_TOKEN_HEADER = "X-Bandwidth-Credit-Token"
+# CREDIT_TOKEN_HEADER (imported above) is the header the client presents its
+# prepaid bandwidth credit token in.
 
 # 1 MB = 10^6 bytes (consistent with the per-GB bandwidth pricing).
 # Imported rather than redefined: pricing and crediting must convert MB to
@@ -61,6 +61,42 @@ def _validate_marshaled_stamp(stamp: str) -> str:
             },
         )
     return s
+
+
+def _chunk_too_large(max_bytes: int) -> HTTPException:
+    return HTTPException(
+        status_code=413,  # Content Too Large
+        detail={
+            "code": "CHUNK_TOO_LARGE",
+            "message": f"Chunk exceeds the maximum size of {max_bytes} bytes.",
+            "max_bytes": max_bytes,
+        },
+    )
+
+
+async def _read_chunk_body(request: Request, max_bytes: int) -> bytes:
+    """Read the chunk body, refusing with 413 as soon as it is over max_bytes.
+
+    A declared Content-Length over the limit is refused before anything is
+    read. Otherwise (chunked transfer encoding, or a length that understates the
+    body) the stream is read message by message and reading stops at the first
+    message that takes the total over the limit, so what is kept never exceeds
+    max_bytes plus that one message. `request.body()` used to read the whole
+    body first, whatever its size (#696).
+    """
+    declared = request.headers.get("content-length")
+    if declared is not None:
+        try:
+            if int(declared) > max_bytes:
+                raise _chunk_too_large(max_bytes)
+        except ValueError:
+            pass  # the server refuses a malformed length; the read below caps anyway
+    body = bytearray()
+    async for part in request.stream():
+        body += part
+        if len(body) > max_bytes:
+            raise _chunk_too_large(max_bytes)
+    return bytes(body)
 
 
 def _topup_info() -> dict:
@@ -297,22 +333,14 @@ async def upload_chunk(
 
     stamp = _validate_marshaled_stamp(swarm_postage_stamp)
 
-    chunk_bytes = await request.body()
+    # Size first, before the body is buffered and before any credit or quota
+    # is touched (#696).
+    max_bytes = settings.CHUNK_UPLOAD_MAX_BYTES_PER_REQUEST
+    chunk_bytes = await _read_chunk_body(request, max_bytes)
     if not chunk_bytes:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail={"code": "EMPTY_CHUNK", "message": "Request body (the chunk) must not be empty."},
-        )
-
-    max_bytes = settings.CHUNK_UPLOAD_MAX_BYTES_PER_REQUEST
-    if len(chunk_bytes) > max_bytes:
-        raise HTTPException(
-            status_code=413,  # Content Too Large
-            detail={
-                "code": "CHUNK_TOO_LARGE",
-                "message": f"Chunk exceeds the maximum size of {max_bytes} bytes.",
-                "max_bytes": max_bytes,
-            },
         )
 
     chunk_len = len(chunk_bytes)
