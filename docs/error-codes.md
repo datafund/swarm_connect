@@ -242,3 +242,5 @@ These come back as 400 when an upload fails because of its stamp, either from
 | Code | Status | Meaning | What to do |
 |---|---|---|---|
 | `PATH_NOT_ALLOWED` | 403 | The debug proxy does not serve that Bee path. `detail.allowed` lists the ones it does. | Use a listed path. |
+| `DEBUG_PATH_INVALID` | 403 | The debug path is malformed: a `.` or `..` segment (also percent-encoded, once or twice), an empty segment (a leading, doubled or trailing slash), a backslash, a control character, or a `%` left after the server's one decode. Bee was not called. | Send the plain path, for example `status/peers`. |
+| `DEBUG_QUERY_NOT_ALLOWED` | 403 | The debug proxy forwards no query string; none of the Bee endpoints it serves takes one. Bee was not called. | Drop the query string. |
