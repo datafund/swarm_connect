@@ -252,7 +252,7 @@ class TestTarHelperFunctions:
         tar_bytes = create_tar_archive(files)
 
         # Should not raise
-        assert inspect_tar(tar_bytes) == 1
+        assert inspect_tar(tar_bytes).file_count == 1
 
     def test_inspect_tar_empty(self):
         """Test inspect_tar with empty TAR."""
@@ -285,7 +285,7 @@ class TestTarHelperFunctions:
         }
         tar_bytes = create_tar_archive(files)
 
-        assert inspect_tar(tar_bytes) == 3
+        assert inspect_tar(tar_bytes).file_count == 3
 
     def test_count_tar_files_with_dirs(self):
         """Test inspect_tar's count excludes directories."""
@@ -308,7 +308,7 @@ class TestTarHelperFunctions:
         tar_bytes = tar_buffer.read()
 
         # Should count only the file, not the directory
-        assert inspect_tar(tar_bytes) == 1
+        assert inspect_tar(tar_bytes).file_count == 1
 
 
 class TestEdgeCases:

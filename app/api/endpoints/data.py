@@ -1,11 +1,16 @@
 # app/api/endpoints/data.py
 import asyncio
 import base64
+import functools
 import json
 import logging
+import re
 import time
+import unicodedata
+from urllib.parse import quote, unquote
 from fastapi import APIRouter, Header, HTTPException, Path, Query, Request, File, UploadFile
 from fastapi.responses import Response
+from starlette.convertors import PathConvertor, register_url_convertor
 import httpx2
 
 from app.x402.settlement import settle_payment
@@ -22,11 +27,14 @@ from typing import Optional
 from app.services.swarm_api import (
     upload_data_to_swarm,
     download_data_from_swarm,
+    download_collection_file,
+    CollectionPathNotFound,
     DownloadTooLargeError,
     get_batch_expiry,
     upload_collection_to_swarm,
     inspect_tar,
     TarRefused,
+    TarSummary,
     validate_stamp_for_upload,
     check_upload_failure_reason,
     StampValidationError,
@@ -68,6 +76,17 @@ _tar_lane = IOLane(2, "manifest-tar-parse")
 MULTIPART_ENVELOPE_ALLOWANCE = 8 * 1024
 
 router = APIRouter()
+
+
+class _AnyPathConvertor(PathConvertor):
+    """Starlette's `path` convertor is `.*`, which stops at a newline: a path
+    with an encoded CR or LF then matched no route (404), or, at the very end,
+    was dropped and became the root download. This one matches every
+    character, so _path_segments refuses control characters with 400 (#700)."""
+    regex = r"[\s\S]*"
+
+
+register_url_convertor("anypath", _AnyPathConvertor())
 
 
 def _build_server_timing_header(timing_dict: dict) -> str:
@@ -160,6 +179,157 @@ def _detect_content_type_and_filename(data_bytes: bytes, reference: str) -> tupl
 
     # Default to binary with .bin extension
     return "application/octet-stream", f"data-{reference[:8]}.bin"
+
+
+# The 404 of /data/{reference} and /data/{reference}/json (#700). Bee answers a
+# collection uploaded without an index document exactly as it answers a
+# reference that does not exist, so the hint names both and claims neither.
+# Kept a plain string with its old prefix, as clients read it.
+def _not_found_detail(reference: str) -> str:
+    return (f"Data not found for reference {reference}. If it is a collection uploaded "
+            f"without an index document, download a file inside it with "
+            f"GET /api/v1/data/{reference}/<path>.")
+
+
+# Collection paths (#700). Starlette has already percent-decoded the URL path
+# once; a segment that decodes once more to "." or ".." (sent as %252e%252e) is
+# refused too, as are control characters, backslashes and empty segments.
+_CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f]")
+
+
+def _path_segments(path: str) -> list[str]:
+    """The segments of a collection path, or ValueError naming what is wrong."""
+    if not path:
+        raise ValueError("The path is empty.")
+    if len(path.encode("utf-8", "surrogateescape")) > settings.MANIFEST_MAX_PATH_BYTES:
+        raise ValueError(f"The path is longer than {settings.MANIFEST_MAX_PATH_BYTES} bytes.")
+    segments = path.split("/")
+    for segment in segments:
+        if segment == "":
+            raise ValueError("The path has an empty segment (a leading, doubled or extra slash).")
+        for form in (segment, unquote(segment)):
+            if form in (".", ".."):
+                raise ValueError("The path may not contain '.' or '..' segments.")
+            if "\\" in form:
+                raise ValueError("The path may not contain backslashes.")
+            if _CONTROL_CHARS.search(form):
+                raise ValueError("The path may not contain control characters.")
+        if "/" in unquote(segment):
+            raise ValueError("The path may not contain a slash encoded twice (%252F).")
+    return segments
+
+
+# A Content-Type Bee sends is passed through only when it is a plain
+# type/subtype with optional parameters; anything else becomes octet-stream.
+_MEDIA_TYPE = re.compile(r"^[A-Za-z0-9!#$&^_.+-]+/[A-Za-z0-9!#$&^_.+-]+(\s*;[\x20-\x7e]*)?$")
+# Bee 2.8.1 sends `inline; filename="<name>"` and nothing after it; up to the
+# last quote, so a name with a quote in it is read whole.
+_BEE_FILENAME = re.compile(r'filename="(.*)"\s*$')
+
+
+def _collection_content_type(bee_value: Optional[str]) -> str:
+    value = (bee_value or "").strip()
+    return value if _MEDIA_TYPE.match(value) else "application/octet-stream"
+
+
+# Characters a download name may not carry: controls (Cc), format characters
+# such as the bidi overrides U+202E and U+200F (Cf), line and paragraph
+# separators (Zl, Zp). A browser shows or saves such a name misleadingly
+# ("evil\u202Etxt.exe" reads as "evilexe.txt").
+_UNSAFE_NAME_CATEGORIES = frozenset({"Cc", "Cf", "Zl", "Zp"})
+
+
+def _is_safe_download_name(name: str) -> bool:
+    """Whether `name` can be offered as the saved file's name: one plain
+    name, no path separator of any OS, not `.` or `..`, no unsafe character,
+    and no leading or trailing space and no trailing dot (Windows drops those,
+    so the saved name would differ from the one shown). A leading dot is kept:
+    `.env` is an ordinary name."""
+    # "." and ".." also end with a dot, so the trailing-dot rule below covers
+    # them; named here so the rule stays complete if that one is relaxed.
+    if not name or name in (".", ".."):
+        return False
+    if "/" in name or "\\" in name:
+        return False
+    if name != name.strip() or name.endswith("."):
+        return False
+    return not any(unicodedata.category(c) in _UNSAFE_NAME_CATEGORIES for c in name)
+
+
+def _safe_segment_name(segment: str) -> str:
+    """The last path segment as a download name. The path rules already
+    refuse separators, controls and dot segments; a format character (a bidi
+    override) or a trailing space or dot can still be in a valid file name of
+    the collection, so those are replaced rather than refused, and the file
+    stays downloadable."""
+    name = "".join("_" if unicodedata.category(c) in _UNSAFE_NAME_CATEGORIES or c in "/\\" else c
+                   for c in segment).strip().rstrip(".").strip()
+    return name if _is_safe_download_name(name) else "download"
+
+
+def _collection_filename(bee_disposition: Optional[str], segments: list[str]) -> str:
+    """Bee's own file name (it names the index document a directory request
+    served) when it is a safe download name, else the last path segment made
+    safe."""
+    match = _BEE_FILENAME.search(bee_disposition or "")
+    if match:
+        # Bee sends the name as raw UTF-8, which httpx2 decodes as UTF-8
+        # (it falls back to latin-1 only for bytes that are not UTF-8, which a
+        # second decode could not repair).
+        name = match.group(1)
+        if _is_safe_download_name(name):
+            return name
+    return _safe_segment_name(segments[-1])
+
+
+def _attachment(filename: str) -> str:
+    """Content-Disposition: attachment, with an ASCII fallback name and the
+    exact name as RFC 6266 filename* when they differ."""
+    fallback = "".join(c if " " <= c <= "~" and c not in '"\\' else "_" for c in filename)
+    value = f'attachment; filename="{fallback}"'
+    if fallback != filename:
+        value += f"; filename*=UTF-8''{quote(filename, safe='')}"
+    return value
+
+
+# A name that h11 sends unchanged as a header value: printable ASCII, no
+# leading or trailing space (h11 strips or refuses those).
+_HEADER_SAFE_NAME = re.compile(r"^[\x21-\x7e](?:[\x20-\x7e]*[\x21-\x7e])?$")
+
+# Set as the collection's index document when the archive has it at its root.
+ROOT_INDEX_DOCUMENT = "index.html"
+
+
+def _document_path(value: str, single_segment: bool = False) -> list[str]:
+    """Check an index_document / error_document name. It goes to Bee in a
+    header, so every character must be printable ASCII (0x20-0x7E) and it may
+    not start or end with a space: the HTTP client refuses anything else when
+    it sends the header (h11 LocalProtocolError, or UnicodeEncodeError), which
+    happens after settle_payment. Otherwise the rules of a download path,
+    without a trailing slash.
+
+    Bee appends the index document to every directory it serves, and refuses
+    an upload whose index document has a slash (Bee 2.8.1 answers 500 "could
+    not store directory", measured), so an index document is one name."""
+    if not _HEADER_SAFE_NAME.match(value):
+        raise ValueError("the path must be printable ASCII (no tab or control character, "
+                         "no leading or trailing space).")
+    if value.endswith("/"):
+        raise ValueError("the path must name a file, not a directory.")
+    if any("/" in unquote(segment) for segment in value.split("/")):
+        # The name goes to Bee in a header as it is, not as a URL; a %2F in it
+        # would be ambiguous between a file name and a directory separator.
+        raise ValueError("the name may not contain a percent-encoded slash (%2F); "
+                         "give the file's path as it is in the archive.")
+    segments = _path_segments(value)
+    if single_segment and len(segments) > 1:
+        raise ValueError("the index document must be a file at the root of the archive, without a '/'.")
+    return segments
+
+
+def _path_invalid(message: str) -> HTTPException:
+    downloads_total.labels(status="error").inc()
+    return HTTPException(status_code=400, detail={"code": "PATH_INVALID", "message": message})
 
 
 def _check_stamp_access(
@@ -648,6 +818,10 @@ async def download_data(
             headers={
                 "Content-Length": str(len(data_bytes)),
                 "Content-Disposition": f'attachment; filename="{filename}"',
+                # A collection's index document is often HTML (#700): never
+                # sniffed into an active type, never run as a gateway page.
+                "X-Content-Type-Options": "nosniff",
+                "Content-Security-Policy": "sandbox",
                 "X-Swarm-Reference": reference
             }
         )
@@ -655,7 +829,7 @@ async def download_data(
     except FileNotFoundError as e:
         downloads_total.labels(status="error").inc()
         logger.warning(f"Data not found for reference {reference}: {exc_text(e)}")
-        raise HTTPException(status_code=404, detail=f"Data not found for reference {reference}")
+        raise HTTPException(status_code=404, detail=_not_found_detail(reference))
     except DownloadTooLargeError as e:
         raise _too_large(reference, e)
     except asyncio.TimeoutError:
@@ -719,7 +893,7 @@ async def download_data_json(
     except FileNotFoundError as e:
         downloads_total.labels(status="error").inc()
         logger.warning(f"Data not found for reference {reference}: {exc_text(e)}")
-        raise HTTPException(status_code=404, detail=f"Data not found for reference {reference}")
+        raise HTTPException(status_code=404, detail=_not_found_detail(reference))
     except DownloadTooLargeError as e:
         raise _too_large(reference, e)
     except asyncio.TimeoutError:
@@ -734,6 +908,113 @@ async def download_data_json(
         raise HTTPException(status_code=500, detail="Internal server error during download")
 
 
+@router.get("/{reference}/{path:anypath}")
+async def download_collection_path(
+    reference: str = Path(..., description="Swarm reference of the collection (manifest)", pattern=r"^[a-fA-F0-9]{64,128}$"),
+    path: str = Path(..., description="Path of a file inside the collection, as it was in the uploaded TAR archive"),
+):
+    """
+    Download one file from a collection uploaded with `POST /api/v1/data/manifest`.
+
+    **Always free** — no payment or headers required, even when x402 is enabled.
+
+    The gateway fetches `bzz/{reference}/{path}` from its Bee node, with the same
+    size limit (`MAX_DOWNLOAD_SIZE_MB`, 413 `DOWNLOAD_TOO_LARGE`) and timeout (504)
+    as `GET /api/v1/data/{reference}`.
+
+    **Path**: the file's path in the archive, for example `assets/logo.png`
+    (`./assets/logo.png` in the archive is stored as `assets/logo.png`). Each
+    segment is percent-encoded towards Bee, so send a name with spaces or `#`
+    percent-encoded in the URL. Refused with 400 `PATH_INVALID`: `.` and `..`
+    segments (also percent-encoded once more), empty segments (`a//b`, a leading
+    slash), backslashes, control characters, a slash encoded twice (`%252F`), and paths over
+    `MANIFEST_MAX_PATH_BYTES`. A plain `%2F` is decoded by the server before
+    routing and acts as a separator (`a%2Fb` is `a/b`). A trailing slash asks for that directory's index
+    document (`docs/` serves `docs/index.html` when the collection has the index
+    document `index.html`). `/api/v1/data/{reference}/` is the same as
+    `/api/v1/data/{reference}`.
+
+    **`json` at the collection root**: `/api/v1/data/{reference}/json` is the
+    JSON-metadata download, so a file named exactly `json` at the root of a
+    collection cannot be fetched through this route. Files called `json` in a
+    directory (`a/json`) are not affected.
+
+    **Response**: the file's bytes, always as a download:
+    - `Content-Type`: the type Bee reports, or `application/octet-stream` when Bee
+      reports none
+    - `Content-Disposition: attachment` with the file's name
+    - `X-Content-Type-Options: nosniff` and `Content-Security-Policy: sandbox`, so
+      an HTML or SVG file is never run as a page of the gateway
+    - `X-Swarm-Reference`
+
+    **Errors**:
+    - 404 `COLLECTION_PATH_NOT_FOUND`: the collection exists and has no file at
+      this path. A collection uploaded with an error document serves that
+      document instead, with 200.
+    - 404 `DATA_NOT_FOUND`: Bee has nothing for this reference and path. The
+      reference may not exist, or may not be a collection.
+    - 422: the reference is not 64 or 128 hex characters.
+    """
+    if path == "":
+        # /data/{reference}/ used to redirect to /data/{reference}; keep its answer.
+        return await download_data(reference)
+    directory = path.endswith("/")
+    try:
+        segments = _path_segments(path[:-1] if directory else path)
+    except ValueError as e:
+        raise _path_invalid(str(e))
+
+    try:
+        result = await download_collection_file(reference, segments, directory=directory)
+    except CollectionPathNotFound as e:
+        downloads_total.labels(status="error").inc()
+        logger.warning(f"No path in collection {reference}: {exc_text(e)}")
+        raise HTTPException(status_code=404, detail={
+            "code": "COLLECTION_PATH_NOT_FOUND",
+            "message": "The collection has no file at this path.",
+            "reference": reference,
+            "path": path,
+        })
+    except FileNotFoundError as e:
+        downloads_total.labels(status="error").inc()
+        logger.warning(f"Nothing at {reference}/<path>: {exc_text(e)}")
+        raise HTTPException(status_code=404, detail={
+            "code": "DATA_NOT_FOUND",
+            "message": ("Nothing was found for this reference and path. The reference may "
+                        "not exist, or may not be a collection."),
+            "reference": reference,
+            "path": path,
+        })
+    except DownloadTooLargeError as e:
+        raise _too_large(reference, e)
+    except asyncio.TimeoutError:
+        raise _download_timeout(reference)
+    except httpx2.HTTPError as e:
+        downloads_total.labels(status="error").inc()
+        logger.error(f"Swarm API error during collection download: {exc_text(e)}")
+        raise HTTPException(status_code=502, detail="Failed to download data from Swarm. The Bee node may be unavailable.")
+    except Exception as e:
+        downloads_total.labels(status="error").inc()
+        logger.error(f"Unexpected error during collection download: {exc_text(e)}")
+        raise HTTPException(status_code=500, detail="Internal server error during download")
+
+    downloads_total.labels(status="success").inc()
+    filename = _collection_filename(result.content_disposition, segments)
+    return Response(
+        content=result.content,
+        headers={
+            "Content-Type": _collection_content_type(result.content_type),
+            "Content-Length": str(len(result.content)),
+            "Content-Disposition": _attachment(filename),
+            # Served from the gateway's own origin: never sniffed into an active
+            # type, never run as a page (#700).
+            "X-Content-Type-Options": "nosniff",
+            "Content-Security-Policy": "sandbox",
+            "X-Swarm-Reference": reference,
+        },
+    )
+
+
 @router.post("/manifest", response_model=ManifestUploadResponse, openapi_extra=paid_route_openapi([200]))
 async def upload_manifest(
     request: Request,
@@ -742,6 +1023,16 @@ async def upload_manifest(
     deferred: bool = False,
     include_timing: bool = False,
     redundancy: Optional[int] = Query(default=None, ge=0, le=4),
+    index_document: Optional[str] = Query(
+        default=None,
+        description="Name of a regular file at the archive's root that Bee serves for the collection "
+                    "root (and that name in every directory). Default: index.html when the archive has one at its root.",
+    ),
+    error_document: Optional[str] = Query(
+        default=None,
+        description="Path of a regular file in the archive that Bee serves, with status 200, "
+                    "for a path the collection does not have.",
+    ),
     file: UploadFile = File(...),
     x_owner_timestamp: Optional[str] = Header(None, alias="X-Owner-Timestamp", description=_OWNER_TS_DESC),
     x_owner_signature: Optional[str] = Header(None, alias="X-Owner-Signature", description=_OWNER_SIG_DESC),
@@ -796,6 +1087,23 @@ async def upload_manifest(
     - Optional `deferred` parameter (defaults to false)
     - Optional `include_timing` parameter (defaults to false)
     - Optional `redundancy` parameter (0-4, defaults to 2=strong)
+    - Optional `index_document` and `error_document` parameters (see below)
+
+    **Index and error documents** (#700):
+    - When the archive has a regular file `index.html` at its root (`index.html`
+      or `./index.html`), the collection gets it as its index document, so
+      `GET /api/v1/data/{reference}` returns it, and `GET
+      /api/v1/data/{reference}/{dir}/` returns `{dir}/index.html`. This changes
+      the reference: the same archive uploaded before this release got another
+      one. Without a root `index.html` nothing changes.
+    - `index_document=<name>` names another index document: a regular file at
+      the archive's root (no `/`; Bee looks for that name in every directory).
+      `error_document=<path>` names a regular file anywhere in the archive that
+      Bee serves, with status 200, for any path the collection does not have.
+      Both in printable ASCII (0x20-0x7E, no leading or trailing space) without
+      `.`/`..` or empty segments, or the upload gets
+      400 `INDEX_DOCUMENT_INVALID` / `ERROR_DOCUMENT_INVALID` before payment
+      (not charged).
 
     **Stamp Validation** (opt-in with `validate_stamp=true`):
     When enabled, validates the stamp before upload:
@@ -855,9 +1163,9 @@ async def upload_manifest(
     ```
 
     **Accessing individual files**:
-    After upload, individual files can be accessed via:
-    - `GET /bzz/{manifest_reference}/{file_path}` on the Bee node directly
-    - Or use bee-js `MantarayNode.unmarshal()` to extract individual file references
+    After upload, download each file through the gateway with
+    `GET /api/v1/data/{reference}/{file_path}` (free). `GET /api/v1/data/{reference}`
+    returns the index document, and answers 404 when the collection has none.
 
     **Response**:
     ```json
@@ -927,6 +1235,20 @@ async def upload_manifest(
                 detail=f"Invalid redundancy level {redundancy}. Must be 0-4 ({valid_levels})"
             )
 
+        # Index and error document names (#700): their form here, their presence
+        # in the archive in the inspect_tar pass below, both before payment.
+        for value, code, label, single in (
+                (index_document, "INDEX_DOCUMENT_INVALID", "index_document", True),
+                (error_document, "ERROR_DOCUMENT_INVALID", "error_document", False)):
+            if value is None:
+                continue
+            try:
+                _document_path(value, single_segment=single)
+            except ValueError as e:
+                raise HTTPException(status_code=400, detail={
+                    "code": code, "message": f"{label}: {e}",
+                })
+
         # Optional pre-upload stamp validation. Always done for a paid upload:
         # the payment is settled just before the upload, so a stamp Bee would
         # refuse (missing, expired, full) must be caught while it is still free.
@@ -980,11 +1302,26 @@ async def upload_manifest(
         # before settle_payment, so a refused archive is never charged.
         tar_validate_start = time.perf_counter()
         try:
-            file_count = await asyncio.wrap_future(_tar_lane.submit(inspect_tar, tar_bytes))
+            wanted = {name for name in (ROOT_INDEX_DOCUMENT, index_document, error_document) if name}
+            summary: TarSummary = await asyncio.wrap_future(
+                _tar_lane.submit(functools.partial(inspect_tar, tar_bytes, wanted=wanted)))
         except TarRefused as e:
             if e.code is None:
                 raise HTTPException(status_code=e.status, detail=e.message)
             raise HTTPException(status_code=e.status, detail={"code": e.code, "message": e.message})
+        file_count = summary.file_count
+        if index_document is not None and index_document not in summary.found:
+            raise HTTPException(status_code=400, detail={
+                "code": "INDEX_DOCUMENT_INVALID",
+                "message": f"index_document: the archive has no regular file at {index_document!r}.",
+            })
+        if error_document is not None and error_document not in summary.found:
+            raise HTTPException(status_code=400, detail={
+                "code": "ERROR_DOCUMENT_INVALID",
+                "message": f"error_document: the archive has no regular file at {error_document!r}.",
+            })
+        if index_document is None and ROOT_INDEX_DOCUMENT in summary.found:
+            index_document = ROOT_INDEX_DOCUMENT
         tar_validate_ms = (time.perf_counter() - tar_validate_start) * 1000
         # Counted in the same pass; the field stays for existing clients.
         tar_count_ms = 0.0
@@ -993,7 +1330,8 @@ async def upload_manifest(
         bee_start = time.perf_counter()
         await settle_payment(request)
         reference = await _upload_to_bee(owner_proof, upload_collection_to_swarm(
-            tar_bytes, stamp_id, deferred=deferred, redundancy_level=redundancy
+            tar_bytes, stamp_id, deferred=deferred, redundancy_level=redundancy,
+            index_document=index_document, error_document=error_document,
         ))
         bee_upload_ms = (time.perf_counter() - bee_start) * 1000
 

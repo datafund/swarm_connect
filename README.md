@@ -353,6 +353,7 @@ Swarm Connect is a FastAPI-based API gateway that provides comprehensive access 
 - `POST /api/v1/data/manifest?stamp_id={id}`: Upload TAR archive as collection/manifest (15x faster for batch uploads)
 - `GET /api/v1/data/{reference}`: Download raw data from Swarm (returns bytes directly)
 - `GET /api/v1/data/{reference}/json`: Download data with JSON metadata (base64-encoded)
+- `GET /api/v1/data/{reference}/{path}`: Download one file of a collection uploaded with `/data/manifest`
 
 #### Debug (read-only Bee diagnostics)
 - `GET /api/v1/debug/bee/{path}`: signature-gated read-only proxy to allow-listed Bee diagnostic endpoints (`topology`, `addresses`, `peers`, `status`, `chainstate`, …) for operators who only have gateway access. Disabled (404) unless `DEBUG_ALLOWED_ADDRESSES` is set; requires an EIP-191 signature from an allow-listed address (`X-Debug-Timestamp` + `X-Debug-Signature` over `swarm-connect-debug:<unix_ts>`). No shared secret is stored.
@@ -723,6 +724,10 @@ Upload multiple files as a TAR archive collection/manifest.
 - **deferred**: Optional (default: false) - Use deferred upload mode (see table above)
 - **include_timing**: Optional (default: false) - Include timing breakdown in response
 - **redundancy**: Optional (default: 2) - Erasure coding level (0-4) - see redundancy table above
+- **index_document**: Optional - name of a regular file at the archive's root that `GET /api/v1/data/{reference}` returns (Bee also serves that name for every directory, so `docs/` returns `docs/<name>`). No `/` in it. Default: `index.html` when the archive has one at its root.
+- **error_document**: Optional - path of a regular file in the archive that Bee returns, with status 200, for any path the collection does not have.
+- An `index_document` or `error_document` that is not a regular file in the archive, or is not printable ASCII (0x20-0x7E, no leading or trailing space; it goes to Bee in a header), gets 400 `INDEX_DOCUMENT_INVALID` / `ERROR_DOCUMENT_INVALID` before payment (not charged).
+- **Reference change**: an archive with `index.html` at its root (`index.html` or `./index.html`) now gets `index.html` as its index document, so it gets a different reference than the same archive uploaded before #700. An archive without a root `index.html` gets the same reference as before.
 - **Response**: `{"reference": "manifest-hash...", "file_count": 50, "message": "Collection uploaded successfully", "timing": null}`
 
 **Usage Example:**
@@ -773,8 +778,16 @@ curl -X POST "http://localhost:8000/api/v1/data/manifest?stamp_id=YOUR_STAMP_ID&
 The `ms_per_file` and `files_per_second` metrics are useful for comparing local Bee node performance vs gateway performance.
 
 **Accessing individual files after upload:**
-- Via Bee node: `GET /bzz/{manifest_reference}/{file_path}`
-- Via bee-js: Use `MantarayNode.unmarshal()` to extract individual file references
+- Through the gateway: `GET /api/v1/data/{reference}/{file_path}` (see below)
+- `GET /api/v1/data/{reference}` returns the index document, and 404 for a collection without one
+- Via a Bee node: `GET /bzz/{reference}/{file_path}`
+
+```bash
+tar -cf site.tar index.html assets/logo.png
+curl -X POST "http://localhost:8000/api/v1/data/manifest?stamp_id=YOUR_STAMP_ID" -F "file=@site.tar"
+curl -O -J "http://localhost:8000/api/v1/data/REFERENCE/assets/logo.png"
+curl -O -J "http://localhost:8000/api/v1/data/REFERENCE"          # index.html
+```
 
 #### `GET /api/v1/data/{reference}`
 Download raw data from Swarm as a file (triggers browser download).
@@ -783,6 +796,7 @@ Download raw data from Swarm as a file (triggers browser download).
 - **Headers**:
   - `Content-Disposition: attachment; filename="provenance-abc12345.json"`
   - `Content-Type`: Auto-detected (application/json, image/png, etc.)
+  - `X-Content-Type-Options: nosniff` and `Content-Security-Policy: sandbox`: a collection's index document is often HTML, and is never run as a page of the gateway (#700)
 - **Filenames**:
   - JSON data → `provenance-{hash}.json`
   - Images → `image-{hash}.png/jpg`
@@ -795,6 +809,17 @@ Download data as JSON with metadata (for API clients).
 - **Use case**: Web apps, mobile apps, API integrations needing metadata
 - **Response**: `{"data": "base64-encoded-content", "content_type": "application/json", "size": 2048, "reference": "abc..."}`
 - **Benefits**: Get file metadata without triggering download, programmatic access
+
+A `404` from this route or from `GET /api/v1/data/{reference}` is `"Data not found for reference <ref>. ..."`. The gateway cannot tell a reference that does not exist from a collection uploaded without an index document, so the message names the path route for the second case.
+
+#### `GET /api/v1/data/{reference}/{path}`
+Download one file of a collection uploaded with `POST /api/v1/data/manifest`. Always free, like the other downloads, with the same size limit (`MAX_DOWNLOAD_SIZE_MB`, 413 `DOWNLOAD_TOO_LARGE`), timeout (504) and rate limit.
+- **Path**: the file's path in the archive (`./assets/a.txt` in the archive is `assets/a.txt`). Percent-encode a name with spaces, `#`, `?` or `%`.
+- **Trailing slash**: `docs/` returns that directory's index document, when the collection has one.
+- **Refused** with 400 `PATH_INVALID`: `.` and `..` segments (also percent-encoded), empty segments, backslashes, control characters, a slash encoded twice (`%252F`), paths over `MANIFEST_MAX_PATH_BYTES`. A plain `%2F` is decoded by the server before routing and acts as a separator: `a%2Fb` is `a/b`.
+- **`json` at the root**: `/api/v1/data/{reference}/json` is the JSON-metadata route above, so a file named exactly `json` at a collection's root cannot be fetched here (fetch it from a Bee node). `sub/json` is not affected.
+- **Headers**: `Content-Type` as Bee reports it (`application/octet-stream` when Bee reports none), `Content-Disposition: attachment` with the file's name, `X-Content-Type-Options: nosniff`, `Content-Security-Policy: sandbox`, `X-Swarm-Reference`. HTML and SVG are always downloads, never pages of the gateway: to serve a collection as a website, use a Swarm `bzz` gateway.
+- **Errors**: 404 `COLLECTION_PATH_NOT_FOUND` (the collection has no such file; with an `error_document`, Bee returns that document with 200 instead), 404 `DATA_NOT_FOUND` (nothing for this reference, or not a collection), 422 for a malformed reference.
 
 ### Wallet Information Endpoints
 
