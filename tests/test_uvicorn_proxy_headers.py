@@ -1,7 +1,8 @@
 """uvicorn must not rewrite the client address from forwarding headers (#697).
 
-uvicorn's proxy-header handling is on by default and trusts 127.0.0.1 and ::1.
-For a loopback peer it replaces the connection's client address with the
+uvicorn's proxy-header handling is on by default. For a peer in
+FORWARDED_ALLOW_IPS (127.0.0.1 and ::1 by default, widened through the
+environment) it replaces the connection's client address with the
 X-Forwarded-For value before the app runs, without checking it is an address.
 app/core/client_ip treats that peer as unforgeable, so with uvicorn's handling
 on, a local caller sending `X-Forwarded-For: evil-123` was keyed as `evil-123`

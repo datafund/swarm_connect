@@ -1,8 +1,9 @@
 """Identifying the caller, for limits that are keyed on who is calling.
 
-Three controls depend on this: the global per-IP rate limit, the x402 free-tier
-rate limit, and the daily spend budget (#102). A caller who can choose this value
-is not limited by any of them.
+Every per-caller limit depends on this (the list in CLAUDE.md, "Caller
+identity"), among them the global per-IP rate limit, the x402 free-tier rate
+limit and the daily spend budget (#102). A caller who can choose this value is
+not limited by any of them.
 
 The previous implementation took the FIRST entry of `X-Forwarded-For`, which is
 the one furthest from us and is caller-supplied if any proxy in the chain appends

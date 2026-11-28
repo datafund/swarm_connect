@@ -508,7 +508,9 @@ class Settings(BaseSettings):
     # locate the caller in X-Forwarded-For. See app/core/client_ip.py.
     #
     # 1 is correct for the standard deployment: Caddy terminates TLS and
-    # forwards to the gateway on loopback. Raise it if a CDN or load balancer is
+    # forwards to the gateway's port published on host loopback (inside the
+    # container the peer is then believed to be the Docker bridge address; not
+    # measured on the hosts). Raise it if a CDN or load balancer is
     # added in front, and set it to 0 if the application is exposed directly, in
     # which case forwarding headers are ignored rather than half-trusted.
     #

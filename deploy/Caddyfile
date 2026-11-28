@@ -38,11 +38,13 @@
 	# consequences:
 	#
 	# - TRUSTED_PROXY_HOPS above 1 makes every header shorter than the hop
-	#   count, so every request falls back to the direct peer (Caddy itself)
-	#   and all callers share one bucket: over-limiting, not a bypass. A caller
+	#   count, so every request falls back to the direct TCP peer (Caddy, or
+	#   the Docker bridge address in front of the container, believed but not
+	#   measured on the hosts) and all callers share one bucket: over-limiting,
+	#   not a bypass. A caller
 	#   can choose their own identity with a value that is too high only when
 	#   the outermost proxy appends to a header the caller sent, for example a
-	#   Caddy with trusted_proxies covering an upstream that appends.
+	#   Caddy with trusted_proxies covering a front proxy that appends.
 	# - IF YOU ADD A PROXY OR CDN IN FRONT OF THIS ONE, raising
 	#   TRUSTED_PROXY_HOPS is not enough on its own: Caddy would still discard
 	#   the front proxy's header and write only the front proxy's address, so

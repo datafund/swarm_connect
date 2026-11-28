@@ -1,9 +1,11 @@
 # app/core/client_ip.py
 """Identify the calling client, for limits that are keyed on who is calling.
 
-Three controls key on this value: the global per-IP rate limit, the x402
-free-tier rate limit, and the daily spend budget (#102). A caller who can change
-the value at will is not limited by any of them.
+Every per-caller limit keys on this value: the global per-IP rate limit, the
+x402 free-tier rate limit, the daily spend budget (#102), the pool's per-address
+allowance, the chunk free-tier byte quota, and the top-caller tracker (the list
+in CLAUDE.md, "Caller identity"). A caller who can change the value at will is
+not limited by any of them.
 
 ## Why the previous approach was a trap rather than a bug
 
@@ -48,9 +50,10 @@ the client are added by infrastructure we control.
 ## Only addresses become keys (#697)
 
 Without a proxy in front, the header is whatever the caller sent. Two forms
-used to pass every limit: `X-Real-IP`, read whenever `X-Forwarded-For` was
-absent (a fresh key per request), and the literal value "unknown", which the
-x402 free-tier limiter did not limit at all. Now X-Real-IP is not read, every
+got past limits: `X-Real-IP`, read whenever `X-Forwarded-For` was absent,
+passed every limit (a fresh key per request); the literal value "unknown"
+passed the x402 free-tier limit, which skipped it (the global limit, spend
+budget and pool already treated it as one caller). Now X-Real-IP is not read, every
 X-Forwarded-For entry we rely on must parse as an IP address or the direct peer
 is used, and "unknown" (no peer at all) is limited as one shared caller.
 """

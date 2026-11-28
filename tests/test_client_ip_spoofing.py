@@ -1,9 +1,10 @@
 """Forged caller identities do not get past the per-caller limits (#697).
 
 With no proxy in front, every forwarding header is whatever the caller sent.
-Two forms used to pass every limit: X-Real-IP, read whenever X-Forwarded-For
-was absent, so a new value was a new budget; and the literal "unknown", which
-the x402 free-tier limiter did not limit at all. Measured before the fix on a
+Two forms got past limits: X-Real-IP, read whenever X-Forwarded-For was absent,
+passed every limit, since a new value was a new budget; the literal "unknown"
+passed the x402 free-tier limit, which skipped it (the other limits already
+treated it as one caller). Measured before the fix on a
 local gateway with a free-tier limit of 3: 6 of 6 requests passed for
 `X-Real-IP: unknown`, `X-Forwarded-For: unknown` and a rotating X-Real-IP.
 
