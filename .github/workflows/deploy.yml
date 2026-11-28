@@ -75,186 +75,411 @@ jobs:
 
       - name: write env file for dev
         if: github.ref == 'refs/heads/dev'
+        # Every value comes in through env:, never as an expression inside
+        # run:. Actions pastes an expression's value into the script text
+        # before bash runs, so a value with a newline could add lines to the
+        # env file or change the script (#654).
+        env:
+          X402_ENABLED: ${{ vars.X402_ENABLED || 'false' }}
+          X402_PAY_TO_ADDRESS: ${{ vars.X402_PAY_TO_ADDRESS || '' }}
+          X402_NETWORK: ${{ vars.X402_NETWORK || 'base-sepolia' }}
+          X402_FACILITATOR_URL: ${{ vars.X402_FACILITATOR_URL || 'https://x402.org/facilitator' }}
+          X402_BZZ_USD_RATE: ${{ vars.X402_BZZ_USD_RATE || '0.50' }}
+          X402_MARKUP_PERCENT: ${{ vars.X402_MARKUP_PERCENT || '50' }}
+          X402_MIN_PRICE_USD: ${{ vars.X402_MIN_PRICE_USD || '0.01' }}
+          X402_BZZ_PRICE_FEED_URL: ${{ vars.X402_BZZ_PRICE_FEED_URL || '' }}
+          X402_BZZ_PRICE_FEED_INTERVAL_SECONDS: ${{ vars.X402_BZZ_PRICE_FEED_INTERVAL_SECONDS || '900' }}
+          X402_FACILITATOR_CDP_API_KEY_ID: ${{ secrets.X402_FACILITATOR_CDP_API_KEY_ID || '' }}
+          X402_FACILITATOR_CDP_API_KEY_SECRET: ${{ secrets.X402_FACILITATOR_CDP_API_KEY_SECRET || '' }}
+          X402_FACILITATOR_PAYAI_API_KEY_ID: ${{ secrets.X402_FACILITATOR_PAYAI_API_KEY_ID || '' }}
+          X402_FACILITATOR_PAYAI_API_KEY_SECRET: ${{ secrets.X402_FACILITATOR_PAYAI_API_KEY_SECRET || '' }}
+          X402_FACILITATOR_BEARER_TOKEN: ${{ secrets.X402_FACILITATOR_BEARER_TOKEN || '' }}
+          X402_PROTOCOL_VERSIONS: ${{ vars.X402_PROTOCOL_VERSIONS || '1' }}
+          X402_FREE_TIER_ENABLED: ${{ vars.X402_FREE_TIER_ENABLED || 'true' }}
+          STAMP_POOL_ENABLED: ${{ vars.STAMP_POOL_ENABLED || 'false' }}
+          STAMP_POOL_RESERVE_SMALL: ${{ vars.STAMP_POOL_RESERVE_SMALL || '1' }}
+          STAMP_POOL_RESERVE_MEDIUM: ${{ vars.STAMP_POOL_RESERVE_MEDIUM || '1' }}
+          STAMP_POOL_RESERVE_LARGE: ${{ vars.STAMP_POOL_RESERVE_LARGE || '0' }}
+          STAMP_POOL_MAX_PURCHASES_PER_HOUR: ${{ vars.STAMP_POOL_MAX_PURCHASES_PER_HOUR || '10' }}
+          GATEWAY_DAILY_BZZ_CEILING: ${{ vars.GATEWAY_DAILY_BZZ_CEILING || '20' }}
+          GATEWAY_DAILY_BZZ_FREE_CEILING: ${{ vars.GATEWAY_DAILY_BZZ_FREE_CEILING || '10' }}
+          POOL_DAILY_ALLOWANCES: ${{ vars.POOL_DAILY_ALLOWANCES }}
+          POOL_DEFAULT_DAILY_ALLOWANCE: ${{ vars.POOL_DEFAULT_DAILY_ALLOWANCE || '-1' }}
+          POOL_ALLOWANCE_PER_IP: ${{ vars.POOL_ALLOWANCE_PER_IP || '-1' }}
+          X402_POOL_MARKUP_PERCENT: ${{ vars.X402_POOL_MARKUP_PERCENT || '100' }}
+          X402_ALLOW_TESTNET_PAID_BYPASS: ${{ vars.X402_ALLOW_TESTNET_PAID_BYPASS || 'false' }}
+          X402_MAX_STAMP_BZZ: ${{ vars.X402_MAX_STAMP_BZZ || '5.0' }}
+          STAMP_DAILY_BZZ_PER_CALLER: ${{ vars.STAMP_DAILY_BZZ_PER_CALLER || '0.5' }}
+          TRUSTED_PROXY_HOPS: ${{ vars.TRUSTED_PROXY_HOPS || '1' }}
+          STAMP_POOL_CHECK_INTERVAL_SECONDS: ${{ vars.STAMP_POOL_CHECK_INTERVAL_SECONDS || '900' }}
+          STAMP_POOL_MIN_TTL_HOURS: ${{ vars.STAMP_POOL_MIN_TTL_HOURS || '24' }}
+          STAMP_POOL_TOPUP_HOURS: ${{ vars.STAMP_POOL_TOPUP_HOURS || '168' }}
+          STAMP_POOL_DEFAULT_DURATION_HOURS: ${{ vars.STAMP_POOL_DEFAULT_DURATION_HOURS || '168' }}
+          STAMP_POOL_STATE_FILE: ${{ vars.STAMP_POOL_STATE_FILE || 'data/pool_state.json' }}
+          STAMP_OWNERSHIP_FILE: ${{ vars.STAMP_OWNERSHIP_FILE || 'data/stamp_owners.json' }}
+          NOTARY_ENABLED: ${{ vars.NOTARY_ENABLED || 'false' }}
+          NOTARY_PRIVATE_KEY: ${{ secrets.NOTARY_PRIVATE_KEY || '' }}
+          CORS_ALLOWED_ORIGINS: ${{ vars.CORS_ALLOWED_ORIGINS || '*' }}
+          CORS_ALLOW_CREDENTIALS: ${{ vars.CORS_ALLOW_CREDENTIALS || 'false' }}
+          MAX_UPLOAD_SIZE_MB: ${{ vars.MAX_UPLOAD_SIZE_MB || '10' }}
+          MAX_DOWNLOAD_SIZE_MB: ${{ vars.MAX_DOWNLOAD_SIZE_MB || '25' }}
+          CHUNK_UPLOAD_ENABLED: ${{ vars.CHUNK_UPLOAD_ENABLED || 'false' }}
+          CHUNK_UPLOAD_MAX_BYTES_PER_REQUEST: ${{ vars.CHUNK_UPLOAD_MAX_BYTES_PER_REQUEST || '4104' }}
+          CHUNK_UPLOAD_FREE_TIER_ENABLED: ${{ vars.CHUNK_UPLOAD_FREE_TIER_ENABLED || 'true' }}
+          CHUNK_UPLOAD_FREE_TIER_MB_PER_DAY: ${{ vars.CHUNK_UPLOAD_FREE_TIER_MB_PER_DAY || '100' }}
+          X402_BANDWIDTH_USD_PER_GB: ${{ vars.X402_BANDWIDTH_USD_PER_GB || '0.10' }}
+          BANDWIDTH_CREDIT_MIN_TOPUP_MB: ${{ vars.BANDWIDTH_CREDIT_MIN_TOPUP_MB || '100' }}
+          BANDWIDTH_CREDIT_MAX_TOPUP_MB: ${{ vars.BANDWIDTH_CREDIT_MAX_TOPUP_MB || '1000000' }}
+          BANDWIDTH_CREDIT_STATE_FILE: ${{ vars.BANDWIDTH_CREDIT_STATE_FILE || 'data/bandwidth_credit.json' }}
+          DEBUG_ALLOWED_ADDRESSES: ${{ vars.DEBUG_ALLOWED_ADDRESSES || '' }}
+          DEBUG_SIG_MAX_AGE_SECONDS: ${{ vars.DEBUG_SIG_MAX_AGE_SECONDS || '300' }}
+          RATE_LIMIT_ENABLED: ${{ vars.RATE_LIMIT_ENABLED || 'true' }}
+          RATE_LIMIT_PER_MINUTE: ${{ vars.RATE_LIMIT_PER_MINUTE || '60' }}
+          RATE_LIMIT_BURST: ${{ vars.RATE_LIMIT_BURST || '10' }}
+          METRICS_ENABLED: ${{ vars.METRICS_ENABLED || 'true' }}
+          METRICS_BALANCE_POLL_SECONDS: ${{ vars.METRICS_BALANCE_POLL_SECONDS || '60' }}
+          GNOSIS_RPC_URL: ${{ vars.GNOSIS_RPC_URL || '' }}
+          GNOSIS_PRIVATE_KEY: ${{ secrets.GNOSIS_PRIVATE_KEY || '' }}
+          GNOSIS_CHAIN_ID: ${{ vars.GNOSIS_CHAIN_ID || '100' }}
+          POSTAGE_STAMP_CONTRACT_ADDRESS: ${{ vars.POSTAGE_STAMP_CONTRACT_ADDRESS || '' }}
+          BZZ_TOKEN_ADDRESS: ${{ vars.BZZ_TOKEN_ADDRESS || '' }}
+          STAMP_PURCHASE_FOR_OTHERS_ENABLED: ${{ vars.STAMP_PURCHASE_FOR_OTHERS_ENABLED || 'false' }}
+          STAMP_FOR_OTHERS_REQUIRE_WHITELIST: ${{ vars.STAMP_FOR_OTHERS_REQUIRE_WHITELIST || 'true' }}
+          STAMP_FOR_OTHERS_OWNER_WHITELIST: ${{ vars.STAMP_FOR_OTHERS_OWNER_WHITELIST || '' }}
+          STAMP_FOR_OTHERS_MAX_DEPTH: ${{ vars.STAMP_FOR_OTHERS_MAX_DEPTH || '22' }}
+          STAMP_FOR_OTHERS_MAX_BZZ: ${{ vars.STAMP_FOR_OTHERS_MAX_BZZ || '1.0' }}
+          STAMP_FOR_OTHERS_MAX_DURATION_HOURS: ${{ vars.STAMP_FOR_OTHERS_MAX_DURATION_HOURS || '168' }}
+          STAMP_FOR_OTHERS_FREE_TIER_ENABLED: ${{ vars.STAMP_FOR_OTHERS_FREE_TIER_ENABLED || 'false' }}
+          GNOSIS_XDAI_CRITICAL_THRESHOLD: ${{ vars.GNOSIS_XDAI_CRITICAL_THRESHOLD || '0.005' }}
+          GNOSIS_XDAI_WARN_THRESHOLD: ${{ vars.GNOSIS_XDAI_WARN_THRESHOLD || '0.05' }}
+          GNOSIS_XBZZ_WARN_THRESHOLD: ${{ vars.GNOSIS_XBZZ_WARN_THRESHOLD || '0.5' }}
+          X402_XDAI_WARN_THRESHOLD: ${{ vars.X402_XDAI_WARN_THRESHOLD || '0.1' }}
+          X402_XBZZ_WARN_THRESHOLD: ${{ vars.X402_XBZZ_WARN_THRESHOLD || '10.0' }}
+          X402_CHEQUEBOOK_WARN_THRESHOLD: ${{ vars.X402_CHEQUEBOOK_WARN_THRESHOLD || '4.0' }}
+          TERMS_URL: ${{ vars.TERMS_URL || '' }}
+          SUPPORT_CONTACT: ${{ vars.SUPPORT_CONTACT || '' }}
         run: |
+          # The env file, one line per entry below. A bare NAME is written as
+          # NAME=<value of $NAME from env: above>; any other line (a comment,
+          # or a fixed NAME=value) is copied as is. Every bare NAME needs an
+          # env: entry; tests/test_deploy_env_injection.py checks both match.
+          settings() {
+            cat << 'EOF'
+          X402_ENABLED
+          X402_PAY_TO_ADDRESS
+          X402_NETWORK
+          X402_FACILITATOR_URL
+          X402_BZZ_USD_RATE
+          X402_MARKUP_PERCENT
+          X402_MIN_PRICE_USD
+          X402_BZZ_PRICE_FEED_URL
+          X402_BZZ_PRICE_FEED_INTERVAL_SECONDS
+          X402_FACILITATOR_CDP_API_KEY_ID
+          X402_FACILITATOR_CDP_API_KEY_SECRET
+          X402_FACILITATOR_PAYAI_API_KEY_ID
+          X402_FACILITATOR_PAYAI_API_KEY_SECRET
+          X402_FACILITATOR_BEARER_TOKEN
+          X402_PROTOCOL_VERSIONS
+          X402_FREE_TIER_ENABLED
+          STAMP_POOL_ENABLED
+          STAMP_POOL_RESERVE_SMALL
+          STAMP_POOL_RESERVE_MEDIUM
+          STAMP_POOL_RESERVE_LARGE
+          STAMP_POOL_MAX_PURCHASES_PER_HOUR
+          GATEWAY_DAILY_BZZ_CEILING
+          GATEWAY_DAILY_BZZ_FREE_CEILING
+          POOL_DAILY_ALLOWANCES
+          POOL_DEFAULT_DAILY_ALLOWANCE
+          POOL_ALLOWANCE_PER_IP
+          X402_POOL_MARKUP_PERCENT
+          X402_ALLOW_TESTNET_PAID_BYPASS
+          X402_MAX_STAMP_BZZ
+          STAMP_DAILY_BZZ_PER_CALLER
+          TRUSTED_PROXY_HOPS
+          STAMP_POOL_CHECK_INTERVAL_SECONDS
+          STAMP_POOL_MIN_TTL_HOURS
+          STAMP_POOL_TOPUP_HOURS
+          STAMP_POOL_DEFAULT_DURATION_HOURS
+          STAMP_POOL_STATE_FILE
+          STAMP_OWNERSHIP_FILE
+          NOTARY_ENABLED
+          NOTARY_PRIVATE_KEY
+          CORS_ALLOWED_ORIGINS
+          CORS_ALLOW_CREDENTIALS
+          MAX_UPLOAD_SIZE_MB
+          MAX_DOWNLOAD_SIZE_MB
+          CHUNK_UPLOAD_ENABLED
+          CHUNK_UPLOAD_MAX_BYTES_PER_REQUEST
+          CHUNK_UPLOAD_FREE_TIER_ENABLED
+          CHUNK_UPLOAD_FREE_TIER_MB_PER_DAY
+          X402_BANDWIDTH_USD_PER_GB
+          BANDWIDTH_CREDIT_MIN_TOPUP_MB
+          BANDWIDTH_CREDIT_MAX_TOPUP_MB
+          BANDWIDTH_CREDIT_STATE_FILE
+          DEBUG_ALLOWED_ADDRESSES
+          DEBUG_SIG_MAX_AGE_SECONDS
+          RATE_LIMIT_ENABLED
+          RATE_LIMIT_PER_MINUTE
+          RATE_LIMIT_BURST
+          METRICS_ENABLED
+          METRICS_BALANCE_POLL_SECONDS
+          GNOSIS_RPC_URL
+          GNOSIS_PRIVATE_KEY
+          GNOSIS_CHAIN_ID
+          POSTAGE_STAMP_CONTRACT_ADDRESS
+          BZZ_TOKEN_ADDRESS
+          STAMP_PURCHASE_FOR_OTHERS_ENABLED
+          STAMP_FOR_OTHERS_REQUIRE_WHITELIST
+          STAMP_FOR_OTHERS_OWNER_WHITELIST
+          STAMP_FOR_OTHERS_MAX_DEPTH
+          STAMP_FOR_OTHERS_MAX_BZZ
+          STAMP_FOR_OTHERS_MAX_DURATION_HOURS
+          STAMP_FOR_OTHERS_FREE_TIER_ENABLED
+          GNOSIS_XDAI_CRITICAL_THRESHOLD
+          GNOSIS_XDAI_WARN_THRESHOLD
+          GNOSIS_XBZZ_WARN_THRESHOLD
+          X402_XDAI_WARN_THRESHOLD
+          X402_XBZZ_WARN_THRESHOLD
+          X402_CHEQUEBOOK_WARN_THRESHOLD
+          TERMS_URL
+          SUPPORT_CONTACT
+          GATEWAY_ENVIRONMENT=development
+          EOF
+          }
+
+          # Refuse a value with a newline or another control character before
+          # anything is written: it would add a line to the env file. Name the
+          # variable only; never print the value. The existing file is kept.
+          LC_ALL=C
+          bad=0
+          while IFS= read -r line; do
+            case $line in
+              ''|'#'*|*=*) continue ;;
+            esac
+            case ${!line} in
+              *[[:cntrl:]]*)
+                echo "::error title=Invalid deploy setting::$line contains a newline or another control character. Fix the GitHub variable or secret $line and re-run the deploy; the env file was not changed."
+                bad=1 ;;
+            esac
+          done < <(settings)
+          [ "$bad" = 0 ] || exit 1
+
           mkdir -p /opt/swarm_connect_dev_data
           # This file holds signing keys: make it owner-only BEFORE writing.
           # umask alone would not narrow a file that already exists as 0644.
           touch /opt/swarm_connect_dev.env && chmod 600 /opt/swarm_connect_dev.env
-          cat > /opt/swarm_connect_dev.env << 'EOF'
-          X402_ENABLED=${{ vars.X402_ENABLED || 'false' }}
-          X402_PAY_TO_ADDRESS=${{ vars.X402_PAY_TO_ADDRESS || '' }}
-          X402_NETWORK=${{ vars.X402_NETWORK || 'base-sepolia' }}
-          X402_FACILITATOR_URL=${{ vars.X402_FACILITATOR_URL || 'https://x402.org/facilitator' }}
-          X402_BZZ_USD_RATE=${{ vars.X402_BZZ_USD_RATE || '0.50' }}
-          X402_MARKUP_PERCENT=${{ vars.X402_MARKUP_PERCENT || '50' }}
-          X402_MIN_PRICE_USD=${{ vars.X402_MIN_PRICE_USD || '0.01' }}
-          X402_BZZ_PRICE_FEED_URL=${{ vars.X402_BZZ_PRICE_FEED_URL || '' }}
-          X402_BZZ_PRICE_FEED_INTERVAL_SECONDS=${{ vars.X402_BZZ_PRICE_FEED_INTERVAL_SECONDS || '900' }}
-          X402_FACILITATOR_CDP_API_KEY_ID=${{ secrets.X402_FACILITATOR_CDP_API_KEY_ID || '' }}
-          X402_FACILITATOR_CDP_API_KEY_SECRET=${{ secrets.X402_FACILITATOR_CDP_API_KEY_SECRET || '' }}
-          X402_FACILITATOR_PAYAI_API_KEY_ID=${{ secrets.X402_FACILITATOR_PAYAI_API_KEY_ID || '' }}
-          X402_FACILITATOR_PAYAI_API_KEY_SECRET=${{ secrets.X402_FACILITATOR_PAYAI_API_KEY_SECRET || '' }}
-          X402_FACILITATOR_BEARER_TOKEN=${{ secrets.X402_FACILITATOR_BEARER_TOKEN || '' }}
-          X402_PROTOCOL_VERSIONS=${{ vars.X402_PROTOCOL_VERSIONS || '1' }}
-          X402_FREE_TIER_ENABLED=${{ vars.X402_FREE_TIER_ENABLED || 'true' }}
-          STAMP_POOL_ENABLED=${{ vars.STAMP_POOL_ENABLED || 'false' }}
-          STAMP_POOL_RESERVE_SMALL=${{ vars.STAMP_POOL_RESERVE_SMALL || '1' }}
-          STAMP_POOL_RESERVE_MEDIUM=${{ vars.STAMP_POOL_RESERVE_MEDIUM || '1' }}
-          STAMP_POOL_RESERVE_LARGE=${{ vars.STAMP_POOL_RESERVE_LARGE || '0' }}
-          STAMP_POOL_MAX_PURCHASES_PER_HOUR=${{ vars.STAMP_POOL_MAX_PURCHASES_PER_HOUR || '10' }}
-          GATEWAY_DAILY_BZZ_CEILING=${{ vars.GATEWAY_DAILY_BZZ_CEILING || '20' }}
-          GATEWAY_DAILY_BZZ_FREE_CEILING=${{ vars.GATEWAY_DAILY_BZZ_FREE_CEILING || '10' }}
-          POOL_DAILY_ALLOWANCES=${{ vars.POOL_DAILY_ALLOWANCES }}
-          POOL_DEFAULT_DAILY_ALLOWANCE=${{ vars.POOL_DEFAULT_DAILY_ALLOWANCE || '-1' }}
-          POOL_ALLOWANCE_PER_IP=${{ vars.POOL_ALLOWANCE_PER_IP || '-1' }}
-          X402_POOL_MARKUP_PERCENT=${{ vars.X402_POOL_MARKUP_PERCENT || '100' }}
-          X402_ALLOW_TESTNET_PAID_BYPASS=${{ vars.X402_ALLOW_TESTNET_PAID_BYPASS || 'false' }}
-          X402_MAX_STAMP_BZZ=${{ vars.X402_MAX_STAMP_BZZ || '5.0' }}
-          STAMP_DAILY_BZZ_PER_CALLER=${{ vars.STAMP_DAILY_BZZ_PER_CALLER || '0.5' }}
-          TRUSTED_PROXY_HOPS=${{ vars.TRUSTED_PROXY_HOPS || '1' }}
-          STAMP_POOL_CHECK_INTERVAL_SECONDS=${{ vars.STAMP_POOL_CHECK_INTERVAL_SECONDS || '900' }}
-          STAMP_POOL_MIN_TTL_HOURS=${{ vars.STAMP_POOL_MIN_TTL_HOURS || '24' }}
-          STAMP_POOL_TOPUP_HOURS=${{ vars.STAMP_POOL_TOPUP_HOURS || '168' }}
-          STAMP_POOL_DEFAULT_DURATION_HOURS=${{ vars.STAMP_POOL_DEFAULT_DURATION_HOURS || '168' }}
-          STAMP_POOL_STATE_FILE=${{ vars.STAMP_POOL_STATE_FILE || 'data/pool_state.json' }}
-          STAMP_OWNERSHIP_FILE=${{ vars.STAMP_OWNERSHIP_FILE || 'data/stamp_owners.json' }}
-          NOTARY_ENABLED=${{ vars.NOTARY_ENABLED || 'false' }}
-          NOTARY_PRIVATE_KEY=${{ secrets.NOTARY_PRIVATE_KEY || '' }}
-          CORS_ALLOWED_ORIGINS=${{ vars.CORS_ALLOWED_ORIGINS || '*' }}
-          CORS_ALLOW_CREDENTIALS=${{ vars.CORS_ALLOW_CREDENTIALS || 'false' }}
-          MAX_UPLOAD_SIZE_MB=${{ vars.MAX_UPLOAD_SIZE_MB || '10' }}
-          MAX_DOWNLOAD_SIZE_MB=${{ vars.MAX_DOWNLOAD_SIZE_MB || '25' }}
-          CHUNK_UPLOAD_ENABLED=${{ vars.CHUNK_UPLOAD_ENABLED || 'false' }}
-          CHUNK_UPLOAD_MAX_BYTES_PER_REQUEST=${{ vars.CHUNK_UPLOAD_MAX_BYTES_PER_REQUEST || '4104' }}
-          CHUNK_UPLOAD_FREE_TIER_ENABLED=${{ vars.CHUNK_UPLOAD_FREE_TIER_ENABLED || 'true' }}
-          CHUNK_UPLOAD_FREE_TIER_MB_PER_DAY=${{ vars.CHUNK_UPLOAD_FREE_TIER_MB_PER_DAY || '100' }}
-          X402_BANDWIDTH_USD_PER_GB=${{ vars.X402_BANDWIDTH_USD_PER_GB || '0.10' }}
-          BANDWIDTH_CREDIT_MIN_TOPUP_MB=${{ vars.BANDWIDTH_CREDIT_MIN_TOPUP_MB || '100' }}
-          BANDWIDTH_CREDIT_MAX_TOPUP_MB=${{ vars.BANDWIDTH_CREDIT_MAX_TOPUP_MB || '1000000' }}
-          BANDWIDTH_CREDIT_STATE_FILE=${{ vars.BANDWIDTH_CREDIT_STATE_FILE || 'data/bandwidth_credit.json' }}
-          DEBUG_ALLOWED_ADDRESSES=${{ vars.DEBUG_ALLOWED_ADDRESSES || '' }}
-          DEBUG_SIG_MAX_AGE_SECONDS=${{ vars.DEBUG_SIG_MAX_AGE_SECONDS || '300' }}
-          RATE_LIMIT_ENABLED=${{ vars.RATE_LIMIT_ENABLED || 'true' }}
-          RATE_LIMIT_PER_MINUTE=${{ vars.RATE_LIMIT_PER_MINUTE || '60' }}
-          RATE_LIMIT_BURST=${{ vars.RATE_LIMIT_BURST || '10' }}
-          METRICS_ENABLED=${{ vars.METRICS_ENABLED || 'true' }}
-          METRICS_BALANCE_POLL_SECONDS=${{ vars.METRICS_BALANCE_POLL_SECONDS || '60' }}
-          GNOSIS_RPC_URL=${{ vars.GNOSIS_RPC_URL || '' }}
-          GNOSIS_PRIVATE_KEY=${{ secrets.GNOSIS_PRIVATE_KEY || '' }}
-          GNOSIS_CHAIN_ID=${{ vars.GNOSIS_CHAIN_ID || '100' }}
-          POSTAGE_STAMP_CONTRACT_ADDRESS=${{ vars.POSTAGE_STAMP_CONTRACT_ADDRESS || '' }}
-          BZZ_TOKEN_ADDRESS=${{ vars.BZZ_TOKEN_ADDRESS || '' }}
-          STAMP_PURCHASE_FOR_OTHERS_ENABLED=${{ vars.STAMP_PURCHASE_FOR_OTHERS_ENABLED || 'false' }}
-          STAMP_FOR_OTHERS_REQUIRE_WHITELIST=${{ vars.STAMP_FOR_OTHERS_REQUIRE_WHITELIST || 'true' }}
-          STAMP_FOR_OTHERS_OWNER_WHITELIST=${{ vars.STAMP_FOR_OTHERS_OWNER_WHITELIST || '' }}
-          STAMP_FOR_OTHERS_MAX_DEPTH=${{ vars.STAMP_FOR_OTHERS_MAX_DEPTH || '22' }}
-          STAMP_FOR_OTHERS_MAX_BZZ=${{ vars.STAMP_FOR_OTHERS_MAX_BZZ || '1.0' }}
-          STAMP_FOR_OTHERS_MAX_DURATION_HOURS=${{ vars.STAMP_FOR_OTHERS_MAX_DURATION_HOURS || '168' }}
-          STAMP_FOR_OTHERS_FREE_TIER_ENABLED=${{ vars.STAMP_FOR_OTHERS_FREE_TIER_ENABLED || 'false' }}
-          GNOSIS_XDAI_CRITICAL_THRESHOLD=${{ vars.GNOSIS_XDAI_CRITICAL_THRESHOLD || '0.005' }}
-          GNOSIS_XDAI_WARN_THRESHOLD=${{ vars.GNOSIS_XDAI_WARN_THRESHOLD || '0.05' }}
-          GNOSIS_XBZZ_WARN_THRESHOLD=${{ vars.GNOSIS_XBZZ_WARN_THRESHOLD || '0.5' }}
-          X402_XDAI_WARN_THRESHOLD=${{ vars.X402_XDAI_WARN_THRESHOLD || '0.1' }}
-          X402_XBZZ_WARN_THRESHOLD=${{ vars.X402_XBZZ_WARN_THRESHOLD || '10.0' }}
-          X402_CHEQUEBOOK_WARN_THRESHOLD=${{ vars.X402_CHEQUEBOOK_WARN_THRESHOLD || '4.0' }}
-          TERMS_URL=${{ vars.TERMS_URL || '' }}
-          SUPPORT_CONTACT=${{ vars.SUPPORT_CONTACT || '' }}
-          GATEWAY_ENVIRONMENT=development
-          EOF
+          while IFS= read -r line; do
+            case $line in
+              ''|'#'*|*=*) printf '%s\n' "$line" ;;
+              *) printf '%s=%s\n' "$line" "${!line}" ;;
+            esac
+          done < <(settings) > /opt/swarm_connect_dev.env
 
       - name: write env file for main
         if: github.ref == 'refs/heads/main'
+        # Values come in through env: (see the dev step above, #654).
+        env:
+          X402_ENABLED: ${{ vars.X402_ENABLED || 'false' }}
+          X402_PAY_TO_ADDRESS: ${{ vars.X402_PAY_TO_ADDRESS || '' }}
+          # No default on purpose (#370): see the comment in the settings list below.
+          X402_NETWORK: ${{ vars.X402_NETWORK }}
+          X402_FACILITATOR_URL: ${{ vars.X402_FACILITATOR_URL }}
+          X402_FACILITATOR_CDP_API_KEY_ID: ${{ secrets.X402_FACILITATOR_CDP_API_KEY_ID || '' }}
+          X402_FACILITATOR_CDP_API_KEY_SECRET: ${{ secrets.X402_FACILITATOR_CDP_API_KEY_SECRET || '' }}
+          X402_FACILITATOR_PAYAI_API_KEY_ID: ${{ secrets.X402_FACILITATOR_PAYAI_API_KEY_ID || '' }}
+          X402_FACILITATOR_PAYAI_API_KEY_SECRET: ${{ secrets.X402_FACILITATOR_PAYAI_API_KEY_SECRET || '' }}
+          X402_FACILITATOR_BEARER_TOKEN: ${{ secrets.X402_FACILITATOR_BEARER_TOKEN || '' }}
+          # Defaults to 1 in both environments (#609): see the settings list below.
+          X402_PROTOCOL_VERSIONS: ${{ vars.X402_PROTOCOL_VERSIONS || '1' }}
+          X402_BZZ_USD_RATE: ${{ vars.X402_BZZ_USD_RATE || '0.50' }}
+          X402_MARKUP_PERCENT: ${{ vars.X402_MARKUP_PERCENT || '50' }}
+          X402_MIN_PRICE_USD: ${{ vars.X402_MIN_PRICE_USD || '0.01' }}
+          X402_BZZ_PRICE_FEED_URL: ${{ vars.X402_BZZ_PRICE_FEED_URL || '' }}
+          X402_BZZ_PRICE_FEED_INTERVAL_SECONDS: ${{ vars.X402_BZZ_PRICE_FEED_INTERVAL_SECONDS || '900' }}
+          X402_FREE_TIER_ENABLED: ${{ vars.X402_FREE_TIER_ENABLED || 'true' }}
+          STAMP_POOL_ENABLED: ${{ vars.STAMP_POOL_ENABLED || 'false' }}
+          STAMP_POOL_RESERVE_SMALL: ${{ vars.STAMP_POOL_RESERVE_SMALL || '1' }}
+          STAMP_POOL_RESERVE_MEDIUM: ${{ vars.STAMP_POOL_RESERVE_MEDIUM || '1' }}
+          STAMP_POOL_RESERVE_LARGE: ${{ vars.STAMP_POOL_RESERVE_LARGE || '0' }}
+          STAMP_POOL_MAX_PURCHASES_PER_HOUR: ${{ vars.STAMP_POOL_MAX_PURCHASES_PER_HOUR || '10' }}
+          GATEWAY_DAILY_BZZ_CEILING: ${{ vars.GATEWAY_DAILY_BZZ_CEILING || '20' }}
+          GATEWAY_DAILY_BZZ_FREE_CEILING: ${{ vars.GATEWAY_DAILY_BZZ_FREE_CEILING || '10' }}
+          POOL_DAILY_ALLOWANCES: ${{ vars.POOL_DAILY_ALLOWANCES }}
+          POOL_DEFAULT_DAILY_ALLOWANCE: ${{ vars.POOL_DEFAULT_DAILY_ALLOWANCE || '-1' }}
+          POOL_ALLOWANCE_PER_IP: ${{ vars.POOL_ALLOWANCE_PER_IP || '-1' }}
+          X402_POOL_MARKUP_PERCENT: ${{ vars.X402_POOL_MARKUP_PERCENT || '100' }}
+          X402_ALLOW_TESTNET_PAID_BYPASS: ${{ vars.X402_ALLOW_TESTNET_PAID_BYPASS || 'false' }}
+          X402_MAX_STAMP_BZZ: ${{ vars.X402_MAX_STAMP_BZZ || '5.0' }}
+          STAMP_DAILY_BZZ_PER_CALLER: ${{ vars.STAMP_DAILY_BZZ_PER_CALLER || '0.5' }}
+          TRUSTED_PROXY_HOPS: ${{ vars.TRUSTED_PROXY_HOPS || '1' }}
+          STAMP_POOL_CHECK_INTERVAL_SECONDS: ${{ vars.STAMP_POOL_CHECK_INTERVAL_SECONDS || '900' }}
+          STAMP_POOL_MIN_TTL_HOURS: ${{ vars.STAMP_POOL_MIN_TTL_HOURS || '24' }}
+          STAMP_POOL_TOPUP_HOURS: ${{ vars.STAMP_POOL_TOPUP_HOURS || '168' }}
+          STAMP_POOL_DEFAULT_DURATION_HOURS: ${{ vars.STAMP_POOL_DEFAULT_DURATION_HOURS || '168' }}
+          STAMP_POOL_STATE_FILE: ${{ vars.STAMP_POOL_STATE_FILE || 'data/pool_state.json' }}
+          STAMP_OWNERSHIP_FILE: ${{ vars.STAMP_OWNERSHIP_FILE || 'data/stamp_owners.json' }}
+          NOTARY_ENABLED: ${{ vars.NOTARY_ENABLED || 'false' }}
+          NOTARY_PRIVATE_KEY: ${{ secrets.NOTARY_PRIVATE_KEY || '' }}
+          CORS_ALLOWED_ORIGINS: ${{ vars.CORS_ALLOWED_ORIGINS || '*' }}
+          CORS_ALLOW_CREDENTIALS: ${{ vars.CORS_ALLOW_CREDENTIALS || 'false' }}
+          MAX_UPLOAD_SIZE_MB: ${{ vars.MAX_UPLOAD_SIZE_MB || '10' }}
+          MAX_DOWNLOAD_SIZE_MB: ${{ vars.MAX_DOWNLOAD_SIZE_MB || '25' }}
+          CHUNK_UPLOAD_ENABLED: ${{ vars.CHUNK_UPLOAD_ENABLED || 'false' }}
+          CHUNK_UPLOAD_MAX_BYTES_PER_REQUEST: ${{ vars.CHUNK_UPLOAD_MAX_BYTES_PER_REQUEST || '4104' }}
+          CHUNK_UPLOAD_FREE_TIER_ENABLED: ${{ vars.CHUNK_UPLOAD_FREE_TIER_ENABLED || 'true' }}
+          CHUNK_UPLOAD_FREE_TIER_MB_PER_DAY: ${{ vars.CHUNK_UPLOAD_FREE_TIER_MB_PER_DAY || '100' }}
+          X402_BANDWIDTH_USD_PER_GB: ${{ vars.X402_BANDWIDTH_USD_PER_GB || '0.10' }}
+          BANDWIDTH_CREDIT_MIN_TOPUP_MB: ${{ vars.BANDWIDTH_CREDIT_MIN_TOPUP_MB || '100' }}
+          BANDWIDTH_CREDIT_MAX_TOPUP_MB: ${{ vars.BANDWIDTH_CREDIT_MAX_TOPUP_MB || '1000000' }}
+          BANDWIDTH_CREDIT_STATE_FILE: ${{ vars.BANDWIDTH_CREDIT_STATE_FILE || 'data/bandwidth_credit.json' }}
+          DEBUG_ALLOWED_ADDRESSES: ${{ vars.DEBUG_ALLOWED_ADDRESSES || '' }}
+          DEBUG_SIG_MAX_AGE_SECONDS: ${{ vars.DEBUG_SIG_MAX_AGE_SECONDS || '300' }}
+          RATE_LIMIT_ENABLED: ${{ vars.RATE_LIMIT_ENABLED || 'true' }}
+          RATE_LIMIT_PER_MINUTE: ${{ vars.RATE_LIMIT_PER_MINUTE || '60' }}
+          RATE_LIMIT_BURST: ${{ vars.RATE_LIMIT_BURST || '10' }}
+          METRICS_ENABLED: ${{ vars.METRICS_ENABLED || 'true' }}
+          METRICS_BALANCE_POLL_SECONDS: ${{ vars.METRICS_BALANCE_POLL_SECONDS || '60' }}
+          GNOSIS_RPC_URL: ${{ vars.GNOSIS_RPC_URL || '' }}
+          GNOSIS_PRIVATE_KEY: ${{ secrets.GNOSIS_PRIVATE_KEY || '' }}
+          GNOSIS_CHAIN_ID: ${{ vars.GNOSIS_CHAIN_ID || '100' }}
+          POSTAGE_STAMP_CONTRACT_ADDRESS: ${{ vars.POSTAGE_STAMP_CONTRACT_ADDRESS || '' }}
+          BZZ_TOKEN_ADDRESS: ${{ vars.BZZ_TOKEN_ADDRESS || '' }}
+          STAMP_PURCHASE_FOR_OTHERS_ENABLED: ${{ vars.STAMP_PURCHASE_FOR_OTHERS_ENABLED || 'false' }}
+          STAMP_FOR_OTHERS_REQUIRE_WHITELIST: ${{ vars.STAMP_FOR_OTHERS_REQUIRE_WHITELIST || 'true' }}
+          STAMP_FOR_OTHERS_OWNER_WHITELIST: ${{ vars.STAMP_FOR_OTHERS_OWNER_WHITELIST || '' }}
+          STAMP_FOR_OTHERS_MAX_DEPTH: ${{ vars.STAMP_FOR_OTHERS_MAX_DEPTH || '22' }}
+          STAMP_FOR_OTHERS_MAX_BZZ: ${{ vars.STAMP_FOR_OTHERS_MAX_BZZ || '1.0' }}
+          STAMP_FOR_OTHERS_MAX_DURATION_HOURS: ${{ vars.STAMP_FOR_OTHERS_MAX_DURATION_HOURS || '168' }}
+          STAMP_FOR_OTHERS_FREE_TIER_ENABLED: ${{ vars.STAMP_FOR_OTHERS_FREE_TIER_ENABLED || 'false' }}
+          GNOSIS_XDAI_CRITICAL_THRESHOLD: ${{ vars.GNOSIS_XDAI_CRITICAL_THRESHOLD || '0.005' }}
+          GNOSIS_XDAI_WARN_THRESHOLD: ${{ vars.GNOSIS_XDAI_WARN_THRESHOLD || '0.05' }}
+          GNOSIS_XBZZ_WARN_THRESHOLD: ${{ vars.GNOSIS_XBZZ_WARN_THRESHOLD || '0.5' }}
+          X402_XDAI_WARN_THRESHOLD: ${{ vars.X402_XDAI_WARN_THRESHOLD || '0.1' }}
+          X402_XBZZ_WARN_THRESHOLD: ${{ vars.X402_XBZZ_WARN_THRESHOLD || '10.0' }}
+          X402_CHEQUEBOOK_WARN_THRESHOLD: ${{ vars.X402_CHEQUEBOOK_WARN_THRESHOLD || '4.0' }}
+          TERMS_URL: ${{ vars.TERMS_URL || '' }}
+          SUPPORT_CONTACT: ${{ vars.SUPPORT_CONTACT || '' }}
         run: |
+          # The env file, one line per entry below. A bare NAME is written as
+          # NAME=<value of $NAME from env: above>; any other line (a comment,
+          # or a fixed NAME=value) is copied as is. Every bare NAME needs an
+          # env: entry; tests/test_deploy_env_injection.py checks both match.
+          settings() {
+            cat << 'EOF'
+          X402_ENABLED
+          X402_PAY_TO_ADDRESS
+          # No defaults for production (#370): a missing variable must stop the
+          # gateway at startup (validate_x402_config), not silently pick a network.
+          X402_NETWORK
+          X402_FACILITATOR_URL
+          X402_FACILITATOR_CDP_API_KEY_ID
+          X402_FACILITATOR_CDP_API_KEY_SECRET
+          X402_FACILITATOR_PAYAI_API_KEY_ID
+          X402_FACILITATOR_PAYAI_API_KEY_SECRET
+          X402_FACILITATOR_BEARER_TOKEN
+          # Defaults to 1 (x402 v1 only) in both environments, unlike the network and
+          # facilitator above: 1 is the behaviour before x402 v2 existed. 1,2 turns on
+          # dual mode; the deploy check below then requires the facilitator to list v2.
+          X402_PROTOCOL_VERSIONS
+          X402_BZZ_USD_RATE
+          X402_MARKUP_PERCENT
+          X402_MIN_PRICE_USD
+          X402_BZZ_PRICE_FEED_URL
+          X402_BZZ_PRICE_FEED_INTERVAL_SECONDS
+          X402_FREE_TIER_ENABLED
+          STAMP_POOL_ENABLED
+          STAMP_POOL_RESERVE_SMALL
+          STAMP_POOL_RESERVE_MEDIUM
+          STAMP_POOL_RESERVE_LARGE
+          STAMP_POOL_MAX_PURCHASES_PER_HOUR
+          GATEWAY_DAILY_BZZ_CEILING
+          GATEWAY_DAILY_BZZ_FREE_CEILING
+          POOL_DAILY_ALLOWANCES
+          POOL_DEFAULT_DAILY_ALLOWANCE
+          POOL_ALLOWANCE_PER_IP
+          X402_POOL_MARKUP_PERCENT
+          X402_ALLOW_TESTNET_PAID_BYPASS
+          X402_MAX_STAMP_BZZ
+          STAMP_DAILY_BZZ_PER_CALLER
+          TRUSTED_PROXY_HOPS
+          STAMP_POOL_CHECK_INTERVAL_SECONDS
+          STAMP_POOL_MIN_TTL_HOURS
+          STAMP_POOL_TOPUP_HOURS
+          STAMP_POOL_DEFAULT_DURATION_HOURS
+          STAMP_POOL_STATE_FILE
+          STAMP_OWNERSHIP_FILE
+          NOTARY_ENABLED
+          NOTARY_PRIVATE_KEY
+          CORS_ALLOWED_ORIGINS
+          CORS_ALLOW_CREDENTIALS
+          MAX_UPLOAD_SIZE_MB
+          MAX_DOWNLOAD_SIZE_MB
+          CHUNK_UPLOAD_ENABLED
+          CHUNK_UPLOAD_MAX_BYTES_PER_REQUEST
+          CHUNK_UPLOAD_FREE_TIER_ENABLED
+          CHUNK_UPLOAD_FREE_TIER_MB_PER_DAY
+          X402_BANDWIDTH_USD_PER_GB
+          BANDWIDTH_CREDIT_MIN_TOPUP_MB
+          BANDWIDTH_CREDIT_MAX_TOPUP_MB
+          BANDWIDTH_CREDIT_STATE_FILE
+          DEBUG_ALLOWED_ADDRESSES
+          DEBUG_SIG_MAX_AGE_SECONDS
+          RATE_LIMIT_ENABLED
+          RATE_LIMIT_PER_MINUTE
+          RATE_LIMIT_BURST
+          METRICS_ENABLED
+          METRICS_BALANCE_POLL_SECONDS
+          GNOSIS_RPC_URL
+          GNOSIS_PRIVATE_KEY
+          GNOSIS_CHAIN_ID
+          POSTAGE_STAMP_CONTRACT_ADDRESS
+          BZZ_TOKEN_ADDRESS
+          STAMP_PURCHASE_FOR_OTHERS_ENABLED
+          STAMP_FOR_OTHERS_REQUIRE_WHITELIST
+          STAMP_FOR_OTHERS_OWNER_WHITELIST
+          STAMP_FOR_OTHERS_MAX_DEPTH
+          STAMP_FOR_OTHERS_MAX_BZZ
+          STAMP_FOR_OTHERS_MAX_DURATION_HOURS
+          STAMP_FOR_OTHERS_FREE_TIER_ENABLED
+          GNOSIS_XDAI_CRITICAL_THRESHOLD
+          GNOSIS_XDAI_WARN_THRESHOLD
+          GNOSIS_XBZZ_WARN_THRESHOLD
+          X402_XDAI_WARN_THRESHOLD
+          X402_XBZZ_WARN_THRESHOLD
+          X402_CHEQUEBOOK_WARN_THRESHOLD
+          TERMS_URL
+          SUPPORT_CONTACT
+          GATEWAY_ENVIRONMENT=main
+          EOF
+          }
+
+          # Refuse a value with a newline or another control character before
+          # anything is written: it would add a line to the env file. Name the
+          # variable only; never print the value. The existing file is kept.
+          LC_ALL=C
+          bad=0
+          while IFS= read -r line; do
+            case $line in
+              ''|'#'*|*=*) continue ;;
+            esac
+            case ${!line} in
+              *[[:cntrl:]]*)
+                echo "::error title=Invalid deploy setting::$line contains a newline or another control character. Fix the GitHub variable or secret $line and re-run the deploy; the env file was not changed."
+                bad=1 ;;
+            esac
+          done < <(settings)
+          [ "$bad" = 0 ] || exit 1
+
           mkdir -p /opt/swarm_connect_data
           # This file holds signing keys: make it owner-only BEFORE writing.
           # umask alone would not narrow a file that already exists as 0644.
           touch /opt/swarm_connect.env && chmod 600 /opt/swarm_connect.env
-          cat > /opt/swarm_connect.env << 'EOF'
-          X402_ENABLED=${{ vars.X402_ENABLED || 'false' }}
-          X402_PAY_TO_ADDRESS=${{ vars.X402_PAY_TO_ADDRESS || '' }}
-          # No defaults for production (#370): a missing variable must stop the
-          # gateway at startup (validate_x402_config), not silently pick a network.
-          X402_NETWORK=${{ vars.X402_NETWORK }}
-          X402_FACILITATOR_URL=${{ vars.X402_FACILITATOR_URL }}
-          X402_FACILITATOR_CDP_API_KEY_ID=${{ secrets.X402_FACILITATOR_CDP_API_KEY_ID || '' }}
-          X402_FACILITATOR_CDP_API_KEY_SECRET=${{ secrets.X402_FACILITATOR_CDP_API_KEY_SECRET || '' }}
-          X402_FACILITATOR_PAYAI_API_KEY_ID=${{ secrets.X402_FACILITATOR_PAYAI_API_KEY_ID || '' }}
-          X402_FACILITATOR_PAYAI_API_KEY_SECRET=${{ secrets.X402_FACILITATOR_PAYAI_API_KEY_SECRET || '' }}
-          X402_FACILITATOR_BEARER_TOKEN=${{ secrets.X402_FACILITATOR_BEARER_TOKEN || '' }}
-          # Defaults to 1 (x402 v1 only) in both environments, unlike the network and
-          # facilitator above: 1 is the behaviour before x402 v2 existed. 1,2 turns on
-          # dual mode; the deploy check below then requires the facilitator to list v2.
-          X402_PROTOCOL_VERSIONS=${{ vars.X402_PROTOCOL_VERSIONS || '1' }}
-          X402_BZZ_USD_RATE=${{ vars.X402_BZZ_USD_RATE || '0.50' }}
-          X402_MARKUP_PERCENT=${{ vars.X402_MARKUP_PERCENT || '50' }}
-          X402_MIN_PRICE_USD=${{ vars.X402_MIN_PRICE_USD || '0.01' }}
-          X402_BZZ_PRICE_FEED_URL=${{ vars.X402_BZZ_PRICE_FEED_URL || '' }}
-          X402_BZZ_PRICE_FEED_INTERVAL_SECONDS=${{ vars.X402_BZZ_PRICE_FEED_INTERVAL_SECONDS || '900' }}
-          X402_FREE_TIER_ENABLED=${{ vars.X402_FREE_TIER_ENABLED || 'true' }}
-          STAMP_POOL_ENABLED=${{ vars.STAMP_POOL_ENABLED || 'false' }}
-          STAMP_POOL_RESERVE_SMALL=${{ vars.STAMP_POOL_RESERVE_SMALL || '1' }}
-          STAMP_POOL_RESERVE_MEDIUM=${{ vars.STAMP_POOL_RESERVE_MEDIUM || '1' }}
-          STAMP_POOL_RESERVE_LARGE=${{ vars.STAMP_POOL_RESERVE_LARGE || '0' }}
-          STAMP_POOL_MAX_PURCHASES_PER_HOUR=${{ vars.STAMP_POOL_MAX_PURCHASES_PER_HOUR || '10' }}
-          GATEWAY_DAILY_BZZ_CEILING=${{ vars.GATEWAY_DAILY_BZZ_CEILING || '20' }}
-          GATEWAY_DAILY_BZZ_FREE_CEILING=${{ vars.GATEWAY_DAILY_BZZ_FREE_CEILING || '10' }}
-          POOL_DAILY_ALLOWANCES=${{ vars.POOL_DAILY_ALLOWANCES }}
-          POOL_DEFAULT_DAILY_ALLOWANCE=${{ vars.POOL_DEFAULT_DAILY_ALLOWANCE || '-1' }}
-          POOL_ALLOWANCE_PER_IP=${{ vars.POOL_ALLOWANCE_PER_IP || '-1' }}
-          X402_POOL_MARKUP_PERCENT=${{ vars.X402_POOL_MARKUP_PERCENT || '100' }}
-          X402_ALLOW_TESTNET_PAID_BYPASS=${{ vars.X402_ALLOW_TESTNET_PAID_BYPASS || 'false' }}
-          X402_MAX_STAMP_BZZ=${{ vars.X402_MAX_STAMP_BZZ || '5.0' }}
-          STAMP_DAILY_BZZ_PER_CALLER=${{ vars.STAMP_DAILY_BZZ_PER_CALLER || '0.5' }}
-          TRUSTED_PROXY_HOPS=${{ vars.TRUSTED_PROXY_HOPS || '1' }}
-          STAMP_POOL_CHECK_INTERVAL_SECONDS=${{ vars.STAMP_POOL_CHECK_INTERVAL_SECONDS || '900' }}
-          STAMP_POOL_MIN_TTL_HOURS=${{ vars.STAMP_POOL_MIN_TTL_HOURS || '24' }}
-          STAMP_POOL_TOPUP_HOURS=${{ vars.STAMP_POOL_TOPUP_HOURS || '168' }}
-          STAMP_POOL_DEFAULT_DURATION_HOURS=${{ vars.STAMP_POOL_DEFAULT_DURATION_HOURS || '168' }}
-          STAMP_POOL_STATE_FILE=${{ vars.STAMP_POOL_STATE_FILE || 'data/pool_state.json' }}
-          STAMP_OWNERSHIP_FILE=${{ vars.STAMP_OWNERSHIP_FILE || 'data/stamp_owners.json' }}
-          NOTARY_ENABLED=${{ vars.NOTARY_ENABLED || 'false' }}
-          NOTARY_PRIVATE_KEY=${{ secrets.NOTARY_PRIVATE_KEY || '' }}
-          CORS_ALLOWED_ORIGINS=${{ vars.CORS_ALLOWED_ORIGINS || '*' }}
-          CORS_ALLOW_CREDENTIALS=${{ vars.CORS_ALLOW_CREDENTIALS || 'false' }}
-          MAX_UPLOAD_SIZE_MB=${{ vars.MAX_UPLOAD_SIZE_MB || '10' }}
-          MAX_DOWNLOAD_SIZE_MB=${{ vars.MAX_DOWNLOAD_SIZE_MB || '25' }}
-          CHUNK_UPLOAD_ENABLED=${{ vars.CHUNK_UPLOAD_ENABLED || 'false' }}
-          CHUNK_UPLOAD_MAX_BYTES_PER_REQUEST=${{ vars.CHUNK_UPLOAD_MAX_BYTES_PER_REQUEST || '4104' }}
-          CHUNK_UPLOAD_FREE_TIER_ENABLED=${{ vars.CHUNK_UPLOAD_FREE_TIER_ENABLED || 'true' }}
-          CHUNK_UPLOAD_FREE_TIER_MB_PER_DAY=${{ vars.CHUNK_UPLOAD_FREE_TIER_MB_PER_DAY || '100' }}
-          X402_BANDWIDTH_USD_PER_GB=${{ vars.X402_BANDWIDTH_USD_PER_GB || '0.10' }}
-          BANDWIDTH_CREDIT_MIN_TOPUP_MB=${{ vars.BANDWIDTH_CREDIT_MIN_TOPUP_MB || '100' }}
-          BANDWIDTH_CREDIT_MAX_TOPUP_MB=${{ vars.BANDWIDTH_CREDIT_MAX_TOPUP_MB || '1000000' }}
-          BANDWIDTH_CREDIT_STATE_FILE=${{ vars.BANDWIDTH_CREDIT_STATE_FILE || 'data/bandwidth_credit.json' }}
-          DEBUG_ALLOWED_ADDRESSES=${{ vars.DEBUG_ALLOWED_ADDRESSES || '' }}
-          DEBUG_SIG_MAX_AGE_SECONDS=${{ vars.DEBUG_SIG_MAX_AGE_SECONDS || '300' }}
-          RATE_LIMIT_ENABLED=${{ vars.RATE_LIMIT_ENABLED || 'true' }}
-          RATE_LIMIT_PER_MINUTE=${{ vars.RATE_LIMIT_PER_MINUTE || '60' }}
-          RATE_LIMIT_BURST=${{ vars.RATE_LIMIT_BURST || '10' }}
-          METRICS_ENABLED=${{ vars.METRICS_ENABLED || 'true' }}
-          METRICS_BALANCE_POLL_SECONDS=${{ vars.METRICS_BALANCE_POLL_SECONDS || '60' }}
-          GNOSIS_RPC_URL=${{ vars.GNOSIS_RPC_URL || '' }}
-          GNOSIS_PRIVATE_KEY=${{ secrets.GNOSIS_PRIVATE_KEY || '' }}
-          GNOSIS_CHAIN_ID=${{ vars.GNOSIS_CHAIN_ID || '100' }}
-          POSTAGE_STAMP_CONTRACT_ADDRESS=${{ vars.POSTAGE_STAMP_CONTRACT_ADDRESS || '' }}
-          BZZ_TOKEN_ADDRESS=${{ vars.BZZ_TOKEN_ADDRESS || '' }}
-          STAMP_PURCHASE_FOR_OTHERS_ENABLED=${{ vars.STAMP_PURCHASE_FOR_OTHERS_ENABLED || 'false' }}
-          STAMP_FOR_OTHERS_REQUIRE_WHITELIST=${{ vars.STAMP_FOR_OTHERS_REQUIRE_WHITELIST || 'true' }}
-          STAMP_FOR_OTHERS_OWNER_WHITELIST=${{ vars.STAMP_FOR_OTHERS_OWNER_WHITELIST || '' }}
-          STAMP_FOR_OTHERS_MAX_DEPTH=${{ vars.STAMP_FOR_OTHERS_MAX_DEPTH || '22' }}
-          STAMP_FOR_OTHERS_MAX_BZZ=${{ vars.STAMP_FOR_OTHERS_MAX_BZZ || '1.0' }}
-          STAMP_FOR_OTHERS_MAX_DURATION_HOURS=${{ vars.STAMP_FOR_OTHERS_MAX_DURATION_HOURS || '168' }}
-          STAMP_FOR_OTHERS_FREE_TIER_ENABLED=${{ vars.STAMP_FOR_OTHERS_FREE_TIER_ENABLED || 'false' }}
-          GNOSIS_XDAI_CRITICAL_THRESHOLD=${{ vars.GNOSIS_XDAI_CRITICAL_THRESHOLD || '0.005' }}
-          GNOSIS_XDAI_WARN_THRESHOLD=${{ vars.GNOSIS_XDAI_WARN_THRESHOLD || '0.05' }}
-          GNOSIS_XBZZ_WARN_THRESHOLD=${{ vars.GNOSIS_XBZZ_WARN_THRESHOLD || '0.5' }}
-          X402_XDAI_WARN_THRESHOLD=${{ vars.X402_XDAI_WARN_THRESHOLD || '0.1' }}
-          X402_XBZZ_WARN_THRESHOLD=${{ vars.X402_XBZZ_WARN_THRESHOLD || '10.0' }}
-          X402_CHEQUEBOOK_WARN_THRESHOLD=${{ vars.X402_CHEQUEBOOK_WARN_THRESHOLD || '4.0' }}
-          TERMS_URL=${{ vars.TERMS_URL || '' }}
-          SUPPORT_CONTACT=${{ vars.SUPPORT_CONTACT || '' }}
-          GATEWAY_ENVIRONMENT=main
-          EOF
+          while IFS= read -r line; do
+            case $line in
+              ''|'#'*|*=*) printf '%s\n' "$line" ;;
+              *) printf '%s=%s\n' "$line" "${!line}" ;;
+            esac
+          done < <(settings) > /opt/swarm_connect.env
 
       - name: deploy
         run: |

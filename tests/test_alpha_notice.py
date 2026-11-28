@@ -8,17 +8,14 @@ contact, not a refund channel. Messages to a caller who may have paid for
 nothing name it when it is set, link the notice when TERMS_URL is set, and
 never promise a refund. With either setting empty they leave no placeholder.
 """
-import re
-from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 import pytest
-import yaml
 from fastapi.testclient import TestClient
 
 from app.core.config import settings
+from tests import deploy_env_steps
 
-REPO = Path(__file__).resolve().parent.parent
 CONTACT = "info@datafund.io"
 NOTICE = "https://github.com/datafund/swarm_connect/blob/main/ALPHA_NOTICE.md"
 
@@ -126,27 +123,16 @@ def test_root_shows_the_contact_and_the_notice(monkeypatch):
 
 # --- deploy.yml ---
 
-DEPLOY_YML = REPO / ".github" / "workflows" / "deploy.yml"
-ENV_FILES = {
-    "write env file for dev": "/opt/swarm_connect_dev.env",
-    "write env file for main": "/opt/swarm_connect.env",
-}
-
-
-def _heredocs():
-    workflow = yaml.safe_load(DEPLOY_YML.read_text())
-    steps = {s["name"]: s for job in workflow["jobs"].values()
-             for s in job.get("steps", []) if "name" in s}
-    for name, env_file in ENV_FILES.items():
-        m = re.search(r"cat > " + re.escape(env_file) + r" << 'EOF'\n(.*?)\nEOF\n",
-                      steps[name]["run"], re.S)
-        assert m, f"no heredoc writing {env_file}"
-        yield name, [line.strip() for line in m.group(1).splitlines()]
+ENV_STEPS = ["write env file for dev", "write env file for main"]
 
 
 @pytest.mark.parametrize("setting", ["TERMS_URL", "SUPPORT_CONTACT"])
 def test_both_environments_write_the_setting_empty_by_default(setting):
-    line = f"{setting}=${{{{ vars.{setting} || '' }}}}"
-    for name, lines in _heredocs():
-        assert lines.count(line) == 1, (name, line)
-        assert sum(1 for x in lines if x.startswith(f"{setting}=")) == 1, name
+    # Through the step's env: map, written once from its settings list (#654).
+    expression = f"${{{{ vars.{setting} || '' }}}}"
+    steps = deploy_env_steps.steps()
+    for name in ENV_STEPS:
+        step = steps[name]
+        assert step["env"][setting] == expression, (name, setting)
+        assert deploy_env_steps.written_names(step).count(setting) == 1, name
+        assert not any(x.startswith(f"{setting}=") for x in deploy_env_steps.spec_lines(step)), name

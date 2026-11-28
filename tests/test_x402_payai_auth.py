@@ -12,7 +12,6 @@ import json
 import logging
 import re
 import uuid
-from pathlib import Path
 
 import httpx2
 import jwt
@@ -24,13 +23,13 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from app.core.config import settings
 from app.x402 import check_config, facilitator
 from app.x402.facilitator_client import FacilitatorClient
+from tests import deploy_env_steps
 from tests.test_x402_check_config import run_check
 
 PAY_TO = "0x" + "ab" * 20
 URL = "https://facilitator.example/x402"
 KEY_ID = "test-payai-key-id-0001"
 V2_EXACT = {"x402Version": 2, "scheme": "exact", "network": "eip155:84532"}
-DEPLOY_YML = Path(__file__).resolve().parent.parent / ".github" / "workflows" / "deploy.yml"
 
 
 def _pkcs8_der(key) -> bytes:
@@ -490,18 +489,18 @@ def test_settings_repr_hides_the_payai_secret():
 
 # --- deploy.yml --------------------------------------------------------------
 
-def _env_heredocs(text):
-    return re.findall(r"cat > (/opt/swarm_connect(?:_dev)?\.env) << 'EOF'\n(.*?)\n\s*EOF\n", text, re.S)
-
-
 def test_deploy_renders_the_payai_secrets_like_the_cdp_ones_in_both_jobs():
-    docs = dict(_env_heredocs(DEPLOY_YML.read_text()))
-    assert set(docs) == {"/opt/swarm_connect.env", "/opt/swarm_connect_dev.env"}
-    for body in docs.values():
-        lines = [line.strip() for line in body.splitlines()]
-        assert "X402_FACILITATOR_CDP_API_KEY_SECRET=${{ secrets.X402_FACILITATOR_CDP_API_KEY_SECRET || '' }}" in lines
+    # Through each step's env: map, written from its settings list (#654).
+    steps = deploy_env_steps.steps()
+    for step_name in ("write env file for dev", "write env file for main"):
+        step = steps[step_name]
+        names = deploy_env_steps.written_names(step)
+        env = step["env"]
+        assert env["X402_FACILITATOR_CDP_API_KEY_SECRET"] == "${{ secrets.X402_FACILITATOR_CDP_API_KEY_SECRET || '' }}"
+        assert "X402_FACILITATOR_CDP_API_KEY_SECRET" in names
         for name in ("X402_FACILITATOR_PAYAI_API_KEY_ID", "X402_FACILITATOR_PAYAI_API_KEY_SECRET"):
-            assert f"{name}=${{{{ secrets.{name} || '' }}}}" in lines
+            assert env[name] == f"${{{{ secrets.{name} || '' }}}}"
+            assert name in names
 
 
 # --- review round 1 ----------------------------------------------------------
