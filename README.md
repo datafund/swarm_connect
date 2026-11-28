@@ -796,6 +796,7 @@ Download raw data from Swarm as a file (triggers browser download).
 - **Headers**:
   - `Content-Disposition: attachment; filename="provenance-abc12345.json"`
   - `Content-Type`: Auto-detected (application/json, image/png, etc.)
+  - `X-Content-Type-Options: nosniff` and `Content-Security-Policy: sandbox`: a collection's index document is often HTML, and is never run as a page of the gateway (#700)
 - **Filenames**:
   - JSON data → `provenance-{hash}.json`
   - Images → `image-{hash}.png/jpg`
@@ -815,7 +816,7 @@ A `404` from this route or from `GET /api/v1/data/{reference}` is `"Data not fou
 Download one file of a collection uploaded with `POST /api/v1/data/manifest`. Always free, like the other downloads, with the same size limit (`MAX_DOWNLOAD_SIZE_MB`, 413 `DOWNLOAD_TOO_LARGE`), timeout (504) and rate limit.
 - **Path**: the file's path in the archive (`./assets/a.txt` in the archive is `assets/a.txt`). Percent-encode a name with spaces, `#`, `?` or `%`.
 - **Trailing slash**: `docs/` returns that directory's index document, when the collection has one.
-- **Refused** with 400 `PATH_INVALID`: `.` and `..` segments (also percent-encoded), empty segments, backslashes, control characters, an encoded slash, paths over `MANIFEST_MAX_PATH_BYTES`.
+- **Refused** with 400 `PATH_INVALID`: `.` and `..` segments (also percent-encoded), empty segments, backslashes, control characters, a slash encoded twice (`%252F`), paths over `MANIFEST_MAX_PATH_BYTES`. A plain `%2F` is decoded by the server before routing and acts as a separator: `a%2Fb` is `a/b`.
 - **`json` at the root**: `/api/v1/data/{reference}/json` is the JSON-metadata route above, so a file named exactly `json` at a collection's root cannot be fetched here (fetch it from a Bee node). `sub/json` is not affected.
 - **Headers**: `Content-Type` as Bee reports it (`application/octet-stream` when Bee reports none), `Content-Disposition: attachment` with the file's name, `X-Content-Type-Options: nosniff`, `Content-Security-Policy: sandbox`, `X-Swarm-Reference`. HTML and SVG are always downloads, never pages of the gateway: to serve a collection as a website, use a Swarm `bzz` gateway.
 - **Errors**: 404 `COLLECTION_PATH_NOT_FOUND` (the collection has no such file; with an `error_document`, Bee returns that document with 200 instead), 404 `DATA_NOT_FOUND` (nothing for this reference, or not a collection), 422 for a malformed reference.

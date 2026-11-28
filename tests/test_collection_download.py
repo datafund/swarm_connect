@@ -272,6 +272,14 @@ class TestPathValidation:
             assert "\n" not in raw and "\r" not in raw and "%0a" not in raw and "%0d" not in raw
             assert raw == f"/bzz/{REF}"
 
+    def test_a_single_encoded_slash_is_a_separator(self):
+        # uvicorn decodes %2F before routing, so a%2Fb is the path a/b: it stays
+        # inside the reference and reaches Bee as two segments.
+        bee = StubBee({"a/b": (b"AB", "text/plain")})
+        status, _ = _raw_get(bee, f"/api/v1/data/{REF}/a%2Fb")
+        assert status == 200
+        assert [q.url.raw_path.decode() for q in bee.requests] == [f"/bzz/{REF}/a/b"]
+
     def test_a_normal_path_passes_the_raw_route_too(self):
         bee = StubBee(FILES)
         status, _ = _raw_get(bee, f"/api/v1/data/{REF}/assets/a.txt")
@@ -335,6 +343,17 @@ class TestErrors:
         import inspect as pyinspect
         assert "_fetch_bzz(" in pyinspect.getsource(swarm_api.download_collection_file)
         assert "_fetch_bzz(" in pyinspect.getsource(swarm_api.download_data_from_swarm)
+
+
+class TestRootDownloadHeaders:
+    def test_root_download_cannot_run_as_a_page(self):
+        bee = StubBee(FILES, index="index.html")
+        r = _get(bee, f"/api/v1/data/{REF}")
+        assert r.status_code == 200
+        assert r.content == b"<h1>root</h1>"
+        assert r.headers["x-content-type-options"] == "nosniff"
+        assert r.headers["content-security-policy"] == "sandbox"
+        assert r.headers["content-disposition"] == f'attachment; filename="text-{REF[:8]}.txt"'
 
 
 class TestRootDownloadHint:
@@ -465,7 +484,8 @@ class TestIndexDocumentOnUpload:
         ("index_document", "/index.html", "INDEX_DOCUMENT_INVALID"),
         ("index_document", "sub/", "INDEX_DOCUMENT_INVALID"),
         ("index_document", "", "INDEX_DOCUMENT_INVALID"),
-        ("index_document", "hé.html", "INDEX_DOCUMENT_INVALID"),
+        ("index_document", "hé.html", "INDEX_DOCUMENT_INVALID"),     # in the tar, not ASCII
+        ("error_document", "hé.html", "ERROR_DOCUMENT_INVALID"),     # in the tar, not ASCII
         ("index_document", "sub/a", "INDEX_DOCUMENT_INVALID"),        # exists; Bee refuses a slash
         ("error_document", "nope.html", "ERROR_DOCUMENT_INVALID"),
         ("error_document", "a/./b", "ERROR_DOCUMENT_INVALID"),
@@ -474,7 +494,10 @@ class TestIndexDocumentOnUpload:
     def test_invalid_document_is_refused_before_payment(self, param, value, code):
         from urllib.parse import quote as q
         bee = UploadBee()
-        tar_bytes = _tar([("index.html", b"x"), ("sub/", None), ("sub/a", b"a"), ("link.html", "->index.html")])
+        # hé.html is a regular file at the root: only the ASCII rule refuses it
+        # (a non-ASCII header would fail in httpx2 after settle_payment).
+        tar_bytes = _tar([("index.html", b"x"), ("sub/", None), ("sub/a", b"a"),
+                          ("link.html", "->index.html"), ("hé.html", b"h")])
         with patch("app.api.endpoints.data.settle_payment") as settle:
             r = _upload(bee, tar_bytes, f"&{param}={q(value)}")
         assert r.status_code == 400, r.text

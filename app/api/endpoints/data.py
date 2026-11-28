@@ -202,7 +202,7 @@ def _path_segments(path: str) -> list[str]:
             if _CONTROL_CHARS.search(form):
                 raise ValueError("The path may not contain control characters.")
         if "/" in unquote(segment):
-            raise ValueError("The path may not contain an encoded slash.")
+            raise ValueError("The path may not contain a slash encoded twice (%252F).")
     return segments
 
 
@@ -757,6 +757,10 @@ async def download_data(
             headers={
                 "Content-Length": str(len(data_bytes)),
                 "Content-Disposition": f'attachment; filename="{filename}"',
+                # A collection's index document is often HTML (#700): never
+                # sniffed into an active type, never run as a gateway page.
+                "X-Content-Type-Options": "nosniff",
+                "Content-Security-Policy": "sandbox",
                 "X-Swarm-Reference": reference
             }
         )
@@ -862,8 +866,9 @@ async def download_collection_path(
     segment is percent-encoded towards Bee, so send a name with spaces or `#`
     percent-encoded in the URL. Refused with 400 `PATH_INVALID`: `.` and `..`
     segments (also percent-encoded once more), empty segments (`a//b`, a leading
-    slash), backslashes, control characters, an encoded slash, and paths over
-    `MANIFEST_MAX_PATH_BYTES`. A trailing slash asks for that directory's index
+    slash), backslashes, control characters, a slash encoded twice (`%252F`), and paths over
+    `MANIFEST_MAX_PATH_BYTES`. A plain `%2F` is decoded by the server before
+    routing and acts as a separator (`a%2Fb` is `a/b`). A trailing slash asks for that directory's index
     document (`docs/` serves `docs/index.html` when the collection has the index
     document `index.html`). `/api/v1/data/{reference}/` is the same as
     `/api/v1/data/{reference}`.

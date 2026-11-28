@@ -1611,8 +1611,8 @@ def collection_path(member_name: str) -> str:
     """The path Bee stores a tar entry under in a collection.
 
     Bee 2.8.1 cleans each entry name like Go's filepath.Clean, so
-    `./index.html` and `a//b/../index.html` are stored as `index.html`
-    (measured, #700). An entry whose name starts with `/` keeps it, and Bee
+    `./index.html` is stored as `index.html` (measured, #700) and
+    `a//b/../index.html` as `a/index.html`. An entry whose name starts with `/` keeps it, and Bee
     serves no path for it (measured), so it never matches a wanted name.
     """
     import posixpath
